@@ -82,7 +82,7 @@ new-money-bevy/
 └─ docs/                       # 从 Godot 拷来 ADR/schema/GLOSSARY
 ```
 
-**为什么选"彻底 ECS"还要拆 `game_core`**：这两件事不冲突。"彻底 ECS" 指的是**规则用 component + system 表达，而不是 OOP 的 `PropertySystem`/`StockMarket` 对象**；拆 crate 指的是**这一层只链接 `bevy` 的无渲染特性子集**。收益：`cargo test -p game_core` 编译量小、跑得快、不需要窗口；渲染/UI 侧的 0.20→0.21 API 破坏不会波及规则层。**注意**：`default-features = false` 下 `bevy_ecs` 是否仍由 `bevy` 主 crate 无条件导出、以及需要显式开启哪些 feature（`bevy_state`、`bevy_time`），落地时以 `cargo doc -p bevy` 为准 ⚠️。退路是直接依赖 `bevy_ecs`/`bevy_app`/`bevy_state` 独立 crate，代价是要人工保证它们与 `bevy` 版本同步。
+**为什么选"彻底 ECS"还要拆 `game_core`**：这两件事不冲突。"彻底 ECS" 指的是**规则用 component + system 表达，而不是 OOP 的 `PropertySystem`/`StockMarket` 对象**；拆 crate 指的是**这一层只链接 `bevy` 的无渲染特性子集**。收益：`cargo test -p game_core` 编译量小、跑得快、不需要窗口；渲染/UI 侧的 0.20→0.21 API 破坏不会波及规则层。**已核实（B0）**：`game_core` 用 `bevy = { default-features = false, features = ["default_app"] }` 正好拿到 `async_executor + bevy_asset + bevy_log + bevy_state + reflect_auto_register`，不含 winit/窗口/渲染；`default_platform` 才是拉进 winit 的那一层。成员 crate 要覆盖 workspace 依赖的 `default-features`，**必须用 edition 2024**（否则 cargo 只是警告一句然后忽略你的设置）。
 
 ### 4.2 世界设计：实体 / 组件
 
@@ -209,7 +209,7 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 |---|---|---|
 | `bevy` | `=0.20.0` | **精确锁定**，`[workspace.dependencies]` 统一 |
 | `bevy_egui` | 0.43.1（bevy `^0.20.0`） | ✅ 可用 —— 调试面板、棋盘可视化编辑辅助 |
-| `bevy_common_assets` | 0.18.0（bevy `^0.20.0`） | ✅ 可用 —— serde_json 资产加载；也可自写 `AssetLoader` 省掉 |
+| `bevy_common_assets` | 0.18.0（bevy `^0.20.0`） | **未采用**：自写 20 行 `JsonAssetLoader<A>` 就够了（`game_core/src/loader.rs`），既省一个第三方依赖，也避开了 `.crate` 文件走 static.crates.io 直连不稳的问题 |
 | `bevy_inspector_egui` | 最新 0.37.0，只配 bevy `^0.19` | ❌ **0.20 版未发布**。缺口：不能可视化 inspect 实体。缓解：用 `bevy_egui` 自写一个只读 entity dump（`ReflectedEntity`/`World::inspect_entity`），或等适配 |
 | `bevy_tweening` | 最新 0.16.0，只配 `^0.19` | ❌ 不用，手写 lerp system（本项目动画就三种：逐格行走、落格弹跳、相机跟随，成本低于引插件） |
 | `bevy_mod_picking` | 0.20.1（2024-07）配 bevy 0.14，停更 | ❌ 改用内置 `bevy_picking` |
@@ -239,12 +239,15 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 | UI 交互 | `Button`/`Interaction` 在 0.20 已弃用，改 `OnInteraction` 组件式；`TextScroll` → `EditableText::viewport`；cursor 模块并入 `bevy_picking` | B5 写按钮时按新形态，别抄旧教程 ⚠️ |
 | 存档/设置 | 新增内置 `bevy_settings`、`bevy_world_serialization`（`scene` feature 会带后者） | 同为 0.20 首发，按 §九 走手写快照 |
 
-**B0 实跑发现的四条环境级坑（已踩过，记录避免重犯）**：
+**B0/B1 实跑发现的八条环境级坑（已踩过，记录避免重犯）**：
 1. **`AssetPlugin::file_path` 在 0.20 是相对「可执行文件目录」的 `String`（不是 `Option`）**，而 `cargo run -p game_app` 的 CWD 是仓库根 → 默认会把资产解析成 `target/debug/assets/**`，所有资产**静默 404**（只有一行 `bevy_asset::server` ERROR，程序不崩）。落地做法：启动时把资产根解析成绝对路径再塞给 `AssetPlugin`，`std::fs` 与 `AssetServer` 共用同一个根，否则会出现"直读文件成功、Asset 加载失败"这种极难排查的组合。
 2. **`default_font` feature 自带的是 Fira Mono 子集，无汉字**，所以不显式指定字体时中文不是"报错"而是**豆腐块/空白**。落地做法：把字体放 `assets/font/` 并用 `asset_server.load()` 显式指定（本仓库用开发授权的思源黑体，见 §7.3）。
 3. **中文必须开 `bevy` 的 `complex_script_segmentation` feature**（转发到 `parley/complex-scripts`）。不开时 Parley/ICU4X 找不到中日韩分词模型，会**每帧刷** `ICU4X data error: No segmentation model for complex script: Chinese/Japanese`，且长句换行按非 CJK 规则处理。B0 实测：开启后错误归零。
 4. **等轴测取景要自己算**：`Transform::from_rotation(...)` 只给旋转不给位移会让画面没有主体；正交相机的可视范围由 `ScalingMode::FixedVertical { viewport_height }` 决定，`default_3d()` 的 `near=0.0`。本项目按棋盘 AABB 推 `center`/`eye`/`viewport_height`（`main.rs::board_aabb`），视线方向沿用 Godot 的 `CAM_OFFSET=(8,16,8)`（即 (1,2,1) 对角、俯角约 54.7°）。
 5. **`Screenshot` 的触发条件不能用帧数**（这条坑最贵，害我把「渲染没问题」误判成「3D 通路坏了」整整一轮）：`PresentMode::AutoNoVsync` 下前 40 帧只有一二十毫秒，3D 管线的着色器编译与网格上传还没热完，此时截出来的 PNG **只有 clear color 与 UI**，而窗口里其实是正常渲染的。判据：截图前后 md5 完全一致 → 说明截的是同一个未完成的中间态，而不是"画面没变"。正确做法是按**墙钟时间**触发（本项目 `time.elapsed_secs() >= 1.5`）。
+6. **资产加载失败默认只打一条日志然后永远等下去**。`AssetServer::load` 失败不会 panic，依赖它的启动流程会静默卡住。本项目在 `boot_world` 里对每个 handle 调 `expect_ready`，命中 `LoadState::Failed(Arc<AssetLoadError>)`（注意是**元组变体**，不是单元变体）就带路径 panic。已用「临时把资产根指到不存在的位置」验证：退出码 101 + 明确中文报错，而不是白屏干等。
+7. **同一扩展名注册多个 loader 是官方支持的**：`Loaders::find` 先按资产 `TypeId` 查 `type_id_to_loaders`，再按扩展名筛。所以 `BoardDef`/`CardSet`/`StockSet` 三个 `JsonAssetLoader` 都声明 `extensions = ["json"]` 并不冲突，typed handle 会路由到匹配的那个；只有**同类型 + 同扩展名**重复注册才会 warn。
+8. **`#[derive(SystemParam)]` 不在 prelude 里**，要 `use bevy::ecs::system::SystemParam;`。用它打包多个 `Res<Assets<T>>` 比给系统挂 `#[allow(clippy::too_many_arguments)]` 好 —— 后者会把「参数确实太多了」这个真信号吃掉。
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
@@ -321,7 +324,7 @@ Godot 端**全项目没有任何字体资源**，也没设 `gui/theme/custom_fon
 | 阶段 | 产出 | 验收标准 | 粗估 |
 |---|---|---|---|
 | **B0** 骨架 ✅ 完成 (10-13) | workspace、`game_core`(`default_app` 无渲染)、`game_app` 等轴测棋盘、`.gitignore`、`check.sh` 质量门、`NM_SHOT` 截图钩子；拷 `data/` 与 `docs/` | `check.sh` 五项全过退出码 0；窗口渲染出棋盘 + 中文（`target/b0.png`） | 0.5 天 |
-| **B1** 数据与棋盘 🚧 半 | `BoardDef/LandDef/BranchDef/LandType/TileKind` serde + `validate()`（含 `tools/validate_board.py` 的 7 条不变式）+ 9 组单测**已完成**；`CardDef/StockDef` serde、`AssetServer` 加载器**未做** | 移植 `test_board_data_prototype.gd`、`test_board_tile.gd`、`test_board_index_sync.gd`；**不移植旧格式路径** | 1 天 |
+| **B1** 数据与棋盘 ✅ 完成 (10-13) | `BoardDef/LandDef/BranchDef/LandType/TileKind` + `CardSet/CardEffect`（内部标签枚举）+ `StockSet/StockDef` serde；`validate()` 覆盖 `tools/validate_board.py` 的 7 条不变式与卡牌/股票的字段约束；`JsonAssetLoader<A>` 自写（无第三方），`CoreGamePlugin` 注册三类资产与 loader，`game_app` 全走 `AssetServer` | `cargo test -p game_core` **15 项**全过；启动日志确认「棋盘 12 格 / 机会 7 张 / 命运 6 张 / 股票 5 只」；资产缺失时 panic 而非静默等待 | 1 天 |
 | **B2** 玩家 + 骰 + 回合状态机 | `PlayerId/Wallet/TokenPosition/JailSentence`；`Rng`+`GameSeed`；`TurnPhase` 全部 8 态与表内 8 个 system；`WalkClock` 定步时 | 移植 `test_dice`、`test_game_state`、`test_jail_flow`、`test_player_data`；**新增**：固定种子 100 回合不 panic 的 property test | 1.5 天 |
 | **B3** 经济核心（无 UI） | property（买/租/升级/抵押/同色组/等级差 ≤1）、bank（存贷息，**修 bug #1**）、stock（tick/买/卖/分红/历史，**修 #4 #5**）、card 效果 enum 化（**修 #3**） | 移植 `test_bank_system`、`test_card_system`；`calculate_rent` 全分支表驱动测试；现金流守恒断言 | 1.5 天 |
 | **B4** 等轴测渲染切片 | tile/land/token spawn system、路面（含对角）、建筑高度、`Text2d` 格名、正交相机 + rig 跟随、`ClearColor` | **肉眼**验收：与 Godot 版截图对比；此时才第一次开窗 | 1.5–2 天 |

@@ -1,20 +1,24 @@
-use std::fs;
 use std::path::PathBuf;
 
 use bevy::{
-    asset::AssetPlugin,
+    asset::{AssetPlugin, LoadState},
     camera::ScalingMode,
+    ecs::system::SystemParam,
     prelude::*,
     render::view::screenshot::{Screenshot, save_to_disk},
     window::{PresentMode, Window},
 };
 use game_core::CoreGamePlugin;
 use game_core::board::{BoardDef, TileKind};
+use game_core::card::{CardKind, CardSet};
+use game_core::stock::StockSet;
 
 mod board_view;
 
-/// B0 阶段先用文件系统直读；B1 换成 `AssetServer` + 自定义 `AssetLoader`。
 const BOARD_REL: &str = "data/boards/prototype.json";
+const CHANCE_REL: &str = "data/cards/chance_cards.json";
+const FATE_REL: &str = "data/cards/fate_cards.json";
+const STOCKS_REL: &str = "data/stocks/stocks.json";
 const DEV_FONT: &str = "font/dev_SourceHanSansSC-Regular.otf";
 
 /// Bevy 0.20 的 `AssetPlugin::file_path` 是相对「可执行文件目录」的，而 `cargo run` 的 CWD 在仓库根，
@@ -33,22 +37,28 @@ fn asset_root() -> PathBuf {
 const ISO_DIR: Vec3 = Vec3::new(8.0, 16.0, 8.0);
 const ISO_DIST: f32 = 40.0;
 
+/// 当前对局使用的棋盘资产。视图与规则都经 `Res<Assets<BoardDef>>` 取，
+/// 这样热重载时资产内容原地更新，不必换 resource。
 #[derive(Resource)]
-pub struct ActiveBoard(pub BoardDef);
+pub struct ActiveBoard(pub Handle<BoardDef>);
 
 #[derive(Resource)]
-pub struct AssetRoot(pub PathBuf);
+struct DataHandles {
+    board: Handle<BoardDef>,
+    chance: Handle<CardSet>,
+    fate: Handle<CardSet>,
+    stocks: Handle<StockSet>,
+}
 
 fn main() {
     let root = asset_root();
     info!("资产根：{}", root.display());
     App::new()
-        .insert_resource(AssetRoot(root.clone()))
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "暴富 · B0 骨架".into(),
+                        title: "暴富 · B1 数据层".into(),
                         present_mode: PresentMode::AutoNoVsync,
                         ..default()
                     }),
@@ -61,18 +71,92 @@ fn main() {
         )
         // 规则层的 Plugin 在表现层注册：验证「无渲染 bevy 子集 + 完整 bevy」能共存于同一 App
         .add_plugins(CoreGamePlugin)
-        .add_systems(
-            Startup,
-            (
-                setup_board,
-                setup_camera,
-                board_view::spawn_board,
-                setup_text,
-            )
-                .chain(),
-        )
-        .add_systems(Update, maybe_capture)
+        .add_systems(Startup, load_data)
+        .add_systems(Update, (boot_world, maybe_capture).chain())
         .run();
+}
+
+fn load_data(mut commands: Commands, server: Res<AssetServer>) {
+    commands.insert_resource(DataHandles {
+        board: server.load(BOARD_REL),
+        chance: server.load(CHANCE_REL),
+        fate: server.load(FATE_REL),
+        stocks: server.load(STOCKS_REL),
+    });
+}
+
+/// 三个数据资产打包成一个系统参数（Bevy 的 `SystemParam` derive），
+/// 免得 `boot_world` 的签名长到得靠 `#[allow]` 过关。
+#[derive(SystemParam)]
+struct SceneAssets<'w> {
+    boards: Res<'w, Assets<BoardDef>>,
+    card_sets: Res<'w, Assets<CardSet>>,
+    stock_sets: Res<'w, Assets<StockSet>>,
+}
+
+/// 数据资产全部就位后，一次性建好相机、棋盘几何与 HUD。
+fn boot_world(
+    mut commands: Commands,
+    handles: Res<DataHandles>,
+    server: Res<AssetServer>,
+    assets: SceneAssets,
+    mut booted: Local<bool>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mats: ResMut<Assets<StandardMaterial>>,
+) {
+    if *booted {
+        return;
+    }
+    expect_ready(&server, &handles.board, "棋盘");
+    expect_ready(&server, &handles.chance, "机会牌");
+    expect_ready(&server, &handles.fate, "命运牌");
+    expect_ready(&server, &handles.stocks, "股票");
+
+    let (Some(board), Some(chance), Some(fate), Some(stocks)) = (
+        assets.boards.get(&handles.board),
+        assets.card_sets.get(&handles.chance),
+        assets.card_sets.get(&handles.fate),
+        assets.stock_sets.get(&handles.stocks),
+    ) else {
+        return;
+    };
+
+    for (what, errs) in [
+        ("棋盘", board.validate()),
+        ("机会牌", chance.validate(CardKind::Chance)),
+        ("命运牌", fate.validate(CardKind::Fate)),
+        ("股票", stocks.validate()),
+    ] {
+        if let Err(errs) = errs {
+            panic!("{what}校验失败:\n  {}", errs.join("\n  "));
+        }
+    }
+    info!(
+        "数据就绪：棋盘「{}」{} 主环格 / {} 土地；机会 {} 张、命运 {} 张；股票 {} 只",
+        board.board_name,
+        board.loop_len(),
+        board.lands.len(),
+        chance.0.len(),
+        fate.0.len(),
+        stocks.0.len()
+    );
+
+    spawn_camera(&mut commands, board);
+    board_view::spawn_board(&mut commands, &mut meshes, &mut mats, board);
+    spawn_hud(&mut commands, &server, board);
+
+    commands.insert_resource(ActiveBoard(handles.board.clone()));
+    *booted = true;
+}
+
+/// 加载失败要立刻炸出来：Bevy 对失败资产默认只打一条日志，静默返回空画面极难排查。
+fn expect_ready<T: Asset>(server: &AssetServer, handle: &Handle<T>, what: &str) {
+    if let LoadState::Failed(err) = server.load_state(handle) {
+        panic!(
+            "{what}加载失败：{err}（路径 {:?}，检查资产根）",
+            handle.path()
+        );
+    }
 }
 
 /// 设了 `NM_SHOT=输出路径` 就截一张 PNG —— 让 agent 能自己核对画面，不必每次请人肉眼验收。
@@ -93,32 +177,15 @@ fn maybe_capture(time: Res<Time>, mut done: Local<bool>, mut commands: Commands)
         .observe(save_to_disk(path));
 }
 
-fn setup_board(mut commands: Commands, root: Res<AssetRoot>) {
-    let path = root.0.join(BOARD_REL);
-    let text = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("读不到 {}（请在仓库根目录 cargo run）: {e}", path.display()));
-    let board = BoardDef::from_json(&text).unwrap_or_else(|e| panic!("棋盘解析失败: {e}"));
-    if let Err(errs) = board.validate() {
-        panic!("棋盘校验失败:\n  {}", errs.join("\n  "));
-    }
-    info!(
-        "棋盘 {} 载入：{} 主环格 / {} 块土地",
-        board.board_name,
-        board.loop_len(),
-        board.lands.len()
-    );
-    commands.insert_resource(ActiveBoard(board));
-}
-
-fn setup_camera(mut commands: Commands, board: Res<ActiveBoard>) {
-    let (min, max) = board_aabb(&board.0);
+fn spawn_camera(commands: &mut Commands, board: &BoardDef) {
+    let (min, max) = board_aabb(board);
     let center = (min + max) * 0.5;
     // 正交投影下距离只影响裁剪，真正决定取景的是 viewport_height。
     // XZ 平面矩形在 45° 方位 + 54.7° 俯角下的屏幕高度约 (宽+深)·sin45°·sin54.7°。
     let span = (max.x - min.x) + (max.z - min.z);
     let viewport_height = span * 0.707 * 0.816 * 1.25;
     let eye = center + ISO_DIR.normalize() * ISO_DIST;
-    info!("取景 center={center} eye={eye} viewport_height={viewport_height} span={span}");
+    info!("取景 center={center} viewport_height={viewport_height}");
 
     commands.spawn((
         Camera3d::default(),
@@ -160,27 +227,25 @@ fn board_aabb(b: &BoardDef) -> (Vec3, Vec3) {
     (min, max)
 }
 
-fn setup_text(mut commands: Commands, asset_server: Res<AssetServer>, board: Res<ActiveBoard>) {
-    let font: Handle<Font> = asset_server.load(DEV_FONT);
+fn spawn_hud(commands: &mut Commands, server: &AssetServer, board: &BoardDef) {
+    let font: Handle<Font> = server.load(DEV_FONT);
     let style = TextFont {
-        font: font.clone().into(),
+        font: font.into(),
         font_size: FontSize::Px(26.0),
         ..default()
     };
+    let small = TextFont {
+        font_size: FontSize::Px(22.0),
+        ..style.clone()
+    };
 
     let names = board
-        .0
         .tiles
         .iter()
         .filter(|t| t.kind == TileKind::Property)
         .map(|t| t.name.as_str())
         .collect::<Vec<_>>()
         .join("　");
-
-    let small = TextFont {
-        font_size: FontSize::Px(22.0),
-        ..style.clone()
-    };
 
     commands
         .spawn((
@@ -198,12 +263,12 @@ fn setup_text(mut commands: Commands, asset_server: Res<AssetServer>, board: Res
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text::new(format!("暴富 · B0 骨架 · 棋盘「{}」", board.0.board_name)),
+                Text::new(format!("暴富 · B1 数据层 · 棋盘「{}」", board.board_name)),
                 style,
                 TextColor(Color::srgb(0.08, 0.08, 0.1)),
             ));
             panel.spawn((
-                Text::new(names.clone()),
+                Text::new(names),
                 small.clone(),
                 TextColor(Color::srgb(0.1, 0.25, 0.55)),
             ));

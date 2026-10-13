@@ -3,7 +3,9 @@
 //! 只描述静态定义（`BoardDef`），运行时状态（归属/等级/抵押）是 Land 实体上的组件，
 //! 因此 JSON 里的 `owner`/`level` 字段刻意不出现在本模块——静态与运行时不可混。
 
+use bevy::asset::Asset;
 use bevy::math::Vec3;
+use bevy::reflect::TypePath;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -103,7 +105,7 @@ pub struct LandDef {
     pub upgrade_cost: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Asset, TypePath, Deserialize)]
 pub struct BoardDef {
     pub board_name: String,
     #[serde(default = "default_cell_size")]

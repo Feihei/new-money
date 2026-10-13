@@ -2,9 +2,7 @@
 //! 对应 Godot 端 `board.gd:219-302`（路面/填充地面）与 `tile_view.gd:92-127`（踏板/组色条）。
 
 use bevy::prelude::*;
-use game_core::board::{LandDef, TileDef, TileKind};
-
-use crate::ActiveBoard;
+use game_core::board::{BoardDef, LandDef, TileDef, TileKind};
 
 const ROAD_W: f32 = 0.9;
 const PAD_H: f32 = 0.06;
@@ -24,17 +22,15 @@ fn flat(c: Color) -> StandardMaterial {
 }
 
 pub fn spawn_board(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<StandardMaterial>>,
-    board: Res<ActiveBoard>,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
+    b: &BoardDef,
 ) {
-    let b = &board.0;
-
     for i in 0..b.tiles.len() {
         let from = &b.tiles[i];
         let to = &b.tiles[(i + 1) % b.tiles.len()];
-        spawn_road_segment(&mut commands, &mut meshes, &mut mats, b.cell_size, from, to);
+        spawn_road_segment(commands, meshes, mats, b.cell_size, from, to);
     }
 
     for t in &b.tiles {
