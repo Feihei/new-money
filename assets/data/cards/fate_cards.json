@@ -1,0 +1,47 @@
+[
+	{
+		"id": "fate_001",
+		"type": "fate",
+		"title": "命运",
+		"desc": "直接入狱！",
+		"effects": [{"action": "go_to_jail", "turns": 3}]
+	},
+	{
+		"id": "fate_002",
+		"type": "fate",
+		"title": "命运",
+		"desc": "回到起点，获得 $2000",
+		"effects": [
+			{"action": "move_to", "tile_name": "起点"},
+			{"action": "add_cash", "amount": 2000}
+		]
+	},
+	{
+		"id": "fate_003",
+		"type": "fate",
+		"title": "命运",
+		"desc": "缴纳所得税 $5000",
+		"effects": [{"action": "deduct_cash", "amount": 5000}]
+	},
+	{
+		"id": "fate_004",
+		"type": "fate",
+		"title": "命运",
+		"desc": "银行利息 $4000",
+		"effects": [{"action": "add_cash", "amount": 4000}]
+	},
+	{
+		"id": "fate_005",
+		"type": "fate",
+		"title": "命运",
+		"desc": "中了大奖 $15000",
+		"effects": [{"action": "add_cash", "amount": 15000}]
+	},
+	{
+		"id": "fate_006",
+		"type": "fate",
+		"title": "命运",
+		"desc": "物业税 $3000",
+		"effects": [{"action": "deduct_cash", "amount": 3000}]
+	}
+]

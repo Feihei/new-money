@@ -1,0 +1,14 @@
+[package]
+name = "game_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "《暴富》规则层：纯 ECS，无渲染依赖，cargo test 可直接跑对局"
+
+[dependencies]
+# 关掉默认 feature（2d/3d/ui/audio 全不要），只保留 ECS + Asset + State + Log
+bevy = { workspace = true, default-features = false, features = ["default_app"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }

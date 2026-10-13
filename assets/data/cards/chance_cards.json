@@ -1,0 +1,51 @@
+[
+	{
+		"id": "chance_001",
+		"type": "chance",
+		"title": "中奖",
+		"desc": "获得 $5000",
+		"effects": [{"action": "add_cash", "amount": 5000}]
+	},
+	{
+		"id": "chance_002",
+		"type": "chance",
+		"title": "股票分红",
+		"desc": "获得 $3000",
+		"effects": [{"action": "add_cash", "amount": 3000}]
+	},
+	{
+		"id": "chance_003",
+		"type": "chance",
+		"title": "交通罚款",
+		"desc": "缴纳罚款 $2000",
+		"effects": [{"action": "deduct_cash", "amount": 2000}]
+	},
+	{
+		"id": "chance_004",
+		"type": "chance",
+		"title": "维修费",
+		"desc": "房屋维修 $1500",
+		"effects": [{"action": "deduct_cash", "amount": 1500}]
+	},
+	{
+		"id": "chance_005",
+		"type": "chance",
+		"title": "生日快乐",
+		"desc": "每人给你 $500",
+		"effects": [{"action": "add_cash", "amount": 500}]
+	},
+	{
+		"id": "chance_006",
+		"type": "chance",
+		"title": "遗产继承",
+		"desc": "获得 $10000",
+		"effects": [{"action": "add_cash", "amount": 10000}]
+	},
+	{
+		"id": "chance_007",
+		"type": "chance",
+		"title": "中了彩票",
+		"desc": "获得 $20000",
+		"effects": [{"action": "add_cash", "amount": 20000}]
+	}
+]

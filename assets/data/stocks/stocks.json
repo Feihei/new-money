@@ -1,0 +1,47 @@
+[
+	{
+		"id": "stock_001",
+		"name": "暴富科技",
+		"base_price": 80.0,
+		"volatility": 0.12,
+		"price_floor": 10.0,
+		"price_ceiling": 400.0,
+		"outstanding_shares": 10000
+	},
+	{
+		"id": "stock_002",
+		"name": "地产集团",
+		"base_price": 60.0,
+		"volatility": 0.08,
+		"price_floor": 8.0,
+		"price_ceiling": 300.0,
+		"outstanding_shares": 15000
+	},
+	{
+		"id": "stock_003",
+		"name": "银行保险",
+		"base_price": 45.0,
+		"volatility": 0.05,
+		"price_floor": 5.0,
+		"price_ceiling": 250.0,
+		"outstanding_shares": 20000
+	},
+	{
+		"id": "stock_004",
+		"name": "民生消费",
+		"base_price": 35.0,
+		"volatility": 0.07,
+		"price_floor": 5.0,
+		"price_ceiling": 200.0,
+		"outstanding_shares": 25000
+	},
+	{
+		"id": "stock_005",
+		"name": "能源矿业",
+		"base_price": 55.0,
+		"volatility": 0.15,
+		"price_floor": 8.0,
+		"price_ceiling": 350.0,
+		"outstanding_shares": 12000
+	}
+]

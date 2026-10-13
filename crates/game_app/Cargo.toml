@@ -1,0 +1,16 @@
+[package]
+name = "game_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "《暴富》表现层：窗口、等轴测渲染、UI、字体、音频、存档"
+
+[dependencies]
+# complex_script_segmentation：不开的话中文换行分词会每帧刷 ICU4X 错误（B0 spike 实测）
+bevy = { workspace = true, features = [
+    "system_font_discovery",
+    "complex_script_segmentation",
+] }
+game_core = { path = "../game_core" }
+serde = { workspace = true }
+serde_json = { workspace = true }

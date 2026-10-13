@@ -1,0 +1,5 @@
+/target/
+# 开发期 CJK 字体（思源黑体开发授权版，未子集化所以体积大；将来子集化后再入库）
+assets/font/dev_*
+*.pdb
+*.exe

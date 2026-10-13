@@ -1,0 +1,156 @@
+# 棋盘数据 JSON Schema
+
+> 新棋盘格式（替代现有 `full_board.json` 的 `position:float` 模型）。详见 `ADR-001-board-topology.md`，含 **土地-道路绑定机制**。
+
+## 顶层结构
+
+```json
+{
+  "board_name": "prototype",
+  "cell_size": 2.0,
+  "grid_cols": 8,
+  "grid_rows": 8,
+  "loop": [ /* 主环有序道路格，顺序=绕行方向 */ ],
+  "lands": [ /* 路旁土地，只记归属/等级，经 land_id 与道路格绑定 */ ],
+  "branches": [ /* 可选：也可内联在 loop 元素的 branch 字段里 */ ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `board_name` | string | 地图名 |
+| `cell_size` | float | 格距（米），默认 2.0 |
+| `grid_cols` / `grid_rows` | int | 网格规模（校验坐标越界） |
+| `loop` | array\<Tile\> | 主环**道路格**，有序；相邻可正交/对角 |
+| `lands` | array\<Land\> | 路旁土地（归属/等级），与道路格绑定 |
+| `branches` | array\<Branch\> | 分支列表（也可内联，见下） |
+
+## Tile（主环道路格）
+
+```json
+{
+  "id": 0,
+  "col": 1, "row": 1,
+  "type": "start",
+  "name": "起点",
+  "data": {},
+  "land_id": 0,
+  "branch": { "type": "jail", "tiles": [ {"col":5,"row":1,"type":"jail","name":"监狱","data":{}} ] }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | int | 主环内唯一索引（= 数组下标） |
+| `col` / `row` | int | 网格坐标，世界坐标自动推导 |
+| `type` | string | 道路格类型（见下） |
+| `name` | string | 显示名 |
+| `data` | object | 类型附加数据（`property` 类型此字段为空，数据在 `lands[]`） |
+| `land_id` | int? | **仅 property 道路格**有；指向 `lands[]` 的土地 |
+| `branch` | object? | **可选**；存在即为分支接入点 |
+
+**道路格 `type` 取值**：`start` / `road` / `chance` / `fate` / `bank` / `transport` / `property` / `jail`(接入点) / `hospital`(接入点) ……
+- `property` 道路格：**必带 `land_id`**，落到此格经 `land_id` 触发土地的购买/收租/升级。
+- 拐角格必须是 `fate`/`bank`/`news` 等特殊类型，**不绑土地**（无 `land_id`）。
+- 其余类型按各自事件处理，无 `land_id`。
+
+### 对角判定
+相邻 `loop` 元素若 `abs(dcol)==1 && abs(drow)==1`，该段为**对角路**（斜向街道），渲染与移动均按斜线处理。
+
+## Land（路旁土地）
+
+```json
+{
+  "id": 0,
+  "col": 2, "row": 0,
+  "size": 1,
+  "name": "商业街",
+  "owner": null,
+  "level": 0,
+  "group": "red",
+  "land_type": "residential",
+  "price": 2000,
+  "rent": [60,180,450,900,1500,2500],
+  "upgrade_cost": 800
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | int | 土地唯一索引（被 `land_id` 引用） |
+| `col` / `row` | int | 土地格坐标，固定在环路**外侧**（作者摆放） |
+| `size` | int | 1 = 住宅 1×1；2 = 商业/保险 2×2 |
+| `name` | string | 地名 |
+| `owner` | int? | 归属玩家 id；`null` = 无主 |
+| `level` | int | 等级（0=空地，1~N=建筑等级） |
+| `group` / `land_type` / `price` / `rent` / `upgrade_cost` | — | 沿用现有地产静态数据 |
+
+**绑定规则**：
+- 1×1 住宅：**1 个 property 道路格** 的 `land_id` 指向它（1:1）。
+- 2×2 商业：**2 个相邻 property 道路格** 共享同一 `land_id`（对应 2 格道路）。
+- 建筑（含 `level` 高度）渲染在**土地格**，不在道路格。
+
+## Branch（死胡同链）
+
+```json
+{
+  "junction_id": 4,
+  "type": "jail",
+  "tiles": [
+    {"col":5,"row":1,"type":"jail","name":"监狱走廊","data":{}},
+    {"col":6,"row":1,"type":"jail","name":"监狱","data":{}}
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `junction_id` | int | 指向 `loop` 中接入点的 `id` |
+| `type` | string | 分支类型（jail / hospital / ...） |
+| `tiles` | array\<Tile\> | 死胡同链，**从靠近接入点 → 末端**排列 |
+
+> 内联写法：`loop` 元素的 `branch` 字段直接放上述 Branch 内容（不含 `junction_id`）。两种写法二选一，实现时统一。
+
+## 行为规则（实现约束）
+
+1. token 被送入分支时置于 `tiles` 的**最后一项**（末端死胡同）。
+2. 逃脱后 token 传送回 `junction_id` 对应主环格，**维持进入分支前的 heading**。
+3. 主环步进：`i → (i+1)%N`；转向卡反转：`i → (i-1+N)%N`。
+4. 分支**绝不**作为常规前进选项；只有事件能进入。
+5. 落到 `property` 道路格：读 `land_id` → 操作对应 `lands[]` 的 `owner`/`level`（购买 / 收租 / 升级）。
+6. 建筑渲染在 `lands[]` 坐标（环路外侧），道路格只渲染路面。
+
+## 完整 prototype 样本（节选，含土地绑定）
+
+```json
+{
+  "board_name": "prototype",
+  "cell_size": 2.0,
+  "grid_cols": 8, "grid_rows": 8,
+  "loop": [
+    {"id":0,"col":1,"row":1,"type":"start","name":"起点","data":{}},
+    {"id":1,"col":2,"row":1,"type":"property","name":"商业街","land_id":0,"data":{}},
+    {"id":2,"col":3,"row":1,"type":"property","name":"住宅区","land_id":1,"data":{}},
+    {"id":3,"col":4,"row":1,"type":"fate","name":"命运","data":{}},
+    {"id":4,"col":5,"row":1,"type":"property","name":"银行旁","land_id":2,"data":{},
+     "branch":{"type":"jail","tiles":[{"col":6,"row":1,"type":"jail","name":"监狱","data":{}}]}},
+    {"id":5,"col":5,"row":2,"type":"fate","name":"命运2","data":{}},
+    {"id":6,"col":5,"row":3,"type":"property","name":"工业区","land_id":2,"data":{}},
+    {"id":7,"col":4,"row":3,"type":"hospital","name":"医院入口","data":{},
+     "branch":{"type":"hospital","tiles":[{"col":3,"row":3,"type":"hospital","name":"医院","data":{}}]}},
+    {"id":8,"col":3,"row":3,"type":"property","name":"公园","land_id":3,"data":{}},
+    {"id":9,"col":2,"row":3,"type":"chance","name":"机会","data":{}},
+    {"id":10,"col":1,"row":3,"type":"property","name":"车站","land_id":4,"data":{}},
+    {"id":11,"col":1,"row":2,"type":"bank","name":"银行","data":{}}
+  ],
+  "lands": [
+    {"id":0,"col":2,"row":0,"size":1,"name":"商业街","owner":null,"level":0,"group":"red","land_type":"residential","price":2000,"rent":[60,180,450,900,1500,2500],"upgrade_cost":800},
+    {"id":1,"col":3,"row":0,"size":1,"name":"住宅区","owner":null,"level":0,"group":"red","land_type":"residential","price":2000,"rent":[60,180,450,900,1500,2500],"upgrade_cost":800},
+    {"id":2,"col":5,"row":0,"size":2,"name":"商业区","owner":null,"level":0,"group":"blue","land_type":"commercial","price":3000,"rent":[100,300,700,1400,2200,3500],"upgrade_cost":1000},
+    {"id":3,"col":3,"row":4,"size":1,"name":"公园","owner":null,"level":0,"group":"green","land_type":"residential","price":1500,"rent":[40,120,300,600,1000,1800],"upgrade_cost":600},
+    {"id":4,"col":1,"row":4,"size":1,"name":"车站","owner":null,"level":0,"group":"blue","land_type":"commercial","price":2800,"rent":[90,270,650,1300,2000,3200],"upgrade_cost":950}
+  ]
+}
+```
+
+> 注：上述 `col/row` 仅为示意拓扑（land 固定在环路外侧 row=0 / row=4），实现原型时按真实 8×8 小方环坐标微调。land 2 为 2×2 商业，被道路格 4 与 6 共享 `land_id:2`。
