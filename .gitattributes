@@ -1,0 +1,20 @@
+# 统一 LF。Windows 默认检出成 CRLF 会让整份文件在 diff 里翻一遍，
+# 且 `cargo fmt --check` 与 tools/ 下的 python 校验器都会跟着误报。
+* text=auto eol=lf
+
+# 二进制内容里可能含 CR/LF 字节，行尾转换会直接破坏文件
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.otf binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.glb binary
+*.gltf binary
+*.blend binary
+*.zip binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
