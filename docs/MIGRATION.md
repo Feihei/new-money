@@ -88,7 +88,7 @@ new-money-bevy/
 
 | 实体 | 数量 | 组件 |
 |---|---|---|
-| 主环道路格 | N（prototype 12，正式 40） | `TileIndex(u32)` `TileKind`（enum，对齐 `tile_type.gd:11-27` 13 类）`GridPos{col,row}` `TileName`（`String`，仅显示用）`LinkedLand(LandId)?`（property 格才有）`BranchJunction{kind}`? |
+| 主环道路格 | N（prototype 12，正式 40） | **不建实体**（B2a 修正，见下）：`TileIndex`/`TileKind`/`GridPos` 全部经 `BoardDef` 查询取得 |
 | 分支死胡同格 | 每分支若干 | `BranchTile{junction:TileIndex, order:u8, kind}` `GridPos` —— 对应 `board_branch.gd:11` "从靠近接入点 → 末端"有序链 |
 | 路旁土地 | 若干 | `LandId(u32)` `GridPos` `LandSize(u8=1\|2)` `LandDef`(Arc：group/land_type/price/rent[6]/upgrade_cost) `OwnerAddr(Option<PlayerId>)` `BuildingLevel(u8)` `Mortgaged`（marker） |
 | 玩家 | 2–4 | `PlayerId(u32)` `PlayerName` `PlayerColor` `Wallet{cash:i64}` `TokenPosition{tile:TileIndex, off_board:Option<GridPos>}` `JailSentence{turns_left}` `StockHoldings(HashMap<StockId,u32>)` `BankBalance{deposit,loan:i64}` `Controller`（`Human \| Ai{difficulty}`）`Bankrupt`（marker，取代 `status=="bankrupt"` 判断） |
@@ -99,16 +99,18 @@ new-money-bevy/
 
 **关键取舍**：`PropertyRegistry`（`property_registry.gd`，128 行的弱类型字典）整个消失——owner/level/mortgaged 直接变成 Land 实体上的组件。同色组垄断判定（`property_system.gd:151-161`）、组内等级差不超过 1（`:164-178`）改为 `Query<&LandDef, With<OwnerAddr>>` 上的聚合，不再每次线性扫 `get_tiles_by_type`。
 
+**B2a 落地修正（10-13）**：**道路格不建实体**，只有土地建。理由是 `BoardDef` 的拓扑查询（`tile()/destination()/land_for_tile()/branch_end()`）已经是道路格的完整接口，而道路格没有任何运行时可变状态 —— 再复制一份 component 就多出第二个真相来源，改一处忘一处。表现层为了渲染/拾取自己 spawn 的网格实体归 `game_app` 管，规则层不认识它。同理 `OwnerAddr` 的实际名字是 `Owner(pub Option<PlayerId>)`，`LandDef` 不重复挂在实体上（价格/租金查 `active.def.land(id)`）。
+
 ### 4.3 Resource（取代 autoload 单例）
 
 | Godot 单例 | Bevy Resource |
 |---|---|
 | `GameState.game_id/turn_count/inflation_index` | `GameSession{id, turn_count, seed}` |
-| `GameState.board` | `ActiveBoard{handle:Handle<BoardDef>, tiles:HashMap<TileIndex,Entity>, lands:HashMap<LandId,Entity>}` |
+| `GameState.board` | `ActiveBoard{def:BoardDef, lands:HashMap<LandId,Entity>}` —— B2a 落地形态：`def` 是加载后的一次性快照，规则 system 直接 `Res<ActiveBoard>` 就能拿拓扑，headless 测试也只插这一个 resource |
 | `GameState.players` | 不需要 —— 玩家就是实体，用 `Query<&Wallet, With<PlayerId>>` |
 | `TurnManager._players/_current_player_index/_pending_*` | `TurnOrder{active:Vec<PlayerId>, cursor:usize}` + `PendingDecision{player, kind}` |
 | `TurnManager.property_system/stock_market/bank_system/...`（`:59-69` 7 个实例字段） | 全部消失，变成 system + 组件数据 |
-| `GameRules`（新）：`START_CASH/JAIL_TURNS/MAX_LEVEL=6/DIVIDEND_INTERVAL=5/DIVIDEND_RATE/BASE_DRIFT/DEPOSIT_RATE/LOAN_RATE/MAX_LOAN_RATIO` | 一个 `GameRules` resource，值从 `data/rules.json` 读（现散落在 `player_data.gd:13` `turn_manager.gd:38-39` `stock_market.gd:14-17` `bank_system.gd:8-10`） |
+| `GameRules`（新）：`START_CASH/JAIL_TURNS/MAX_LEVEL=6/DIVIDEND_INTERVAL=5/DIVIDEND_RATE/BASE_DRIFT/DEPOSIT_RATE/LOAN_RATE/MAX_LOAN_RATIO` | 一个 `GameRules` resource，值从 `data/rules.json` 读（现散落在 `player_data.gd:13` `turn_manager.gd:38-39` `stock_market.gd:14-17` `bank_system.gd:8-10`）。**B2a 已落 `start_cash`**，缺陷 #12 就此消除（起始现金只剩这一处）；其余常量与 `rules.json` 留到 B3 真用到时再加 |
 | `DataManager`（`data_manager.gd`，手写 `_cache`） | `AssetServer` + `Assets<BoardDef>`/`Assets<CardDef>`/`Assets<StockDef>`，缓存与热重载免费得到 |
 | `SaveManager`（**未实现**，`save_manager.gd:17-26` 是 TODO） | 见 §九 |
 | `AudioManager`（未实现） | `bevy_audio`，`game_app` 侧 |
@@ -146,7 +148,7 @@ new-money-bevy/
 
 | system | 条件 | 读 | 写 |
 |---|---|---|---|
-| `begin_game_system` | `OnEnter(Boot)` | `Assets<BoardDef>` | spawn tile/land/player/deck/stock 实体；`TurnOrder`；→`TurnStart` |
+| `begin_game_system` | `OnEnter(Boot)`（B2a 暂挂 `Update` + `Option<Res<ActiveBoard>>` 自守门 —— 0.20 没有 `resource_missing` 运行条件） | `Assets<BoardDef>` `GameSetup` `GameRules` | spawn land/player 实体（道路格不建实体，见 §4.2）；`TurnOrder`；→`TurnStart` |
 | `begin_turn_system` | `OnEnter(TurnStart)` | `TurnOrder` `Query<(&JailSentence,&Bankrupt)>` | 破产→直接 `TurnEnd`；服刑→`JailProcessed`；正常→发 `TurnStarted`，→`WaitRoll` |
 | `roll_dice_system` | `in_state(WaitRoll)` | `MessageReader<RequestRoll>` `Res<Rng>` | `DiceRolled`；算 `destination`；`TokenPosition`；`WalkQueue`；→`Walking` |
 | `walk_step_system` | `in_state(Walking)` | `Res<WalkClock>` `WalkQueue` `ActiveBoard` | `TileStepped`；步数耗尽→发 `PlayerArrived`，→`Landed` |
@@ -222,7 +224,6 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 > 如果 `bevy_inspector_egui` 的缺口你认为不可接受，唯一退路是**降到 bevy 0.19**（生态已适配面更广）。这是 §十一 的待决问题之一。
 
 ### 6.1 0.20 API 事实核对表（B0 已从本地 crate 源码 + 官方 examples 逐个核实）
-
 | 事项 | 0.20 的确切形态 | 对方案的影响 |
 |---|---|---|
 | feature 模型 | `default = ["2d","3d","ui","audio"]`；`2d`/`3d`/`ui` 各自 = `default_app` + `default_platform` + `scene` + `picking` + 对应渲染层 | §4.1 的"`default-features=false` 即无渲染"成立，但要显式给 `features = ["default_app"]` |
@@ -239,7 +240,7 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 | UI 交互 | `Button`/`Interaction` 在 0.20 已弃用，改 `OnInteraction` 组件式；`TextScroll` → `EditableText::viewport`；cursor 模块并入 `bevy_picking` | B5 写按钮时按新形态，别抄旧教程 ⚠️ |
 | 存档/设置 | 新增内置 `bevy_settings`、`bevy_world_serialization`（`scene` feature 会带后者） | 同为 0.20 首发，按 §九 走手写快照 |
 
-**B0/B1 实跑发现的八条环境级坑（已踩过，记录避免重犯）**：
+**B0/B1/B2 实跑发现的十条环境级坑（已踩过，记录避免重犯）**：
 1. **`AssetPlugin::file_path` 在 0.20 是相对「可执行文件目录」的 `String`（不是 `Option`）**，而 `cargo run -p game_app` 的 CWD 是仓库根 → 默认会把资产解析成 `target/debug/assets/**`，所有资产**静默 404**（只有一行 `bevy_asset::server` ERROR，程序不崩）。落地做法：启动时把资产根解析成绝对路径再塞给 `AssetPlugin`，`std::fs` 与 `AssetServer` 共用同一个根，否则会出现"直读文件成功、Asset 加载失败"这种极难排查的组合。
 2. **`default_font` feature 自带的是 Fira Mono 子集，无汉字**，所以不显式指定字体时中文不是"报错"而是**豆腐块/空白**。落地做法：把字体放 `assets/font/` 并用 `asset_server.load()` 显式指定（本仓库用开发授权的思源黑体，见 §7.3）。
 3. **中文必须开 `bevy` 的 `complex_script_segmentation` feature**（转发到 `parley/complex-scripts`）。不开时 Parley/ICU4X 找不到中日韩分词模型，会**每帧刷** `ICU4X data error: No segmentation model for complex script: Chinese/Japanese`，且长句换行按非 CJK 规则处理。B0 实测：开启后错误归零。
@@ -248,10 +249,12 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 6. **资产加载失败默认只打一条日志然后永远等下去**。`AssetServer::load` 失败不会 panic，依赖它的启动流程会静默卡住。本项目在 `boot_world` 里对每个 handle 调 `expect_ready`，命中 `LoadState::Failed(Arc<AssetLoadError>)`（注意是**元组变体**，不是单元变体）就带路径 panic。已用「临时把资产根指到不存在的位置」验证：退出码 101 + 明确中文报错，而不是白屏干等。
 7. **同一扩展名注册多个 loader 是官方支持的**：`Loaders::find` 先按资产 `TypeId` 查 `type_id_to_loaders`，再按扩展名筛。所以 `BoardDef`/`CardSet`/`StockSet` 三个 `JsonAssetLoader` 都声明 `extensions = ["json"]` 并不冲突，typed handle 会路由到匹配的那个；只有**同类型 + 同扩展名**重复注册才会 warn。
 8. **`#[derive(SystemParam)]` 不在 prelude 里**，要 `use bevy::ecs::system::SystemParam;`。用它打包多个 `Res<Assets<T>>` 比给系统挂 `#[allow(clippy::too_many_arguments)]` 好 —— 后者会把「参数确实太多了」这个真信号吃掉。
+9. **headless 测试里用 `AssetServer` 读盘，必须自己初始化任务池**：`App::new()` + `CoreGamePlugin` 不够，`AssetPlugin` 的文件 IO 跑在 `IoTaskPool` 上，而它只由 `bevy::app::TaskPoolPlugin` 建立，否则第一次加载直接 panic `The IoTaskPool has not been initialized yet`。`game_app` 经 `DefaultPlugins` 自带，所以这个坑只在测试侧暴露（好在是响的，不是静默失败）。
+10. **别用 `timeout N cargo run` 做冒烟测试**：debug 链接一个上百 MB 的 Bevy 二进制要吃掉大半预算，`timeout` 到点杀掉的是 cargo 而不是应用，日志会是**空文件**（看起来像"应用没输出"）。做法：先 `cargo build -p game_app` 再 `timeout N ./target/debug/game_app.exe`；并且 `NM_SHOT` 现在会在截图落盘后于 2.5s 自行 `exit(0)`，不依赖外部 kill，也不会留下没人关的窗口进程。
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
-`game_app` 里做成 `NM_SHOT=<路径> cargo run -p game_app` 的环境开关（**按墙钟 1.5s 触发**，见上面第 5 条），
+`game_app` 里做成 `NM_SHOT=<路径>` 的环境开关（**按墙钟 1.5s 触发、2.5s 自行 `exit(0)`**，见上面第 5/10 条），
 后续每个渲染阶段都能用它自动生成对比图。
 
 **遗留待解（B4 处理）**：`Label3D`（格名跟着 3D 物体朝向相机）在 Bevy 没有等价物。三条路：① `Text2d` + 由相机朝向反算 billboard（但 `Text2d` 属 2D 渲染通路，与 3D 深度不同层，遮挡关系会不对）；② 把名字烘进贴图用 billboard sprite；③ UI 层跟随投影（点分世界→屏幕坐标）。B4 需要先做一个 billboard spike 再定。
@@ -325,7 +328,8 @@ Godot 端**全项目没有任何字体资源**，也没设 `gui/theme/custom_fon
 |---|---|---|---|
 | **B0** 骨架 ✅ 完成 (10-13) | workspace、`game_core`(`default_app` 无渲染)、`game_app` 等轴测棋盘、`.gitignore`、`check.sh` 质量门、`NM_SHOT` 截图钩子；拷 `data/` 与 `docs/` | `check.sh` 五项全过退出码 0；窗口渲染出棋盘 + 中文（`target/b0.png`） | 0.5 天 |
 | **B1** 数据与棋盘 ✅ 完成 (10-13) | `BoardDef/LandDef/BranchDef/LandType/TileKind` + `CardSet/CardEffect`（内部标签枚举）+ `StockSet/StockDef` serde；`validate()` 覆盖 `tools/validate_board.py` 的 7 条不变式与卡牌/股票的字段约束；`JsonAssetLoader<A>` 自写（无第三方），`CoreGamePlugin` 注册三类资产与 loader，`game_app` 全走 `AssetServer` | `cargo test -p game_core` **15 项**全过；启动日志确认「棋盘 12 格 / 机会 7 张 / 命运 6 张 / 股票 5 只」；资产缺失时 panic 而非静默等待 | 1 天 |
-| **B2** 玩家 + 骰 + 回合状态机 | `PlayerId/Wallet/TokenPosition/JailSentence`；`Rng`+`GameSeed`；`TurnPhase` 全部 8 态与表内 8 个 system；`WalkClock` 定步时 | 移植 `test_dice`、`test_game_state`、`test_jail_flow`、`test_player_data`；**新增**：固定种子 100 回合不 panic 的 property test | 1.5 天 |
+| **B2a** 世界装配 ✅ 完成 (10-13) | `GameRules`/`GameSetup`/`DataHandles` 移进 core；`TileIndex`/`LandId`/`PlayerId` newtype；`Wallet`/`TokenPosition`/`JailSentence`/`Bankrupt`/`Owner` 组件；`ActiveBoard` resource；`begin_game_system` 铺土地与玩家实体 | `cargo test -p game_core` **19 项**（其中 4 项是 App 级：真资产装配世界、只装配一次、阵容与现金只来自 resource、棋盘缺失时不装配）；窗口日志「世界装配完成：12 主环格 / 6 土地实体 / 2 玩家」 | 0.5 天 |
+| **B2b** 骰 + 回合状态机 | `Rng`+`GameSeed`；`TurnPhase` 全部 8 态与表内其余 7 个 system（`begin_game_system` 改挂 `OnEnter(Boot)`）；`WalkClock` 定步时 | 移植 `test_dice`、`test_game_state`、`test_jail_flow`、`test_player_data`；**新增**：固定种子 100 回合不 panic 的 property test | 1 天 |
 | **B3** 经济核心（无 UI） | property（买/租/升级/抵押/同色组/等级差 ≤1）、bank（存贷息，**修 bug #1**）、stock（tick/买/卖/分红/历史，**修 #4 #5**）、card 效果 enum 化（**修 #3**） | 移植 `test_bank_system`、`test_card_system`；`calculate_rent` 全分支表驱动测试；现金流守恒断言 | 1.5 天 |
 | **B4** 等轴测渲染切片 | tile/land/token spawn system、路面（含对角）、建筑高度、`Text2d` 格名、正交相机 + rig 跟随、`ClearColor` | **肉眼**验收：与 Godot 版截图对比；此时才第一次开窗 | 1.5–2 天 |
 | **B5** UI + 交互 | 中文字体接入；顶栏/HUD/4 个模态；`bevy_picking` 点格与按钮；`DecisionChosen` 闭环；主菜单→对局流转；暂停 | 能完整打完一局（2 人类玩家）；长中文文案换行不溢出 | 2–3 天 |

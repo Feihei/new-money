@@ -53,6 +53,11 @@ pub enum LandType {
     Insurance,
 }
 
+/// 主环下标。环形拓扑的一切索引都用它，而不是裸 `i64`/`u32`：
+/// 与 `LandId`、`PlayerId` 是不同 newtype，混用直接编译失败（缺陷 #1 的防线）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TileIndex(pub u32);
+
 /// 格子附加数据。当前只有拘留格用得到，其余格为 `{}`。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub struct TileData {
@@ -150,6 +155,11 @@ impl BoardDef {
             return from;
         }
         (from + steps).rem_euclid(n)
+    }
+
+    /// 把任意索引（可为负、可越界）折成 `TileIndex`，取模规则与 `tile()` 一致。
+    pub fn wrapped(&self, index: i64) -> TileIndex {
+        TileIndex(self.destination(index, 0) as u32)
     }
 
     /// 网格坐标 → 世界坐标（y=0）。ADR-001：坐标一律推导，不手填 x/z。
@@ -387,6 +397,9 @@ mod tests {
         assert_eq!(b.destination(5, 12), 5);
         assert_eq!(b.tile(-1).unwrap().id, 11);
         assert_eq!(b.tile(12).unwrap().id, 0);
+        // wrapped() 与 tile() 必须同一套取模规则，否则棋子位置与看到的格子会错位
+        assert_eq!(b.wrapped(-1), TileIndex(11));
+        assert_eq!(b.wrapped(12), TileIndex(0));
     }
 
     #[test]

@@ -9,16 +9,14 @@ use bevy::{
     window::{PresentMode, Window},
 };
 use game_core::CoreGamePlugin;
-use game_core::board::{BoardDef, TileKind};
-use game_core::card::{CardKind, CardSet};
-use game_core::stock::StockSet;
+use game_core::board::TileKind;
+use game_core::card::CardKind;
+use game_core::prelude::{
+    ActiveBoard, BoardDef, CardSet, DataHandles, GameRules, GameSetup, StockSet, begin_game_system,
+};
 
 mod board_view;
 
-const BOARD_REL: &str = "data/boards/prototype.json";
-const CHANCE_REL: &str = "data/cards/chance_cards.json";
-const FATE_REL: &str = "data/cards/fate_cards.json";
-const STOCKS_REL: &str = "data/stocks/stocks.json";
 const DEV_FONT: &str = "font/dev_SourceHanSansSC-Regular.otf";
 
 /// Bevy 0.20 的 `AssetPlugin::file_path` 是相对「可执行文件目录」的，而 `cargo run` 的 CWD 在仓库根，
@@ -37,19 +35,6 @@ fn asset_root() -> PathBuf {
 const ISO_DIR: Vec3 = Vec3::new(8.0, 16.0, 8.0);
 const ISO_DIST: f32 = 40.0;
 
-/// 当前对局使用的棋盘资产。视图与规则都经 `Res<Assets<BoardDef>>` 取，
-/// 这样热重载时资产内容原地更新，不必换 resource。
-#[derive(Resource)]
-pub struct ActiveBoard(pub Handle<BoardDef>);
-
-#[derive(Resource)]
-struct DataHandles {
-    board: Handle<BoardDef>,
-    chance: Handle<CardSet>,
-    fate: Handle<CardSet>,
-    stocks: Handle<StockSet>,
-}
-
 fn main() {
     let root = asset_root();
     info!("资产根：{}", root.display());
@@ -58,7 +43,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "暴富 · B1 数据层".into(),
+                        title: "暴富 · B2 世界装配".into(),
                         present_mode: PresentMode::AutoNoVsync,
                         ..default()
                     }),
@@ -72,33 +57,41 @@ fn main() {
         // 规则层的 Plugin 在表现层注册：验证「无渲染 bevy 子集 + 完整 bevy」能共存于同一 App
         .add_plugins(CoreGamePlugin)
         .add_systems(Startup, load_data)
-        .add_systems(Update, (boot_world, maybe_capture).chain())
+        // 表现层的建图流程读规则层产物 `ActiveBoard`，所以必须显式排在 `begin_game_system` 之后
+        .add_systems(
+            Update,
+            (boot_world, maybe_capture).chain().after(begin_game_system),
+        )
         .run();
 }
 
 fn load_data(mut commands: Commands, server: Res<AssetServer>) {
-    commands.insert_resource(DataHandles {
-        board: server.load(BOARD_REL),
-        chance: server.load(CHANCE_REL),
-        fate: server.load(FATE_REL),
-        stocks: server.load(STOCKS_REL),
-    });
+    commands.insert_resource(DataHandles::load(&server));
 }
 
-/// 三个数据资产打包成一个系统参数（Bevy 的 `SystemParam` derive），
+/// 资产句柄与它们的存储打包成系统参数（Bevy 的 `SystemParam` derive），
 /// 免得 `boot_world` 的签名长到得靠 `#[allow]` 过关。
 #[derive(SystemParam)]
 struct SceneAssets<'w> {
-    boards: Res<'w, Assets<BoardDef>>,
     card_sets: Res<'w, Assets<CardSet>>,
     stock_sets: Res<'w, Assets<StockSet>>,
 }
 
-/// 数据资产全部就位后，一次性建好相机、棋盘几何与 HUD。
+/// 启动这一趟流程要读的 resource 们，同样是打包成系统参数。
+#[derive(SystemParam)]
+struct BootState<'w> {
+    data: Res<'w, DataHandles>,
+    server: Res<'w, AssetServer>,
+    rules: Res<'w, GameRules>,
+    setup: Res<'w, GameSetup>,
+    /// 规则层的产物：`begin_game_system` 校验过棋盘、铺好实体之后才存在
+    active: Option<Res<'w, ActiveBoard>>,
+}
+
+/// 数据资产与规则层世界都就位后，一次性建好相机、棋盘几何与 HUD。
 fn boot_world(
     mut commands: Commands,
-    handles: Res<DataHandles>,
-    server: Res<AssetServer>,
+    state: BootState,
     assets: SceneAssets,
     mut booted: Local<bool>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -107,22 +100,20 @@ fn boot_world(
     if *booted {
         return;
     }
-    expect_ready(&server, &handles.board, "棋盘");
-    expect_ready(&server, &handles.chance, "机会牌");
-    expect_ready(&server, &handles.fate, "命运牌");
-    expect_ready(&server, &handles.stocks, "股票");
+    expect_ready(&state.server, &state.data.board, "棋盘");
+    expect_ready(&state.server, &state.data.chance, "机会牌");
+    expect_ready(&state.server, &state.data.fate, "命运牌");
+    expect_ready(&state.server, &state.data.stocks, "股票");
 
-    let (Some(board), Some(chance), Some(fate), Some(stocks)) = (
-        assets.boards.get(&handles.board),
-        assets.card_sets.get(&handles.chance),
-        assets.card_sets.get(&handles.fate),
-        assets.stock_sets.get(&handles.stocks),
+    let (Some(chance), Some(fate), Some(stocks)) = (
+        assets.card_sets.get(&state.data.chance),
+        assets.card_sets.get(&state.data.fate),
+        assets.stock_sets.get(&state.data.stocks),
     ) else {
         return;
     };
-
+    // 棋盘的校验在规则层（begin_game_system）做过，这里只管卡牌与股票
     for (what, errs) in [
-        ("棋盘", board.validate()),
         ("机会牌", chance.validate(CardKind::Chance)),
         ("命运牌", fate.validate(CardKind::Fate)),
         ("股票", stocks.validate()),
@@ -131,11 +122,13 @@ fn boot_world(
             panic!("{what}校验失败:\n  {}", errs.join("\n  "));
         }
     }
+
+    let Some(active) = state.active.as_ref() else {
+        return;
+    };
+    let board = &active.def;
     info!(
-        "数据就绪：棋盘「{}」{} 主环格 / {} 土地；机会 {} 张、命运 {} 张；股票 {} 只",
-        board.board_name,
-        board.loop_len(),
-        board.lands.len(),
+        "表现层就绪：机会 {} 张、命运 {} 张；股票 {} 只",
         chance.0.len(),
         fate.0.len(),
         stocks.0.len()
@@ -143,9 +136,14 @@ fn boot_world(
 
     spawn_camera(&mut commands, board);
     board_view::spawn_board(&mut commands, &mut meshes, &mut mats, board);
-    spawn_hud(&mut commands, &server, board);
+    spawn_hud(
+        &mut commands,
+        &state.server,
+        board,
+        &state.setup,
+        &state.rules,
+    );
 
-    commands.insert_resource(ActiveBoard(handles.board.clone()));
     *booted = true;
 }
 
@@ -159,7 +157,8 @@ fn expect_ready<T: Asset>(server: &AssetServer, handle: &Handle<T>, what: &str) 
     }
 }
 
-/// 设了 `NM_SHOT=输出路径` 就截一张 PNG —— 让 agent 能自己核对画面，不必每次请人肉眼验收。
+/// 设了 `NM_SHOT=输出路径` 就截一张 PNG 然后自行退出 —— 让 agent 能自己核对画面，
+/// 不必每次请人肉眼验收，也不会留下一堆没人关的窗口进程。
 ///
 /// 触发条件必须是**墙钟时间**而不是帧数：`AutoNoVsync` 下前 40 帧只有一二十毫秒，
 /// 3D 管线（着色器编译 + 网格上传）还没热完，截出来只剩 clear color 与 UI。
@@ -167,7 +166,14 @@ fn maybe_capture(time: Res<Time>, mut done: Local<bool>, mut commands: Commands)
     let Ok(path) = std::env::var("NM_SHOT") else {
         return;
     };
-    if *done || time.elapsed_secs() < 1.5 {
+    if *done {
+        // 留出一点余量让截图回调把 PNG 落盘，然后退出：截图进程不该靠外部 kill
+        if time.elapsed_secs() >= 2.5 {
+            std::process::exit(0);
+        }
+        return;
+    }
+    if time.elapsed_secs() < 1.5 {
         return;
     }
     *done = true;
@@ -227,7 +233,13 @@ fn board_aabb(b: &BoardDef) -> (Vec3, Vec3) {
     (min, max)
 }
 
-fn spawn_hud(commands: &mut Commands, server: &AssetServer, board: &BoardDef) {
+fn spawn_hud(
+    commands: &mut Commands,
+    server: &AssetServer,
+    board: &BoardDef,
+    setup: &GameSetup,
+    rules: &GameRules,
+) {
     let font: Handle<Font> = server.load(DEV_FONT);
     let style = TextFont {
         font: font.into(),
@@ -247,6 +259,14 @@ fn spawn_hud(commands: &mut Commands, server: &AssetServer, board: &BoardDef) {
         .collect::<Vec<_>>()
         .join("　");
 
+    // 开局快照：阵容与现金取自规则层的配置，真实 HUD（现金随结算变动）在 B5
+    let roster = setup
+        .players
+        .iter()
+        .map(|p| format!("{} ${}", p.name, rules.start_cash))
+        .collect::<Vec<_>>()
+        .join("　");
+
     commands
         .spawn((
             Node {
@@ -263,9 +283,14 @@ fn spawn_hud(commands: &mut Commands, server: &AssetServer, board: &BoardDef) {
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text::new(format!("暴富 · B1 数据层 · 棋盘「{}」", board.board_name)),
+                Text::new(format!("暴富 · B2 世界装配 · 棋盘「{}」", board.board_name)),
                 style,
                 TextColor(Color::srgb(0.08, 0.08, 0.1)),
+            ));
+            panel.spawn((
+                Text::new(roster),
+                small.clone(),
+                TextColor(Color::srgb(0.45, 0.2, 0.05)),
             ));
             panel.spawn((
                 Text::new(names),
