@@ -1,65 +1,16 @@
 //! App 级集成测试：真资产 + 真 `AssetServer`，走与 `game_app` 相同的装配路径。
 //! 不需要窗口：`game_core` 只链接 bevy 的 `default_app` 特性子集。
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+mod common;
 
-use bevy::app::TaskPoolPlugin;
-use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
+use common::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
     ActiveBoard, Bankrupt, DataHandles, GameRules, GameSetup, JailSentence, LandId, Owner,
     PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, START_TILE, TokenPosition,
     Wallet,
 };
-
-fn asset_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets")
-        .canonicalize()
-        .expect("资产根应存在")
-}
-
-/// `AssetServer` 的文件读盘跑在 `IoTaskPool` 上，而它只由 `TaskPoolPlugin` 初始化。
-/// `game_app` 经 `DefaultPlugins` 自带，headless 测试必须自己加，否则第一次 IO 直接
-/// panic「The IoTaskPool has not been initialized yet」。
-fn task_pools() -> TaskPoolPlugin {
-    TaskPoolPlugin::default()
-}
-
-/// 启动顺序与 game_app 一致：绝对资产根的 `AssetPlugin` → `CoreGamePlugin` → 插入 `DataHandles`。
-fn test_app(setup: GameSetup, rules: GameRules) -> App {
-    let mut app = App::new();
-    app.add_plugins(task_pools())
-        .add_plugins(AssetPlugin {
-            file_path: asset_root().display().to_string(),
-            watch_for_changes_override: Some(false),
-            ..default()
-        })
-        .add_plugins(CoreGamePlugin)
-        .insert_resource(setup)
-        .insert_resource(rules)
-        .add_systems(
-            Startup,
-            |mut commands: Commands, server: Res<AssetServer>| {
-                commands.insert_resource(DataHandles::load(&server));
-            },
-        );
-    app
-}
-
-/// 资产加载是异步的，所以要步进到世界出现为止；返回是否成功装配。
-fn run_until_world(app: &mut App) -> bool {
-    for _ in 0..500 {
-        app.update();
-        if app.world().contains_resource::<ActiveBoard>() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    false
-}
 
 fn snapshot(app: &mut App) -> Vec<(u32, String, i64, u32)> {
     let w = app.world_mut();
@@ -92,7 +43,7 @@ fn status_markers(app: &mut App) -> usize {
 
 #[test]
 fn world_boots_from_real_assets() {
-    let mut app = test_app(GameSetup::default(), GameRules::default());
+    let mut app = boot_default();
     assert!(run_until_world(&mut app), "棋盘资产没能在时限内装配成世界");
 
     let start = START_TILE.0;
@@ -122,11 +73,12 @@ fn world_boots_from_real_assets() {
 
 #[test]
 fn world_boots_exactly_once() {
-    let mut app = test_app(GameSetup::default(), GameRules::default());
+    let mut app = boot_default();
     assert!(run_until_world(&mut app));
     let before = (snapshot(&mut app).len(), land_rows(&mut app).len());
 
-    // begin_game_system 每帧都跑，靠 Option<Res<ActiveBoard>> 自守门；没有守门就会重复铺实体
+    // begin_game_system 每帧都跑，靠 in_state(Boot) + Option<Res<ActiveBoard>> 自守门；
+    // 没有守门就会重复铺实体
     for _ in 0..10 {
         app.update();
     }
@@ -141,22 +93,14 @@ fn world_boots_exactly_once() {
 fn setup_and_rules_are_the_only_sources() {
     // 阵容与起始现金都由 resource 驱动：换值不必动任何 system（缺陷 #12 的验收）
     let setup = GameSetup {
-        players: vec![
-            PlayerSetup {
-                name: "甲".into(),
-                color: PLAYER_COLORS[0],
-            },
-            PlayerSetup {
-                name: "乙".into(),
-                color: PLAYER_COLORS[1],
-            },
-            PlayerSetup {
-                name: "丙".into(),
-                color: PLAYER_COLORS[2],
-            },
-        ],
+        players: (0..3)
+            .map(|i| PlayerSetup {
+                name: ["甲", "乙", "丙"][i].to_string(),
+                color: PLAYER_COLORS[i],
+            })
+            .collect(),
     };
-    let mut app = test_app(setup, GameRules { start_cash: 8_888 });
+    let mut app = boot(setup, GameRules { start_cash: 8_888 }, Default::default());
     assert!(run_until_world(&mut app));
 
     assert_eq!(
@@ -181,9 +125,11 @@ fn setup_and_rules_are_the_only_sources() {
 #[test]
 fn world_waits_when_board_asset_is_missing() {
     // 规则层的行为是「等」，不是「猜一个棋盘」。响的部分由 game_app 的 expect_ready 负责
+    use std::time::Duration;
+
     let mut app = App::new();
-    app.add_plugins(task_pools())
-        .add_plugins(AssetPlugin {
+    app.add_plugins(bevy::app::TaskPoolPlugin::default())
+        .add_plugins(bevy::asset::AssetPlugin {
             file_path: asset_root().display().to_string(),
             watch_for_changes_override: Some(false),
             ..default()

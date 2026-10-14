@@ -56,6 +56,8 @@
 
 > 第 9 条值得单独强调：**移植不是 1:1 搬运，删掉的兼容代码约占 core 的 15%**。
 
+> **截至 B2b（10-13）已修并有回归网的**：#2（`turn_flow.rs::assert_turns_balanced`）、#6（`same_seed_replays_the_same_match`）、#7（`requests_from_somebody_else_are_ignored` + 骰子在 core 的 `roll_dice_system` 里）、#8 的玩家状态部分（`JailSentence`/`Bankrupt` 是组件存在性，见 `jail_skips_two_turns_then_releases`）、#12（`world_boot.rs::setup_and_rules_are_the_only_sources`）。#1 的 newtype 防线已就位但要等 B3 的贷款逻辑才有实际调用点；#3/#4/#5/#9/#10/#11 属 B3 与后续。
+
 ---
 
 ## 四、目标架构（彻底 ECS 化）
@@ -117,7 +119,7 @@ new-money-bevy/
 
 ### 4.4 Message（取代 EventBus 的 24 个信号）
 
-0.20 形态：`#[derive(Message)]` 结构体 + `app.add_message::<T>()` + `Commands::send_message()` + `MessageReader<T>`/`MessageWriter<T>`（存储为 `Messages<T>`）。按 `event_bus.gd:14-61` 的九域分组翻译：
+0.20 形态：`#[derive(Message)]` 结构体 + `app.add_message::<T>()` + **`MessageWriter<T>` 写**（⚠️ 不是 `Commands::send_message`，0.20 的 `Commands` 上没有这个方法）+ `MessageReader<T>` 读（存储是 `Messages<T>`；`MessageReader` 带 `'w`/`'s` 两个生命周期）。观察者推送是另一套 `#[derive(Event)]` + `trigger`。按 `event_bus.gd:14-61` 的九域分组翻译：
 
 ```
 流程   TurnStarted{player} TurnEnded{player} RequestRoll{player} DiceRolled{player,steps}
@@ -157,6 +159,8 @@ new-money-bevy/
 | `end_turn_system` | `OnEnter(TurnEnd)` | `Wallet` `GameSession` | `TurnEnded`；`turn_count+=1`；活跃人数 ≤1 → `Over`，否则推进 cursor → `TurnStart` |
 | `stock_tick_system` | `in_state(Landed)` 之前 | `Query<(&StockDef,&mut StockPrice,&mut PriceHistory)>` `Res<Rng>` | `StockPriceChanged`；`tick%5==0` 分红 |
 
+**B2b 落地进度（10-13）**：表内 `begin_game_system`、`begin_turn_system`、`roll_dice_system`、`resolve_landing_system`、`end_turn_system`（+ 一个只做日志的 `game_over_system`）已上线；`walk_step_system` 随 B2c 的 `WalkClock` 进来（当前落格是瞬时的，`Walking` 态还没有生产者），`decision_system` 与 `stock_tick_system` 随 B3。`begin_game_system` 挂的是 `in_state(Boot)` 而不是 `OnEnter(Boot)` —— 初始态不产生转移，`OnEnter` 根本不会触发。
+
 对照可见的三个简化：**不再需要** `add_child(tm)` 才能收信号的约束（`turn_manager.gd:16`）、`_dice_connected/_moved_connected` 布尔簿记（`:54-55`）、以及 `get_phase() != X: return` 这类手写守卫（`:194-195,221-222,317-318,326-327,...`，共 6 处）——`in_state()` 就是这个守卫的声明式版本。
 
 ### 4.6 唯一需要小心的架构问题：谁拥有"棋子位置"
@@ -178,7 +182,7 @@ Godot 端把这件事做成了"逻辑等渲染"（`turn_manager.gd:219` 等 `boa
 | Godot | Bevy 0.20 | 备注 |
 |---|---|---|
 | `extends Node` autoload 单例 | `Resource` / `Message` | |
-| `signal` / `emit()` / `connect()` | `#[derive(Message)]` / `Commands::send_message()` / `MessageReader<T>` | 同步→帧末批量 |
+| `signal` / `emit()` / `connect()` | `#[derive(Message)]` / `MessageWriter<T>` / `MessageReader<T>` | 同步→帧末批量 |
 | `enum Phase` + 手写守卫 | `#[derive(States)]` + `app.init_state::<T>()` + `run_if(in_state(..))` | `OnUpdate` 已移除 ⚠️ |
 | `await token.arrived` | `TurnPhase::Walking` + `TileStepped`/`PlayerArrived` | 无协程 |
 | `Resource` / `@export` 数据类 | `serde` struct → `Assets<T>`（配置）或 Component（运行时状态） | 二选一，不混 |
@@ -230,7 +234,7 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 | `default_app` | `async_executor, bevy_asset, bevy_log, bevy_state, reflect_auto_register` | **规则层需要的正是这个**：ECS + Asset + States + Log，不含 winit/渲染 |
 | `default_platform` | `std, bevy_gilrs, bevy_winit, bevy_clipboard, default_font, multi_threaded, webgl2, x11, wayland, custom_cursor, sysinfo_plugin` | 只有表现层该链接它；注意 `default_font` 是 Fira Mono 子集，**无汉字** → 中文必现豆腐块 |
 | 状态机 | `#[derive(States)]` + `app.init_state::<T>()`；`OnEnter/OnExit/OnTransition` 在；**`OnUpdate` 已删除**，改用 `run_if(in_state(T::X))`；转移 `NextState<T>::set()/set_if_different()` | §4.5 的表已按此写 |
-| 消息 | `#[derive(Message)]` + `app.add_message::<T>()` + `Commands::send_message()` + `MessageReader/Messages`；观察者推送是另一套 `#[derive(Event)]` + `trigger` | §4.4 成立 |
+| 消息 | `#[derive(Message)]` + `app.add_message::<T>()` + **`MessageWriter<T>::write()`** + `MessageReader<T>`/`Messages<T>`；`Commands` 上**没有** `send_message`（B2b 实测纠正）；观察者推送是另一套 `#[derive(Event)]` + `trigger` | §4.4 成立，写法见 `game_core/src/turn.rs` |
 | 世界空间文本 | **`Text2d` 已从 `bevy_text` 移到 `bevy_sprite`**（需 `2d` 或 `bevy_sprite_render` feature）；UI 文本根是 `bevy_ui::Text::new(s)`，子 span 用 `TextSpan`；样式是并列组件 `TextFont{font, font_size, ..}` / `TextColor` / `TextLayout::justify(..)` | `tile_view.gd:146-152` 的 `Label3D` 无直接对等物（见下） |
 | 字体来源 | `FontSource::{Handle(H), Family(SmolStr), Families(&str), List(Vec), Generic}`；`system_font_discovery` feature 开启后可按族名加载 | §7.3 的两条路都可行；开发期用文件路径最确定 |
 | 正交等轴测 | `Camera3d::default()` + `Projection::from(OrthographicProjection{ scaling_mode: ScalingMode::FixedVertical{ viewport_height }, ..OrthographicProjection::default_3d() })`（官方 `examples/3d/orthographic.rs` 自称就是给 isometric 用的） | §7.1 直接照此实现，B0 已验证 |
@@ -240,7 +244,7 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 | UI 交互 | `Button`/`Interaction` 在 0.20 已弃用，改 `OnInteraction` 组件式；`TextScroll` → `EditableText::viewport`；cursor 模块并入 `bevy_picking` | B5 写按钮时按新形态，别抄旧教程 ⚠️ |
 | 存档/设置 | 新增内置 `bevy_settings`、`bevy_world_serialization`（`scene` feature 会带后者） | 同为 0.20 首发，按 §九 走手写快照 |
 
-**B0/B1/B2 实跑发现的十条环境级坑（已踩过，记录避免重犯）**：
+**B0/B1/B2 实跑发现的十三条环境级坑（已踩过，记录避免重犯）**：
 1. **`AssetPlugin::file_path` 在 0.20 是相对「可执行文件目录」的 `String`（不是 `Option`）**，而 `cargo run -p game_app` 的 CWD 是仓库根 → 默认会把资产解析成 `target/debug/assets/**`，所有资产**静默 404**（只有一行 `bevy_asset::server` ERROR，程序不崩）。落地做法：启动时把资产根解析成绝对路径再塞给 `AssetPlugin`，`std::fs` 与 `AssetServer` 共用同一个根，否则会出现"直读文件成功、Asset 加载失败"这种极难排查的组合。
 2. **`default_font` feature 自带的是 Fira Mono 子集，无汉字**，所以不显式指定字体时中文不是"报错"而是**豆腐块/空白**。落地做法：把字体放 `assets/font/` 并用 `asset_server.load()` 显式指定（本仓库用开发授权的思源黑体，见 §7.3）。
 3. **中文必须开 `bevy` 的 `complex_script_segmentation` feature**（转发到 `parley/complex-scripts`）。不开时 Parley/ICU4X 找不到中日韩分词模型，会**每帧刷** `ICU4X data error: No segmentation model for complex script: Chinese/Japanese`，且长句换行按非 CJK 规则处理。B0 实测：开启后错误归零。
@@ -251,6 +255,9 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 8. **`#[derive(SystemParam)]` 不在 prelude 里**，要 `use bevy::ecs::system::SystemParam;`。用它打包多个 `Res<Assets<T>>` 比给系统挂 `#[allow(clippy::too_many_arguments)]` 好 —— 后者会把「参数确实太多了」这个真信号吃掉。
 9. **headless 测试里用 `AssetServer` 读盘，必须自己初始化任务池**：`App::new()` + `CoreGamePlugin` 不够，`AssetPlugin` 的文件 IO 跑在 `IoTaskPool` 上，而它只由 `bevy::app::TaskPoolPlugin` 建立，否则第一次加载直接 panic `The IoTaskPool has not been initialized yet`。`game_app` 经 `DefaultPlugins` 自带，所以这个坑只在测试侧暴露（好在是响的，不是静默失败）。
 10. **别用 `timeout N cargo run` 做冒烟测试**：debug 链接一个上百 MB 的 Bevy 二进制要吃掉大半预算，`timeout` 到点杀掉的是 cargo 而不是应用，日志会是**空文件**（看起来像"应用没输出"）。做法：先 `cargo build -p game_app` 再 `timeout N ./target/debug/game_app.exe`；并且 `NM_SHOT` 现在会在截图落盘后于 2.5s 自行 `exit(0)`，不依赖外部 kill，也不会留下没人关的窗口进程。
+11. **`init_state::<T>()` 要求 `StatesPlugin` 已就位**（路径是 `bevy::state::app::StatesPlugin`）。真实客户端经 `DefaultPlugins` 自带，headless 测试的裸 `App::new()` 没有 → 直接 panic `The StateTransition schedule is missing`。而 `StatesPlugin::build` 用的是 `MainScheduleOrder::insert_after`，**不幂等**：加两遍会让状态转移每帧跑两次。所以 `CoreGamePlugin` 里补加之前先 `app.is_plugin_added::<StatesPlugin>()` 查一次。
+12. **消息与状态转移都是「一步一帧」**，测试的等待条件不能写成「阶段等于 X」：本帧 `write` 的消息下一帧才 `read` 得到（缓冲在 `First` 交换），`StateTransition` 又排在 `PreUpdate` 之后。后果是「刚发出掷骰请求、阶段还没动」时 `phase == WaitRoll` 立刻为真 —— 本项目就因此把四个回合测试全判错过一次。判据换成 `GameSession.turn_count`，并在结尾固定多跑几帧把消息刷进流水（见 `tests/common/mod.rs::play_turns`）。
+13. **`MessageReader<'w, 's, M>` 带两个生命周期**（`MessageWriter<'w, M>` 只有一个）。打包进 `#[derive(SystemParam)]` 时要把结构体写成 `<'w, 's>` 两参数形式。
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
@@ -329,7 +336,8 @@ Godot 端**全项目没有任何字体资源**，也没设 `gui/theme/custom_fon
 | **B0** 骨架 ✅ 完成 (10-13) | workspace、`game_core`(`default_app` 无渲染)、`game_app` 等轴测棋盘、`.gitignore`、`check.sh` 质量门、`NM_SHOT` 截图钩子；拷 `data/` 与 `docs/` | `check.sh` 五项全过退出码 0；窗口渲染出棋盘 + 中文（`target/b0.png`） | 0.5 天 |
 | **B1** 数据与棋盘 ✅ 完成 (10-13) | `BoardDef/LandDef/BranchDef/LandType/TileKind` + `CardSet/CardEffect`（内部标签枚举）+ `StockSet/StockDef` serde；`validate()` 覆盖 `tools/validate_board.py` 的 7 条不变式与卡牌/股票的字段约束；`JsonAssetLoader<A>` 自写（无第三方），`CoreGamePlugin` 注册三类资产与 loader，`game_app` 全走 `AssetServer` | `cargo test -p game_core` **15 项**全过；启动日志确认「棋盘 12 格 / 机会 7 张 / 命运 6 张 / 股票 5 只」；资产缺失时 panic 而非静默等待 | 1 天 |
 | **B2a** 世界装配 ✅ 完成 (10-13) | `GameRules`/`GameSetup`/`DataHandles` 移进 core；`TileIndex`/`LandId`/`PlayerId` newtype；`Wallet`/`TokenPosition`/`JailSentence`/`Bankrupt`/`Owner` 组件；`ActiveBoard` resource；`begin_game_system` 铺土地与玩家实体 | `cargo test -p game_core` **19 项**（其中 4 项是 App 级：真资产装配世界、只装配一次、阵容与现金只来自 resource、棋盘缺失时不装配）；窗口日志「世界装配完成：12 主环格 / 6 土地实体 / 2 玩家」 | 0.5 天 |
-| **B2b** 骰 + 回合状态机 | `Rng`+`GameSeed`；`TurnPhase` 全部 8 态与表内其余 7 个 system（`begin_game_system` 改挂 `OnEnter(Boot)`）；`WalkClock` 定步时 | 移植 `test_dice`、`test_game_state`、`test_jail_flow`、`test_player_data`；**新增**：固定种子 100 回合不 panic 的 property test | 1 天 |
+| **B2b** 骰 + 回合状态机 ✅ 完成 (10-13) | `Rng`+`GameSeed`（测试固定、客户端取时钟）；`TurnPhase` 8 态（`Walking` 尚无生产者）；`begin_turn`/`roll_dice`/`resolve_landing`/`end_turn`/`game_over` 五个 system；`TurnOrder`/`GameSession`；7 条流程消息 | `cargo test -p game_core` **33 项**（21 单元 + 12 App 级）：整条回合流水逐字比对、同种子复现 / 换种子改变、非当前玩家的请求被忽略、破产者整轮跳过、服刑跳两格后出狱且组件被摘掉、只剩一人即终局、空阵容立即终局不挂死、20 回合不 panic 且回合计数与掷骰次数一致 | 1 天 |
+| **B2c** 定步时行走 | `WalkClock` + `WalkQueue`：把「掷出 N 点」展开成逐格推进，`TileStepped`/`PlayerArrived` 取代瞬时落格；`GameRules.walk_step_interval`（0 即跳过动画） | 绕回起点经过、分支死路不进入主环、`walk_step_interval=0` 时与 B2b 的即时行为等价 | 0.5 天 |
 | **B3** 经济核心（无 UI） | property（买/租/升级/抵押/同色组/等级差 ≤1）、bank（存贷息，**修 bug #1**）、stock（tick/买/卖/分红/历史，**修 #4 #5**）、card 效果 enum 化（**修 #3**） | 移植 `test_bank_system`、`test_card_system`；`calculate_rent` 全分支表驱动测试；现金流守恒断言 | 1.5 天 |
 | **B4** 等轴测渲染切片 | tile/land/token spawn system、路面（含对角）、建筑高度、`Text2d` 格名、正交相机 + rig 跟随、`ClearColor` | **肉眼**验收：与 Godot 版截图对比；此时才第一次开窗 | 1.5–2 天 |
 | **B5** UI + 交互 | 中文字体接入；顶栏/HUD/4 个模态；`bevy_picking` 点格与按钮；`DecisionChosen` 闭环；主菜单→对局流转；暂停 | 能完整打完一局（2 人类玩家）；长中文文案换行不溢出 | 2–3 天 |

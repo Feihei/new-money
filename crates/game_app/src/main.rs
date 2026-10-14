@@ -12,7 +12,8 @@ use game_core::CoreGamePlugin;
 use game_core::board::TileKind;
 use game_core::card::CardKind;
 use game_core::prelude::{
-    ActiveBoard, BoardDef, CardSet, DataHandles, GameRules, GameSetup, StockSet, begin_game_system,
+    ActiveBoard, BoardDef, CardSet, DataHandles, GameRules, GameSeed, GameSetup, StockSet,
+    begin_game_system,
 };
 
 mod board_view;
@@ -43,7 +44,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "暴富 · B2 世界装配".into(),
+                        title: "暴富 · B2 回合状态机".into(),
                         present_mode: PresentMode::AutoNoVsync,
                         ..default()
                     }),
@@ -66,7 +67,16 @@ fn main() {
 }
 
 fn load_data(mut commands: Commands, server: Res<AssetServer>) {
+    // 真实客户端每次开局换种子；测试与回放走 game_core::GameSeed::default() 的固定值
+    commands.insert_resource(GameSeed(clock_seed()));
     commands.insert_resource(DataHandles::load(&server));
+}
+
+fn clock_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 /// 资产句柄与它们的存储打包成系统参数（Bevy 的 `SystemParam` derive），
@@ -283,7 +293,10 @@ fn spawn_hud(
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text::new(format!("暴富 · B2 世界装配 · 棋盘「{}」", board.board_name)),
+                Text::new(format!(
+                    "暴富 · B2 回合状态机 · 棋盘「{}」",
+                    board.board_name
+                )),
                 style,
                 TextColor(Color::srgb(0.08, 0.08, 0.1)),
             ));

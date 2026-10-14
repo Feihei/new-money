@@ -2,13 +2,16 @@
 
 use std::collections::HashMap;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::board::BoardDef;
 use crate::data::DataHandles;
 use crate::land::{self, LandId};
 use crate::player::{self, GameSetup};
+use crate::rng::{GameSeed, Rng};
 use crate::rules::GameRules;
+use crate::turn::{GameSession, TurnOrder, TurnPhase};
 
 /// 取代 Godot 的 `GameState.board`（`game_state.gd:24`）。
 ///
@@ -24,17 +27,28 @@ pub struct ActiveBoard {
     pub lands: HashMap<LandId, Entity>,
 }
 
-/// 棋盘资产就位后一次性装配世界：校验 → spawn 土地实体 → spawn 玩家实体 → 插入 `ActiveBoard`。
+/// 开局要读的配置打包成一个系统参数（阵容、数值、种子）。
+/// `pub` 是必须的：`begin_game_system` 是公开 system，参数类型比它更私有条目会报错。
+#[derive(SystemParam)]
+pub struct BeginCfg<'w> {
+    rules: Res<'w, GameRules>,
+    setup: Res<'w, GameSetup>,
+    seed: Res<'w, GameSeed>,
+}
+
+/// 棋盘资产就位后一次性装配世界：校验 → spawn 土地实体 → spawn 玩家实体 →
+/// 插入 `ActiveBoard`/`TurnOrder`/`Rng`/`GameSession`，然后把状态机交给 `TurnStart`。
 ///
-/// 挂在 `Update` 上并用 `Option<Res<ActiveBoard>>` 自守门（0.20 没有 `resource_missing` 运行条件，
-/// 而 `Option<Res<T>>` 的写法语义更直白）。B2b 引入 `TurnPhase` 后改挂 `OnEnter(Boot)`。
+/// 挂在 `in_state(TurnPhase::Boot)` 上；`Option<Res<ActiveBoard>>` 的守门仍然保留 ——
+/// 状态转移要到下一帧才生效，而本帧内不该重复铺实体（0.20 没有 `resource_missing` 运行条件，
+/// `Option<Res<T>>` 的写法语义更直白）。
 pub fn begin_game_system(
     mut commands: Commands,
     active: Option<Res<ActiveBoard>>,
     data: Res<DataHandles>,
     boards: Res<Assets<BoardDef>>,
-    rules: Res<GameRules>,
-    setup: Res<GameSetup>,
+    cfg: BeginCfg,
+    mut next: ResMut<NextState<TurnPhase>>,
 ) {
     if active.is_some() {
         return;
@@ -47,15 +61,22 @@ pub fn begin_game_system(
     }
 
     let lands = land::spawn_lands(&mut commands, &def);
-    let players = player::spawn_players(&mut commands, &setup, &rules);
+    let players = player::spawn_players(&mut commands, &cfg.setup, &cfg.rules);
     info!(
         "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家（起始现金 {}）",
         def.board_name,
         def.loop_len(),
         lands.len(),
         players.len(),
-        rules.start_cash
+        cfg.rules.start_cash
     );
 
     commands.insert_resource(ActiveBoard { def, lands });
+    commands.insert_resource(TurnOrder::new(players));
+    commands.insert_resource(Rng::new(cfg.seed.0));
+    commands.insert_resource(GameSession {
+        turn_count: 0,
+        seed: cfg.seed.0,
+    });
+    next.set(TurnPhase::TurnStart);
 }
