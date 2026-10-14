@@ -170,8 +170,8 @@ fn paced_walking_steps_once_per_interval() {
     let mut app = boot(
         GameSetup::default(),
         GameRules {
-            start_cash: 20_000,
             walk_step_interval: 0.18,
+            ..Default::default()
         },
         seed_with_first_roll(3),
     );

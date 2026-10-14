@@ -58,6 +58,25 @@ pub enum LandType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TileIndex(pub u32);
 
+/// 网格坐标（不含世界坐标换算，那是 `BoardDef::world_pos` 的事）。
+///
+/// 死胡同分支格**没有** `TileIndex`（它们不在环上），所以「棋子被视觉上停到监狱格」
+/// 这类事实只能由 `GridPos` 表达 —— 见 `msg::PlayerJailed`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GridPos {
+    pub col: u32,
+    pub row: u32,
+}
+
+impl GridPos {
+    pub fn of(tile: &TileDef) -> Self {
+        Self {
+            col: tile.col,
+            row: tile.row,
+        }
+    }
+}
+
 /// 格子附加数据。当前只有拘留格用得到，其余格为 `{}`。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub struct TileData {

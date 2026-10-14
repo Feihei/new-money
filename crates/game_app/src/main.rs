@@ -10,7 +10,6 @@ use bevy::{
 };
 use game_core::CoreGamePlugin;
 use game_core::board::TileKind;
-use game_core::card::CardKind;
 use game_core::prelude::{
     ActiveBoard, BoardDef, CardSet, DataHandles, GameRules, GameSeed, GameSetup, StockSet,
     begin_game_system,
@@ -44,7 +43,7 @@ fn main() {
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
-                        title: "暴富 · B2 回合状态机".into(),
+                        title: "暴富 · B3 经济核心（无 UI）".into(),
                         present_mode: PresentMode::AutoNoVsync,
                         ..default()
                     }),
@@ -122,16 +121,8 @@ fn boot_world(
     ) else {
         return;
     };
-    // 棋盘的校验在规则层（begin_game_system）做过，这里只管卡牌与股票
-    for (what, errs) in [
-        ("机会牌", chance.validate(CardKind::Chance)),
-        ("命运牌", fate.validate(CardKind::Fate)),
-        ("股票", stocks.validate()),
-    ] {
-        if let Err(errs) = errs {
-            panic!("{what}校验失败:\n  {}", errs.join("\n  "));
-        }
-    }
+    // 数据校验只在规则层做一次（`begin_game_system` 里四类资产一起验，无头测试也走那条路）。
+    // 这里只负责「加载失败要响」（expect_ready），不负责内容对错。
 
     let Some(active) = state.active.as_ref() else {
         return;
@@ -293,10 +284,7 @@ fn spawn_hud(
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text::new(format!(
-                    "暴富 · B2 回合状态机 · 棋盘「{}」",
-                    board.board_name
-                )),
+                Text::new(format!("暴富 · B3 经济核心 · 棋盘「{}」", board.board_name)),
                 style,
                 TextColor(Color::srgb(0.08, 0.08, 0.1)),
             ));

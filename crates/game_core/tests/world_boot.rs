@@ -105,6 +105,7 @@ fn setup_and_rules_are_the_only_sources() {
         GameRules {
             start_cash: 8_888,
             walk_step_interval: 0.0,
+            ..Default::default()
         },
         Default::default(),
     );

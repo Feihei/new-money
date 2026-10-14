@@ -1,11 +1,37 @@
-//! 股票定义。运行时状态（现价、历史、tick 数）不进这里 —— 那是实体组件。
-//!
-//! 对应 Godot 端 `stock_data.gd`：那边 `load_from_dict` 会把 `current_price` 也塞进定义，
-//! 于是静态配置与对局状态混在同一个对象里，存档时难以区分。
+//! 股票定义与运行时组件。静态配置在 `StockSet`（Asset），运行时状态（现价、历史）
+//! 是股票实体上的组件 —— 对应 Godot 端 `stock_data.gd`：那边 `load_from_dict`
+//! 会把 `current_price` 也塞进定义，静态配置与对局状态混在同一对象里，存档难分。
+
+use std::collections::VecDeque;
 
 use bevy::asset::Asset;
+use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use serde::Deserialize;
+
+/// 股票标识 newtype。与 `LandId`/`TileIndex`/`PlayerId` 互不通用 ——
+/// 持仓、价格、交易消息都通过它索引，字符串 id 拼错在查询处就会显形。
+#[derive(Component, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StockId(pub String);
+
+/// 现价。波动由 `stock_tick` 结算推进（`stock_market.gd:68-78` 的公式）。
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct StockPrice(pub f32);
+
+/// 收盘价历史（尾部最新）。上限由 `GameRules.max_price_history` 控制，
+/// 超出从头丢弃 —— `stock_market.gd:194-200` 的 `_record_price`。
+#[derive(Component, Debug, Clone, Default)]
+pub struct PriceHistory(pub VecDeque<f32>);
+
+/// 玩家持仓：stock_id → 股数。卖空即移除 key（`stock_market.gd:142-146`）。
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct StockHoldings(pub std::collections::HashMap<StockId, u32>);
+
+impl StockHoldings {
+    pub fn get(&self, id: &StockId) -> u32 {
+        self.0.get(id).copied().unwrap_or(0)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct StockDef {

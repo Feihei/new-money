@@ -6,11 +6,15 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::board::BoardDef;
+use crate::card::{CardKind, CardSet};
 use crate::data::DataHandles;
+use crate::deck::Deck;
 use crate::land::{self, LandId};
+use crate::market::MarketClock;
 use crate::player::{self, GameSetup};
 use crate::rng::{GameSeed, Rng};
 use crate::rules::GameRules;
+use crate::stock::{PriceHistory, StockId, StockPrice, StockSet};
 use crate::turn::{GameSession, TurnOrder, TurnPhase};
 
 /// 取代 Godot 的 `GameState.board`（`game_state.gd:24`）。
@@ -27,6 +31,18 @@ pub struct ActiveBoard {
     pub lands: HashMap<LandId, Entity>,
 }
 
+/// 开局要读的四份资产（棋盘 + 两副牌 + 股票）。
+///
+/// 打包成系统参数而不是给 `begin_game_system` 挂 `#[allow(clippy::too_many_arguments)]`：
+/// 后者会把「参数确实太多了」这个真信号吃掉（`.agents/MIGRATION.md` §六 坑 8）。
+#[derive(SystemParam)]
+pub struct BootAssets<'w> {
+    data: Res<'w, DataHandles>,
+    boards: Res<'w, Assets<BoardDef>>,
+    card_sets: Res<'w, Assets<CardSet>>,
+    stock_sets: Res<'w, Assets<StockSet>>,
+}
+
 /// 开局要读的配置打包成一个系统参数（阵容、数值、种子）。
 /// `pub` 是必须的：`begin_game_system` 是公开 system，参数类型比它更私有条目会报错。
 #[derive(SystemParam)]
@@ -36,47 +52,91 @@ pub struct BeginCfg<'w> {
     seed: Res<'w, GameSeed>,
 }
 
-/// 棋盘资产就位后一次性装配世界：校验 → spawn 土地实体 → spawn 玩家实体 →
+/// 四类数据资产全部就位后一次性装配世界：校验 → spawn 土地/玩家/股票/牌堆实体 →
 /// 插入 `ActiveBoard`/`TurnOrder`/`Rng`/`GameSession`，然后把状态机交给 `TurnStart`。
 ///
 /// 挂在 `in_state(TurnPhase::Boot)` 上；`Option<Res<ActiveBoard>>` 的守门仍然保留 ——
 /// 状态转移要到下一帧才生效，而本帧内不该重复铺实体（0.20 没有 `resource_missing` 运行条件，
 /// `Option<Res<T>>` 的写法语义更直白）。
+///
+/// B3 起卡牌与股票也是运行时的依赖（牌堆要洗牌、市场要建实体），所以这里等的是**全部四份**
+/// 资产，不再只等棋盘。校验也收到这里：数据错了就 panic，无头测试与真实客户端走同一条路，
+/// 而不是只有开窗那一侧会响。
 pub fn begin_game_system(
     mut commands: Commands,
     active: Option<Res<ActiveBoard>>,
-    data: Res<DataHandles>,
-    boards: Res<Assets<BoardDef>>,
+    assets: BootAssets<'_>,
     cfg: BeginCfg,
     mut next: ResMut<NextState<TurnPhase>>,
 ) {
     if active.is_some() {
         return;
     }
-    let Some(def) = boards.get(&data.board).cloned() else {
+    let (Some(def), Some(chance), Some(fate), Some(stocks)) = (
+        assets.boards.get(&assets.data.board).cloned(),
+        assets.card_sets.get(&assets.data.chance),
+        assets.card_sets.get(&assets.data.fate),
+        assets.stock_sets.get(&assets.data.stocks).cloned(),
+    ) else {
         return;
     };
-    if let Err(errs) = def.validate() {
-        panic!("棋盘校验失败:\n  {}", errs.join("\n  "));
+    for (what, errs) in [
+        ("棋盘", def.validate()),
+        ("机会牌", chance.validate(CardKind::Chance)),
+        ("命运牌", fate.validate(CardKind::Fate)),
+        ("股票", stocks.validate()),
+    ] {
+        if let Err(errs) = errs {
+            panic!("{what}校验失败:\n  {}", errs.join("\n  "));
+        }
     }
 
+    // 洗牌消耗的是**牌堆子流**，骰子流一位没动 —— 所以「对局第一手点数 ==
+    // `Rng::new(seed).roll_die()`」这条 B2 的断言在 B3 之后依然成立（见 rng.rs）。
+    let mut rng = Rng::new(cfg.seed.0);
     let lands = land::spawn_lands(&mut commands, &def);
     let players = player::spawn_players(&mut commands, &cfg.setup, &cfg.rules);
+    spawn_stocks(&mut commands, &stocks);
+    for deck in [
+        Deck::shuffled(CardKind::Chance, chance, &mut rng),
+        Deck::shuffled(CardKind::Fate, fate, &mut rng),
+    ] {
+        commands.spawn(deck);
+    }
+
     info!(
-        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家（起始现金 {}）",
+        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）（起始现金 {}）",
         def.board_name,
         def.loop_len(),
         lands.len(),
         players.len(),
+        stocks.0.len(),
+        chance.0.len(),
+        fate.0.len(),
         cfg.rules.start_cash
     );
 
     commands.insert_resource(ActiveBoard { def, lands });
     commands.insert_resource(TurnOrder::new(players));
-    commands.insert_resource(Rng::new(cfg.seed.0));
+    commands.insert_resource(rng);
     commands.insert_resource(GameSession {
         turn_count: 0,
         seed: cfg.seed.0,
     });
+    commands.insert_resource(MarketClock::default());
     next.set(TurnPhase::TurnStart);
+}
+
+/// 每只股一个实体：现价从 `base_price` 起步，历史先记这一条
+/// （`stock_market.gd:26-28` 的 `add_stock` 就是这么初始化 `price_history` 的）。
+fn spawn_stocks(commands: &mut Commands, stocks: &StockSet) {
+    for s in &stocks.0 {
+        let mut history = std::collections::VecDeque::new();
+        history.push_back(s.base_price);
+        commands.spawn((
+            StockId(s.id.clone()),
+            StockPrice(s.base_price),
+            PriceHistory(history),
+        ));
+    }
 }

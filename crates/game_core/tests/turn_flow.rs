@@ -164,7 +164,7 @@ fn jail_skips_two_turns_then_releases() {
 
     let ev = events(&app);
     assert_eq!(
-        ev.iter().filter(|e| e.starts_with("JailSkip(")).count(),
+        ev.iter().filter(|e| e.starts_with("JailSkip(P1,")).count(),
         2,
         "应恰好跳过两格：{ev:?}"
     );
@@ -231,19 +231,24 @@ fn empty_roster_ends_the_match_instead_of_hanging() {
 
 #[test]
 fn twenty_turns_run_without_panic() {
-    // 100 回合的长跑在 B2d 与现金流守恒断言一起做；这里先守住状态机本身
+    // 长跑守状态机本身。B3 起「回合数 == 掷骰数」不再恒成立：抽到入狱卡的那一回合
+    // 只有 `JailSkip` 没有 `Roll`，所以不变量改成「每回合要么掷骰要么服刑跳过」。
     let mut app = boot(trio(), GameRules::instant(), GameSeed(777));
     assert!(run_until_world(&mut app));
 
     play_turns(&mut app, 20);
 
     let ev = events(&app);
+    let turns = app.world().resource::<GameSession>().turn_count;
+    let rolls = ev.iter().filter(|e| e.starts_with("Roll(")).count();
+    let skipped = ev.iter().filter(|e| e.starts_with("JailSkip(")).count();
+    let ended = ev.iter().filter(|e| e.starts_with("TurnEnd(")).count();
+    assert_eq!(turns, 20, "回合计数该正好走完 20 格");
     assert_eq!(
-        app.world().resource::<GameSession>().turn_count,
-        20,
-        "回合计数应与实际掷骰次数一致"
+        rolls + skipped,
+        turns as usize,
+        "{rolls} 次掷骰 + {skipped} 次服刑跳过 应等于 {turns} 个回合：{ev:?}"
     );
-    assert_eq!(ev.iter().filter(|e| e.starts_with("Roll(")).count(), 20);
-    assert_eq!(ev.iter().filter(|e| e.starts_with("TurnEnd(")).count(), 20);
+    assert_eq!(ended, turns as usize, "每个回合都要有一条 TurnEnd");
     assert_turns_balanced(&app);
 }

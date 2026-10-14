@@ -41,6 +41,14 @@ pub struct Wallet {
     pub cash: i64,
 }
 
+/// 银行账户：存款生息、贷款计息（`bank_system.gd` 的 deposit/loan 字段）。
+/// 利息结算不经过现金 —— 存款利息进余额、贷款利息进负债，与 Godot 一致。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BankBalance {
+    pub deposit: i64,
+    pub loan: i64,
+}
+
 /// 逻辑位置：永远只在主环上。
 ///
 /// 入狱时停在**接入点**而不是死胡同格本身（`player_data.gd:62-68` 的语义），
@@ -146,6 +154,8 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
                     },
                     TokenPosition { tile: START_TILE },
                     WalkQueue::default(),
+                    BankBalance::default(),
+                    crate::stock::StockHoldings::default(),
                 ))
                 .id()
         })

@@ -2,8 +2,13 @@
 //!
 //! Godot 端骰子用全局 `randi_range`（`dice.gd:19`）、洗牌用 `_rng.randomize()`
 //! （`card_deck.gd:53`），两者都不可复现，而 `roll_seeded()` 只是个 `assert` 后原样返回的
-//! 假种子函数（缺陷 #6）。这里整局共用一个 `ChaCha8Rng`，种子是 resource，
-//! 于是「同种子 → 同对局」变成一条可以断言的性质 —— 回放与失败复现都从这里长出来。
+//! 假种子函数（缺陷 #6）。这里整局共用一个种子，于是「同种子 → 同对局」变成一条
+//! 可以断言的性质 —— 回放与失败复现都从这里长出来。
+//!
+//! **同一个种子分成三条互不相干的子流**（骰子 / 牌堆 / 行情）：抽一张卡不该让下一手
+//! 骰点变样。若共用一条流，经济系统每多一次取随机数就会把 `turn_flow` 里
+//! 「对局骰点 == 独立掷出的骰点」那批回归网整片打翻，回放也对不齐；分流之后
+//! 每域的随机性各自稳定，加内容不互相扰动。
 
 use std::ops::RangeInclusive;
 
@@ -13,6 +18,10 @@ use rand_chacha::ChaCha8Rng;
 
 /// 单颗六面骰（`dice.gd:15`）。大富翁4 规则：无双骰、无双数额外回合。
 pub const DIE_FACES: u32 = 6;
+
+/// 子流的域标签：三条流要取到互不相关的密钥流，高位错开即可。
+const CARDS_TAG: u64 = 0xCA4D_5EED_0000_0001;
+const MARKET_TAG: u64 = 0x0A0E_7700_0000_0002;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,30 +34,40 @@ impl Default for GameSeed {
     }
 }
 
-/// 全局唯一的随机流。任何需要随机的 system 都从这里取，不要自己 new 一个 ——
+/// 全局唯一的随机性来源。任何需要随机的 system 都从这里取，不要自己 new 一个 ——
 /// 否则「同种子同对局」立刻失效。
 #[derive(Resource)]
 pub struct Rng {
     pub seed: u64,
-    inner: ChaCha8Rng,
+    dice: ChaCha8Rng,
+    cards: ChaCha8Rng,
+    market: ChaCha8Rng,
 }
 
 impl Rng {
     pub fn new(seed: u64) -> Self {
         Self {
             seed,
-            inner: ChaCha8Rng::seed_from_u64(seed),
+            // 骰子流直接吃种子本身：`Rng::new(s).roll_die()` 必须等于对局里的第一手点数
+            dice: ChaCha8Rng::seed_from_u64(seed),
+            cards: ChaCha8Rng::seed_from_u64(seed ^ CARDS_TAG),
+            market: ChaCha8Rng::seed_from_u64(seed ^ MARKET_TAG),
         }
     }
 
-    /// 掷一颗骰，返回 1..=6。
+    /// 掷一颗骰，返回 1..=6（骰子流）。
     pub fn roll_die(&mut self) -> u32 {
-        self.range(1..=DIE_FACES)
+        self.dice.random_range(1..=DIE_FACES)
     }
 
-    /// 闭区间取随机数（洗牌、股价波动共用同一条流）。
-    pub fn range(&mut self, span: RangeInclusive<u32>) -> u32 {
-        self.inner.random_range(span)
+    /// 闭区间取随机整数（牌堆流）：洗牌用的 `0..=i`、将来 AI 的随机化都走这条。
+    pub fn pick(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.cards.random_range(span)
+    }
+
+    /// 闭区间取随机浮点（行情流）：股价每 tick 的噪声（`stock_market.gd:73`）。
+    pub fn range_f32(&mut self, span: RangeInclusive<f32>) -> f32 {
+        self.market.random_range(span)
     }
 }
 
@@ -81,6 +100,59 @@ mod tests {
         let rolled: Vec<u32> = draws(7, 2000);
         for face in 1..=DIE_FACES {
             assert!(rolled.contains(&face), "2000 次里没出现过 {face}，分布可疑");
+        }
+    }
+
+    /// 分流的意义：别的域取多少随机数，都不该挪动骰子流。
+    /// 加了卡牌/行情之后，「对局第一手 == `Rng::new(seed).roll_die()`」这类断言仍然成立。
+    #[test]
+    fn other_streams_do_not_shift_the_dice() {
+        let mut busy = Rng::new(99);
+        for _ in 0..50 {
+            busy.pick(0..=6);
+            busy.range_f32(-0.5..=0.5);
+        }
+        let mut fresh = Rng::new(99);
+        assert_eq!(
+            busy.roll_die(),
+            fresh.roll_die(),
+            "牌堆/行情取数污染了骰子流"
+        );
+    }
+
+    #[test]
+    fn each_stream_is_reproducible() {
+        let cards = |seed: u64| {
+            let mut r = Rng::new(seed);
+            (0..30).map(|_| r.pick(0..=99)).collect::<Vec<_>>()
+        };
+        let drifts = |seed: u64| {
+            let mut r = Rng::new(seed);
+            (0..30)
+                .map(|_| (r.range_f32(-0.5..=0.5) * 1000.0).round() as i32)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cards(5), cards(5), "同种子必须复现同一条抽牌序列");
+        assert_ne!(cards(5), cards(6));
+        assert_eq!(drifts(5), drifts(5), "同种子必须复现同一条行情序列");
+        assert_ne!(drifts(5), drifts(6));
+    }
+
+    /// 域标签失效（三条流退化成同一条）时这条会响：拿牌堆流掷骰区间走 30 次，
+    /// 结果不该等于骰子流的同种子序列。
+    #[test]
+    fn card_stream_is_not_the_dice_stream() {
+        let mut r = Rng::new(11);
+        let via_cards: Vec<u32> = (0..30).map(|_| r.pick(1..=DIE_FACES)).collect();
+        assert_ne!(via_cards, draws(11, 30), "牌堆流与骰子流取了同一个域");
+    }
+
+    #[test]
+    fn drift_stays_inside_the_amplitude() {
+        let mut rng = Rng::new(3);
+        for _ in 0..500 {
+            let v = rng.range_f32(-0.12..=0.12);
+            assert!((-0.12..=0.12).contains(&v), "噪声 {v} 跑出区间");
         }
     }
 }

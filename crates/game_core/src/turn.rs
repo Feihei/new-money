@@ -234,12 +234,6 @@ pub fn roll_dice_system(
     });
 }
 
-/// 落格分派点。B3 在这里按 `TileKind` 接地产/卡牌/银行；当前等价于
-/// Godot `_land_and_end` 的默认分支（无可结算内容 → 直接结束回合）。
-pub fn resolve_landing_system(mut next: ResMut<NextState<TurnPhase>>) {
-    next.set(TurnPhase::TurnEnd);
-}
-
 /// 回合收尾：发 `TurnEnded`、回合计数、判终局，否则轮转下一位。
 pub fn end_turn_system(
     mut order: ResMut<TurnOrder>,

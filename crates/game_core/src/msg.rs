@@ -9,7 +9,10 @@
 
 use bevy::prelude::*;
 
-use crate::board::TileIndex;
+use crate::board::{GridPos, TileIndex};
+use crate::card::CardKind;
+use crate::land::LandId;
+use crate::stock::StockId;
 
 /// 某位玩家的回合开始了。阶段推进的唯一入口是 `OnEnter(TurnPhase::TurnStart)`，
 /// 所以每回合恰好一条 —— Godot 端 `_advance_and_start` 与 `_start_turn` 各发一次（缺陷 #2）
@@ -90,4 +93,200 @@ pub struct JailSkipped {
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameOver {
     pub winner: Option<Entity>,
+}
+
+// ===== 移动（B3 补齐的两条：入狱与瞬移都是卡牌效果的后果）=====
+
+/// 被卡牌瞬移到指定主环格。逻辑位置由 core 改写，`render` 只做位移动画。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerTeleported {
+    pub player: Entity,
+    pub tile: TileIndex,
+}
+
+/// 被关进拘留格（监狱/医院）。`junction` 是逻辑位置继续沿环前进的接入点，
+/// `end` 是死胡同格的网格坐标 —— 只给表现层把棋子停过去用，`None` 表示这张棋盘
+/// 没有死胡同格，棋子就停在接入点（`card_effects.gd:50-55` 的 `emit(-1,-1)` 语义）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerJailed {
+    pub player: Entity,
+    pub junction: TileIndex,
+    pub end: Option<GridPos>,
+}
+
+// ===== 地产 =====
+
+/// 无主地产的购买报价。是否买由 `DecisionChosen` 回答（Godot 的
+/// `confirm_buy`/`cancel_buy` 两个方法在这里合成一条消息 + 一个 `Pending`）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuyOffered {
+    pub player: Entity,
+    pub land: LandId,
+}
+
+/// 已成交：`land` 归 `player`，价格 `price` 已从现金扣除。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandBought {
+    pub player: Entity,
+    pub land: LandId,
+    pub price: i64,
+}
+
+/// 自有垄断地的升级报价（`cost` 是这一级要付的钱）。
+///
+/// §4.4 的消息表里没有这条：Godot 用 `upgrade_decision_requested` 表达同一事实，
+/// 移植时照搬语义比凑齐表格重要 —— UI 得知道「现在有一个可拒绝的升级」。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpgradeOffered {
+    pub player: Entity,
+    pub land: LandId,
+    pub cost: i64,
+}
+
+/// 租金已结算：`payer` 付给 `owner`。付不起时不发这条，改发 `PlayerBankrupt`。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RentDue {
+    pub payer: Entity,
+    pub owner: Entity,
+    pub land: LandId,
+    pub amount: i64,
+}
+
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandUpgraded {
+    pub player: Entity,
+    pub land: LandId,
+    pub new_level: u8,
+}
+
+// ===== 经济与银行 =====
+
+/// 现金变动。所有 `Wallet` 的增减都必须留下一条这条流水 ——
+/// B3 的现金审计断言（`balance == start_cash + Σ delta`）就是靠它兜住
+/// 「改了钱包忘了发消息」这类错误。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CashChanged {
+    pub player: Entity,
+    pub delta: i64,
+    pub balance: i64,
+}
+
+/// 破产宣告。`unpaid` 是付不出来的那笔钱（租金/罚款/地价）。
+///
+/// 缺陷 #3 的修复点：Godot `card_effects.gd:34-41` 只回一句「现金不足，破产！」
+/// 的文案却不改状态；这里 `CouldNotPay` 与 `PlayerBankrupt` 成对出现，状态与说法必然一致。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerBankrupt {
+    pub player: Entity,
+    pub unpaid: i64,
+}
+
+/// 踩到银行格：全员利息已结算，带上该玩家结算后的余额供 HUD 显示。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BankVisited {
+    pub player: Entity,
+    pub deposit: i64,
+    pub loan: i64,
+}
+
+// ===== 股票 =====
+
+/// 股价真的动了：`old → new`。
+///
+/// 缺陷 #4 的修复点：Godot `stock_market.gd:118,148` 在买卖时发
+/// `stock_price_changed(price, current_price)`，两个值相同（价格根本没变），
+/// 真正的波动事件反而缺失。这里拆开：波动发 `StockPriceChanged`，成交发 `StockTraded`。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct StockPriceChanged {
+    pub stock: StockId,
+    pub old: f32,
+    pub new: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradeSide {
+    Buy,
+    Sell,
+}
+
+/// 成交凭据：`shares` 股按 `price` 成交。实际成交数可能少于请求数（现金不足时部分成交）。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct StockTraded {
+    pub player: Entity,
+    pub stock: StockId,
+    pub shares: u32,
+    pub price: f32,
+    pub side: TradeSide,
+}
+
+/// 踩到证券交易格：本 tick 的行情与分红已结算。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StockVisited {
+    pub player: Entity,
+}
+
+// ===== 卡牌 =====
+
+/// 抽到一张牌并已结算完效果。文案由 UI 从 `outcomes` 生成，结算层不拼字符串。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct CardDrawn {
+    pub player: Entity,
+    pub card: CardNotice,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CardNotice {
+    pub id: String,
+    pub kind: CardKind,
+    pub title: String,
+    pub desc: String,
+    pub outcomes: Vec<EffectOutcome>,
+}
+
+/// 单条卡牌效果的结算凭据（`card_effects.gd` 的四个 `match` 分支一一对应）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectOutcome {
+    Gained(i64),
+    Lost(i64),
+    /// 该扣而扣不起 → 同帧必然还有一条 `PlayerBankrupt`
+    CouldNotPay {
+        needed: i64,
+    },
+    Jailed {
+        turns: u32,
+        junction: TileIndex,
+    },
+    Teleported {
+        tile: TileIndex,
+        name: String,
+    },
+    /// 数据写了个棋盘上不存在的格名。不猜、不回退到起点（`card_effects.gd:76-81`
+    /// 已经修过这个坑），UI 该把它当成本局数据错误显示出来。
+    UnknownTile {
+        name: String,
+    },
+}
+
+// ===== 决策 =====
+
+/// 玩家对当前报价的回答。
+///
+/// Godot 端是六个方法（`confirm_buy`/`cancel_buy`/`confirm_upgrade`/`cancel_upgrade`/
+/// `dismiss_rent_notice`/`dismiss_card`），每个方法开头都要重复一句
+/// `if _phase != WAIT_DECISION or _pending_decision != "...": return`。
+/// 这里语义在 `Pending`（系统状态）里，消息只带意图，六个方法塌成三个动作。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionChosen {
+    pub player: Entity,
+    pub action: Decision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// 接受当前报价（买地 / 升级）
+    Accept,
+    /// 放弃当前报价（不买 / 不升级）
+    Decline,
+    /// 关闭只需阅读的通知（租金单 / 卡面）
+    Acknowledge,
 }

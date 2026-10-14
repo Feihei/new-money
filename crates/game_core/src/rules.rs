@@ -15,6 +15,24 @@ pub struct GameRules {
     /// `0` = 跳过动画，一帧走完 —— headless 测试与「动画速度」设置都归到这条路径
     /// （B2c 验收：interval=0 时与 B2b 的瞬时落格行为等价）。
     pub walk_step_interval: f32,
+    /// 建筑等级上限（`property_system.gd:113` 的 `level >= 6`）。
+    pub max_building_level: u8,
+    /// 垄断同色组后的租金倍数（`property_system.gd:75-77` 的 `base_rent *= 2`）。
+    pub monopoly_rent_multiplier: i64,
+    /// 存款利率（每回合），`bank_system.gd:8` 的 3%。
+    pub deposit_rate: f32,
+    /// 贷款利率（每回合），`bank_system.gd:9` 的 8%。
+    pub loan_rate: f32,
+    /// 最多可贷 = 未抵押地产总价 × 该系数，`bank_system.gd:10`。
+    pub max_loan_ratio: f32,
+    /// 股价每 tick 的基础漂移，`stock_market.gd:14`。
+    pub stock_base_drift: f32,
+    /// 每多少个 tick 分红一次，`stock_market.gd:15`。
+    pub dividend_interval: u32,
+    /// 每股股息 = 股价 × 该比例，`stock_market.gd:16`。
+    pub dividend_rate: f32,
+    /// 每只股保留的历史价格条数，`stock_market.gd:17`。
+    pub max_price_history: usize,
 }
 
 impl Default for GameRules {
@@ -22,6 +40,15 @@ impl Default for GameRules {
         Self {
             start_cash: 20_000,
             walk_step_interval: 0.18,
+            max_building_level: 6,
+            monopoly_rent_multiplier: 2,
+            deposit_rate: 0.03,
+            loan_rate: 0.08,
+            max_loan_ratio: 2.0,
+            stock_base_drift: 0.002,
+            dividend_interval: 5,
+            dividend_rate: 0.015,
+            max_price_history: 50,
         }
     }
 }
