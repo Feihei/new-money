@@ -53,10 +53,26 @@
 | 10 | `board_data.gd:63-67` `passes_start`、`game_state.gd:20` `inflation_index`、`scripts/entities/color_circle.gd`、`card_notice` 的 `HSeparator` 主题 | 死代码：`passes_start` 全项目无调用；`inflation_index` 只在 `test_game_state.gd:23-28` 被赋值和断言，不进任何公式；`color_circle.gd` 未被任何场景/脚本引用 | 不搬 |
 | 11 | `game_state.gd:45` | 新开对局却 `EventBus.game_saved.emit(game_id)` | 消息语义对齐后自然消失 |
 | 12 | `player_data.gd:98` + `game_state.gd:41` + `turn_manager.gd:39` | 起始资金 20000 硬编码三处（`START_CASH` 常量存在但 `reset()` 不走它） | 唯一来源 `GameRules` resource（可从 JSON 覆盖） |
+| 13 | `player_data.gd:84-91` + `property_registry.gd` | 破产只清玩家自己的 `properties` 列表，registry 里的业主仍写着死者 → 租金永远打给破产者、同色组永远卡住别人 | 归属是 Land 实体上的 `Owner` 组件，`Books::bankrupt` 一次遍历把名下地块放回市场 |
+| 14 | `property_system.gd:151-161` | `_owns_full_group` 用空串匹配得到「无格子能匹配 → 全都满足」的隐式 `true`，坏数据上白送垄断与升级权 | `group: Option<String>` 是类型而不是字符串，`None` 显式返回 `false` |
 
 > 第 9 条值得单独强调：**移植不是 1:1 搬运，删掉的兼容代码约占 core 的 15%**。
 
-> **截至 B2b（10-13）已修并有回归网的**：#2（`turn_flow.rs::assert_turns_balanced`）、#6（`same_seed_replays_the_same_match`）、#7（`requests_from_somebody_else_are_ignored` + 骰子在 core 的 `roll_dice_system` 里）、#8 的玩家状态部分（`JailSentence`/`Bankrupt` 是组件存在性，见 `jail_skips_two_turns_then_releases`）、#12（`world_boot.rs::setup_and_rules_are_the_only_sources`）。#1 的 newtype 防线已就位但要等 B3 的贷款逻辑才有实际调用点；#3/#4/#5/#9/#10/#11 属 B3 与后续。
+> **截至 B2b（10-13）已修并有回归网的**：#2（`turn_flow.rs::assert_turns_balanced`）、#6（`same_seed_replays_the_same_match`）、#7（`requests_from_somebody_else_are_ignored` + 骰子在 core 的 `roll_dice_system` 里）、#8 的玩家状态部分（`JailSentence`/`Bankrupt` 是组件存在性，见 `jail_skips_two_turns_then_releases`）、#12（`world_boot.rs::setup_and_rules_are_the_only_sources`）。
+
+> **B3（10-14）修完的四条**：
+> - **#1** 贷款额度 —— `economy::calc_max_loan` 的入参是 `LandView`（内部 `LandId`），`TileIndex` 喂进来编译不过；端到端回归 `settle.rs::loan_limit_comes_from_owned_lands`（顶格 6000 贷得到、再加 1 块拒）。
+> - **#3** 扣款失败必须真破产 —— `Wallet` 只能经 `Books::credit`/`debit` 改动，付不起时 `charge` 直接走 `bankrupt`。回归：`a_fine_you_cannot_pay_bankrupts_you_for_real`（`CouldNotPay` 与 `PlayerBankrupt` 同帧成对、`Bankrupt` 组件真的挂上）。
+> - **#4** 股价事件 —— 拆成 `StockPriceChanged{stock,old,new}`（tick 真的动了才发）与 `StockTraded{player,stock,shares,price,side}`；回归 `stock_visit_ticks_every_price_once`。
+> - **#5** 买入递归 —— `economy::buy_plan` 一次算清可买股数；另有扫表性质 `buy_plan_never_asks_for_more_than_the_wallet_has`（39 个价格 × 6 档现金，花费绝不超过余额）。
+>
+> **#9/#10/#11 属后续**：旧格式本来就没搬；`passes_start`/`inflation_index`/`color_circle.gd` 未搬；#11 的 `game_saved` 误发随 B7 存档一起处理。
+
+> **B3 过程里新发现、一并修掉的 Godot 错误（编号续在 12 之后）**：
+> - **#13** `player_data.gd:84-91` 破产时只清玩家自己的 `properties` 列表，`PropertyRegistry` 里的业主仍写着死者 → 租金永远打给破产者、同色组永远卡住别人的垄断与升级。`Books::bankrupt` 把名下地块一并放回市场（回归 `cant_pay_rent_bankrupts_the_payer_and_frees_their_lands`）。
+> - **#14** `property_system.gd:151-161` 的 `_owns_full_group` 用空串匹配会得到「没有任何格子能匹配 → 全都满足」的隐式 `true`，坏数据上等于白送垄断与升级权。Rust 侧无 `group` 的地块明确返回 `false`（`economy::owns_full_group`，回归 `groupless_land_gets_no_free_monopoly`）。
+>
+> **B3 记录的数据缺口（没动数据，等你定）**：`prototype.json` 的 12 格里**没有 `stock` 格**，而 `stock_market.gd:68` 的 `tick()` 只在踩到证券格时调用 —— 照搬之下整局行情一动不动、分红永不发放。市场逻辑已完整实现并有测试（测试里临时把某格改成 `stock` 类型跑这条路径），真实对局要跑到它需要给棋盘加一个证券格。
 
 ---
 
@@ -112,7 +128,7 @@ new-money-bevy/
 | `GameState.players` | 不需要 —— 玩家就是实体，用 `Query<&Wallet, With<PlayerId>>` |
 | `TurnManager._players/_current_player_index/_pending_*` | `TurnOrder{active:Vec<PlayerId>, cursor:usize}` + `PendingDecision{player, kind}` |
 | `TurnManager.property_system/stock_market/bank_system/...`（`:59-69` 7 个实例字段） | 全部消失，变成 system + 组件数据 |
-| `GameRules`（新）：`START_CASH/JAIL_TURNS/MAX_LEVEL=6/DIVIDEND_INTERVAL=5/DIVIDEND_RATE/BASE_DRIFT/DEPOSIT_RATE/LOAN_RATE/MAX_LOAN_RATIO` | 一个 `GameRules` resource，值从 `data/rules.json` 读（现散落在 `player_data.gd:13` `turn_manager.gd:38-39` `stock_market.gd:14-17` `bank_system.gd:8-10`）。**B2a 已落 `start_cash`**，缺陷 #12 就此消除（起始现金只剩这一处）；其余常量与 `rules.json` 留到 B3 真用到时再加 |
+| `GameRules`（新）：`START_CASH/JAIL_TURNS/MAX_LEVEL=6/DIVIDEND_INTERVAL=5/DIVIDEND_RATE/BASE_DRIFT/DEPOSIT_RATE/LOAN_RATE/MAX_LOAN_RATIO` | 一个 `GameRules` resource，值从 `data/rules.json` 读（现散落在 `player_data.gd:13` `turn_manager.gd:38-39` `stock_market.gd:14-17` `bank_system.gd:8-10`）。**B2a 已落 `start_cash`**，缺陷 #12 就此消除（起始现金只剩这一处）；其余常量 **B3 已全落**（`max_building_level`/`monopoly_rent_multiplier`/`deposit_rate`/`loan_rate`/`max_loan_ratio`/`stock_base_drift`/`dividend_interval`/`dividend_rate`/`max_price_history`）。**`rules.json` 暂不做**（2026-10-14 决定）：单一来源由 resource 本身达成，外部化等真有策划调参需求时再加 |
 | `DataManager`（`data_manager.gd`，手写 `_cache`） | `AssetServer` + `Assets<BoardDef>`/`Assets<CardDef>`/`Assets<StockDef>`，缓存与热重载免费得到 |
 | `SaveManager`（**未实现**，`save_manager.gd:17-26` 是 TODO） | 见 §九 |
 | `AudioManager`（未实现） | `bevy_audio`，`game_app` 侧 |
@@ -134,6 +150,16 @@ new-money-bevy/
                                                    cancel_upgrade/dismiss_rent_notice/dismiss_card 六个方法
 场景   SceneRequested{target} Paused Resumed
 ```
+
+> **B3 落地（10-14）**：上表除「场景域」三条（随 B5）之外全部就位，注册了 25 条消息。
+> 两处与表格的差别：① 多了 `UpgradeOffered{player,land,cost}` —— §4.4 的表里只有
+> `LandUpgraded`（成交结果），但升级报价本身是个要 UI 回答的问题，Godot 用
+> `upgrade_decision_requested` 表达，照搬语义比凑齐表格重要；② `CardDrawn` 带的是
+> `CardNotice{id,kind,title,desc,outcomes}` 结构而不是拼好的字符串，`outcomes` 是
+> `EffectOutcome` 枚举（`Gained`/`Lost`/`CouldNotPay`/`Jailed`/`Teleported`/`UnknownTile`），
+> 文案由 UI 生成 —— 缺陷 #3 里「结算函数拼字符串」那一半就此消除。
+> `DecisionChosen{player,action}` 的 `action` 是 `Decision{Accept,Decline,Acknowledge}` 三值，
+> 语义由 `PendingDecision` 决定（六个 Godot 方法 → 三个动作 × 待决上下文）。
 
 三条原则：
 1. **`phase_changed`（`event_bus.gd:17`）和 `turn_phase_changed`（`turn_manager.gd:41`）不移植**。Godot 需要字符串化阶段是因为没有别的途径让 UI 感知状态机；Bevy 里 UI 直接读 `Res<State<TurnPhase>>` 或监听 `OnEnter`。少两个事件、少一处 `_phase_to_string` 映射（`turn_manager.gd:483-492`）。
@@ -162,6 +188,24 @@ new-money-bevy/
 **B2b 落地进度（10-13）**：表内 `begin_game_system`、`begin_turn_system`、`roll_dice_system`、`resolve_landing_system`、`end_turn_system`（+ 一个只做日志的 `game_over_system`）已上线；`decision_system` 与 `stock_tick_system` 随 B3。`begin_game_system` 挂的是 `in_state(Boot)` 而不是 `OnEnter(Boot)` —— 初始态不产生转移，`OnEnter` 根本不会触发。
 
 **B2c 落地进度（10-14）**：`walk_step_system` 上线，`Walking` 态有了生产者 —— 掷骰即定路径（`BoardDef::walk_path`，纯主环 `i → (i+1)%N` 展开），逻辑位置掷骰帧落定到 `to`；逐格推进只消费 `WalkClock`、每格发 `TileStepped`，队列走空发 `PlayerArrived` 交棒 `Landed`。消息补齐 §4.4 移动域的 `WalkStarted`/`TileStepped`/`PlayerArrived`（现共 10 条）。
+
+**B3 落地进度（10-14）**：`decision_system` 与行情/银行/卡牌的结算全部上线，但落格那一段
+的实际形状与上表不同 —— 不是一个 `resolve_landing_system` 里写 if 链，而是 `OnEnter(Landed)`
+上的六段流水线（`landing.rs`/`property.rs`/`bank.rs`/`market.rs`/`deck.rs`）：
+
+| 段 | system | 只做 |
+|---|---|---|
+| 1 | `classify_landing_system` | 把当前玩家的 `TokenPosition` 翻译成 `Landing{kind, land}`（本帧只解释一次） |
+| 2-5 | `settle_property_landing` / `settle_bank_landing` / `settle_market_landing` / `settle_card_landing` | 各读 `Res<Landing>`，不是自己那类格就直接返回；只写组件与消息 |
+| 6 | `close_landing_system` | 唯一有权决定下一步去哪的一段：挂着 `PendingDecision` → `WaitDecision`，否则 `TurnEnd` |
+
+三条收益：域的结算 system **推不动回合**（想越权就没有 `NextState` 可拿）；`TileKind` 的
+`match` 穷尽性由编译器守住（缺陷 #8 的格类型那一半）；每段的参数包只装自己那几样组件，
+`Books` 一个 SystemParam 统一持有现金/地块/存款/持仓，避免了同一 system 里两份 `&mut Wallet`。
+
+两处刻意偏离表格与 Godot：① `stock_tick_system` 不是「`Landed` 之前」跑，而是**只在踩到证券格时**
+`tick()` + 分红（照 `turn_manager.gd:372-378` 的代码，非文档）；② 卡牌的 `move_to` 不连锁结算
+新落到的格子（Godot 亦然，否则会引入「卡把人送到卡牌格」的环）。
 
 对照可见的三个简化：**不再需要** `add_child(tm)` 才能收信号的约束（`turn_manager.gd:16`）、`_dice_connected/_moved_connected` 布尔簿记（`:54-55`）、以及 `get_phase() != X: return` 这类手写守卫（`:194-195,221-222,317-318,326-327,...`，共 6 处）——`in_state()` 就是这个守卫的声明式版本。
 
@@ -210,6 +254,24 @@ Godot 端把这件事做成了"逻辑等渲染"（`turn_manager.gd:219` 等 `boa
 | `gutconfig.json` + headless godot | `cargo test` | 迁移的主要动因 |
 
 ---
+
+### 5.1 已移植的 Godot 文件与行为差异（每移植完一个就加一行，防两边悄悄分叉）
+
+| Godot 文件 | 落到哪里 | 与源行为的差异（都是刻意的） |
+|---|---|---|
+| `dice.gd`(26) | `rng.rs`（B2b） | `roll_seeded()` 假种子删掉；骰子走 `Rng` 的骰子子流 |
+| `board_data.gd`(336) `board_tile.gd`(72) `tile_type.gd`(49) `board_branch.gd`(46) `land_plot.gd`(62) | `board.rs`（B1） | 旧格式 `tiles[]`+`position:float` 分支不搬（#9）；类型字符串换成 `TileKind`/`LandType` 枚举 |
+| `player_data.gd`(105) | `player.rs` 组件 + `settle.rs` 的 `Books`（B2a/B3） | `status` 字符串换成 `JailSentence`/`Bankrupt` 组件存在性（#8）；起始现金单一来源（#12）；`add_cash`/`deduct_cash` 变成必发 `CashChanged` 的 `credit`/`debit` |
+| `property_system.gd`(186) | `economy.rs` 判定 + `property.rs` 分派 + `Books::buy/upgrade/rent_of` | 垄断倍数走 `GameRules`；无 `group` 的地块不再白送垄断与升级（#14）；`can_upgrade` 多带一个「谁在升」参数 |
+| `property_registry.gd`(128) | **整个消失** → `Owner`/`BuildingLevel`/`Mortgaged` 组件 + `ActiveBoard.lands` 索引 | 54 行旧 key 兼容层不搬（#9）；`"L"+land_id` 字符串 key 不复存在（#1 的根因） |
+| `bank_system.gd`(105) | `economy.rs` 的 plan 函数 + `Books::deposit/withdraw/borrow/repay/apply_interest_all` + `bank.rs` | 可贷额度按地块算（#1）；四个动作返回「计划额」而不是直接改对象，改钱包仍走 `Books` |
+| `stock_market.gd`(200) | `market.rs`（实体 + tick + 交易 + 分红）+ `economy.rs` 公式 | 两个 `Dictionary` 换成股票实体；`buy()` 不再递归（#5）；价格波动与成交拆成两条消息（#4）；`load_from_file` 由 `AssetServer` 取代 |
+| `card_data.gd`(24) | `card.rs`（B1） | `effects` 从 `Dictionary` 换成 `CardEffect` 枚举 |
+| `card_deck.gd`(88) | `deck.rs` | 洗牌走 `Rng` 的牌堆子流（#6）；牌堆存 `CardId`（下标）而不是持有卡面对象 |
+| `card_effects.gd`(81) | `deck.rs::settle_card_landing` | 扣不起钱真破产（#3）；返回值是 `EffectOutcome` 结构而不是拼好的中文文案；找不到格名不再回退到起点 |
+| `turn_manager.gd`(492) | `turn.rs` + `walk.rs` + `landing.rs`/`property.rs`/`bank.rs`/`market.rs`/`deck.rs`（B2b–B3） | 三处 `await` 变成 `Walking` 态；六个决策方法变成 `Decision{Accept,Decline,Acknowledge}` × `PendingDecision`；`turn_started` 每回合恰好一条（#2）；`_phase_to_string` 与 `phase_changed` 不搬 |
+
+**尚未移植**：`autoload/scene_manager.gd`、`audio_manager.gd`、`save_manager.gd`（B7）、`game_state.gd` 的存档语义（B7）、`scripts/board/*` 与 `scripts/ui/*` 全部表现层（B4–B5）、`entities/color_circle.gd`（死代码，不搬 #10）。
 
 ## 六、Bevy 0.20 依赖矩阵（已核实）
 
@@ -342,14 +404,14 @@ Godot 端**全项目没有任何字体资源**，也没设 `gui/theme/custom_fon
 | **B2a** 世界装配 ✅ 完成 (10-13) | `GameRules`/`GameSetup`/`DataHandles` 移进 core；`TileIndex`/`LandId`/`PlayerId` newtype；`Wallet`/`TokenPosition`/`JailSentence`/`Bankrupt`/`Owner` 组件；`ActiveBoard` resource；`begin_game_system` 铺土地与玩家实体 | `cargo test -p game_core` **19 项**（其中 4 项是 App 级：真资产装配世界、只装配一次、阵容与现金只来自 resource、棋盘缺失时不装配）；窗口日志「世界装配完成：12 主环格 / 6 土地实体 / 2 玩家」 | 0.5 天 |
 | **B2b** 骰 + 回合状态机 ✅ 完成 (10-13) | `Rng`+`GameSeed`（测试固定、客户端取时钟）；`TurnPhase` 8 态（`Walking` 尚无生产者）；`begin_turn`/`roll_dice`/`resolve_landing`/`end_turn`/`game_over` 五个 system；`TurnOrder`/`GameSession`；7 条流程消息 | `cargo test -p game_core` **33 项**（21 单元 + 12 App 级）：整条回合流水逐字比对、同种子复现 / 换种子改变、非当前玩家的请求被忽略、破产者整轮跳过、服刑跳两格后出狱且组件被摘掉、只剩一人即终局、空阵容立即终局不挂死、20 回合不 panic 且回合计数与掷骰次数一致 | 1 天 |
 | **B2c** 定步时行走 ✅ 完成 (10-14) | `WalkClock` + `WalkQueue`：把「掷出 N 点」展开成逐格推进，`WalkStarted`/`TileStepped`/`PlayerArrived` 取代瞬时落格；`GameRules.walk_step_interval`（0 即跳过动画，测试走 `GameRules::instant()`）；`BoardDef::walk_path` 纯主环展开 | `cargo test -p game_core` **41 项**（25 单元 + 16 App 级）全过：绕回起点经过、分支死路不进主环（两个方向都挡住）、interval=0 一帧走完与 B2b 等价（既有 12 个 App 用例不改语义全绿）、0.18s 定步节奏逐格推进；`NM_SHOT` 冒烟截图无退化 | 0.5 天 |
-| **B3** 经济核心（无 UI） | property（买/租/升级/抵押/同色组/等级差 ≤1）、bank（存贷息，**修 bug #1**）、stock（tick/买/卖/分红/历史，**修 #4 #5**）、card 效果 enum 化（**修 #3**） | 移植 `test_bank_system`、`test_card_system`；`calculate_rent` 全分支表驱动测试；现金流守恒断言 | 1.5 天 |
+| **B3** 经济核心（无 UI） ✅ 完成 (10-14) | property（买/租/升级/抵押标记/同色组/等级差 ≤1）、bank（存贷息，**修 #1**）、stock（tick/买/卖/分红/历史，**修 #4 #5**）、card 效果枚举化（**修 #3**）、落格六段流水线 + `DecisionChosen` 闭环、`Rng` 分三条子流 | `cargo test -p game_core` **97 项**（56 单元 + 41 App 级）全过：`calculate_rent` 全分支表驱动、贷款额度端到端、破产释放地块、分红只在第 5 tick、部分成交不超付、四效果卡牌（含 #3 回归）、40 回合长跑现金流水可审计 + 无负现金 + 同种子复现整条经济流水；`NM_SHOT` 冒烟无退化（`target/b3.png`） | 1.5 天 |
 | **B4** 等轴测渲染切片 | tile/land/token spawn system、路面（含对角）、建筑高度、`Text2d` 格名、正交相机 + rig 跟随、`ClearColor` | **肉眼**验收：与 Godot 版截图对比；此时才第一次开窗 | 1.5–2 天 |
 | **B5** UI + 交互 | 中文字体接入；顶栏/HUD/4 个模态；`bevy_picking` 点格与按钮；`DecisionChosen` 闭环；主菜单→对局流转；暂停 | 能完整打完一局（2 人类玩家）；长中文文案换行不溢出 | 2–3 天 |
 | **B6** AI | `Controller::Ai` + utility 决策 system（规则树版），发同样的 `RequestRoll`/`DecisionChosen`；伪延迟 `500–1500ms` | 3 AI + 1 人类可完局；AI 不阻塞（分帧） | 2 天 |
 | **B7** 音频/设置/存档 | `bevy_audio` BGM+SFX、`GameRules.walk_step_interval` 挂到设置、`GameSnapshot` 存读、自动存档 | 存读回归测试：存档→读档→再存档字节一致 | 1.5 天 |
 | **B8** 打磨/发布 | K 线图、飘字、结算画面、i18n、Windows 打包 | `DEV_PLAN.md` M3 里程碑 | 2 天+ |
 
-逻辑层（B0–B3）约 **4.5 天**就能追平现有 Godot 进度并顺手修掉 12 处缺陷；真正的成本集中在 B4–B5（约 4–5 天）。总计约 **14 人日**（不含美术）。
+逻辑层（B0–B3）**已完成**，追平现有 Godot 进度并顺手修掉 §三 的 14 处缺陷（#1–#8、#12–#14；#9/#10 是「刻意不搬」，#11 随 B7）。剩下的成本集中在 B4–B5 表现层（约 4–5 天）。
 
 ---
 

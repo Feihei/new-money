@@ -45,4 +45,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## 当前状态
 
-B0、B1、B2a、B2b、B2c 已完成（数据层、世界装配、回合状态机 + 种子化骰子 + 定步时行走，规则层 41 项测试）。下一步是 B3 经济核心（property/bank/stock/card，顺手修缺陷 #1/#3/#4/#5），之后 B4 等轴测渲染切片。逐阶段验收标准以 `.agents/MIGRATION.md` §十 为准。
+B0、B1、B2a、B2b、B2c、B3 已完成（数据层、世界装配、回合状态机 + 种子化骰子 + 定步时行走、经济核心 property/bank/stock/card，缺陷 #1/#3/#4/#5/#13/#14 已修，规则层 97 项测试）。下一步是 B4 等轴测渲染切片。逐阶段验收标准以 `.agents/MIGRATION.md` §十 为准。
