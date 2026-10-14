@@ -271,7 +271,12 @@ Godot 端把这件事做成了"逻辑等渲染"（`turn_manager.gd:219` 等 `boa
 | `card_effects.gd`(81) | `deck.rs::settle_card_landing` | 扣不起钱真破产（#3）；返回值是 `EffectOutcome` 结构而不是拼好的中文文案；找不到格名不再回退到起点 |
 | `turn_manager.gd`(492) | `turn.rs` + `walk.rs` + `landing.rs`/`property.rs`/`bank.rs`/`market.rs`/`deck.rs`（B2b–B3） | 三处 `await` 变成 `Walking` 态；六个决策方法变成 `Decision{Accept,Decline,Acknowledge}` × `PendingDecision`；`turn_started` 每回合恰好一条（#2）；`_phase_to_string` 与 `phase_changed` 不搬 |
 
-**尚未移植**：`autoload/scene_manager.gd`、`audio_manager.gd`、`save_manager.gd`（B7）、`game_state.gd` 的存档语义（B7）、`scripts/board/*` 与 `scripts/ui/*` 全部表现层（B4–B5）、`entities/color_circle.gd`（死代码，不搬 #10）。
+| `board.gd`(704) 的几何与相机部分（`:168-188,206-302`） | `render/board.rs` + `render/camera.rs`（B4） | 路面旋转用 `atan2(-dz,dx)`，**B0 那份写成 `atan2(dx,-dz)` 的 90° 错位已修**；分支也铺路（B0 漏了）；相机改成 rig 父子结构 + 指数平滑跟随，取景高度可配（见 §7.1）。`board.gd` 的 UI/对话框/信号连接簿记（`:339-704`）仍未移植（B5） |
+| `tile_view.gd`(152) | `render/board.rs`（地板与组色条）+ `render/labels.rs`（格名） | 同色组标记条按「道路格 → 绑定土地」的真实朝向摆，不再固定 -Z；颜色取所绑 land 的 group，不再写死 `"blue"`（`:157-160` 那份是 Godot 自己的简化）。格名从 `Label3D` 换成 UI 投影（§六 定案），且带上主环下标 |
+| `land_view.gd`(117) | `render/land.rs` | 等级方体不再随 `property_bought`/`property_upgraded` 信号重建 mesh，而是**一次铺满 `max_building_level` 个、按 `BuildingLevel` 显隐**；驱动源是 `Ref<Owner>`/`Ref<BuildingLevel>` 变化检测。归属色取玩家实体的 `PlayerColor`，不按 id 取模 |
+| `player_token.gd`(117) | `render/token.rs` | 不再自己数步（core 的 `TileStepped` 才是节奏来源）；弹跳从「走完再弹两拍」合成成一步内的正弦弧；瞬移从「逐格走最短环」改成 0.4s 直线滑移；同格四人按 `PlayerId` 分角偏移（Godot 开局两颗球完全重合） |
+
+**尚未移植**：`autoload/scene_manager.gd`、`audio_manager.gd`、`save_manager.gd`（B7）、`game_state.gd` 的存档语义（B7）、`board.gd` 的 UI 与四个对话框（B5）、`scripts/ui/*` 全部（B5）、`entities/color_circle.gd`（死代码，不搬 #10）。
 
 ## 六、Bevy 0.20 依赖矩阵（已核实）
 
@@ -310,7 +315,7 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 | UI 交互 | `Button`/`Interaction` 在 0.20 已弃用，改 `OnInteraction` 组件式；`TextScroll` → `EditableText::viewport`；cursor 模块并入 `bevy_picking` | B5 写按钮时按新形态，别抄旧教程 ⚠️ |
 | 存档/设置 | 新增内置 `bevy_settings`、`bevy_world_serialization`（`scene` feature 会带后者） | 同为 0.20 首发，按 §九 走手写快照 |
 
-**B0/B1/B2 实跑发现的十三条环境级坑（已踩过，记录避免重犯）**：
+**实跑发现的十七条环境级坑（已踩过，记录避免重犯）**：
 1. **`AssetPlugin::file_path` 在 0.20 是相对「可执行文件目录」的 `String`（不是 `Option`）**，而 `cargo run -p game_app` 的 CWD 是仓库根 → 默认会把资产解析成 `target/debug/assets/**`，所有资产**静默 404**（只有一行 `bevy_asset::server` ERROR，程序不崩）。落地做法：启动时把资产根解析成绝对路径再塞给 `AssetPlugin`，`std::fs` 与 `AssetServer` 共用同一个根，否则会出现"直读文件成功、Asset 加载失败"这种极难排查的组合。
 2. **`default_font` feature 自带的是 Fira Mono 子集，无汉字**，所以不显式指定字体时中文不是"报错"而是**豆腐块/空白**。落地做法：把字体放 `assets/font/` 并用 `asset_server.load()` 显式指定（本仓库用开发授权的思源黑体，见 §7.3）。
 3. **中文必须开 `bevy` 的 `complex_script_segmentation` feature**（转发到 `parley/complex-scripts`）。不开时 Parley/ICU4X 找不到中日韩分词模型，会**每帧刷** `ICU4X data error: No segmentation model for complex script: Chinese/Japanese`，且长句换行按非 CJK 规则处理。B0 实测：开启后错误归零。
@@ -324,13 +329,30 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 11. **`init_state::<T>()` 要求 `StatesPlugin` 已就位**（路径是 `bevy::state::app::StatesPlugin`）。真实客户端经 `DefaultPlugins` 自带，headless 测试的裸 `App::new()` 没有 → 直接 panic `The StateTransition schedule is missing`。而 `StatesPlugin::build` 用的是 `MainScheduleOrder::insert_after`，**不幂等**：加两遍会让状态转移每帧跑两次。所以 `CoreGamePlugin` 里补加之前先 `app.is_plugin_added::<StatesPlugin>()` 查一次。
 12. **消息与状态转移都是「一步一帧」**，测试的等待条件不能写成「阶段等于 X」：本帧 `write` 的消息下一帧才 `read` 得到（缓冲在 `First` 交换），`StateTransition` 又排在 `PreUpdate` 之后。后果是「刚发出掷骰请求、阶段还没动」时 `phase == WaitRoll` 立刻为真 —— 本项目就因此把四个回合测试全判错过一次。判据换成 `GameSession.turn_count`，并在结尾固定多跑几帧把消息刷进流水（见 `tests/common/mod.rs::play_turns`）。
 13. **`MessageReader<'w, 's, M>` 带两个生命周期**（`MessageWriter<'w, M>` 只有一个）。打包进 `#[derive(SystemParam)]` 时要把结构体写成 `<'w, 's>` 两参数形式。
+14. **元组的 `.run_if(...)` / `.in_set(...)` 会在「元素里有双生命周期 `SystemParam`」时崩**：报错是 `cannot become an ObserverSystem`（重载解析掉进了 `ObserverSystemExt::run_if`）。单个 system 挂条件没事、纯函数元组挂条件也没事，混进 `MovementNews<'w,'s>` 这种参数包就不行。做法：条件挂到 `#[derive(SystemSet)]` 分组上，用 `configure_sets` 配；这也顺带把「一组 system 共用一个守门」说清楚了。
+15. **`resource_added::<T>` / `resource_exists::<T>` 是函数项，不加括号**（`.run_if(resource_exists::<ActiveBoard>)`），与 `in_state(TurnPhase::Boot)`（要括号，它是个返回闭包的工厂）正好相反。加错括号的报错是「this function takes 1 argument but 0 arguments were supplied」。
+16. **rig 父节点要自己带 `Visibility`**：`Camera3d` 需要 `InheritedVisibility`，而它是从父节点的 `Visibility` 继承来的。父节点只挂 `Transform` 就会刷 `bevy_app::hierarchy` 的 B0004 警告（可见性传播断在 rig 这一层），画面看着正常但每帧叫一次。
+17. **`Commands` 造的实体在同一帧的后续 system 里看不到**（`.after()` 不保证插 `apply_deferred`，两个 system 无静态冲突时调度器不会加 flush 点）。这条在 HUD 上表现为「第一帧一个都没匹配到，却把文本记成最新，之后每帧提前返回」—— 缓存「已经写成什么样」必须等到**真的写到了**才更新。
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
 `game_app` 里做成 `NM_SHOT=<路径>` 的环境开关（**按墙钟 1.5s 触发、2.5s 自行 `exit(0)`**，见上面第 5/10 条），
 后续每个渲染阶段都能用它自动生成对比图。
 
-**遗留待解（B4 处理）**：`Label3D`（格名跟着 3D 物体朝向相机）在 Bevy 没有等价物。三条路：① `Text2d` + 由相机朝向反算 billboard（但 `Text2d` 属 2D 渲染通路，与 3D 深度不同层，遮挡关系会不对）；② 把名字烘进贴图用 billboard sprite；③ UI 层跟随投影（点分世界→屏幕坐标）。B4 需要先做一个 billboard spike 再定。
+**已定案（B4，10-14）：`Label3D` 的等价物走「UI 层投影跟随」**。三条路的取舍：
+
+| 路 | 结论 |
+|---|---|
+| ① `Text2d` + 反算 billboard | ❌ `Text2d` 在 0.20 属 `bevy_sprite` 的 2D 通路，与 3D 不同渲染层，还要为它多挂一台 `Camera2d`；遮挡关系必然错 |
+| ② 名字烘进贴图 + billboard sprite | ❌ 要自己引字体光栅化与图集管理，为十几个静态标签不值 |
+| ③ `Camera::world_to_viewport` + UI `Text` | ✅ **采用**。一台 `Camera3d` 同时渲染 3D 与 UI（§6.1 已核实），中文与 HUD 共用同一套排版，且永远正对相机 —— 正是 billboard 语义 |
+
+落地在 `game_app/src/render/labels.rs`：spawn 时每格一个 UI `Text`（记住自己的世界锚点），
+每帧用 `world_to_viewport` 换算到屏幕并居中（`ComputedNode::size()` 是上一帧的物理像素，
+乘 `inverse_scale_factor` 换逻辑像素，故居中有最多一帧滞后）。投影失败（跑到近/远平面外）
+就 `Display::None`，不排版。**代价说清**：标签不参与深度，永远浮在建筑之上 ——
+等轴测棋盘上「每格名字都读得到」比「被前面那栋楼挡住」有用，所以这笔换算是赚的。
+`ZIndex(-1)` 让它排在 HUD 之下（同属 UI 层，靠 z_index 分先后）。
 
 ---
 
@@ -338,6 +360,11 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 
 ### 7.1 等轴测棋盘（源 `board.gd:168-188,206-302`）
 - 相机：`Camera3d` 正交，rig 跟随棋子 XZ。源常量 `CAM_OFFSET=(8,16,8)`、`CAM_SIZE=8.0`（**代码值**，非文档的 25）；实际俯角约 54.7°，与 `PHASE_1_5_PLAN.md` 要求的 35.264° 不符 —— 移植时把两个值都做成可配置，肉眼定标一次。
+  > **B4 落地（10-14）**：`CAM_OFFSET`/`CAM_SIZE`/`CAM_DIST`/跟随时间常数都在 `render/mod.rs` 的 `dim` 里；
+  > 取景高度额外留了 `NM_CAM_SIZE` 环境变量（默认 8.0 = Godot 值，`0` = 整盘取景）。
+  > 跟随用指数平滑（`tau=0.12s` ≈ 0.35s 收敛到 95%），跟的是**棋子的视觉位置**而不是 `TokenPosition`
+  > —— 后者在掷骰那一帧就跳到终点，跟着它会把镜头甩在棋子前面。
+  > 待肉眼定标：默认紧取景下 12 格棋盘一屏装不满，B5 有 HUD 之后要再确认一次「晕不晕」。
 - 几何：全部程序化。路面 = 按 `abs(dcol)==1 && abs(drow)==1` 区分正交段/对角段的旋转薄盒（`board.gd:242-249` `rotation.y=atan2(-dz,dx)`）；格地板 = 薄盒（`tile_view.gd:92-98`）；同色组色条（`:109-127`）；建筑 = 按 level 堆叠的扁盒 + 归属色圆盘（`land_view.gd:75-117`、`tile_view.gd:129-143`）；棋子 = 半径 0.5 球（`player_token.gd:29-40`）。
 - 世界坐标：`world(col,row) = (col*cell_size, 0, row*cell_size)`，`cell_size` 来自 JSON（ADR-001 §"网格→世界"）。**这条在 Rust 里就是 `BoardDef::world_pos()` 一个纯函数**，与渲染无关，可在 core 里单测。
 - 材质：全 unshaded，无光照依赖 → Bevy 侧用 `Unlit2d` 或 `StandardMaterial{unlit:true}`，`ClearColor` 对应源 `Environment background_color=Color(0.6,0.6,0.7)`（`board.gd:179-188`）。Z 遮挡由深度缓冲处理，和 Godot 一致，无额外工作。
@@ -405,13 +432,13 @@ Godot 端**全项目没有任何字体资源**，也没设 `gui/theme/custom_fon
 | **B2b** 骰 + 回合状态机 ✅ 完成 (10-13) | `Rng`+`GameSeed`（测试固定、客户端取时钟）；`TurnPhase` 8 态（`Walking` 尚无生产者）；`begin_turn`/`roll_dice`/`resolve_landing`/`end_turn`/`game_over` 五个 system；`TurnOrder`/`GameSession`；7 条流程消息 | `cargo test -p game_core` **33 项**（21 单元 + 12 App 级）：整条回合流水逐字比对、同种子复现 / 换种子改变、非当前玩家的请求被忽略、破产者整轮跳过、服刑跳两格后出狱且组件被摘掉、只剩一人即终局、空阵容立即终局不挂死、20 回合不 panic 且回合计数与掷骰次数一致 | 1 天 |
 | **B2c** 定步时行走 ✅ 完成 (10-14) | `WalkClock` + `WalkQueue`：把「掷出 N 点」展开成逐格推进，`WalkStarted`/`TileStepped`/`PlayerArrived` 取代瞬时落格；`GameRules.walk_step_interval`（0 即跳过动画，测试走 `GameRules::instant()`）；`BoardDef::walk_path` 纯主环展开 | `cargo test -p game_core` **41 项**（25 单元 + 16 App 级）全过：绕回起点经过、分支死路不进主环（两个方向都挡住）、interval=0 一帧走完与 B2b 等价（既有 12 个 App 用例不改语义全绿）、0.18s 定步节奏逐格推进；`NM_SHOT` 冒烟截图无退化 | 0.5 天 |
 | **B3** 经济核心（无 UI） ✅ 完成 (10-14) | property（买/租/升级/抵押标记/同色组/等级差 ≤1）、bank（存贷息，**修 #1**）、stock（tick/买/卖/分红/历史，**修 #4 #5**）、card 效果枚举化（**修 #3**）、落格六段流水线 + `DecisionChosen` 闭环、`Rng` 分三条子流 | `cargo test -p game_core` **97 项**（56 单元 + 41 App 级）全过：`calculate_rent` 全分支表驱动、贷款额度端到端、破产释放地块、分红只在第 5 tick、部分成交不超付、四效果卡牌（含 #3 回归）、40 回合长跑现金流水可审计 + 无负现金 + 同种子复现整条经济流水；`NM_SHOT` 冒烟无退化（`target/b3.png`） | 1.5 天 |
-| **B4** 等轴测渲染切片 | tile/land/token spawn system、路面（含对角）、建筑高度、`Text2d` 格名、正交相机 + rig 跟随、`ClearColor` | **肉眼**验收：与 Godot 版截图对比；此时才第一次开窗 | 1.5–2 天 |
+| **B4** 等轴测渲染切片 ✅ 完成 (10-14) | `render/{board,land,token,camera,labels}.rs` + `RenderPlugin`：地面密铺、主环与分支路面（含对角，**顺带修掉 B0 的 90° 旋转错位**）、道路格地板按 `TileKind` 配色、组色条朝向绑定的土地、建筑按 `BuildingLevel` 显隐 + 按 `PlayerColor` 换色、棋子按 `TileStepped` 逐格插值带正弦弹跳、入狱/瞬移 0.4s 滑移、正交相机 rig 指数平滑跟随、`ClearColor`、格名走 UI 投影（§六 定案）；`NM_AUTOROLL` 开发用自动玩家（B5 删） | `check.sh` 五项退出码 0；`NM_SHOT` 出图三张（`target/b4_static.png` 整盘、`target/b4_play.png` 跟随 + 30 回合后的建筑与现金流、`target/b4_wide.png`）；运行日志零 WARN。**与 Godot 版并排肉眼对比仍待用户确认**（本机没装 godot CLI，出不了参照图） | 1.5–2 天 |
 | **B5** UI + 交互 | 中文字体接入；顶栏/HUD/4 个模态；`bevy_picking` 点格与按钮；`DecisionChosen` 闭环；主菜单→对局流转；暂停 | 能完整打完一局（2 人类玩家）；长中文文案换行不溢出 | 2–3 天 |
 | **B6** AI | `Controller::Ai` + utility 决策 system（规则树版），发同样的 `RequestRoll`/`DecisionChosen`；伪延迟 `500–1500ms` | 3 AI + 1 人类可完局；AI 不阻塞（分帧） | 2 天 |
 | **B7** 音频/设置/存档 | `bevy_audio` BGM+SFX、`GameRules.walk_step_interval` 挂到设置、`GameSnapshot` 存读、自动存档 | 存读回归测试：存档→读档→再存档字节一致 | 1.5 天 |
 | **B8** 打磨/发布 | K 线图、飘字、结算画面、i18n、Windows 打包 | `DEV_PLAN.md` M3 里程碑 | 2 天+ |
 
-逻辑层（B0–B3）**已完成**，追平现有 Godot 进度并顺手修掉 §三 的 14 处缺陷（#1–#8、#12–#14；#9/#10 是「刻意不搬」，#11 随 B7）。剩下的成本集中在 B4–B5 表现层（约 4–5 天）。
+逻辑层（B0–B3）**已完成**，追平现有 Godot 进度并顺手修掉 §三 的 14 处缺陷（#1–#8、#12–#14；#9/#10 是「刻意不搬」，#11 随 B7）。表现层的几何与动画（B4）**已完成**，剩下的成本集中在 B5 的 UI 与交互（约 2–3 天）—— 那才是「能打完一局」的一步。
 
 ---
 

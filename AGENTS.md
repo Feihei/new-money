@@ -24,7 +24,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 - **不要用 `... | tail` 之类管道判断成败**，`check.sh` 已经逐步取退出码，照它做。
-- 核对画面：`NM_SHOT=<路径>` 环境变量让 `game_app` 截图后自行退出（按墙钟触发，原因见 `.agents/MIGRATION.md` §六 的坑 5/10）。别用 `timeout N cargo run` 做冒烟测试。
+- 核对画面：`NM_SHOT=<路径>` 让 `game_app` 截图后自行退出，`NM_SHOT_AT=<秒>` 推迟到对局跑起来之后再截（按墙钟触发，原因见 `.agents/MIGRATION.md` §六 的坑 5/10）。`NM_CAM_SIZE=0` 整盘取景、默认 8 跟随紧取景。别用 `timeout N cargo run` 做冒烟测试。
+- B5 之前没有掷骰按钮：要看动画与建筑长出来就 `NM_AUTOROLL=1`（开发用自动玩家，B5 换按钮后删）。
 
 ## 硬约束
 
@@ -45,4 +46,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## 当前状态
 
-B0、B1、B2a、B2b、B2c、B3 已完成（数据层、世界装配、回合状态机 + 种子化骰子 + 定步时行走、经济核心 property/bank/stock/card，缺陷 #1/#3/#4/#5/#13/#14 已修，规则层 97 项测试）。下一步是 B4 等轴测渲染切片。逐阶段验收标准以 `.agents/MIGRATION.md` §十 为准。
+B0、B1、B2a、B2b、B2c、B3、B4 已完成（数据层、世界装配、回合状态机 + 种子化骰子 + 定步时行走、经济核心 property/bank/stock/card、等轴测渲染切片：几何/建筑/棋子动画/相机跟随/格名投影，缺陷 #1/#3/#4/#5/#13/#14 已修，规则层 97 项测试）。下一步是 B5 UI 与交互——那一步才让「两个真人打完一局」成立。逐阶段验收标准以 `.agents/MIGRATION.md` §十 为准。
