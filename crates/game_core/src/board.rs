@@ -162,6 +162,18 @@ impl BoardDef {
         TileIndex(self.destination(index, 0) as u32)
     }
 
+    /// 从 `from` 起走 `steps` 步途经的主环格（不含起点、含终点），按绕行方向。
+    ///
+    /// ADR-001 行为规则 3/4：主环步进恒为 `i → (i+1)%N`，分支**绝不**作为常规前进选项 ——
+    /// 途经挂分支的接入点也只记录主环下标，死胡同格（没有 `TileIndex`）结构上进不了结果。
+    /// `steps <= 0` 时为空（B2c 的掷骰恒 ≥1，负步数留给未来的转向卡）。
+    pub fn walk_path(&self, from: i64, steps: i64) -> Vec<TileIndex> {
+        if steps <= 0 {
+            return Vec::new();
+        }
+        (1..=steps).map(|k| self.wrapped(from + k)).collect()
+    }
+
     /// 网格坐标 → 世界坐标（y=0）。ADR-001：坐标一律推导，不手填 x/z。
     pub fn world_pos(&self, col: u32, row: u32) -> Vec3 {
         Vec3::new(
@@ -400,6 +412,32 @@ mod tests {
         // wrapped() 与 tile() 必须同一套取模规则，否则棋子位置与看到的格子会错位
         assert_eq!(b.wrapped(-1), TileIndex(11));
         assert_eq!(b.wrapped(12), TileIndex(0));
+    }
+
+    #[test]
+    fn walk_path_wraps_past_the_start_tile() {
+        let b = board();
+        // 从 11 号走 2 步：先踏过 0 号起点再落到 1 号 —— 「绕回起点经过」
+        assert_eq!(b.walk_path(11, 2), vec![TileIndex(0), TileIndex(1)]);
+        assert_eq!(b.walk_path(0, 1), vec![TileIndex(1)]);
+        assert!(b.walk_path(3, 0).is_empty(), "0 步不该有路径");
+        assert!(b.walk_path(3, -1).is_empty(), "负步数留给转向卡，当前为空");
+    }
+
+    #[test]
+    fn walk_path_never_dives_into_a_branch() {
+        let b = board();
+        // 接入点 2 挂监狱死胡同（见 branches_expose_junction_and_dead_end）。
+        // 穿过接入点必须继续沿主环走，分支不顶掉任何一步 —— 路径长度恒等于步数，
+        // 且全为主环下标（死胡同格没有 TileIndex，结构上进不来）。
+        assert_eq!(b.branch_junction(BranchKind::Jail).unwrap().id, 2);
+        assert_eq!(
+            b.walk_path(1, 3),
+            vec![TileIndex(2), TileIndex(3), TileIndex(4)]
+        );
+        assert_eq!(b.walk_path(2, 1), vec![TileIndex(3)]);
+        // 整整一圈也恰好 12 步：分支不是环的一部分
+        assert_eq!(b.walk_path(2, 12).len(), 12);
     }
 
     #[test]

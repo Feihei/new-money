@@ -159,7 +159,9 @@ new-money-bevy/
 | `end_turn_system` | `OnEnter(TurnEnd)` | `Wallet` `GameSession` | `TurnEnded`；`turn_count+=1`；活跃人数 ≤1 → `Over`，否则推进 cursor → `TurnStart` |
 | `stock_tick_system` | `in_state(Landed)` 之前 | `Query<(&StockDef,&mut StockPrice,&mut PriceHistory)>` `Res<Rng>` | `StockPriceChanged`；`tick%5==0` 分红 |
 
-**B2b 落地进度（10-13）**：表内 `begin_game_system`、`begin_turn_system`、`roll_dice_system`、`resolve_landing_system`、`end_turn_system`（+ 一个只做日志的 `game_over_system`）已上线；`walk_step_system` 随 B2c 的 `WalkClock` 进来（当前落格是瞬时的，`Walking` 态还没有生产者），`decision_system` 与 `stock_tick_system` 随 B3。`begin_game_system` 挂的是 `in_state(Boot)` 而不是 `OnEnter(Boot)` —— 初始态不产生转移，`OnEnter` 根本不会触发。
+**B2b 落地进度（10-13）**：表内 `begin_game_system`、`begin_turn_system`、`roll_dice_system`、`resolve_landing_system`、`end_turn_system`（+ 一个只做日志的 `game_over_system`）已上线；`decision_system` 与 `stock_tick_system` 随 B3。`begin_game_system` 挂的是 `in_state(Boot)` 而不是 `OnEnter(Boot)` —— 初始态不产生转移，`OnEnter` 根本不会触发。
+
+**B2c 落地进度（10-14）**：`walk_step_system` 上线，`Walking` 态有了生产者 —— 掷骰即定路径（`BoardDef::walk_path`，纯主环 `i → (i+1)%N` 展开），逻辑位置掷骰帧落定到 `to`；逐格推进只消费 `WalkClock`、每格发 `TileStepped`，队列走空发 `PlayerArrived` 交棒 `Landed`。消息补齐 §4.4 移动域的 `WalkStarted`/`TileStepped`/`PlayerArrived`（现共 10 条）。
 
 对照可见的三个简化：**不再需要** `add_child(tm)` 才能收信号的约束（`turn_manager.gd:16`）、`_dice_connected/_moved_connected` 布尔簿记（`:54-55`）、以及 `get_phase() != X: return` 这类手写守卫（`:194-195,221-222,317-318,326-327,...`，共 6 处）——`in_state()` 就是这个守卫的声明式版本。
 
@@ -174,6 +176,8 @@ Godot 端把这件事做成了"逻辑等渲染"（`turn_manager.gd:219` 等 `boa
 - 测试里把 `GameRules.walk_step_interval` 设成 0（或直接改 `WalkClock`），一步到位，无需等待；UI 上"跳过动画"就是把同一个值调 0——顺带实现 `DEV_PLAN.md:503` 想要的"动画速度"设置项。
 
 这是本方案里唯一一处需要你在实施时守住的红线：**render 永远不向 core 发"推进回合"的消息**。
+
+> **B2c 落地（10-14）**：`WalkQueue` 最终形态是 `{path, done, from}` 而不是本节的 `{path, elapsed}` —— 耗时累计归全局 `WalkClock`（行走互斥，同一时刻至多一人在走），队列只记「已迈几步」的绝对进度，`walk_step_system` 每帧把 `floor(elapsed/interval)` 与 `done` 的差补齐。`advance_walk_clock_system` 挂 `First`、只在 `Walking` 态推进（帧间真实 Δt）；headless 测试没有真实时间流逝，一律 `GameRules::instant()`（interval=0 → 一帧走完，与 B2b 逐字等价），要测节奏就直接改写 `WalkClock.elapsed`。另核实：`bevy_time` 是 bevy_internal 的**非可选依赖**（0.20 的 `bevy` 门面没有同名 feature），`game_core` 不用加 feature 就有 `Res<Time>`。
 
 ---
 
@@ -337,7 +341,7 @@ Godot 端**全项目没有任何字体资源**，也没设 `gui/theme/custom_fon
 | **B1** 数据与棋盘 ✅ 完成 (10-13) | `BoardDef/LandDef/BranchDef/LandType/TileKind` + `CardSet/CardEffect`（内部标签枚举）+ `StockSet/StockDef` serde；`validate()` 覆盖 `tools/validate_board.py` 的 7 条不变式与卡牌/股票的字段约束；`JsonAssetLoader<A>` 自写（无第三方），`CoreGamePlugin` 注册三类资产与 loader，`game_app` 全走 `AssetServer` | `cargo test -p game_core` **15 项**全过；启动日志确认「棋盘 12 格 / 机会 7 张 / 命运 6 张 / 股票 5 只」；资产缺失时 panic 而非静默等待 | 1 天 |
 | **B2a** 世界装配 ✅ 完成 (10-13) | `GameRules`/`GameSetup`/`DataHandles` 移进 core；`TileIndex`/`LandId`/`PlayerId` newtype；`Wallet`/`TokenPosition`/`JailSentence`/`Bankrupt`/`Owner` 组件；`ActiveBoard` resource；`begin_game_system` 铺土地与玩家实体 | `cargo test -p game_core` **19 项**（其中 4 项是 App 级：真资产装配世界、只装配一次、阵容与现金只来自 resource、棋盘缺失时不装配）；窗口日志「世界装配完成：12 主环格 / 6 土地实体 / 2 玩家」 | 0.5 天 |
 | **B2b** 骰 + 回合状态机 ✅ 完成 (10-13) | `Rng`+`GameSeed`（测试固定、客户端取时钟）；`TurnPhase` 8 态（`Walking` 尚无生产者）；`begin_turn`/`roll_dice`/`resolve_landing`/`end_turn`/`game_over` 五个 system；`TurnOrder`/`GameSession`；7 条流程消息 | `cargo test -p game_core` **33 项**（21 单元 + 12 App 级）：整条回合流水逐字比对、同种子复现 / 换种子改变、非当前玩家的请求被忽略、破产者整轮跳过、服刑跳两格后出狱且组件被摘掉、只剩一人即终局、空阵容立即终局不挂死、20 回合不 panic 且回合计数与掷骰次数一致 | 1 天 |
-| **B2c** 定步时行走 | `WalkClock` + `WalkQueue`：把「掷出 N 点」展开成逐格推进，`TileStepped`/`PlayerArrived` 取代瞬时落格；`GameRules.walk_step_interval`（0 即跳过动画） | 绕回起点经过、分支死路不进入主环、`walk_step_interval=0` 时与 B2b 的即时行为等价 | 0.5 天 |
+| **B2c** 定步时行走 ✅ 完成 (10-14) | `WalkClock` + `WalkQueue`：把「掷出 N 点」展开成逐格推进，`WalkStarted`/`TileStepped`/`PlayerArrived` 取代瞬时落格；`GameRules.walk_step_interval`（0 即跳过动画，测试走 `GameRules::instant()`）；`BoardDef::walk_path` 纯主环展开 | `cargo test -p game_core` **41 项**（25 单元 + 16 App 级）全过：绕回起点经过、分支死路不进主环（两个方向都挡住）、interval=0 一帧走完与 B2b 等价（既有 12 个 App 用例不改语义全绿）、0.18s 定步节奏逐格推进；`NM_SHOT` 冒烟截图无退化 | 0.5 天 |
 | **B3** 经济核心（无 UI） | property（买/租/升级/抵押/同色组/等级差 ≤1）、bank（存贷息，**修 bug #1**）、stock（tick/买/卖/分红/历史，**修 #4 #5**）、card 效果 enum 化（**修 #3**） | 移植 `test_bank_system`、`test_card_system`；`calculate_rent` 全分支表驱动测试；现金流守恒断言 | 1.5 天 |
 | **B4** 等轴测渲染切片 | tile/land/token spawn system、路面（含对角）、建筑高度、`Text2d` 格名、正交相机 + rig 跟随、`ClearColor` | **肉眼**验收：与 Godot 版截图对比；此时才第一次开窗 | 1.5–2 天 |
 | **B5** UI + 交互 | 中文字体接入；顶栏/HUD/4 个模态；`bevy_picking` 点格与按钮；`DecisionChosen` 闭环；主菜单→对局流转；暂停 | 能完整打完一局（2 人类玩家）；长中文文案换行不溢出 | 2–3 天 |

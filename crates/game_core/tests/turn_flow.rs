@@ -72,16 +72,18 @@ fn one_turn_cycles_the_fsm() {
     play_turns(&mut app, 1);
 
     assert_eq!(tile_of(&app, p0), steps, "落格点数应等于种子掷出的点数");
-    assert_eq!(
-        events(&app),
-        vec![
-            "TurnStarted(P0)".to_string(),
-            format!("Roll(P0,{steps},0->{steps})"),
-            "TurnEnd(P0)".to_string(),
-            "TurnStarted(P1)".to_string(),
-        ],
-        "整条回合流水的顺序与内容都必须确定"
-    );
+    // B2c 起，掷骰后的移动是一条逐格时间线：Roll 定意图 → Walk 开始 →
+    // 每格一条 Step → Arrive 到站。interval=0 时全部压在一帧内，流水仍确定。
+    let mut expected = vec![
+        "TurnStarted(P0)".to_string(),
+        format!("Roll(P0,{steps},0->{steps})"),
+        format!("Walk(P0,{steps},0->{steps})"),
+    ];
+    expected.extend((1..=steps).map(|k| format!("Step(P0,{k})")));
+    expected.push(format!("Arrive(P0,0->{steps})"));
+    expected.push("TurnEnd(P0)".to_string());
+    expected.push("TurnStarted(P1)".to_string());
+    assert_eq!(events(&app), expected, "整条回合流水的顺序与内容都必须确定");
     assert_eq!(app.world().resource::<GameSession>().turn_count, 1);
     assert_eq!(phase(&app), TurnPhase::WaitRoll);
     assert_eq!(current(&app), roster(&mut app)[1].0, "该轮到 P1");
@@ -90,7 +92,7 @@ fn one_turn_cycles_the_fsm() {
 #[test]
 fn same_seed_replays_the_same_match() {
     let play = |seed: GameSeed| {
-        let mut app = boot(GameSetup::default(), GameRules::default(), seed);
+        let mut app = boot(GameSetup::default(), GameRules::instant(), seed);
         assert!(run_until_world(&mut app));
         play_turns(&mut app, 6);
         events(&app)
@@ -129,7 +131,7 @@ fn requests_from_somebody_else_are_ignored() {
 
 #[test]
 fn bankrupt_players_are_skipped() {
-    let mut app = boot(trio(), GameRules::default(), GameSeed::default());
+    let mut app = boot(trio(), GameRules::instant(), GameSeed::default());
     boot_to_wait_roll(&mut app);
     let p2 = roster(&mut app)[2].0;
     insert(&mut app, p2, Bankrupt);
@@ -187,7 +189,7 @@ fn jail_skips_two_turns_then_releases() {
 
 #[test]
 fn game_over_when_one_player_remains() {
-    let mut app = boot(trio(), GameRules::default(), GameSeed::default());
+    let mut app = boot(trio(), GameRules::instant(), GameSeed::default());
     boot_to_wait_roll(&mut app);
     let rows = roster(&mut app);
     for i in [1, 2] {
@@ -215,7 +217,7 @@ fn game_over_when_one_player_remains() {
 fn empty_roster_ends_the_match_instead_of_hanging() {
     let mut app = boot(
         GameSetup { players: vec![] },
-        GameRules::default(),
+        GameRules::instant(),
         GameSeed::default(),
     );
     assert!(run_until_world(&mut app));
@@ -230,7 +232,7 @@ fn empty_roster_ends_the_match_instead_of_hanging() {
 #[test]
 fn twenty_turns_run_without_panic() {
     // 100 回合的长跑在 B2d 与现金流守恒断言一起做；这里先守住状态机本身
-    let mut app = boot(trio(), GameRules::default(), GameSeed(777));
+    let mut app = boot(trio(), GameRules::instant(), GameSeed(777));
     assert!(run_until_world(&mut app));
 
     play_turns(&mut app, 20);

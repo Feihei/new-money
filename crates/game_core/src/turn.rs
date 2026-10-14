@@ -10,9 +10,11 @@ use bevy::prelude::*;
 
 use crate::msg::{
     DiceRolled, GameOver, JailSkipped, PlayerReleased, RequestRoll, TurnEnded, TurnStarted,
+    WalkStarted,
 };
-use crate::player::{Bankrupt, JailSentence, PlayerId, TokenPosition};
+use crate::player::{Bankrupt, JailSentence, PlayerId, TokenPosition, WalkQueue};
 use crate::rng::Rng;
+use crate::walk::WalkClock;
 use crate::world::ActiveBoard;
 
 /// 回合阶段。`Boot` 是初始态：资产到位前什么都不做。
@@ -25,8 +27,9 @@ pub enum TurnPhase {
     Boot,
     TurnStart,
     WaitRoll,
-    /// 逐格行走（B2c 填充：`WalkClock` 驱动 `WalkQueue`）。当前落格是瞬时的，
-    /// 还没有 system 进入这一态。
+    /// 逐格行走：`WalkClock` 驱动 `WalkQueue`，每格一条 `TileStepped`
+    /// （`walk_step_system`，见 §4.6 的所有权红线）。`walk_step_interval = 0`
+    /// 时一帧走完，与 B2b 的瞬时落格行为等价。
     Walking,
     /// 落格结算的分派点。B3 在此接地产/卡牌/银行，目前所有格子都无结算。
     Landed,
@@ -99,6 +102,15 @@ pub struct TurnWriters<'w> {
     over: MessageWriter<'w, GameOver>,
 }
 
+/// `roll_dice_system` 的输入打包：请求流水 + 当前轮转 + 棋盘拓扑
+/// （§4.5 表格里「读」的那三样；reader 带两个生命周期，见坑 13）。
+#[derive(SystemParam)]
+pub struct RollInput<'w, 's> {
+    requests: MessageReader<'w, 's, RequestRoll>,
+    order: Res<'w, TurnOrder>,
+    active: Res<'w, ActiveBoard>,
+}
+
 /// 回合开始的唯一入口：跳过破产者 → 处理服刑 → 否则等掷骰。
 ///
 /// 服刑的递减规则与 `player_data.gd:72-80` 一致：`turns_left` 每次回合开始减一，
@@ -160,44 +172,66 @@ pub fn begin_turn_system(
     }
 }
 
-/// 掷骰并即时落格。只在 `WaitRoll` 里跑，且只认「当前回合玩家」的请求 ——
+/// 掷骰并定下本次移动。只在 `WaitRoll` 里跑，且只认「当前回合玩家」的请求 ——
 /// 这是缺陷 #7 的修复点：Godot 的点数由表现层 `board.gd:704` 发出，逻辑因此离不开渲染、
 /// headless 根本掷不了骰。
+///
+/// 逻辑位置（`TokenPosition`）在掷骰的一刻就落定到 `to`；此后 `Walking` 态只是把
+/// 这次移动按 `GameRules.walk_step_interval` 展开成逐格时间线（`TileStepped`），
+/// 表现层拿它做插值 —— 任何等待动画的 `await` 都不存在了。
 pub fn roll_dice_system(
-    mut requests: MessageReader<RequestRoll>,
-    order: Res<TurnOrder>,
-    active: Res<ActiveBoard>,
+    mut input: RollInput,
     mut rng: ResMut<Rng>,
-    mut positions: Query<&mut TokenPosition, With<PlayerId>>,
+    mut clock: ResMut<WalkClock>,
+    mut walkers: Query<(&mut TokenPosition, &mut WalkQueue), With<PlayerId>>,
     mut rolled: MessageWriter<DiceRolled>,
+    mut started: MessageWriter<WalkStarted>,
     mut next: ResMut<NextState<TurnPhase>>,
 ) {
-    let Some(current) = order.current() else {
+    let Some(current) = input.order.current() else {
         return;
     };
     // 全部读完再判断：`any()` 会短路，没读完的请求下一帧又被读出来 → 多掷一次
     let mut asked = false;
-    for r in requests.read() {
+    for r in input.requests.read() {
         asked |= r.player == current;
     }
     if !asked {
         return;
     }
-    let Ok(mut pos) = positions.get_mut(current) else {
+    let Ok((mut pos, mut queue)) = walkers.get_mut(current) else {
         return;
     };
 
     let from = pos.tile;
     let steps = rng.roll_die();
-    let to = active.def.wrapped(from.0 as i64 + steps as i64);
+    let path = input.active.def.walk_path(from.0 as i64, steps as i64);
+    let to = path.last().copied().unwrap_or(from);
     pos.tile = to;
+    *queue = WalkQueue {
+        path: path.into(),
+        done: 0,
+        from,
+    };
+    clock.elapsed = 0.0;
     rolled.write(DiceRolled {
         player: current,
         steps,
         from,
         to,
     });
-    next.set(TurnPhase::Landed);
+    started.write(WalkStarted {
+        player: current,
+        from,
+        to,
+        steps,
+    });
+    // 步数为 0（理论不可达：骰子 ≥1）也必须能出 Walking，否则状态机会卡死
+    next.set(if queue.path.is_empty() {
+        TurnPhase::Landed
+    } else {
+        TurnPhase::Walking
+    });
 }
 
 /// 落格分派点。B3 在这里按 `TileKind` 接地产/卡牌/银行；当前等价于

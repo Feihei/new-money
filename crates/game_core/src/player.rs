@@ -5,6 +5,8 @@ use bevy::prelude::*;
 use crate::board::TileIndex;
 use crate::rules::GameRules;
 
+use std::collections::VecDeque;
+
 /// 玩家标识。与 `LandId`、`TileIndex` 互不通用 —— 这是缺陷 #1
 /// （拿 `"L"+land_id` 字符串 key 去调 `get_tile(index:int)`，导致贷款上限恒为 0）
 /// 在 Rust 里编译不过的结构性原因。
@@ -53,6 +55,39 @@ pub struct TokenPosition {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JailSentence {
     pub turns_left: u32,
+}
+
+/// 一次行走的进度，挂在玩家实体上；`path` 为空即「没在走」。
+///
+/// 与 §4.6 原案（`WalkQueue{path, elapsed}`）的差异：耗时累计放在全局
+/// [`WalkClock`](crate::walk::WalkClock)（行走是互斥的，同一时刻至多一人在走），
+/// 队列里只留「绝对进度」—— `done` 记已发过 `TileStepped` 的步数，
+/// 时钟换算出的应到步数减去它就是本帧要补的步数。
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct WalkQueue {
+    /// 还没走的格（不含出发点，按绕行方向）。空 = 已到站或没在走。
+    pub path: VecDeque<TileIndex>,
+    /// 本段行走已完成的步数。
+    pub done: u32,
+    /// 本段行走的出发点（`PlayerArrived` 的 `from`）。
+    pub from: TileIndex,
+}
+
+impl Default for WalkQueue {
+    fn default() -> Self {
+        Self {
+            path: VecDeque::new(),
+            done: 0,
+            from: START_TILE,
+        }
+    }
+}
+
+impl WalkQueue {
+    /// 队列里的总步数（含已完成的）。
+    pub fn total(&self) -> usize {
+        self.done as usize + self.path.len()
+    }
 }
 
 /// 存在即破产。破产玩家退出回合序，钱包与地产由结算 system 清空。
@@ -110,6 +145,7 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
                         cash: rules.start_cash,
                     },
                     TokenPosition { tile: START_TILE },
+                    WalkQueue::default(),
                 ))
                 .id()
         })

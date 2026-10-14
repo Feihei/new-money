@@ -14,8 +14,8 @@ use bevy::prelude::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
     ActiveBoard, DataHandles, DiceRolled, GameOver, GameRules, GameSeed, GameSession, GameSetup,
-    JailSkipped, PlayerId, PlayerReleased, RequestRoll, TokenPosition, TurnEnded, TurnOrder,
-    TurnPhase, TurnStarted, Wallet,
+    JailSkipped, PlayerArrived, PlayerId, PlayerReleased, RequestRoll, TileStepped, TokenPosition,
+    TurnEnded, TurnOrder, TurnPhase, TurnStarted, WalkStarted, Wallet,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -35,14 +35,20 @@ pub struct Inputs(pub Vec<Entity>);
 #[derive(Resource, Default, Debug)]
 pub struct Observed(pub Vec<String>);
 
-/// `MessageReader` 打包：七个 reader 参数比给系统挂 `#[allow]` 好读。
+/// `MessageReader` 打包：九个 reader 参数比给系统挂 `#[allow]` 好读。
 /// （0.20 的 reader 带 `'w`/`'s` 两个生命周期，与 Bevy 自带的 `EventReader` 同形）
+///
+/// 字段顺序 = `collect` 的记录顺序 = 同帧多条消息在 `Observed` 里的相对顺序，
+/// 按「回合开始 → 出狱/服刑 → 掷骰 → 行走 → 到站 → 回合结束」的因果排列。
 #[derive(SystemParam)]
 struct AllReaders<'w, 's> {
     turn_started: MessageReader<'w, 's, TurnStarted>,
     released: MessageReader<'w, 's, PlayerReleased>,
     jail_skipped: MessageReader<'w, 's, JailSkipped>,
     dice_rolled: MessageReader<'w, 's, DiceRolled>,
+    walk_started: MessageReader<'w, 's, WalkStarted>,
+    tile_stepped: MessageReader<'w, 's, TileStepped>,
+    player_arrived: MessageReader<'w, 's, PlayerArrived>,
     turn_ended: MessageReader<'w, 's, TurnEnded>,
     game_over: MessageReader<'w, 's, GameOver>,
 }
@@ -78,6 +84,27 @@ fn collect(mut log: ResMut<Observed>, mut r: AllReaders, players: Query<&PlayerI
             "Roll({},{},{}->{})",
             who(&players, m.player),
             m.steps,
+            m.from.0,
+            m.to.0
+        ));
+    }
+    for m in r.walk_started.read() {
+        log.0.push(format!(
+            "Walk({},{},{}->{})",
+            who(&players, m.player),
+            m.steps,
+            m.from.0,
+            m.to.0
+        ));
+    }
+    for m in r.tile_stepped.read() {
+        log.0
+            .push(format!("Step({},{})", who(&players, m.player), m.tile.0));
+    }
+    for m in r.player_arrived.read() {
+        log.0.push(format!(
+            "Arrive({},{}->{})",
+            who(&players, m.player),
             m.from.0,
             m.to.0
         ));
@@ -127,9 +154,11 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
 }
 
 pub fn boot_default() -> App {
+    // 无头 App 没有真实时间流逝，行走时钟永远推不动 —— 测试一律用瞬时落格
+    // （interval=0 与 B2b 行为等价，这正是 B2c 的验收项之一）
     boot(
         GameSetup::default(),
-        GameRules::default(),
+        GameRules::instant(),
         GameSeed::default(),
     )
 }

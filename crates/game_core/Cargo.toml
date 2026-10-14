@@ -6,7 +6,8 @@ license.workspace = true
 description = "《暴富》规则层：纯 ECS，无渲染依赖，cargo test 可直接跑对局"
 
 [dependencies]
-# 关掉默认 feature（2d/3d/ui/audio 全不要），只保留 ECS + Asset + State + Log
+# 关掉默认 feature（2d/3d/ui/audio 全不要），只保留 ECS + Asset + State + Log。
+# bevy_time 在 0.20 是 bevy_internal 的非可选依赖（无渲染），行走时钟读 Res<Time> 不破坏分层红线。
 bevy = { workspace = true, default-features = false, features = ["default_app"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -100,7 +100,14 @@ fn setup_and_rules_are_the_only_sources() {
             })
             .collect(),
     };
-    let mut app = boot(setup, GameRules { start_cash: 8_888 }, Default::default());
+    let mut app = boot(
+        setup,
+        GameRules {
+            start_cash: 8_888,
+            walk_step_interval: 0.0,
+        },
+        Default::default(),
+    );
     assert!(run_until_world(&mut app));
 
     assert_eq!(

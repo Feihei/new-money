@@ -36,6 +36,35 @@ pub struct DiceRolled {
     pub to: TileIndex,
 }
 
+/// 行走开始：`roll_dice_system` 定好路径后发，携带本次移动的完整意图。
+/// 表现层由此开始逐格动画；规则层的逻辑位置此刻已指向 `to`
+/// （§4.6 红线：core 拥有逻辑位置，渲染只做插值）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalkStarted {
+    pub player: Entity,
+    pub from: TileIndex,
+    pub to: TileIndex,
+    pub steps: u32,
+}
+
+/// 棋子踏入一格（每步一条，`tile` 是踏入的格）。
+///
+/// 路径恒为主环下标：分支死胡同没有 `TileIndex`，结构上进不来
+/// （ADR-001 行为规则 4，见 `BoardDef::walk_path`）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileStepped {
+    pub player: Entity,
+    pub tile: TileIndex,
+}
+
+/// 走完骰子点数、落定在 `to`。落格结算（B3 起 `resolve_landing_system` 的分派）自此开始。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerArrived {
+    pub player: Entity,
+    pub from: TileIndex,
+    pub to: TileIndex,
+}
+
 /// 某位玩家的回合结束。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnEnded {
