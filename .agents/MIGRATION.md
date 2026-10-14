@@ -80,8 +80,8 @@ new-money-bevy/
 │  │  ├─ src/player/           # Player 实体与组件
 │  │  └─ src/rng.rs            # Rng + GameSeed
 │  └─ game_app/                # bin：default plugins、渲染、UI、字体、音频、存档、场景流转
-├─ tests/                      # headless 集成测试（App + app.update()）
-└─ docs/                       # 从 Godot 拷来 ADR/schema/GLOSSARY
+├─ crates/game_core/tests/     # headless 集成测试（App + app.update()）
+└─ .agents/                    # agent 工作文档：本方案 + ADR-001 + schema + 术语表（Godot 原样副本）
 ```
 
 **为什么选"彻底 ECS"还要拆 `game_core`**：这两件事不冲突。"彻底 ECS" 指的是**规则用 component + system 表达，而不是 OOP 的 `PropertySystem`/`StockMarket` 对象**；拆 crate 指的是**这一层只链接 `bevy` 的无渲染特性子集**。收益：`cargo test -p game_core` 编译量小、跑得快、不需要窗口；渲染/UI 侧的 0.20→0.21 API 破坏不会波及规则层。**已核实（B0）**：`game_core` 用 `bevy = { default-features = false, features = ["default_app"] }` 正好拿到 `async_executor + bevy_asset + bevy_log + bevy_state + reflect_auto_register`，不含 winit/窗口/渲染；`default_platform` 才是拉进 winit 的那一层。成员 crate 要覆盖 workspace 依赖的 `default-features`，**必须用 edition 2024**（否则 cargo 只是警告一句然后忽略你的设置）。
@@ -374,7 +374,7 @@ Godot 端**全项目没有任何字体资源**，也没设 `gui/theme/custom_fon
 
 我建议的第一批动作（不需要你做更多决定，B0 的中文 spike 除外）：
 1. 建 workspace + `game_core`（`bevy/default-features=false`）+ `game_app` 空窗口，把"屏幕上渲染出一行中文 + 一个等轴测方块"作为 B0 验收（**这是全项目最可能翻车的两个点，值得第一天就证伪**）。
-2. 拷 `data/` 与 `docs/`（ADR-001、board-data-schema、GLOSSARY）进新目录 —— 它们是移植的规格来源。
+2. 拷 `data/` 与规格文档（ADR-001、board-data-schema、GLOSSARY，现居 `.agents/`）进新目录 —— 它们是移植的规格来源。
 3. 按 §十 顺序做 B1。
 
 > 本文档的 §三（缺陷清单）和 §五（映射表）建议当作长期资产维护：每移植完一个 Godot 文件，就在表里划掉并注明差异，避免两边行为悄悄分叉。
