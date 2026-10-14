@@ -243,6 +243,25 @@ impl BoardDef {
             .collect()
     }
 
+    /// 按网格坐标找格，**含死胡同分支格**。返回 `(主环下标, 格)`，分支格的下标是 `None`。
+    ///
+    /// 表现层点格、以及任何「手上只有 (col,row)」的场合都该走这里，而不是自己遍历
+    /// `tiles`/`branch.tiles` —— 后者的顺序与归属规则（分支格挂在谁的 `branch` 下）
+    /// 只写在 `BoardDef` 里一次。
+    pub fn tile_at_grid(&self, col: u32, row: u32) -> Option<(Option<TileIndex>, &TileDef)> {
+        if let Some(t) = self.tiles.iter().find(|t| t.col == col && t.row == row) {
+            return Some((Some(TileIndex(t.id)), t));
+        }
+        for junction in &self.tiles {
+            if let Some(branch) = &junction.branch
+                && let Some(t) = branch.tiles.iter().find(|t| t.col == col && t.row == row)
+            {
+                return Some((None, t));
+            }
+        }
+        None
+    }
+
     pub fn branch_junction(&self, kind: BranchKind) -> Option<&TileDef> {
         self.tiles
             .iter()
@@ -457,6 +476,22 @@ mod tests {
         assert_eq!(b.walk_path(2, 1), vec![TileIndex(3)]);
         // 整整一圈也恰好 12 步：分支不是环的一部分
         assert_eq!(b.walk_path(2, 12).len(), 12);
+    }
+
+    #[test]
+    fn tile_at_grid_covers_branch_tiles_too() {
+        let b = board();
+        // 主环格：带下标
+        let (index, tile) = b.tile_at_grid(b.tiles[5].col, b.tiles[5].row).unwrap();
+        assert_eq!(index, Some(TileIndex(5)));
+        assert_eq!(tile.id, 5);
+        // 死胡同格（监狱末端）：找得到，但没有主环下标
+        let end = b.branch_end(BranchKind::Jail).unwrap();
+        let (index, found) = b.tile_at_grid(end.col, end.row).unwrap();
+        assert_eq!(index, None, "分支格不在环上");
+        assert_eq!(found.name, end.name);
+        // 棋盘外的坐标：None，而不是回退到某一格
+        assert!(b.tile_at_grid(999, 999).is_none());
     }
 
     #[test]

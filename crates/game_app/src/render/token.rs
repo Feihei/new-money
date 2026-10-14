@@ -12,7 +12,7 @@ use game_core::prelude::{
     PlayerTeleported, TileIndex, TileStepped, TokenPosition,
 };
 
-use super::{dim, flat};
+use super::{Rendered, dim, flat};
 
 /// 一颗视觉棋子。`pub` 是给相机模块的：rig 要跟的就是它的位置。
 #[derive(Component)]
@@ -70,6 +70,7 @@ pub(crate) fn spawn_token_visuals(
                 t: 0.0,
                 dur: 0.0,
             },
+            Rendered,
         ));
     }
 }

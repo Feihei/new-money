@@ -11,57 +11,82 @@ use bevy::{
     window::{PresentMode, Window},
 };
 use game_core::CoreGamePlugin;
-use game_core::prelude::{ActiveBoard, DataHandles, GameSeed, GameSession, TurnPhase};
+use game_core::prelude::{DataHandles, GameSeed, TurnPhase};
 
 mod autopilot;
-mod hud;
 mod render;
+mod scene;
+mod ui;
 
 const DEV_FONT: &str = "font/dev_SourceHanSansSC-Regular.otf";
 
 fn main() {
     let root = asset_root();
     info!("资产根：{}", root.display());
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "暴富 · B4 等轴测渲染切片".into(),
-                        present_mode: PresentMode::AutoNoVsync,
-                        ..default()
-                    }),
-                    ..default()
-                })
-                .set(AssetPlugin {
-                    file_path: root.display().to_string(),
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "暴富 · B5 UI 与交互".into(),
+                    present_mode: PresentMode::AutoNoVsync,
                     ..default()
                 }),
-        )
-        // 规则层的 Plugin 在表现层注册：验证「无渲染 bevy 子集 + 完整 bevy」能共存于同一 App
-        .add_plugins(CoreGamePlugin)
-        .add_plugins(render::RenderPlugin)
-        .add_plugins(autopilot::AutopilotPlugin)
-        .add_systems(Startup, load_data)
-        .add_systems(
-            Update,
-            (
-                hud::spawn_hud.run_if(resource_added::<ActiveBoard>),
-                // `GameSession`/`TurnOrder` 与 `ActiveBoard` 同批插入，但守门要写出来：
-                // 少了它，第一帧的 `Res<GameSession>` 参数校验就会失败
-                hud::refresh_hud.run_if(resource_exists::<GameSession>),
-                check_assets.run_if(in_state(TurnPhase::Boot)),
-                maybe_capture,
-            ),
-        )
-        .run();
+                ..default()
+            })
+            .set(AssetPlugin {
+                file_path: root.display().to_string(),
+                ..default()
+            }),
+    )
+    // 规则层的 Plugin 在表现层注册：验证「无渲染 bevy 子集 + 完整 bevy」能共存于同一 App
+    .add_plugins(CoreGamePlugin)
+    // 网格命中测试：点格详情卡要能点到 3D 地板。默认会 raycast **所有**网格，
+    // 建筑与棋子都会被点中；`require_markers = true` 把它改成显式登记 ——
+    // 只有带 `Pickable` 的地板 + 标了 `MeshPickingCamera` 的相机会参与
+    .add_plugins(MeshPickingPlugin)
+    .insert_resource(MeshPickingSettings {
+        require_markers: true,
+        ..default()
+    })
+    .add_plugins(render::RenderPlugin)
+    .add_plugins(ui::UiPlugin)
+    .add_plugins(scene::ScenePlugin)
+    .add_plugins(autopilot::AutopilotPlugin);
+
+    insert_boot_resources(app.world_mut());
+
+    app.add_systems(
+        Update,
+        (
+            check_assets.run_if(in_state(TurnPhase::Boot)),
+            maybe_capture,
+        ),
+    )
+    .run();
 }
 
-fn load_data(mut commands: Commands, server: Res<AssetServer>) {
-    // 真实客户端每次开局换种子；测试与回放走 game_core::GameSeed::default() 的固定值
-    commands.insert_resource(GameSeed(clock_seed()));
-    commands.insert_resource(DataHandles::load(&server));
-    commands.insert_resource(render::DevFont(server.load(DEV_FONT)));
+/// 开局资源直接写进 world，不走 `Commands`。
+///
+/// `MainSchedule::Startup` 末尾就跑一次 `StateTransition`，所以 `ScenePlugin` 那句
+/// `set(Scene::Menu)` 会在**同一批**里触发 `OnEnter(Menu)` → `spawn_menu`。
+/// 用 `Commands` 插资源要等到下一批 flush，那时菜单已经试着 spawn 过了，
+/// 报的是「`Res<DevFont>` failed validation: Resource does not exist」。
+fn insert_boot_resources(world: &mut World) {
+    let server = world.resource::<AssetServer>().clone();
+    world.insert_resource(GameSeed(boot_seed()));
+    world.insert_resource(DataHandles::load(&server));
+    world.insert_resource(render::DevFont(server.load(DEV_FONT)));
+}
+
+/// 种子默认取墙钟纳秒；`NM_SEED=<十进制>` 钉死它，让一局能原样重跑。
+///
+/// 长对局验收需要可复现：几百回合之后崩一次，换个种子可能就是另一种走法，查无可查。
+fn boot_seed() -> u64 {
+    std::env::var("NM_SEED")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or_else(clock_seed)
 }
 
 fn clock_seed() -> u64 {

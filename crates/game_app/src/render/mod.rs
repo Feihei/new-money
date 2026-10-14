@@ -14,6 +14,22 @@ pub mod token;
 use bevy::prelude::*;
 use game_core::prelude::ActiveBoard;
 
+/// 表现层自己 spawn 的实体标记（棋盘几何、土地视觉、棋子、格名、相机、弹层底板）。
+/// 回主菜单时按它一次性清场 —— 规则层的实体由 `game_core::Gameplay` 负责，两边互不知晓。
+#[derive(Component)]
+pub struct Rendered;
+
+/// 一块可点的道路格地板：它的网格坐标。
+///
+/// 只带坐标、不带格名与类型 —— 那些由 `BoardDef::tile_at_grid` 现查（§4.2）。
+/// 只有地板挂它，加上 `MeshPickingSettings::require_markers = true`，
+/// 于是点建筑、点棋子都不会误开详情卡。
+#[derive(Component)]
+pub struct TilePick {
+    pub col: u32,
+    pub row: u32,
+}
+
 /// 开发期 CJK 字体句柄。`assets/font/dev_*` 是本地开发副本（不入库，见 AGENTS.md 硬约束 7），
 /// Bevy 没有 Godot 那套内建中文回退，不显式指定字体就是豆腐块（§六 坑 2）。
 #[derive(Resource)]

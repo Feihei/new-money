@@ -17,6 +17,24 @@ use crate::rules::GameRules;
 use crate::stock::{PriceHistory, StockId, StockPrice, StockSet};
 use crate::turn::{GameSession, TurnOrder, TurnPhase};
 
+/// 规则层为「这一局」spawn 的实体都带这个标记，返回主菜单时按它一次性清场。
+///
+/// 不清行的后果不是内存泄漏而是**逻辑错误**：`begin_game_system` 重开一局会 spawn 新的
+/// 玩家/土地实体，而 `Query<_, With<PlayerId>>` 会同时查到新旧两批 —— 一局里凭空多出两个人，
+/// 利息与分红付给死人，回合序也乱。标记由 spawn 方负责，清场方因此不需要知道有任何实体类型。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gameplay;
+
+/// 规则层里需要被表现层门控的 system 组。
+///
+/// 只把 `begin_game_system` 圈出来：装配一旦被 `Scene::Menu` 挡住，`TurnPhase` 就停在 `Boot`，
+/// 后面所有 `OnEnter(TurnStart)`/`in_state(WaitRoll)` 的 system 自然都不会跑 ——
+/// 一个门就够，不必给整台状态机套条件。
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CoreSet {
+    Boot,
+}
+
 /// 取代 Godot 的 `GameState.board`（`game_state.gd:24`）。
 ///
 /// `def` 是加载后的一次性快照而不是 `Handle`：规则 system 直接 `Res<ActiveBoard>` 就能拿拓扑，
@@ -101,7 +119,7 @@ pub fn begin_game_system(
         Deck::shuffled(CardKind::Chance, chance, &mut rng),
         Deck::shuffled(CardKind::Fate, fate, &mut rng),
     ] {
-        commands.spawn(deck);
+        commands.spawn((deck, Gameplay));
     }
 
     info!(
@@ -137,6 +155,7 @@ fn spawn_stocks(commands: &mut Commands, stocks: &StockSet) {
             StockId(s.id.clone()),
             StockPrice(s.base_price),
             PriceHistory(history),
+            Gameplay,
         ));
     }
 }

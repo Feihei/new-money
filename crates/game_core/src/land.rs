@@ -10,6 +10,7 @@ use bevy::prelude::*;
 
 use crate::board::BoardDef;
 use crate::player::PlayerId;
+use crate::world::Gameplay;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LandId(pub u32);
@@ -40,7 +41,7 @@ pub fn spawn_lands(commands: &mut Commands, board: &BoardDef) -> HashMap<LandId,
         .map(|l| {
             let id = LandId(l.id);
             let entity = commands
-                .spawn((id, Owner::default(), BuildingLevel::default()))
+                .spawn((id, Owner::default(), BuildingLevel::default(), Gameplay))
                 .id();
             (id, entity)
         })

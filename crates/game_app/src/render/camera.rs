@@ -7,7 +7,7 @@
 use bevy::{camera::ScalingMode, prelude::*};
 use game_core::prelude::{ActiveBoard, BoardDef, PlayerId, TokenPosition, TurnOrder};
 
-use super::{dim, palette, token::TokenVisual};
+use super::{Rendered, dim, palette, token::TokenVisual};
 
 #[derive(Component)]
 pub(crate) struct CameraRig;
@@ -34,10 +34,14 @@ pub(crate) fn spawn_camera_rig(
             // 就会报 Bevy 的 B0004 警告（可见性传播断在 rig 这一层）
             Visibility::default(),
             Transform::from_xyz(focus.x, 0.0, focus.z),
+            // 相机是 rig 的子节点，`despawn()` 递归回收，标记只挂在父上
+            Rendered,
         ))
         .with_children(|rig| {
             rig.spawn((
                 Camera3d::default(),
+                // 只有标了 `MeshPickingCamera` 的相机参与网格命中测试（见 main.rs 的 require_markers）
+                MeshPickingCamera,
                 Camera {
                     clear_color: ClearColorConfig::Custom(palette::SKY),
                     ..default()

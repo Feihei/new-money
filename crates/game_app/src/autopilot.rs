@@ -1,9 +1,10 @@
 //! 开发用自动玩家（`NM_AUTOROLL=1` 才装配）。
 //!
-//! 它是**输入侧**的替身，不是渲染层的一部分：只做两件 B5 的按钮、B6 的 AI 同样会做的事 ——
+//! 它是**输入侧**的替身，不是渲染层的一部分：只做两件 B5 的按钮同样会做的事 ——
 //! 在 `WaitRoll` 发 `RequestRoll`、在 `WaitDecision` 回答 `DecisionChosen`。
-//! 留着它是因为 B4 的验收要看「棋子在走、楼在长」，而那需要真的在打对局；
-//! 掷骰按钮上线（B5）后就该删掉它。
+//!
+//! B5 的按钮上线后它并没有退役，因为两者用途不同：按钮是给人的，这个是用来跑长对局的。
+//! 「打完一局」的验收要几百个回合，没有它就只能靠人手动点几百次；B6 的 AI 也会走同一条缝。
 
 use bevy::prelude::*;
 use game_core::prelude::{
@@ -12,28 +13,50 @@ use game_core::prelude::{
 
 pub struct AutopilotPlugin;
 
+/// 两次动作之间留一拍，好让逐格动画看得清。`NM_AUTOGAP=<秒>` 改它：
+/// 跑长对局验收时设成 0，一拍 0.9s 会把几百回合拖成十几分钟。
+#[derive(Resource)]
+struct AutoGap(f32);
+
+impl AutoGap {
+    fn from_env() -> Self {
+        Self(
+            std::env::var("NM_AUTOGAP")
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .unwrap_or(0.9),
+        )
+    }
+}
+
 impl Plugin for AutopilotPlugin {
     fn build(&self, app: &mut App) {
         if std::env::var_os("NM_AUTOROLL").is_none() {
             return;
         }
-        info!("自动玩家已开启（NM_AUTOROLL）：一律接受报价，B5 的按钮会取代它");
-        app.add_systems(
-            Update,
-            (
-                auto_roll.run_if(in_state(TurnPhase::WaitRoll)),
-                auto_answer.run_if(in_state(TurnPhase::WaitDecision)),
-            ),
-        );
+        info!("自动玩家已开启（NM_AUTOROLL）：一律接受报价");
+        app.insert_resource(AutoGap::from_env());
+        let roll_only = auto_roll.run_if(in_state(TurnPhase::WaitRoll));
+        // `NM_AUTODECISION=0` 只掷骰不回答：回合会停在第一个 `WaitDecision`，
+        // 于是截图能稳定拍到模态本身（B5 的验收图要的就是这个）
+        if std::env::var("NM_AUTODECISION").as_deref() == Ok("0") {
+            app.add_systems(Update, roll_only);
+        } else {
+            app.add_systems(
+                Update,
+                (
+                    roll_only,
+                    auto_answer.run_if(in_state(TurnPhase::WaitDecision)),
+                ),
+            );
+        }
     }
 }
-
-/// 两次动作之间留一拍，好让逐格动画看得清。
-const GAP_SECS: f32 = 0.9;
 
 fn auto_roll(
     time: Res<Time>,
     order: Res<TurnOrder>,
+    gap: Res<AutoGap>,
     mut requests: MessageWriter<RequestRoll>,
     mut due: Local<f32>,
 ) {
@@ -43,13 +66,14 @@ fn auto_roll(
     if time.elapsed_secs() < *due {
         return;
     }
-    *due = time.elapsed_secs() + GAP_SECS;
+    *due = time.elapsed_secs() + gap.0;
     requests.write(RequestRoll { player });
 }
 
 fn auto_answer(
     time: Res<Time>,
     pending: Res<PendingDecision>,
+    gap: Res<AutoGap>,
     mut answers: MessageWriter<DecisionChosen>,
     mut due: Local<f32>,
 ) {
@@ -59,7 +83,7 @@ fn auto_answer(
     if time.elapsed_secs() < *due {
         return;
     }
-    *due = time.elapsed_secs() + GAP_SECS;
+    *due = time.elapsed_secs() + gap.0;
     answers.write(DecisionChosen {
         player,
         action: Decision::Accept,

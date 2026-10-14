@@ -74,6 +74,10 @@
 >
 > **B3 记录的数据缺口（没动数据，等你定）**：`prototype.json` 的 12 格里**没有 `stock` 格**，而 `stock_market.gd:68` 的 `tick()` 只在踩到证券格时调用 —— 照搬之下整局行情一动不动、分红永不发放。市场逻辑已完整实现并有测试（测试里临时把某格改成 `stock` 类型跑这条路径），真实对局要跑到它需要给棋盘加一个证券格。
 
+> **B5 核对过、决定照搬的源游戏规则怪癖**（不是移植错误，改它等于改玩法，需要单独拍板）：
+> - **Lv0 空地已经收 `rent[0]`，所以「升级到 Lv1」租金增幅为 0**。`property_system.gd:59-61` 先 `if level < 1: level = 1` 再取 `rent_array[level - 1]`，即空地与一级房收同一档租；升级面板如实显示「+$0」（截图核对过）。要改就得同时改 `calculate_rent` 与租金表语义。
+> - **终局提示只有一行「游戏结束」是 Godot 的原样行为**：`board.gd` 的阶段旁白会盖掉胜者那句。Rust 侧反过来做了 —— `Over` 阶段不写旁白，让 `GameOver` 的「胜者：X！」留在屏幕上。这是刻意分叉，已记在 §5.1。
+
 ---
 
 ## 四、目标架构（彻底 ECS 化）
@@ -275,8 +279,15 @@ Godot 端把这件事做成了"逻辑等渲染"（`turn_manager.gd:219` 等 `boa
 | `tile_view.gd`(152) | `render/board.rs`（地板与组色条）+ `render/labels.rs`（格名） | 同色组标记条按「道路格 → 绑定土地」的真实朝向摆，不再固定 -Z；颜色取所绑 land 的 group，不再写死 `"blue"`（`:157-160` 那份是 Godot 自己的简化）。格名从 `Label3D` 换成 UI 投影（§六 定案），且带上主环下标 |
 | `land_view.gd`(117) | `render/land.rs` | 等级方体不再随 `property_bought`/`property_upgraded` 信号重建 mesh，而是**一次铺满 `max_building_level` 个、按 `BuildingLevel` 显隐**；驱动源是 `Ref<Owner>`/`Ref<BuildingLevel>` 变化检测。归属色取玩家实体的 `PlayerColor`，不按 id 取模 |
 | `player_token.gd`(117) | `render/token.rs` | 不再自己数步（core 的 `TileStepped` 才是节奏来源）；弹跳从「走完再弹两拍」合成成一步内的正弦弧；瞬移从「逐格走最短环」改成 0.4s 直线滑移；同格四人按 `PlayerId` 分角偏移（Godot 开局两颗球完全重合） |
+| `scene_manager.gd`(67) | `scene.rs` 的 `Scene` 状态 + `OnEnter/OnExit` 链（B5） | 字符串场景路径换成 `Scene` 枚举，`change_scene` 的 `err != OK` 分支不复存在（转移不会失败）；`scene_changing`/`scene_changed` 两条信号不搬（转场动画在 B8 之前没有需求）；「切换前 `get_tree().paused = false`」变成显式 `reset_ui_state`：闸门与四份 UI 记忆一起清，漏一条就是**新局开局即冻结而画面正常**（§6.1 坑 22） |
+| `board.gd`(704) 的 UI 与提示部分（`:339-704`、`:548-583`、`:537-538,668-679`） | `ui/top_bar.rs` + `ui/mod.rs` 的派发（B5） | 阶段名不再直接打内部枚举 `WAIT_ROLL`，改中文；提示行拆成「阶段旁白 + 事件流水」两条来源、事件覆盖阶段（Godot 里买地提示会被紧接着的「X 的回合」冲掉，本来就读不到）；`Over` 阶段**不写**旁白，否则晚一帧的 `GameOver` 胜者句会被盖掉；按钮可用态从「信号里记得刷新」改成「判据幂等、逐帧对齐」，`can_roll` 与派发同源 |
+| `property_dialog.gd`(282) `upgrade_dialog.gd`(257) `rent_notice.gd`(171) `card_notice.gd`(187) | `ui/dialog.rs` 一个文件（B5） | 四份几乎逐字重复的 `_build_ui`/`_style_button` 合成 `frame`/`panel`/`info_row`/`button_row` 四个构件；**弹出时机由 `PendingDecision` 状态驱动，不再由信号驱动**（消息驱动会漏弹：弹窗 system 排在建报价之后时本帧消息读不到，而玩家那一帧已能点东西）；卡面文案仍来自 `CardDrawn`，因为 `Pending::Card` 刻意不携带字符串 |
+| `pause_menu.gd`(57) + `pause_menu.tscn` | `ui/pause.rs`（B5） | `get_tree().paused` 换成 core 的 `Paused` 资源（规则层只读，写的永远是输入侧），四个推进型 system 挂 `run_if(not_paused)`；「谁是真相」只有一个 `PauseMenuOpen`，面板与闸门由它同时驱动，不会出现「菜单还开着但回合已跑」；ESC 之外补了顶栏「暂停」按钮（Godot 只用键盘，鼠标玩家找不到这条路径）；「设置」在 Godot 端也只是 `print("未实现")`，这里照摆但灰掉 |
+| `player_hud.gd`(220) | `ui/player_hud.rs`（B5） | 每帧重建子节点改成「spawn 一次 + 按组件缓存改写」；地产数不再读玩家自己的 `properties` 数组，而是遍历 `Owner` 组件（与 #13 同源）；当前回合高亮走 `TurnOrder.current()`；`PRESET_BOTTOM_WIDE + offset_top=-120` 翻成 `bottom:8 + height:112`（§6.1 坑 21） |
+| `main_menu.gd`(34) + `main_menu.tscn` | `ui/menu.rs`（B5） | 「读档」「设置」灰掉（B7 之前没有后端）；`quit` 走 `AppExit`；菜单需要一台 `Camera2d` 才画得出来（§6.1 坑 19） |
+| —— | `ui/tile_info.rs`（B5，**源项目没有这条交互**） | 新增：点一格 → 右上角详情卡（名字/类型/位置/地价/归属/等级/整张租金表）。只认带 `TilePick` 的道路格地板，点建筑、棋子、空白都不开卡；内容全部回 `BoardDef` + 组件现算，实体上只留 `(col,row)` |
 
-**尚未移植**：`autoload/scene_manager.gd`、`audio_manager.gd`、`save_manager.gd`（B7）、`game_state.gd` 的存档语义（B7）、`board.gd` 的 UI 与四个对话框（B5）、`scripts/ui/*` 全部（B5）、`entities/color_circle.gd`（死代码，不搬 #10）。
+**尚未移植**：`autoload/audio_manager.gd`、`save_manager.gd`（B7）、`game_state.gd` 的存档语义（B7）、`entities/color_circle.gd`（死代码，不搬 #10）。`board.gd` 到 B5 已全部拆完（几何/相机 B4，UI/对话框 B5）。
 
 ## 六、Bevy 0.20 依赖矩阵（已核实）
 
@@ -315,7 +326,7 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 | UI 交互 | `Button`/`Interaction` 在 0.20 已弃用，改 `OnInteraction` 组件式；`TextScroll` → `EditableText::viewport`；cursor 模块并入 `bevy_picking` | B5 写按钮时按新形态，别抄旧教程 ⚠️ |
 | 存档/设置 | 新增内置 `bevy_settings`、`bevy_world_serialization`（`scene` feature 会带后者） | 同为 0.20 首发，按 §九 走手写快照 |
 
-**实跑发现的十七条环境级坑（已踩过，记录避免重犯）**：
+**实跑发现的二十二条环境级坑（已踩过，记录避免重犯）**：
 1. **`AssetPlugin::file_path` 在 0.20 是相对「可执行文件目录」的 `String`（不是 `Option`）**，而 `cargo run -p game_app` 的 CWD 是仓库根 → 默认会把资产解析成 `target/debug/assets/**`，所有资产**静默 404**（只有一行 `bevy_asset::server` ERROR，程序不崩）。落地做法：启动时把资产根解析成绝对路径再塞给 `AssetPlugin`，`std::fs` 与 `AssetServer` 共用同一个根，否则会出现"直读文件成功、Asset 加载失败"这种极难排查的组合。
 2. **`default_font` feature 自带的是 Fira Mono 子集，无汉字**，所以不显式指定字体时中文不是"报错"而是**豆腐块/空白**。落地做法：把字体放 `assets/font/` 并用 `asset_server.load()` 显式指定（本仓库用开发授权的思源黑体，见 §7.3）。
 3. **中文必须开 `bevy` 的 `complex_script_segmentation` feature**（转发到 `parley/complex-scripts`）。不开时 Parley/ICU4X 找不到中日韩分词模型，会**每帧刷** `ICU4X data error: No segmentation model for complex script: Chinese/Japanese`，且长句换行按非 CJK 规则处理。B0 实测：开启后错误归零。
@@ -333,11 +344,38 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 15. **`resource_added::<T>` / `resource_exists::<T>` 是函数项，不加括号**（`.run_if(resource_exists::<ActiveBoard>)`），与 `in_state(TurnPhase::Boot)`（要括号，它是个返回闭包的工厂）正好相反。加错括号的报错是「this function takes 1 argument but 0 arguments were supplied」。
 16. **rig 父节点要自己带 `Visibility`**：`Camera3d` 需要 `InheritedVisibility`，而它是从父节点的 `Visibility` 继承来的。父节点只挂 `Transform` 就会刷 `bevy_app::hierarchy` 的 B0004 警告（可见性传播断在 rig 这一层），画面看着正常但每帧叫一次。
 17. **`Commands` 造的实体在同一帧的后续 system 里看不到**（`.after()` 不保证插 `apply_deferred`，两个 system 无静态冲突时调度器不会加 flush 点）。这条在 HUD 上表现为「第一帧一个都没匹配到，却把文本记成最新，之后每帧提前返回」—— 缓存「已经写成什么样」必须等到**真的写到了**才更新。
+18. **`MainSchedule::Startup` 的末尾会跑一次 `StateTransition`**：`ScenePlugin` 在 Startup 里 `set(Scene::Menu)`，而 `Menu` 正是默认值 —— 补出来的这次转移**与 Startup 同批**执行，于是 `OnEnter(Menu)` 的 spawn 代码看到的还是空 world。用 `Commands` 插开机资源要等帧末 flush，那时菜单已经试着建过了，报的是 `Res<DevFont> failed validation: Resource does not exist`。做法：开机资源（字体 handle、资产根、种子）直接 `world.insert_resource(...)`，不走 `Commands`。
+19. **UI 也要有相机**：一个场景里没有任何 `Camera` 时，画面就是纯 `ClearColor`，UI 一个字都不画，而且**不报错**。菜单场景原本只打算放 UI，结果截图整片黑，补一台 `Camera2d`（带自己的 `ClearColorConfig`）才有字。
+20. **0.20 的点击交互要自己搭三层**：① `bevy_ui::Button` 与 `Interaction` 已弃用（prelude 里带着 `expect(deprecated)`，`-D warnings` 直接吃错），点击只能读 `MessageReader<PointerClick>`；② `UiPickingSettings/MeshPickingSettings::require_markers` 判的是**相机**（`Has<UiPickingCamera>`），逐节点的开关是 `Pickable`；③ 命中测试报的是**最深的**节点，所以按钮文字要点得动就得沿 `ChildOf` 往上找动作，而**横跨整屏的顶栏必须挂 `Pickable::IGNORE`** —— 否则它背后那条带上的地板永远点不到（这条是静默失效：按钮一切正常，只是格子点不出来）。
+21. **Bevy 的 `top` 不等于 Godot 的负 `offset_top`**：`player_hud.gd` 的 `PRESET_BOTTOM_WIDE + offset_top=-120` 直译成 `top: 120` 会把 HUD 摆到屏幕**顶上**，正确换算是 `bottom: 8 + height: 112`。编译、运行都不报错，只有截图看得出来 —— 所以 §7.2 的每一处绝对定位都要配一张图再收工。
+22. **回主菜单时，跨局存活的 UI 记忆会静默毒化下一局**（B5 收尾时发现，三条都是实跑的账）：`OnEnter(Menu)` 把面板实体随 `BoardUi` 收走，但资源与 `Local` 留着 ——
+    - `Paused(true)` 留着 → 下一局开局即冻结，而画面看着完全正常；
+    - 「上次挂着哪个待决事项」存在 `Local`/资源里 → 新局第一次报价与上一局最后一次恰好相同（`Buy(LandId(0))` 很常见）时一比相等，**模态永远不再弹**，回合机停在 `WaitDecision` 等一个不存在的按钮；
+    - `Local<Option<Entity>>` 存着面板句柄 → 面板早被 `despawn_board_view` 收走，下一次开合对着死实体 `despawn`。
+
+    做法：**「现在显示成什么样」的键挂在实体上**（`ModalRoot((player, Pending))`、`TileCard(TileView)`、`PausePanel` 标记 + 查询），实体没了键自然没了，不需要谁记得去清；只有真正无法从实体推出的记忆（`RecentCard` 这种消息副产品、`PauseMenuOpen`、`Paused`、`SelectedTile`）留在资源里，由 `ui::reset_ui_state` 在 `OnEnter(Menu)` 链上统一清。判据：任何 `Local`/资源缓存都要能回答「换一局时它归谁清」。
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
 `game_app` 里做成 `NM_SHOT=<路径>` 的环境开关（**按墙钟 1.5s 触发、2.5s 自行 `exit(0)`**，见上面第 5/10 条），
 后续每个渲染阶段都能用它自动生成对比图。
+
+B5 之后这条判据升级为「**每个界面都必须有一条不依赖鼠标键盘的入口**」，否则那个界面等于没被验收过。
+现有的环境变量清单（全部只在开发侧生效，不进游戏逻辑）：
+
+| 变量 | 作用 | 为什么需要 |
+|---|---|---|
+| `NM_SHOT=<路径>` / `NM_SHOT_AT=<秒>` | 截图并自行退出 / 推迟截图时刻 | 见第 5、10 条 |
+| `NM_CAM_SIZE=<秒>` | 相机取景边长（`0` = 整盘） | §7.1 要求两个值都可配 |
+| `NM_SCENE=board` | 跳过主菜单直接开局 | 菜单→对局的流转要能分别拍 |
+| `NM_SEED=<十进制>` | 钉死对局种子 | 几百回合后崩一次，换种子就换一种死法，查无可查 |
+| `NM_AUTOROLL=1` | 自动玩家：自动掷骰 + 接受报价 | 「打完一局」的验收不能靠人点几百次 |
+| `NM_AUTOGAP=<秒>` | 自动玩家两次动作的间隔（默认 0.9） | 长跑设 0，否则一局要十几分钟 |
+| `NM_AUTODECISION=0` | 只掷骰不回答 | 回合停在第一个 `WaitDecision`，模态才拍得到 |
+| `NM_DECISION=buy\|upgrade\|rent\|card` | 直接挂出某个模态 | 升级要凑齐同色组、收据要有人踩过别人的地，一局里未必碰得到 |
+| `NM_PAUSE=1` | 开局即暂停 | ESC 按不了，暂停面板否则进不了截图 |
+| `NM_PICK_TILE=列:行` | 开局即选中那格 | 点格详情卡是新增交互，没有鼠标可点 |
+| `NM_MENULOOP=<秒>` | 到点回主菜单，再过同样的秒数自动开一局 | 场景来回切换的错误（§6.1 坑 22）只在**第二局**暴露，不自动走这条路径就验不到 |
 
 **已定案（B4，10-14）：`Label3D` 的等价物走「UI 层投影跟随」**。三条路的取舍：
 
@@ -432,13 +470,35 @@ Godot 端**全项目没有任何字体资源**，也没设 `gui/theme/custom_fon
 | **B2b** 骰 + 回合状态机 ✅ 完成 (10-13) | `Rng`+`GameSeed`（测试固定、客户端取时钟）；`TurnPhase` 8 态（`Walking` 尚无生产者）；`begin_turn`/`roll_dice`/`resolve_landing`/`end_turn`/`game_over` 五个 system；`TurnOrder`/`GameSession`；7 条流程消息 | `cargo test -p game_core` **33 项**（21 单元 + 12 App 级）：整条回合流水逐字比对、同种子复现 / 换种子改变、非当前玩家的请求被忽略、破产者整轮跳过、服刑跳两格后出狱且组件被摘掉、只剩一人即终局、空阵容立即终局不挂死、20 回合不 panic 且回合计数与掷骰次数一致 | 1 天 |
 | **B2c** 定步时行走 ✅ 完成 (10-14) | `WalkClock` + `WalkQueue`：把「掷出 N 点」展开成逐格推进，`WalkStarted`/`TileStepped`/`PlayerArrived` 取代瞬时落格；`GameRules.walk_step_interval`（0 即跳过动画，测试走 `GameRules::instant()`）；`BoardDef::walk_path` 纯主环展开 | `cargo test -p game_core` **41 项**（25 单元 + 16 App 级）全过：绕回起点经过、分支死路不进主环（两个方向都挡住）、interval=0 一帧走完与 B2b 等价（既有 12 个 App 用例不改语义全绿）、0.18s 定步节奏逐格推进；`NM_SHOT` 冒烟截图无退化 | 0.5 天 |
 | **B3** 经济核心（无 UI） ✅ 完成 (10-14) | property（买/租/升级/抵押标记/同色组/等级差 ≤1）、bank（存贷息，**修 #1**）、stock（tick/买/卖/分红/历史，**修 #4 #5**）、card 效果枚举化（**修 #3**）、落格六段流水线 + `DecisionChosen` 闭环、`Rng` 分三条子流 | `cargo test -p game_core` **97 项**（56 单元 + 41 App 级）全过：`calculate_rent` 全分支表驱动、贷款额度端到端、破产释放地块、分红只在第 5 tick、部分成交不超付、四效果卡牌（含 #3 回归）、40 回合长跑现金流水可审计 + 无负现金 + 同种子复现整条经济流水；`NM_SHOT` 冒烟无退化（`target/b3.png`） | 1.5 天 |
-| **B4** 等轴测渲染切片 ✅ 完成 (10-14) | `render/{board,land,token,camera,labels}.rs` + `RenderPlugin`：地面密铺、主环与分支路面（含对角，**顺带修掉 B0 的 90° 旋转错位**）、道路格地板按 `TileKind` 配色、组色条朝向绑定的土地、建筑按 `BuildingLevel` 显隐 + 按 `PlayerColor` 换色、棋子按 `TileStepped` 逐格插值带正弦弹跳、入狱/瞬移 0.4s 滑移、正交相机 rig 指数平滑跟随、`ClearColor`、格名走 UI 投影（§六 定案）；`NM_AUTOROLL` 开发用自动玩家（B5 删） | `check.sh` 五项退出码 0；`NM_SHOT` 出图三张（`target/b4_static.png` 整盘、`target/b4_play.png` 跟随 + 30 回合后的建筑与现金流、`target/b4_wide.png`）；运行日志零 WARN。**与 Godot 版并排肉眼对比仍待用户确认**（本机没装 godot CLI，出不了参照图） | 1.5–2 天 |
-| **B5** UI + 交互 | 中文字体接入；顶栏/HUD/4 个模态；`bevy_picking` 点格与按钮；`DecisionChosen` 闭环；主菜单→对局流转；暂停 | 能完整打完一局（2 人类玩家）；长中文文案换行不溢出 | 2–3 天 |
+| **B4** 等轴测渲染切片 ✅ 完成 (10-14) | `render/{board,land,token,camera,labels}.rs` + `RenderPlugin`：地面密铺、主环与分支路面（含对角，**顺带修掉 B0 的 90° 旋转错位**）、道路格地板按 `TileKind` 配色、组色条朝向绑定的土地、建筑按 `BuildingLevel` 显隐 + 按 `PlayerColor` 换色、棋子按 `TileStepped` 逐格插值带正弦弹跳、入狱/瞬移 0.4s 滑移、正交相机 rig 指数平滑跟随、`ClearColor`、格名走 UI 投影（§六 定案）；`NM_AUTOROLL` 开发用自动玩家（B5 没删，改成跑长对局的验收工具，见 §10.1） | `check.sh` 五项退出码 0；`NM_SHOT` 出图三张（`target/b4_static.png` 整盘、`target/b4_play.png` 跟随 + 30 回合后的建筑与现金流、`target/b4_wide.png`）；运行日志零 WARN。**与 Godot 版并排肉眼对比仍待用户确认**（本机没装 godot CLI，出不了参照图） | 1.5–2 天 |
+| **B5** UI + 交互 ✅ 完成 (10-14) | 顶栏（提示行/阶段/掷骰/暂停/返回主菜单）、底部玩家 HUD、四个模态（买地/升级/租金收据/卡面）由 `PendingDecision` **状态驱动**、暂停菜单 + core 的 `Paused` 闸门、主菜单↔对局流转（`Scene` 状态 + 清场 + `reset_ui_state`）、`bevy_picking` 按钮与点格、**新增交互：点格显示详情卡**；开发侧旋钮 `NM_SCENE`/`NM_SEED`/`NM_AUTOGAP`/`NM_AUTODECISION`/`NM_DECISION`/`NM_PAUSE`/`NM_PICK_TILE`/`NM_MENULOOP` | 见 §10.1 的 B5 验收记录 | 2–3 天 |
 | **B6** AI | `Controller::Ai` + utility 决策 system（规则树版），发同样的 `RequestRoll`/`DecisionChosen`；伪延迟 `500–1500ms` | 3 AI + 1 人类可完局；AI 不阻塞（分帧） | 2 天 |
 | **B7** 音频/设置/存档 | `bevy_audio` BGM+SFX、`GameRules.walk_step_interval` 挂到设置、`GameSnapshot` 存读、自动存档 | 存读回归测试：存档→读档→再存档字节一致 | 1.5 天 |
 | **B8** 打磨/发布 | K 线图、飘字、结算画面、i18n、Windows 打包 | `DEV_PLAN.md` M3 里程碑 | 2 天+ |
 
-逻辑层（B0–B3）**已完成**，追平现有 Godot 进度并顺手修掉 §三 的 14 处缺陷（#1–#8、#12–#14；#9/#10 是「刻意不搬」，#11 随 B7）。表现层的几何与动画（B4）**已完成**，剩下的成本集中在 B5 的 UI 与交互（约 2–3 天）—— 那才是「能打完一局」的一步。
+逻辑层（B0–B3）**已完成**，追平现有 Godot 进度并顺手修掉 §三 的 14 处缺陷（#1–#8、#12–#14；#9/#10 是「刻意不搬」，#11 随 B7）。表现层的几何与动画（B4）**已完成**。**B5 也已完成** —— 「能打完一局」这条线在 10-14 打通，验收记录见下面 §10.1。
+
+### 10.1 B5 验收记录（10-14）
+
+**「能完整打完一局（2 人类玩家）」**：`NM_AUTOROLL=1 NM_AUTOGAP=0 NM_SEED=20261014` 跑真窗口，
+**55 回合后 `玩家 0 破产（付不出 18000）` → `对局结束：55 回合`**，屏幕上留下「胜者：孙小美！」、
+败者卡片显示 `[破产]`、`掷骰` 自动变灰（`can_roll` 在 `Over` 为假）。同种子重跑两次结果逐字一致（55 回合、同一笔 18000），
+说明 B5 新加的输入侧派发没有引入不确定性。自动玩家与按钮走的是**同一对消息**（`RequestRoll`/`DecisionChosen`），
+所以这条长跑同时证明了按钮那条缝是通的。
+
+**「长中文文案换行不溢出」**：逐屏截图核对过 9 张 —— 主菜单、对局空盘、等待掷骰（按钮亮）、
+买地模态（南京路 / 外滩商业区两种配色）、升级模态、租金收据、卡面通知、暂停面板、点格详情卡（地产格 + 死胡同格两种）。
+换行靠 `info_row` 的键列定宽 + 值列 `flex_grow`，父节点被宽度约束时 Parley 按 `WordBoundary` 切开 CJK（§6.1 坑 3）。
+
+**B5 过程中发现并修掉的三个静默缺陷**（都是「回主菜单再开一局」这条路径上的，全部记进 §6.1 坑 22）：
+`Paused` 跨局残留导致新局开局即冻结；`OpenModal`/`Local` 残留导致下一局第一次相同的报价永远不弹模态；
+`Local<Option<Entity>>` 存着已被 `BoardUi` 收走的面板句柄。修法统一是**把「现在显示成什么样」的键挂到实体上**，
+只有消息副产品（`RecentCard`）留在资源里由 `reset_ui_state` 清。另外 `Over` 阶段的旁白会盖掉胜者那句，改成该阶段不写旁白。
+
+**测试**：`game_app` 新增 7 项 App 级测试（该 crate 现在 8 项全过；规则层 98 项）（`ui::tests`），用 `MinimalPlugins` + 手搓 `PointerClick`
+覆盖点击派发这一层：按到按钮**文字**要能沿父链找到按钮、待决事项/暂停/`Disabled` 三种情况必须拦住掷骰、
+无动作实体（遮罩）不吃事件、`Decide` 的主语是待决玩家而非当前玩家、`CloseInfo`/`TogglePause` 只写 UI 资源。
+这条缝是 B5 唯一「错了不会立刻看得见」的地方，而它不需要窗口。
 
 ---
 

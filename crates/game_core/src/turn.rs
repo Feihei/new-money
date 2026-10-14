@@ -93,6 +93,18 @@ pub struct GameSession {
     pub seed: u64,
 }
 
+/// 暂停总闸（`pause_menu.gd` 的 `get_tree().paused`）。规则层只读，写的永远是输入侧。
+///
+/// 这不违反 §4.6 的红线：红线管的是「表现层替逻辑做决定」，而暂停与掷骰同属玩家意图 ——
+/// 它说的是「现在不许推进」，不是「推进到下一步」。
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Paused(pub bool);
+
+/// `run_if` 条件：没按下暂停才让回合机的 system 跑。
+pub fn not_paused(paused: Res<Paused>) -> bool {
+    !paused.0
+}
+
 /// `begin_turn_system` 的出口消息打包（四个 `MessageWriter` 参数比挂 `#[allow]` 好读）。
 #[derive(SystemParam)]
 pub struct TurnWriters<'w> {

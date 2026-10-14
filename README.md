@@ -9,30 +9,34 @@
 环境：Rust stable（workspace 用 edition 2024）、Python 3（跑棋盘校验）。
 
 ```bash
-cargo run -p game_app     # 打开窗口：等轴测棋盘 + 中文 HUD
-NM_AUTOROLL=1 cargo run -p game_app   # 还没有掷骰按钮，这个开关让对局自己打（B5 删掉）
+cargo run -p game_app     # 打开窗口：主菜单 → 新游戏 → 用顶栏「掷骰」玩
 cargo test -p game_core   # 规则层测试，不需要窗口
 ./check.sh                # 质量门：fmt + 测试 + check + clippy(-D warnings) + 棋盘校验
 ```
 
-窗口里可以调的：`NM_CAM_SIZE`（取景高度，默认 8 = Godot 的 `CAM_SIZE`，`0` 整盘取景）、
-`NM_SHOT=<路径>` + `NM_SHOT_AT=<秒>`（截一张 PNG 后自行退出，给 agent 自查画面用）。
+窗口里可以调的（全部只在开发侧生效）：`NM_CAM_SIZE`（取景高度，默认 8 = Godot 的 `CAM_SIZE`，`0` 整盘取景）、
+`NM_SHOT=<路径>` + `NM_SHOT_AT=<秒>`（截一张 PNG 后自行退出，给 agent 自查画面用）、
+`NM_AUTOROLL=1`（自动玩家替人点按钮，跑长对局用；配 `NM_AUTOGAP=0` 提速、`NM_SEED=<十进制>` 复现）。
+完整清单与每条的存在理由见 [`.agents/MIGRATION.md` §6.1](./.agents/MIGRATION.md)。
 
 Bevy 精确锁定 `=0.20.0`（见 `Cargo.toml`），**不要 `cargo update`**。
 
 ## 现在到哪一步了
 
-开发中，**还不能完整玩一局**（缺 UI 与交互）。已完成 B0–B4：
+**两个真人已经能打完一局**（B5 完成，10-14：固定种子 55 回合后一名玩家破产、屏幕留下「胜者：X！」）。已完成 B0–B5：
 
 - 数据层：棋盘 / 卡牌 / 股票的 JSON schema、加载与校验（`assets/data/**`）
 - 世界装配：土地与玩家成为实体，起始现金等规则常量收拢到 `GameRules`
-- 回合状态机 + 种子化骰子 + 定步时行走：可复现、可 headless 对局，规则层 97 项测试
+- 回合状态机 + 种子化骰子 + 定步时行走：可复现、可 headless 对局，规则层 98 项测试
 - 经济核心：地产买卖与升级、银行存贷息、股票行情与分红、卡牌效果，落格走六段流水线；
   移植过程中顺手修掉 Godot 侧 14 处缺陷里的 10 处
 - 表现层：等轴测棋盘（地面密铺 / 含对角的路面 / 组色条 / 按等级堆叠的建筑）、
   棋子逐格插值与弹跳、正交相机 rig 跟随、格名投影、中文字体、截图自查钩子
+- UI 与交互：顶栏（掷骰/暂停/返回主菜单）、底部玩家 HUD、四个模态（买地 / 升级 / 租金收据 / 卡面通知）、
+  暂停菜单（ESC + 按钮，规则层 `Paused` 闸门）、主菜单↔对局流转、`bevy_picking` 点格，
+  以及**源项目没有的新交互**：点一格看它的详情卡（类型 / 位置 / 地价 / 归属 / 等级 / 整张租金表）
 
-进行中/待做：B5 UI 与交互（掷骰按钮、HUD、四个对话框、`bevy_picking` 点格）→ B6 AI → B7 存档/设置 → B8 打磨发布。逐阶段的验收标准见 [`.agents/MIGRATION.md` §十](./.agents/MIGRATION.md)。
+待做：B6 AI（`Controller::Ai` + utility 决策）→ B7 音频/设置/存档 → B8 打磨发布（K 线图、结算画面、打包）。逐阶段的验收标准见 [`.agents/MIGRATION.md` §十](./.agents/MIGRATION.md)。
 
 ## 目录结构
 

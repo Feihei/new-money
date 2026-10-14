@@ -10,9 +10,12 @@ use bevy::prelude::*;
 use game_core::board::{BoardDef, TileDef};
 use game_core::prelude::ActiveBoard;
 
-use super::{darkened, dim, flat, palette, yaw_to_face};
+use super::{Rendered, TilePick, darkened, dim, flat, palette, yaw_to_face};
 
 /// 一次性铺好不会变的几何。之后只有土地建筑与棋子会动。
+///
+/// 每块都挂 [`Rendered`]：回主菜单要靠它一次性清场，漏一块就会在下一局棋盘下面
+/// 留一块颜色不对的地板，而那种「偶发的脏格子」最难查回来源。
 pub(crate) fn spawn_board_geometry(
     mut commands: Commands,
     active: Res<ActiveBoard>,
@@ -79,6 +82,7 @@ fn road_between(
         // 局部 +X 对齐到路段方向：正交段与对角段同一条公式（Godot `board.gd:248`）
         Transform::from_xyz((a.x + c.x) / 2.0, dim::ROAD_H / 2.0, (a.z + c.z) / 2.0)
             .with_rotation(Quat::from_rotation_y(yaw_to_face(delta))),
+        Rendered,
     ));
     1
 }
@@ -117,6 +121,13 @@ fn tile_floor(
         Mesh3d(meshes.add(Cuboid::new(b.cell_size, dim::FLOOR_H, b.cell_size))),
         MeshMaterial3d(flat(mats, darkened(palette::tile(t.kind), 0.5))),
         Transform::from_xyz(pos.x, dim::FLOOR_Y, pos.z),
+        // 点格详情卡的命中目标：`TilePick` + `Pickable` 成对出现，缺一个就是「点了没反应」
+        TilePick {
+            col: t.col,
+            row: t.row,
+        },
+        Pickable::default(),
+        Rendered,
     ));
     1
 }
@@ -160,6 +171,7 @@ fn group_strip(
                 .unwrap_or(Color::srgb(0.6, 0.6, 0.6)),
         )),
         Transform::from_xyz(at.x, dim::STRIP_Y, at.z).with_rotation(Quat::from_rotation_y(yaw)),
+        Rendered,
     ));
 }
 
@@ -205,6 +217,7 @@ fn spawn_ground(
                 Mesh3d(meshes.add(Cuboid::new(b.cell_size, dim::FLOOR_H, b.cell_size))),
                 MeshMaterial3d(flat(mats, checker)),
                 Transform::from_xyz(pos.x, dim::FLOOR_Y, pos.z),
+                Rendered,
             ));
             blocks += 1;
         }

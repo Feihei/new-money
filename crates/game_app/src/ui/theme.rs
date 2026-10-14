@@ -1,0 +1,132 @@
+//! UI 尺寸与配色。
+//!
+//! 数值逐条对应 Godot 的 `scripts/ui/*.gd` 与 `scenes/ui/*.tscn`，出处注在行尾。
+//! 集中一处是 §7.2 的要求：Bevy 没有可视化排版编辑器，每次调间距都要重编译，
+//! 常量散在六个文件里会把「看着不对」变成考古。
+//!
+//! 字号有个陷阱：Godot 没写 `font_size` 的地方是它默认的 **16**，不是 24 也不是 20。
+
+/// 颜色。`Color::srgba` 是 const fn，所以这些都能留在编译期。
+pub mod col {
+    use bevy::prelude::*;
+
+    // ===== 遮罩与面板 =====
+    /// 四个弹层同值（`property_dialog.gd:112` 等）
+    pub const OVERLAY: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
+    /// `pause_menu.tscn:22`
+    pub const PAUSE_DIM: Color = Color::srgba(0.0, 0.0, 0.0, 0.60);
+    /// 面板底（各 dialog 同值）
+    pub const PANEL: Color = Color::srgba(0.10, 0.10, 0.14, 0.98);
+    pub const BORDER_BUY: Color = Color::srgba(0.75, 0.65, 0.25, 0.80); // property_dialog.gd:130
+    pub const BORDER_UPGRADE: Color = Color::srgba(0.25, 0.60, 0.35, 0.80); // upgrade_dialog.gd:117
+    pub const BORDER_RENT: Color = Color::srgba(0.75, 0.55, 0.25, 0.80); // rent_notice.gd:78
+    pub const BORDER_CARD: Color = Color::srgba(0.75, 0.60, 0.90, 0.85); // card_notice.gd:82
+
+    // ===== 文字 =====
+    pub const TITLE_GOLD: Color = Color::srgb(1.00, 0.85, 0.30);
+    pub const HINT: Color = Color::srgb(0.90, 0.90, 0.95); // board.tscn:47
+    pub const PHASE: Color = Color::srgb(1.00, 0.90, 0.30); // board.tscn:54
+    pub const BODY: Color = Color::srgb(0.82, 0.82, 0.88);
+    pub const MUTED: Color = Color::srgb(0.70, 0.70, 0.75);
+    pub const KEY: Color = Color::srgb(0.60, 0.60, 0.65);
+    pub const VALUE: Color = Color::srgb(0.75, 0.75, 0.80);
+    /// 要付的钱（地价、升级费）
+    pub const COST: Color = Color::srgb(1.00, 0.50, 0.40);
+    /// 收益与增幅
+    pub const GAIN: Color = Color::srgb(0.40, 0.85, 0.50);
+    pub const CASH_OK: Color = Color::srgb(0.50, 0.85, 0.55);
+    pub const CASH_BAD: Color = Color::srgb(1.00, 0.45, 0.45);
+    pub const BANKRUPT: Color = Color::srgb(1.00, 0.35, 0.35);
+    pub const JAILED: Color = Color::srgb(1.00, 0.60, 0.30);
+    /// 卡面「效果：」那一行（card_notice.gd:138）
+    pub const RESULT: Color = Color::srgb(0.55, 0.85, 0.60);
+    pub const CHANCE: Color = Color::srgb(0.30, 0.70, 0.85); // card_notice.gd:13
+    pub const FATE: Color = Color::srgb(0.80, 0.60, 0.95); // card_notice.gd:14
+
+    // ===== 按钮（dialog 的 `_style_button`）=====
+    pub const BTN_PRIMARY: Color = Color::srgb(0.25, 0.55, 0.30);
+    pub const BTN_PRIMARY_HOVER: Color = Color::srgb(0.30, 0.65, 0.35);
+    pub const BTN_SECONDARY: Color = Color::srgb(0.22, 0.22, 0.28);
+    pub const BTN_SECONDARY_HOVER: Color = Color::srgb(0.30, 0.30, 0.38);
+    pub const BTN_DISABLED: Color = Color::srgb(0.15, 0.15, 0.18);
+    pub const BTN_BORDER: Color = Color::srgb(0.45, 0.45, 0.50);
+
+    pub const BTN_TEXT_DISABLED: Color = Color::srgb(0.45, 0.45, 0.50);
+
+    // ===== 玩家 HUD（player_hud.gd）=====
+    pub const HUD_CARD: Color = Color::srgba(0.12, 0.12, 0.16, 0.90); // :72
+    pub const HUD_CARD_ACTIVE: Color = Color::srgba(0.18, 0.20, 0.14, 0.95); // :208
+    pub const HUD_BORDER_ACTIVE: Color = Color::srgba(0.70, 0.65, 0.25, 0.90); // :213
+    pub const HUD_NAME: Color = Color::srgb(0.88, 0.88, 0.92); // :95
+    pub const HUD_CASH: Color = Color::srgb(0.50, 0.85, 0.55); // :104
+    pub const HUD_PROPS: Color = Color::srgb(0.65, 0.65, 0.72); // :112
+
+    // ===== 主菜单（main_menu.tscn）=====
+    pub const MENU_BG: Color = Color::srgb(0.12, 0.12, 0.16); // :21
+    pub const MENU_TITLE: Color = Color::srgb(1.00, 0.85, 0.20); // :38
+    pub const MENU_FOOTER: Color = Color::srgb(0.50, 0.50, 0.55); // :79
+}
+
+/// 字号。名字按用途而不是按数字，改数值不改调用点。
+pub mod size {
+    /// Godot 未覆盖处的默认字号
+    pub const BODY: f32 = 16.0;
+    /// HUD 的地产数与状态标签
+    pub const SMALL: f32 = 13.0;
+    /// 弹层信息行与副标题
+    pub const ROW: f32 = 14.0;
+    pub const NAME: f32 = 15.0;
+    pub const CARD_TITLE: f32 = 26.0;
+    pub const DIALOG_TITLE: f32 = 22.0;
+    pub const BUY_TITLE: f32 = 24.0;
+    pub const RENT_AMOUNT: f32 = 32.0;
+    pub const PAUSE_TITLE: f32 = 28.0;
+    pub const MENU_TITLE: f32 = 48.0;
+    /// 卡面「确定」按钮（`card_notice.gd:150` 的 17，比其余按钮大一档）
+    pub const CARD_OK: f32 = 17.0;
+}
+
+/// 布局尺寸（px）。
+pub mod layout {
+    /// 顶栏：`board.tscn:33-41` TOP_WIDE + 边距 16、gap 12
+    pub const TOP_BAR_INSET: f32 = 16.0;
+    pub const TOP_BAR_GAP: f32 = 12.0;
+    pub const ROLL_BUTTON: [f32; 2] = [140.0, 44.0];
+    pub const BACK_BUTTON: [f32; 2] = [120.0, 44.0];
+
+    /// 弹层面板宽与「左上角相对屏幕中心」的偏移（`PRESET_CENTER` + `position`）
+    pub const BUY_PANEL: [f32; 3] = [400.0, -200.0, -220.0];
+    pub const UPGRADE_PANEL: [f32; 3] = [400.0, -200.0, -180.0];
+    pub const RENT_PANEL: [f32; 3] = [380.0, -190.0, -150.0];
+    pub const CARD_PANEL: [f32; 3] = [420.0, -210.0, -170.0];
+    /// 弹层按钮：买地/升级成对（`property_dialog.gd:194,202`），收据与卡面各一颗（`:123`、`:148`）
+    pub const MODAL_BUTTON: [f32; 2] = [140.0, 42.0];
+    pub const OK_BUTTON: [f32; 2] = [160.0, 42.0];
+    pub const CARD_OK_BUTTON: [f32; 2] = [180.0, 44.0];
+    /// 按钮行间距（`btn_box` 的 separation 20）与信息行组间距（InfoPanel 的 4）
+    pub const BTN_ROW_GAP: f32 = 20.0;
+    pub const INFO_ROW_GAP: f32 = 4.0;
+    /// 信息行键列宽：买地/升级面板是 100，升级面板 110（`_add_info_row`）
+    pub const INFO_KEY_W: f32 = 100.0;
+    pub const INFO_KEY_W_WIDE: f32 = 110.0;
+    /// 面板圆角 / 边框宽 / 内边距（横 24~26、纵 20~22，取 Godot 的众数）
+    pub const PANEL_RADIUS: f32 = 10.0;
+    pub const PANEL_BORDER: f32 = 2.0;
+    pub const PANEL_PAD_X: f32 = 24.0;
+    pub const PANEL_PAD_Y: f32 = 20.0;
+    pub const BTN_RADIUS: f32 = 6.0;
+    pub const BTN_BORDER: f32 = 1.0;
+
+    /// 玩家 HUD：底部通栏。Godot 的 `PRESET_BOTTOM_WIDE` + `offset_top=-120 / bottom=-8 /
+    /// 左右 8`（`player_hud.gd:15-20`），翻成 Bevy 是「bottom 8 + 高 112」
+    pub const HUD_BOTTOM: [f32; 4] = [112.0, 8.0, 8.0, 8.0];
+    pub const HUD_CARD_GAP: f32 = 4.0;
+    pub const HUD_ROW_GAP: f32 = 10.0;
+    pub const HUD_DOT: f32 = 14.0;
+
+    /// 主菜单：VBox 宽 320、gap 16（`main_menu.tscn:23-33`）
+    pub const MENU_WIDTH: f32 = 320.0;
+    pub const MENU_GAP: f32 = 16.0;
+    pub const MENU_BUTTON_H: f32 = 48.0;
+    pub const PAUSE_PANEL: [f32; 2] = [320.0, 280.0];
+}

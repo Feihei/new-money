@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 use crate::board::TileIndex;
 use crate::rules::GameRules;
+use crate::world::Gameplay;
 
 use std::collections::VecDeque;
 
@@ -156,6 +157,7 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
                     WalkQueue::default(),
                     BankBalance::default(),
                     crate::stock::StockHoldings::default(),
+                    Gameplay,
                 ))
                 .id()
         })

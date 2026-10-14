@@ -9,7 +9,7 @@ use game_core::prelude::{
     ActiveBoard, BuildingLevel, GameRules, LandId, Owner, PlayerColor, PlayerId,
 };
 
-use super::{darkened, dim, flat, palette};
+use super::{Rendered, darkened, dim, flat, palette};
 
 /// 挂在 Land 实体上（Land 实体本身没有 `Transform`，方体是各自摆好世界坐标的独立实体）。
 #[derive(Component)]
@@ -52,6 +52,7 @@ pub(crate) fn attach_land_visuals(
                 ),
             )),
             Transform::from_xyz(center.x, dim::PLOT_H / 2.0, center.z),
+            Rendered,
         ));
 
         let w = footprint * dim::BUILD_SCALE;
@@ -65,6 +66,7 @@ pub(crate) fn attach_land_visuals(
                     MeshMaterial3d(owner_mat.clone()),
                     Transform::from_xyz(center.x, y, center.z),
                     Visibility::Hidden,
+                    Rendered,
                 ))
                 .id();
             slabs.push(slab);

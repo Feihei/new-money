@@ -62,21 +62,22 @@ pub mod prelude {
     pub use crate::rules::GameRules;
     pub use crate::settle::{Books, InsufficientFunds};
     pub use crate::stock::{PriceHistory, StockDef, StockHoldings, StockId, StockPrice, StockSet};
-    pub use crate::turn::{GameSession, TurnOrder, TurnPhase};
+    pub use crate::turn::{GameSession, Paused, TurnOrder, TurnPhase, not_paused};
     pub use crate::walk::{WalkClock, advance_walk_clock_system, walk_step_system};
-    pub use crate::world::{ActiveBoard, begin_game_system};
+    pub use crate::world::{ActiveBoard, CoreSet, Gameplay, begin_game_system};
 }
 
 use prelude::{
     BankVisited, BoardDef, BuyOffered, CardDrawn, CardSet, CashChanged, DecisionChosen, DiceRolled,
     GameOver, GameRules, GameSeed, GameSetup, JailSkipped, JsonAssetLoader, LandBought,
-    LandUpgraded, Landing, MarketClock, PendingDecision, PlayerArrived, PlayerBankrupt,
+    LandUpgraded, Landing, MarketClock, Paused, PendingDecision, PlayerArrived, PlayerBankrupt,
     PlayerJailed, PlayerReleased, PlayerTeleported, RentDue, RequestRoll, StockPriceChanged,
     StockSet, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted,
     UpgradeOffered, WalkClock, WalkStarted, advance_walk_clock_system, begin_game_system,
     decision_system, walk_step_system,
 };
-use turn::{begin_turn_system, end_turn_system, game_over_system, roll_dice_system};
+use turn::{begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system};
+use world::CoreSet;
 
 /// 规则层 Plugin：注册数据资产与其 JSON loader、对局 resource、回合消息与状态机。
 /// 只链接 bevy 的无渲染特性子集（`default_app` + `bevy_time`），因此 `cargo test -p game_core`
@@ -107,6 +108,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<GameRules>()
             .init_resource::<GameSetup>()
             .init_resource::<GameSeed>()
+            .init_resource::<Paused>()
             .init_resource::<WalkClock>()
             .init_resource::<MarketClock>()
             .init_resource::<Landing>()
@@ -141,20 +143,33 @@ impl Plugin for CoreGamePlugin {
             .add_message::<DecisionChosen>()
             .init_state::<TurnPhase>()
             // 装配世界：初始态的 OnEnter 不会触发，所以用 in_state(Boot)
-            .add_systems(Update, begin_game_system.run_if(in_state(TurnPhase::Boot)))
+            .add_systems(
+                Update,
+                begin_game_system
+                    .in_set(CoreSet::Boot)
+                    .run_if(in_state(TurnPhase::Boot)),
+            )
             .add_systems(OnEnter(TurnPhase::TurnStart), begin_turn_system)
             .add_systems(
                 Update,
                 (
-                    roll_dice_system.run_if(in_state(TurnPhase::WaitRoll)),
-                    walk_step_system.run_if(in_state(TurnPhase::Walking)),
-                    decision_system.run_if(in_state(TurnPhase::WaitDecision)),
+                    roll_dice_system
+                        .run_if(in_state(TurnPhase::WaitRoll))
+                        .run_if(not_paused),
+                    walk_step_system
+                        .run_if(in_state(TurnPhase::Walking))
+                        .run_if(not_paused),
+                    decision_system
+                        .run_if(in_state(TurnPhase::WaitDecision))
+                        .run_if(not_paused),
                 ),
             )
             // 时钟在 First 推进、Update 消费：同帧内先累计、后定步
             .add_systems(
                 First,
-                advance_walk_clock_system.run_if(in_state(TurnPhase::Walking)),
+                advance_walk_clock_system
+                    .run_if(in_state(TurnPhase::Walking))
+                    .run_if(not_paused),
             )
             // 落格流水线：解释一次格子 → 四个域各自结算 → 由 pending 决定去哪一阶段。
             // 顺序写成显式 chain：域的先后决定同帧消息的次序，靠隐式冲突排序说出来不算数。

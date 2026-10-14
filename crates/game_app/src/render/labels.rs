@@ -12,7 +12,7 @@
 use bevy::prelude::*;
 use game_core::prelude::ActiveBoard;
 
-use super::{DevFont, dim};
+use super::{DevFont, Rendered, dim};
 
 /// 一个格名标签：它在世界里的锚点（投影每帧重算，rig 一动标签就跟动）。
 #[derive(Component)]
@@ -59,6 +59,8 @@ fn spawn_label(commands: &mut Commands, font: &Handle<Font>, at: Vec3, text: Str
         },
         // 排在 HUD 之下：两者同属 UI 层，靠 `ZIndex` 分先后
         ZIndex(-1),
+        // 完全退出命中测试：标签正好压在格子正上方，不忽略它就会吃掉点格详情卡的点击
+        Pickable::IGNORE,
         Text::new(text),
         TextFont {
             font: font.clone().into(),
@@ -66,6 +68,7 @@ fn spawn_label(commands: &mut Commands, font: &Handle<Font>, at: Vec3, text: Str
             ..default()
         },
         TextColor(Color::WHITE),
+        Rendered,
     ));
 }
 
