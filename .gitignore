@@ -1,5 +1,10 @@
 /target/
+# tmp files
+.tmp/
 # 开发期 CJK 字体（思源黑体开发授权版，未子集化所以体积大；将来子集化后再入库）
 assets/font/dev_*
+# 角色模型：二进制、git 无法 diff，每重新导出一次就在历史里永久多存一份完整拷贝。
+# 迭代期只留在工作区；理由与「定稿后再决定」见 .agents/MIGRATION.md §7.5
+assets/model/
 *.pdb
 *.exe
