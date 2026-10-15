@@ -8,7 +8,7 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    Decision, DecisionChosen, PendingDecision, RequestRoll, TurnOrder, TurnPhase,
+    Decision, DecisionChosen, Pending, PendingDecision, RequestRoll, TurnOrder, TurnPhase,
 };
 
 pub struct AutopilotPlugin;
@@ -77,15 +77,19 @@ fn auto_answer(
     mut answers: MessageWriter<DecisionChosen>,
     mut due: Local<f32>,
 ) {
-    let Some((player, _)) = pending.active() else {
+    let Some((player, about)) = pending.active() else {
         return;
     };
     if time.elapsed_secs() < *due {
         return;
     }
     *due = time.elapsed_secs() + gap.0;
-    answers.write(DecisionChosen {
-        player,
-        action: Decision::Accept,
-    });
+    // 报价类答「接受」，收据/卡面/柜台答「已阅」。这一分工不是讲究：柜台只认
+    // `Acknowledge`（`landing.rs` 的 match），一律发 `Accept` 的写法会让长跑的自动玩家
+    // 第一个踩到银行格的回合就永久停在 `WaitDecision` —— 而且不报错，只是不动了。
+    let action = match about {
+        Pending::Buy(_) | Pending::Upgrade(_) => Decision::Accept,
+        Pending::RentNotice(_) | Pending::Card | Pending::BankTeller => Decision::Acknowledge,
+    };
+    answers.write(DecisionChosen { player, action });
 }

@@ -11,6 +11,7 @@
 //! 事件就停在那里，不会穿到顶栏按钮上。
 
 pub mod dialog;
+pub mod finance;
 pub mod menu;
 pub mod pause;
 pub mod player_hud;
@@ -20,8 +21,9 @@ pub mod top_bar;
 
 use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
-    ActiveBoard, Decision, DecisionChosen, Paused, PendingDecision, RequestRoll, TurnOrder,
-    TurnPhase,
+    ActiveBoard, AtmAccess, BankOp, BankOpRequested, Decision, DecisionChosen, Paused, Pending,
+    PendingDecision, RequestRoll, StockId, StockTradeRequested, TradeSide, TurnOrder, TurnPhase,
+    bank_op_allowed,
 };
 
 use theme::{col, layout, size};
@@ -35,25 +37,33 @@ impl Plugin for UiPlugin {
             .insert_resource(pause::PauseMenuOpen::from_env())
             // `NM_PICK_TILE=列:行` 开局即选中那格：详情卡否则也进不了截图
             .insert_resource(tile_info::SelectedTile::from_env())
-            // `NM_DECISION=buy|upgrade|rent|card` 直接挂出某个模态（见 [`dialog::ForceModal`]）
+            // `NM_DECISION=buy|upgrade|rent|card|bank` 直接挂出某个模态（见 [`dialog::ForceModal`]）
             .insert_resource(dialog::ForceModal::from_env())
+            // `NM_STOCK=1` / `NM_ATM=1`：两块浮层的非鼠标入口，理由同 `NM_PAUSE`
+            .insert_resource(finance::StockPanelOpen::from_env())
+            .insert_resource(finance::AtmPanelOpen::from_env())
             .add_systems(
                 Update,
                 (
                     (top_bar::spawn_top_bar, player_hud::spawn_player_hud).in_set(UiSet::Boot),
+                    // 集合成员**逐个标**：`sync_stock_panel` 的参数包 `StockView<'w, 's>`
+                    // 带两个生命周期，而元组整体 `.in_set(...)` 在这种元素上会退化到
+                    // `ObserverSystemExt` 的重载解析然后崩（§6.1 坑 14）。
+                    // 门禁仍然在集合上（见下面 `configure_sets`），这里只是标成员。
                     (
-                        pause::toggle_pause_on_escape,
-                        top_bar::refresh_top_bar,
-                        top_bar::hint_from_events,
-                        player_hud::refresh_player_hud,
-                        dialog::remember_drawn_card,
-                        dialog::force_decision,
-                        dialog::sync_modal,
-                        pause::sync_pause_menu,
-                        tile_info::pick_tile,
-                        tile_info::sync_tile_card,
-                    )
-                        .in_set(UiSet::Live),
+                        pause::toggle_pause_on_escape.in_set(UiSet::Live),
+                        top_bar::refresh_top_bar.in_set(UiSet::Live),
+                        top_bar::hint_from_events.in_set(UiSet::Live),
+                        player_hud::refresh_player_hud.in_set(UiSet::Live),
+                        dialog::remember_drawn_card.in_set(UiSet::Live),
+                        dialog::force_decision.in_set(UiSet::Live),
+                        dialog::sync_modal.in_set(UiSet::Live),
+                        finance::sync_atm_panel.in_set(UiSet::Live),
+                        finance::sync_stock_panel.in_set(UiSet::Live),
+                        pause::sync_pause_menu.in_set(UiSet::Live),
+                        tile_info::pick_tile.in_set(UiSet::Live),
+                        tile_info::sync_tile_card.in_set(UiSet::Live),
+                    ),
                     // 派发与悬停**不**受 `ActiveBoard` 门禁：主菜单上没有 ActiveBoard，
                     // 而「新游戏」「退出」恰恰只能在那里派发。曾把它们挂进 Live 集
                     // （`resource_exists::<ActiveBoard>`），后果是菜单按钮点了没反应、
@@ -73,6 +83,11 @@ impl Plugin for UiPlugin {
                 UiSet::Live.run_if(resource_exists::<ActiveBoard>),
             ),
         );
+        // `NM_ATM=1`：把 ATM 卡直接发到当前回合玩家手里。浮层要有不靠鼠标的入口，
+        // 而这张卡的正常来源是「路过银行格」—— 那一掷不由截图脚本控制。
+        if std::env::var_os("NM_ATM").is_some() {
+            app.add_systems(Update, finance::dev_grant_atm);
+        }
     }
 }
 
@@ -86,7 +101,11 @@ enum UiSet {
 }
 
 /// 挂在可点击节点上。语义是「按下去要做的事」，不携带状态 —— 能不能做由派发方判断。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 只 `Clone` 不 `Copy`：`Trade` 要带 `StockId`（里面是字符串）。命中测试每个点击只走一次，
+/// 这点拷贝不值得为它把股票 id 换成索引 —— 换成索引就得在派发处再解回股票，
+/// 而「按的是哪只股」在面板上本来就以 id 为准。
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub enum UiAction {
     NewGame,
     Quit,
@@ -99,6 +118,21 @@ pub enum UiAction {
     CloseInfo,
     /// 开合暂停菜单（ESC 键与「继续」「暂停」按钮同一个动作）
     TogglePause,
+    /// 开合 ATM 浮层（B5b：路过银行格解锁）
+    ToggleAtm,
+    /// 开合证券浮层（B5b：常驻入口，每回合掷骰前可交易）
+    ToggleStock,
+    /// 办一笔银行操作，金额在建按钮那一刻就烤成定值（面板跟着钱包重建，「全部」才是准的）
+    BankOp {
+        op: BankOp,
+        amount: i64,
+    },
+    /// 买卖股票
+    Trade {
+        stock: StockId,
+        side: TradeSide,
+        shares: u32,
+    },
 }
 
 /// 存在即禁用：着色变灰，且点击不派发。对应 Godot 的 `button.disabled = true`。
@@ -128,23 +162,75 @@ pub(crate) fn can_roll(phase: TurnPhase, paused: &Paused, pending: &PendingDecis
     phase == TurnPhase::WaitRoll && !paused.0 && pending.active().is_none()
 }
 
+/// 证券交易的窗口与掷骰同一条：`WaitRoll`、没暂停、没被模态占住。
+/// 「本回合怎么安排钱」属于掷骰之前的决定，走完路再买就变成事后诸葛。
+/// 判据直接复用 [`can_roll`]，两条从此不会各自漂移。
+pub(crate) fn can_trade(phase: TurnPhase, paused: &Paused, pending: &PendingDecision) -> bool {
+    can_roll(phase, paused, pending)
+}
+
+/// 柜台此刻开着的话，是关于谁的。
+pub(crate) fn counter_of(pending: &PendingDecision) -> Option<Entity> {
+    match pending.active() {
+        Some((player, Pending::BankTeller)) => Some(player),
+        _ => None,
+    }
+}
+
+/// 此刻能不能办这一笔银行操作。面板着色与派发共用这一句（同 `can_roll` 的理由）。
+///
+/// 与规则层同构但不完全等价：这里多挡一条「挂着别的模态时不办」。买地/升级/收据/卡面
+/// 的内容是弹出那一刻烤死的，中途改钱包会让它显示过期数字 —— 那些遮罩本来也压住了浮层。
+/// 真正的权限仍由 `bank::bank_op_system` 判，这里只管「该不该亮」。
+pub(crate) fn can_bank_op(
+    op: BankOp,
+    paused: &Paused,
+    pending: &PendingDecision,
+    atm: &AtmAccess,
+) -> bool {
+    if paused.0 {
+        return false;
+    }
+    let counter = counter_of(pending).is_some();
+    let other_modal_up = pending.active().is_some() && !counter;
+    !other_modal_up && bank_op_allowed(op, atm.0.is_some() || counter, counter)
+}
+
+/// 这笔操作的**主语**是谁：柜台优先（那就是柜台的客人），否则是 ATM 卡的持有人。
+/// 按钮不携带玩家句柄 —— 带错了就是「甲的点击花掉乙的钱」，由状态说了算更安全。
+pub(crate) fn bank_op_subject(pending: &PendingDecision, atm: &AtmAccess) -> Option<Entity> {
+    counter_of(pending).or(atm.0)
+}
+
 /// 回主菜单时清掉 UI 侧**跨局存活**的记忆。挂在 `OnEnter(Scene::Menu)` 的链上。
 ///
 /// 面板实体本身不用管：它们都带 [`BoardUi`]，由 `despawn_board_view` 整块收走，
-/// 而「现在挂着什么」这类键已经改挂在实体上（见 [`dialog::ModalRoot`]、[`tile_info::TileView`]），
-/// 随实体一起消失。剩下这四个是纯资源，不清的后果各不一样，且都**不会报错**：
+/// 而「现在挂着什么」这类键已经改挂在实体上（见 [`dialog::ModalRoot`]、[`tile_info::TileView`]、
+/// [`finance::FinanceStamp`]），随实体一起消失。剩下这些是纯资源，不清的后果各不一样，
+/// 且都**不会报错**：
 /// - `Paused` 留着 true → 下一局开局即冻结，画面看着完全正常；
 /// - `PauseMenuOpen` 留着 true → 下一局第一帧就把面板盖回来；
 /// - `SelectedTile` 留着 → 下一局凭空显示上一局那格的详情卡；
-/// - `RecentCard` 留着 → 下一局第一次抽到「无内容」的卡时，显示的是上一局那张的文案。
+/// - `RecentCard` 留着 → 下一局第一次抽到「无内容」的卡时，显示的是上一局那张的文案；
+/// - `AtmPanelOpen`/`StockPanelOpen` 留着 → 下一局第一帧就浮着两块上一局的账面板。
+///
+/// 三个「开机时定」的开关一律复原到 `from_env()` 而不是 `default()`：开机的菜单入场
+/// 就在这一条链上（`NM_SCENE=board` 时它先跑一次），清成 `default()` 会把开发旋钮
+/// 自己抹掉 —— 结果是 `NM_ATM`/`NM_STOCK`/`NM_PAUSE` 三张截图永远拍不到东西，
+/// 而「每个界面都得有一条不靠鼠标的入口」这条判据就形同虚设。真人没设环境变量，
+/// `from_env()` 就是 `default()`，行为不变。
 pub(crate) fn reset_ui_state(
     mut commands: Commands,
     mut memory: ResMut<dialog::RecentCard>,
     mut selected: ResMut<tile_info::SelectedTile>,
+    mut atm: ResMut<finance::AtmPanelOpen>,
+    mut stock: ResMut<finance::StockPanelOpen>,
 ) {
     memory.0 = None;
     selected.0 = None;
-    commands.insert_resource(pause::PauseMenuOpen::default());
+    *atm = finance::AtmPanelOpen::from_env();
+    *stock = finance::StockPanelOpen::from_env();
+    commands.insert_resource(pause::PauseMenuOpen::from_env());
     commands.insert_resource(Paused::default());
 }
 
@@ -362,6 +448,8 @@ struct Gate<'w> {
     order: Option<Res<'w, TurnOrder>>,
     phase: Res<'w, State<TurnPhase>>,
     paused: Res<'w, Paused>,
+    /// ATM 卡是谁的。`init_resource` 常驻，菜单态也在（所以派发不受门禁，见 `build`）
+    atm: Res<'w, AtmAccess>,
 }
 
 /// 命中测试给出的实体那一侧：动作、禁用标记、父链。
@@ -372,26 +460,31 @@ struct Widgets<'w, 's> {
     parents: Query<'w, 's, &'static ChildOf>,
 }
 
-/// 派发的三个出口。`AppExit` 在 0.20 也是消息，所以能和另两个收在一起；
+/// 派发的出口。`AppExit` 在 0.20 也是消息，所以能和另几个收在一起；
 /// `MessageWriter` 只带一个生命周期（`MessageReader` 才带两个，§六 坑 13）。
 #[derive(SystemParam)]
 struct Sends<'w> {
     rolls: MessageWriter<'w, RequestRoll>,
     answers: MessageWriter<'w, DecisionChosen>,
+    ops: MessageWriter<'w, BankOpRequested>,
+    trades: MessageWriter<'w, StockTradeRequested>,
     exit: MessageWriter<'w, AppExit>,
 }
 
-/// 只动 UI 自己状态的那两个开关。
+/// 只动 UI 自己状态的那几个开关。
 #[derive(SystemParam)]
 struct UiState<'w> {
     toggle: ResMut<'w, pause::PauseMenuOpen>,
     selected: ResMut<'w, tile_info::SelectedTile>,
+    atm: ResMut<'w, finance::AtmPanelOpen>,
+    stock: ResMut<'w, finance::StockPanelOpen>,
 }
 
 /// 读 `PointerClick`，沿父链找到动作后派发。
 ///
 /// 「能不能做」全部在这里判一次，而不是散到各按钮的构造代码里：按钮只声明自己代表什么。
 /// 这也意味着弹层开着时掷骰必然无效 —— 判据是 `PendingDecision`，不是「有没有遮罩」。
+/// 规则层还会再判一次（认主语、认窗口），所以这里放行错了也只是白点一下。
 fn dispatch_ui_actions(
     mut clicks: MessageReader<PointerClick>,
     gate: Gate,
@@ -404,13 +497,15 @@ fn dispatch_ui_actions(
         if click.button != PointerButton::Primary {
             continue;
         }
-        let Some((entity, action)) = action_of(&widgets.actions, &widgets.parents, click.entity)
-        else {
+        let Some(entity) = action_owner(&widgets.actions, &widgets.parents, click.entity) else {
             continue;
         };
         if widgets.disabled.get(entity).is_ok() {
             continue;
         }
+        let Ok(action) = widgets.actions.get(entity) else {
+            continue;
+        };
         match action {
             UiAction::NewGame => next_scene.set(crate::scene::Scene::Board),
             UiAction::BackToMenu => next_scene.set(crate::scene::Scene::Menu),
@@ -432,26 +527,63 @@ fn dispatch_ui_actions(
                 if let Some((player, _)) = gate.pending.active() {
                     sends.answers.write(DecisionChosen {
                         player,
-                        action: answer,
+                        action: *answer,
                     });
                 }
             }
+            // 银行操作：主语是柜台的客人，或 ATM 卡的持有人（两者不会同时挂着别人）
+            UiAction::BankOp { op, amount } => {
+                if !can_bank_op(*op, &gate.paused, &gate.pending, &gate.atm) {
+                    continue;
+                }
+                if let Some(player) = bank_op_subject(&gate.pending, &gate.atm) {
+                    sends.ops.write(BankOpRequested {
+                        player,
+                        op: *op,
+                        amount: *amount,
+                    });
+                }
+            }
+            // 股票：只有当前回合玩家在掷骰前能下单，与规则层同一条窗口
+            UiAction::Trade {
+                stock,
+                side,
+                shares,
+            } => {
+                if !can_trade(*gate.phase.get(), &gate.paused, &gate.pending) {
+                    continue;
+                }
+                let Some(player) = gate.order.as_ref().and_then(|o| o.current()) else {
+                    continue;
+                };
+                sends.trades.write(StockTradeRequested {
+                    player,
+                    stock: stock.clone(),
+                    side: *side,
+                    shares: *shares,
+                });
+            }
             UiAction::CloseInfo => ui.selected.0 = None,
             UiAction::TogglePause => ui.toggle.flip(),
+            UiAction::ToggleAtm => ui.atm.0 = !ui.atm.0,
+            UiAction::ToggleStock => ui.stock.0 = !ui.stock.0,
         }
     }
 }
 
-/// 沿父链找第一个带 `UiAction` 的祖先，返回它和它的动作。
-fn action_of(
+/// 沿父链找第一个带 [`UiAction`] 的祖先，返回那个祖先实体。
+///
+/// 返回实体而不是动作本身：`UiAction` 从 `Copy` 降级成 `Clone`（`Trade` 带着股票 id），
+/// 而派发方本来就要再读一次组件去 `match`，把引用传回去比在这儿拷一份更直。
+fn action_owner(
     actions: &Query<&UiAction>,
     parents: &Query<&ChildOf>,
     hit: Entity,
-) -> Option<(Entity, UiAction)> {
+) -> Option<Entity> {
     let mut current = Some(hit);
     while let Some(entity) = current {
-        if let Ok(action) = actions.get(entity) {
-            return Some((entity, *action));
+        if actions.get(entity).is_ok() {
+            return Some(entity);
         }
         current = parents.get(entity).ok().map(|p| p.parent());
     }
@@ -473,7 +605,7 @@ fn hover_feedback(
     mut buttons: Query<(&mut BackgroundColor, &Palette, Option<&Disabled>)>,
 ) {
     let mut repaint = |event_entity: Entity, hover: bool| {
-        let Some((entity, _)) = action_of(&actions, &parents, event_entity) else {
+        let Some(entity) = action_owner(&actions, &parents, event_entity) else {
             return;
         };
         if let Ok((mut bg, palette, disabled)) = buttons.get_mut(entity)
@@ -561,20 +693,32 @@ mod tests {
     struct Seen {
         rolls: Vec<Entity>,
         answers: Vec<(Entity, Decision)>,
+        ops: Vec<(Entity, BankOp, i64)>,
+        trades: Vec<(Entity, String, TradeSide, u32)>,
     }
 
     fn collect(
         mut seen: ResMut<Seen>,
         mut rolls: MessageReader<RequestRoll>,
         mut answers: MessageReader<DecisionChosen>,
+        mut ops: MessageReader<BankOpRequested>,
+        mut trades: MessageReader<StockTradeRequested>,
     ) {
         seen.rolls.extend(rolls.read().map(|r| r.player));
         seen.answers
             .extend(answers.read().map(|a| (a.player, a.action)));
+        seen.ops
+            .extend(ops.read().map(|o| (o.player, o.op, o.amount)));
+        seen.trades.extend(
+            trades
+                .read()
+                .map(|t| (t.player, t.stock.0.clone(), t.side, t.shares)),
+        );
     }
 
     /// 一套只装配到「能跑 UI 派发」的对局骨架：两名玩家、一颗掷骰按钮（文字是它的子节点）、
-    /// 一颗决策按钮、一颗灰掉的按钮、一层没有动作的遮罩，外加详情卡与暂停的两颗 UI 态按钮。
+    /// 一颗决策按钮、一颗灰掉的按钮、一层没有动作的遮罩，外加详情卡、暂停、
+    /// B5b 的银行操作与股票买卖、两个浮层开关各一颗。
     struct Harness {
         app: App,
         /// `TurnOrder` 的当前玩家
@@ -587,6 +731,10 @@ mod tests {
         bare: Entity,
         close: Entity,
         pause: Entity,
+        deposit: Entity,
+        buy: Entity,
+        toggle_atm: Entity,
+        toggle_stock: Entity,
     }
 
     impl Harness {
@@ -599,10 +747,15 @@ mod tests {
                 .add_message::<PointerClick>()
                 .add_message::<RequestRoll>()
                 .add_message::<DecisionChosen>()
+                .add_message::<BankOpRequested>()
+                .add_message::<StockTradeRequested>()
                 .add_message::<AppExit>()
                 .init_resource::<Seen>()
                 .init_resource::<tile_info::SelectedTile>()
                 .init_resource::<pause::PauseMenuOpen>()
+                .init_resource::<finance::AtmPanelOpen>()
+                .init_resource::<finance::StockPanelOpen>()
+                .init_resource::<AtmAccess>()
                 .insert_resource(Paused(paused))
                 .insert_resource(pending)
                 .add_systems(Update, (dispatch_ui_actions, collect).chain());
@@ -625,6 +778,23 @@ mod tests {
             let bare = app.world_mut().spawn(Node::default()).id();
             let close = app.world_mut().spawn(UiAction::CloseInfo).id();
             let pause = app.world_mut().spawn(UiAction::TogglePause).id();
+            let deposit = app
+                .world_mut()
+                .spawn(UiAction::BankOp {
+                    op: BankOp::Deposit,
+                    amount: 1_000,
+                })
+                .id();
+            let buy = app
+                .world_mut()
+                .spawn(UiAction::Trade {
+                    stock: StockId("stock_001".to_string()),
+                    side: TradeSide::Buy,
+                    shares: 10,
+                })
+                .id();
+            let toggle_atm = app.world_mut().spawn(UiAction::ToggleAtm).id();
+            let toggle_stock = app.world_mut().spawn(UiAction::ToggleStock).id();
 
             // 先把阶段落实，再点击才不会落在 `Boot` 上
             app.update();
@@ -638,7 +808,23 @@ mod tests {
                 bare,
                 close,
                 pause,
+                deposit,
+                buy,
+                toggle_atm,
+                toggle_stock,
             }
+        }
+
+        /// 把 ATM 卡发到某人手里。
+        fn set_atm(&mut self, holder: Entity) {
+            self.app.world_mut().resource_mut::<AtmAccess>().0 = Some(holder);
+        }
+
+        fn offer(&mut self, player: Entity, about: Pending) {
+            self.app
+                .world_mut()
+                .resource_mut::<PendingDecision>()
+                .offer(player, about);
         }
 
         /// 点一格实体，跑两帧收消息。
@@ -726,14 +912,86 @@ mod tests {
         assert!(h.app.world().resource::<pause::PauseMenuOpen>().0);
     }
 
-    /// 回归：派发曾被挂进 `UiSet::Live`（门是 `resource_exists::<ActiveBoard>`），
-    /// 而主菜单上没有 ActiveBoard —— 「新游戏」「退出」点了没反应，只能点窗口关闭。
-    /// B5 验收测不到它：`NM_MENULOOP` 直改 Scene 状态，绕过了派发系统。
-    ///
-    /// 所以这里必须走**真实 Plugin 接线**（不是上面手搓 dispatch 的 Harness）：
-    /// 菜单态、无 ActiveBoard，点一颗带动作的按钮，必须能切进对局。
+    /// ATM 认人不认回合：卡是甲的，就该由甲办，哪怕现在轮到乙行动。
+    /// 这条如果写成「主语 = 当前回合玩家」，路过银行那一格的人反而永远花不到自己的卡 ——
+    /// 那正是这条路最初设想失败的地方。
     #[test]
-    fn the_menu_dispatches_without_an_active_board() {
+    fn an_atm_op_names_the_card_holder_not_the_current_player() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let holder = h.other;
+        h.set_atm(holder);
+        h.click(h.deposit);
+        assert_eq!(h.seen().ops, vec![(holder, BankOp::Deposit, 1_000)]);
+    }
+
+    /// 没卡又没柜台 = 一点都没发生。UI 不该替规则层「先记一笔再说」。
+    #[test]
+    fn a_bank_op_with_no_window_is_dropped() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        h.click(h.deposit);
+        assert!(h.seen().ops.is_empty(), "两个窗口都不在还派发出操作");
+    }
+
+    /// 柜台与卡分属两人时（同帧交接的那一瞬间真会出现），主语归柜台。
+    /// 柜台是规则层主动挂上来的「正在等你」，卡只是地理事实。
+    #[test]
+    fn the_counter_outranks_the_card_for_the_subject() {
+        let mut h = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let customer = h.player;
+        let holder = h.other;
+        h.set_atm(holder);
+        h.offer(customer, Pending::BankTeller);
+        h.click(h.deposit);
+        assert_eq!(h.seen().ops, vec![(customer, BankOp::Deposit, 1_000)]);
+    }
+
+    /// 交易只在掷骰之前。走完路再下单 = 事后补决策，规则层的窗口判据也是这么写的。
+    #[test]
+    fn a_trade_only_goes_through_before_the_roll() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let me = h.player;
+        h.click(h.buy);
+        assert_eq!(
+            h.seen().trades,
+            vec![(me, "stock_001".to_string(), TradeSide::Buy, 10)],
+            "掷骰前那颗按钮该下单，且主语是当前玩家"
+        );
+
+        let mut later = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let other = later.other;
+        later.offer(other, Pending::RentNotice(LandId(3)));
+        later.click(later.buy);
+        assert!(
+            later.seen().trades.is_empty(),
+            "已经掷过骰、回合卡在决策上，还能下单？"
+        );
+    }
+
+    /// 暂停也要挡住交易：判据与掷骰同源（`can_trade` 就是 `can_roll`）。
+    #[test]
+    fn pausing_blocks_a_trade_request() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, true, PendingDecision::default());
+        h.click(h.buy);
+        assert!(h.seen().trades.is_empty(), "暂停时不该放行下单");
+    }
+
+    #[test]
+    fn the_two_floating_panels_toggle_from_their_own_buttons() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        h.click(h.toggle_atm);
+        assert!(h.app.world().resource::<finance::AtmPanelOpen>().0);
+        h.click(h.toggle_stock);
+        assert!(h.app.world().resource::<finance::StockPanelOpen>().0);
+        h.click(h.toggle_atm);
+        assert!(!h.app.world().resource::<finance::AtmPanelOpen>().0);
+    }
+
+    /// 真实接线的 headless 应用：UiPlugin + ScenePlugin 都装上，补齐 `CoreGamePlugin`
+    /// 平时注册的那批资源，没有棋盘、没有窗口。
+    ///
+    /// 为什么要走真接线而不是手搓 system：坑 23 那类错误是「挂错集合/挂错门禁」，
+    /// 只有按生产环境的同一份接线才暴露得出来。
+    fn wired() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_plugins(StatesPlugin)
@@ -744,9 +1002,12 @@ mod tests {
             .init_state::<TurnPhase>()
             .insert_resource(Paused::default())
             .insert_resource(PendingDecision::default())
+            .init_resource::<AtmAccess>()
             .add_message::<PointerClick>()
             .add_message::<RequestRoll>()
             .add_message::<DecisionChosen>()
+            .add_message::<BankOpRequested>()
+            .add_message::<StockTradeRequested>()
             .add_message::<AppExit>()
             // hover_feedback 读的两条 picking 消息，真实应用由 picking 后端注册
             .add_message::<PointerOver>()
@@ -754,6 +1015,18 @@ mod tests {
             // `spawn_menu` 要 `Res<DevFont>`（0.20 缺资源不再静默跳过而是 panic）；
             // 占位句柄即可 —— headless 不渲染，只求菜单装配系统跑得过去
             .insert_resource(crate::render::DevFont(Handle::default()));
+        app
+    }
+
+    /// 回归：派发曾被挂进 `UiSet::Live`（门是 `resource_exists::<ActiveBoard>`），
+    /// 而主菜单上没有 ActiveBoard —— 「新游戏」「退出」点了没反应，只能点窗口关闭。
+    /// B5 验收测不到它：`NM_MENULOOP` 直改 Scene 状态，绕过了派发系统。
+    ///
+    /// 所以这里必须走**真实 Plugin 接线**（不是上面手搓 dispatch 的 Harness）：
+    /// 菜单态、无 ActiveBoard，点一颗带动作的按钮，必须能切进对局。
+    #[test]
+    fn the_menu_dispatches_without_an_active_board() {
+        let mut app = wired();
 
         // picking 后端 headless 不跑，按钮点击手拼一份最小可信的消息
         let button = app.world_mut().spawn(UiAction::NewGame).id();
@@ -767,6 +1040,37 @@ mod tests {
             app.world().resource::<State<crate::scene::Scene>>().get(),
             &crate::scene::Scene::Board,
             "菜单点击没被派发 —— dispatch 是否又被挂回了 ActiveBoard 门后？"
+        );
+    }
+
+    /// 坑 22 那条判据（「换一局时它归谁清」）对 B5b 新增的两块浮层同样成立：
+    /// 面板实体随 `BoardUi` 被收走，而「开着吗」存在资源里。留着不清，
+    /// 下一局第一帧就浮着上一局的 ATM 与行情 —— 不报错，只是数字是别人的。
+    #[test]
+    fn going_back_to_the_menu_closes_both_floating_panels() {
+        let mut app = wired();
+        // 进对局、把两块面板都打开（真实点击走的也是这两个开关）
+        app.world_mut()
+            .resource_mut::<NextState<crate::scene::Scene>>()
+            .set(crate::scene::Scene::Board);
+        app.update();
+        app.insert_resource(finance::AtmPanelOpen(true));
+        app.insert_resource(finance::StockPanelOpen(true));
+
+        app.world_mut()
+            .resource_mut::<NextState<crate::scene::Scene>>()
+            .set(crate::scene::Scene::Menu);
+        for _ in 0..3 {
+            app.update();
+        }
+
+        assert!(
+            !app.world().resource::<finance::AtmPanelOpen>().0,
+            "回主菜单没关 ATM 浮层"
+        );
+        assert!(
+            !app.world().resource::<finance::StockPanelOpen>().0,
+            "回主菜单没关证券浮层"
         );
     }
 

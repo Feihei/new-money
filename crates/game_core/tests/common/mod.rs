@@ -17,13 +17,14 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
-    ActiveBoard, BankBalance, BankVisited, Books, BuildingLevel, BuyOffered, CardDrawn, CardId,
-    CardKind, CashChanged, DataHandles, Decision, DecisionChosen, Deck, DiceRolled, GameOver,
-    GameRules, GameSeed, GameSession, GameSetup, JailSkipped, LandBought, LandId, LandUpgraded,
-    Market, Mortgaged, Owner, Pending, PendingDecision, PlayerArrived, PlayerBankrupt, PlayerId,
-    PlayerJailed, PlayerReleased, PlayerTeleported, RentDue, RequestRoll, Rng, StockPriceChanged,
-    StockTraded, StockVisited, TileIndex, TileStepped, TokenPosition, TurnEnded, TurnOrder,
-    TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet,
+    ActiveBoard, AtmAccess, BankBalance, BankOp, BankOpDone, BankOpRequested, BankVisited, Books,
+    BuildingLevel, BuyOffered, CardDrawn, CardId, CardKind, CashChanged, DataHandles, Decision,
+    DecisionChosen, Deck, DiceRolled, GameOver, GameRules, GameSeed, GameSession, GameSetup,
+    JailSkipped, LandBought, LandId, LandUpgraded, Market, MarketClock, Mortgaged, Owner, Pending,
+    PendingDecision, PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed, PlayerReleased,
+    PlayerTeleported, RentDue, RequestRoll, Rng, StockId, StockPriceChanged, StockTradeRequested,
+    StockTraded, StockVisited, TileIndex, TileStepped, TokenPosition, TradeSide, TurnEnded,
+    TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -38,6 +39,15 @@ pub fn asset_root() -> PathBuf {
 #[derive(Resource, Default)]
 pub struct Inputs(pub Vec<Entity>);
 
+/// 测试侧的「点证券面板的买/卖按钮」。同理经一条泵 system 转成消息，
+/// 于是「阶段不对就不受理」这条门禁被真的走了一遍，而不是被测试绕过。
+#[derive(Resource, Default)]
+pub struct Trades(pub Vec<StockTradeRequested>);
+
+/// 测试侧的「点柜台/ATM 的四个按钮」。
+#[derive(Resource, Default)]
+pub struct BankRequests(pub Vec<BankOpRequested>);
+
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
 /// 要测经济就换成 `AcceptAll`（买得起就买、能升就升）。
@@ -48,6 +58,9 @@ pub enum DecisionPolicy {
     #[default]
     DeclineAll,
     AcceptAll,
+    /// 什么都不答，回合停在 `WaitDecision`。要看「窗口开着的时候能办什么」的用例用它 ——
+    /// 柜台与买地报价都是先看再答，自动答掉就观察不到了。
+    Hold,
 }
 
 /// 代替 B5 的对话框：挂着待决事项就按策略答一次。
@@ -58,6 +71,9 @@ fn auto_answer_system(
     pending: Res<PendingDecision>,
     mut answers: MessageWriter<DecisionChosen>,
 ) {
+    if *policy == DecisionPolicy::Hold {
+        return;
+    }
     let Some((player, about)) = pending.active() else {
         return;
     };
@@ -66,6 +82,11 @@ fn auto_answer_system(
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::AcceptAll) => Decision::Accept,
         // 收据与卡面无论如何都算「看完了」
         (Pending::RentNotice(_) | Pending::Card, _) => Decision::Acknowledge,
+        // 柜台只认「办完」。这里必须显式答一句，否则每一个踩到银行格的回合都会
+        // 停在 `WaitDecision`，把所有长跑用例整片挂死 —— 编译器逼这一条写出来。
+        (Pending::BankTeller, _) => Decision::Acknowledge,
+        // `Hold` 在函数开头就返回了，这一支只为穷尽存在
+        (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::Hold) => return,
     };
     answers.write(DecisionChosen { player, action });
 }
@@ -115,6 +136,7 @@ struct BookReaders<'w, 's> {
     teleported: MessageReader<'w, 's, PlayerTeleported>,
     cards: MessageReader<'w, 's, CardDrawn>,
     bank: MessageReader<'w, 's, BankVisited>,
+    bank_ops: MessageReader<'w, 's, BankOpDone>,
     stock_visit: MessageReader<'w, 's, StockVisited>,
     traded: MessageReader<'w, 's, StockTraded>,
     prices: MessageReader<'w, 's, StockPriceChanged>,
@@ -131,6 +153,23 @@ fn who(players: &Query<&PlayerId>, e: Entity) -> String {
 /// 地块显示成 `L3` 而不是 `LandId(3)`，流水读起来像人话。
 fn land(id: LandId) -> String {
     format!("L{}", id.0)
+}
+
+/// 银行操作的中文短动词。流水要能被断言读出来，`Deposit(1000)` 那种一屏看不出方向。
+fn op_verb(op: BankOp) -> &'static str {
+    match op {
+        BankOp::Deposit => "存",
+        BankOp::Withdraw => "取",
+        BankOp::Borrow => "借",
+        BankOp::Repay => "还",
+    }
+}
+
+fn side_verb(side: game_core::prelude::TradeSide) -> &'static str {
+    match side {
+        game_core::prelude::TradeSide::Buy => "买",
+        game_core::prelude::TradeSide::Sell => "卖",
+    }
 }
 
 fn collect_flow(mut log: ResMut<Observed>, mut r: FlowReaders, players: Query<&PlayerId>) {
@@ -273,14 +312,23 @@ fn collect_books(
             m.loan
         ));
     }
+    for m in r.bank_ops.read() {
+        log.0.push(format!(
+            "BankOp({}{}{})",
+            who(&players, m.player),
+            op_verb(m.op),
+            m.amount
+        ));
+    }
     for m in r.stock_visit.read() {
         log.0
             .push(format!("StockVisit({})", who(&players, m.player)));
     }
     for m in r.traded.read() {
         log.0.push(format!(
-            "Trade({}{}{}股@{:.2})",
+            "Trade({}{}{}{}股@{:.2})",
             who(&players, m.player),
+            side_verb(m.side),
             m.stock.0,
             m.shares,
             m.price
@@ -295,9 +343,22 @@ fn collect_books(
     }
 }
 
-fn pump_inputs(mut inputs: ResMut<Inputs>, mut rolls: MessageWriter<RequestRoll>) {
+fn pump_inputs(
+    mut inputs: ResMut<Inputs>,
+    mut trades: ResMut<Trades>,
+    mut asks: ResMut<BankRequests>,
+    mut rolls: MessageWriter<RequestRoll>,
+    mut trade_writes: MessageWriter<StockTradeRequested>,
+    mut op_writes: MessageWriter<BankOpRequested>,
+) {
     for player in inputs.0.drain(..) {
         rolls.write(RequestRoll { player });
+    }
+    for t in trades.0.drain(..) {
+        trade_writes.write(t);
+    }
+    for a in asks.0.drain(..) {
+        op_writes.write(a);
     }
 }
 
@@ -315,6 +376,8 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .insert_resource(rules)
         .insert_resource(seed)
         .init_resource::<Inputs>()
+        .init_resource::<Trades>()
+        .init_resource::<BankRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -650,6 +713,43 @@ pub fn bank_of(app: &mut App, player: Entity) -> (i64, i64) {
         .get::<BankBalance>()
         .expect("玩家应有银行账户");
     (b.deposit, b.loan)
+}
+
+/// 替 `player` 按一次证券面板的买/卖按钮（`id` 用 `stocks.json` 里的字符串）。
+/// 走 `Trades` 队列而非直塞消息：这样「只在掷骰前受理」那条门禁是真的被走到的。
+pub fn trade(app: &mut App, player: Entity, id: &str, side: TradeSide, shares: u32) {
+    app.world_mut()
+        .resource_mut::<Trades>()
+        .0
+        .push(StockTradeRequested {
+            player,
+            stock: StockId(id.to_string()),
+            side,
+            shares,
+        });
+}
+
+/// 替 `player` 按一次柜台/ATM 面板上的金额按钮。
+pub fn bank_ask(app: &mut App, player: Entity, op: BankOp, amount: i64) {
+    app.world_mut()
+        .resource_mut::<BankRequests>()
+        .0
+        .push(BankOpRequested { player, op, amount });
+}
+
+/// 本回合谁有 ATM 资格（`None` = 没人路过银行格）。
+pub fn atm_holder(app: &App) -> Option<Entity> {
+    app.world().resource::<AtmAccess>().0
+}
+
+/// 现在挂着「谁的什么待决事项」。
+pub fn pending_of(app: &App) -> Option<(Entity, Pending)> {
+    app.world().resource::<PendingDecision>().active()
+}
+
+/// 行情钟走到第几天（一个 tick 就是一天）。
+pub fn tick_of(app: &App) -> u32 {
+    app.world().resource::<MarketClock>().tick
 }
 
 /// 现金审计：每位玩家的 `Σ delta` 与钱包余额逐一对账。

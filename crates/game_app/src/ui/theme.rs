@@ -21,6 +21,9 @@ pub mod col {
     pub const BORDER_UPGRADE: Color = Color::srgba(0.25, 0.60, 0.35, 0.80); // upgrade_dialog.gd:117
     pub const BORDER_RENT: Color = Color::srgba(0.75, 0.55, 0.25, 0.80); // rent_notice.gd:78
     pub const BORDER_CARD: Color = Color::srgba(0.75, 0.60, 0.90, 0.85); // card_notice.gd:82
+    /// B5b 新增：柜台与两块浮层的描边（源项目没有这两块，配色跟着语义走）
+    pub const BORDER_BANK: Color = Color::srgba(0.45, 0.70, 0.90, 0.85);
+    pub const BORDER_STOCK: Color = Color::srgba(0.55, 0.80, 0.65, 0.85);
 
     // ===== 文字 =====
     pub const TITLE_GOLD: Color = Color::srgb(1.00, 0.85, 0.30);
@@ -129,4 +132,19 @@ pub mod layout {
     pub const MENU_GAP: f32 = 16.0;
     pub const MENU_BUTTON_H: f32 = 48.0;
     pub const PAUSE_PANEL: [f32; 2] = [320.0, 280.0];
+
+    // ===== B5b：银行与证券（源项目没有这两块，数值是本项目自己的）=====
+    /// 顶栏两个入口按钮（ATM / 证券）
+    pub const FINANCE_BUTTON: [f32; 2] = [96.0, 44.0];
+    /// ATM 浮层：左上，压在顶栏下面。与右上角的详情卡、左下的证券面板互不透叠
+    pub const ATM_PANEL: [f32; 3] = [300.0, 16.0, 72.0];
+    /// 证券浮层：左下，留出底部 HUD 的 112 + 20
+    pub const STOCK_PANEL: [f32; 3] = [460.0, 16.0, 132.0];
+    /// 柜台模态：比买地面板高一截（四行按钮 + 办完）
+    pub const BANK_PANEL: [f32; 3] = [440.0, -220.0, -230.0];
+    /// 面板内的金额按钮：四行两列，比模态主按钮小一档
+    pub const AMOUNT_BUTTON: [f32; 2] = [132.0, 36.0];
+    /// 浮层里「关闭」那颗
+    pub const PANEL_CLOSE_BUTTON: [f32; 2] = [92.0, 32.0];
+    pub const OP_ROW_GAP: f32 = 8.0;
 }

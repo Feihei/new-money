@@ -12,10 +12,12 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    BankVisited, GameOver, GameSession, JailSkipped, Paused, PendingDecision, PlayerBankrupt,
-    PlayerName, StockVisited, TurnOrder, TurnPhase,
+    AtmAccess, BankOpDone, BankVisited, GameOver, GameRules, GameSession, JailSkipped, MarketClock,
+    Paused, PendingDecision, PlayerBankrupt, PlayerName, StockTraded, StockVisited, TurnOrder,
+    TurnPhase,
 };
 
+use super::finance::comma;
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, Disabled, PRIMARY, Palette, SECONDARY, UiAction, button, can_roll, label,
@@ -74,6 +76,28 @@ pub(crate) fn spawn_top_bar(mut commands: Commands, font: Res<DevFont>) {
                 &font.0,
                 ButtonSpec::new("掷骰", layout::ROLL_BUTTON, PRIMARY, UiAction::Roll),
             );
+            // B5b 的两个入口。ATM 只在卡到手后亮（路过银行格才有），
+            // 证券随时可看 —— 「能不能看」与「能不能下单」是两件事，分开灰
+            button(
+                bar,
+                &font.0,
+                ButtonSpec::new(
+                    "ATM",
+                    layout::FINANCE_BUTTON,
+                    SECONDARY,
+                    UiAction::ToggleAtm,
+                ),
+            );
+            button(
+                bar,
+                &font.0,
+                ButtonSpec::new(
+                    "证券",
+                    layout::FINANCE_BUTTON,
+                    SECONDARY,
+                    UiAction::ToggleStock,
+                ),
+            );
             // Godot 的暂停只有 ESC 一条路（`pause_menu.gd:19-25`），这里补一个按钮：
             // 只用键盘能找到的功能，鼠标玩家就找不到
             button(
@@ -108,17 +132,67 @@ pub(crate) struct TurnView<'w, 's> {
     session: Res<'w, GameSession>,
     paused: Res<'w, Paused>,
     pending: Res<'w, PendingDecision>,
+    atm: Res<'w, AtmAccess>,
+    clock: Res<'w, MarketClock>,
+    rules: Res<'w, GameRules>,
     names: Query<'w, 's, &'static PlayerName>,
 }
 
-/// 阶段跳变时改写旁白与阶段名；掷骰按钮的可用态则跟着判据走。
+/// 一颗按钮此刻该不该亮。三颗按钮三种判据，都从这里出，
+/// 于是「看着能点、按下去没反应」只可能是这一处写错，而不是散在三个构造点。
+fn button_allowed(action: &UiAction, turn: &TurnView) -> bool {
+    let phase = *turn.phase.get();
+    match action {
+        UiAction::Roll => can_roll(phase, &turn.paused, &turn.pending),
+        // ATM：卡在手上一路都开着，唯一挡它的是暂停与别人家的模态（模态的遮罩本来也压着）
+        UiAction::ToggleAtm => {
+            !turn.paused.0
+                && turn.atm.0.is_some()
+                && super::counter_of(&turn.pending).is_none()
+                && turn.pending.active().is_none()
+        }
+        // 证券：随时能看行情，下单的限制写在面板里那八颗按钮上
+        UiAction::ToggleStock => !turn.paused.0,
+        _ => true,
+    }
+}
+
+/// 改写按钮上那行字的颜色。
+///
+/// `button()` 在 spawn 那一刻就把灰字配好了，但顶栏的可用态是**每帧算出来的**：
+/// ATM 卡到手/过期、暂停开合都发生在 spawn 之后。只换底色不换字色，禁用的按钮
+/// 仍然顶着一行白字 —— 而底色 `BTN_DISABLED` 与 `BTN_SECONDARY` 差得并不远，
+/// 玩家读不出「这颗按不动」。
+fn paint_label(
+    kids: &Query<&Children>,
+    labels: &mut Query<&mut TextColor>,
+    button: Entity,
+    disabled: bool,
+) {
+    let want = if disabled {
+        col::BTN_TEXT_DISABLED
+    } else {
+        Color::WHITE
+    };
+    let Ok(children) = kids.get(button) else {
+        return;
+    };
+    for child in children {
+        if let Ok(mut text) = labels.get_mut(*child) {
+            text.0 = want;
+        }
+    }
+}
+
+/// 阶段跳变时改写旁白与阶段名；按钮的可用态则跟着判据走。
 ///
 /// 两条守卫分开是因为它们的驱动源不同。文本只关心阶段，用 `Local<Option<TurnPhase>>`
 /// 而不是 `Ref<State<_>>::is_changed`：装配那一帧按钮还不在世界里（`Commands` 帧末才 flush），
 /// 文本写空手时要把这一帧**记下来重来**，判据握在自己手里更好办。
-/// 按钮**不设守卫**：暂停开合、待决事项清空都不改阶段，只盯阶段的守卫会让它停在错误的颜色上；
-/// 而回主菜单再开一局时 `Local` 会带着上一局的判断活下来，新 spawn 的按钮就再也没人刷过。
-/// 判据本身是幂等的（只在 `Disabled` 与 `can_roll` 不一致时才动手），逐帧跑也不影响悬停换色。
+/// 按钮**不设守卫**：暂停开合、待决事项清空、ATM 卡到手都不改阶段，只盯阶段的守卫会让它们
+/// 停在错误的颜色上；而回主菜单再开一局时 `Local` 会带着上一局的判断活下来，新 spawn 的按钮
+/// 就再也没人刷过。判据本身是幂等的（只在 `Disabled` 与判据不一致时才动手），逐帧跑也
+/// 不影响悬停换色。
 pub(crate) fn refresh_top_bar(
     turn: TurnView,
     mut buttons: Query<(
@@ -128,24 +202,25 @@ pub(crate) fn refresh_top_bar(
         Option<&Disabled>,
         &UiAction,
     )>,
+    kids: Query<&Children>,
+    mut labels: Query<&mut TextColor>,
     mut texts: Query<(&mut Text, Option<&HintText>, Option<&PhaseText>)>,
     mut commands: Commands,
     mut seen_phase: Local<Option<TurnPhase>>,
 ) {
     let now = *turn.phase.get();
-    let can = can_roll(now, &turn.paused, &turn.pending);
     for (entity, mut bg, palette, disabled, action) in buttons.iter_mut() {
-        if *action != UiAction::Roll {
-            continue;
-        }
-        match (can, disabled) {
+        let allowed = button_allowed(action, &turn);
+        match (allowed, disabled) {
             (true, Some(_)) => {
                 commands.entity(entity).remove::<Disabled>();
                 bg.0 = palette.normal;
+                paint_label(&kids, &mut labels, entity, false);
             }
             (false, None) => {
                 commands.entity(entity).insert(Disabled);
                 bg.0 = col::BTN_DISABLED;
+                paint_label(&kids, &mut labels, entity, true);
             }
             _ => {}
         }
@@ -154,7 +229,7 @@ pub(crate) fn refresh_top_bar(
     if *seen_phase == Some(now) {
         return;
     }
-    let hint = phase_hint(now, &turn.order, &turn.session, &turn.names);
+    let hint = phase_hint(now, &turn);
     let mut wrote = false;
     for (mut text, is_hint, is_phase) in texts.iter_mut() {
         if is_phase.is_some() {
@@ -179,21 +254,23 @@ pub(crate) fn refresh_top_bar(
 /// `Over` 刻意**不**写文案：终局那句话是「胜者：X！」，由 [`hint_from_events`] 从
 /// `GameOver` 带来。阶段旁白与事件流水差一帧到位（消息下一帧才读得到，转移也晚一帧），
 /// 于是这里写「游戏结束」会把胜者那句盖掉 —— 而阶段标签已经说了「游戏结束」，重复没有价值。
-fn phase_hint(
-    phase: TurnPhase,
-    order: &TurnOrder,
-    session: &GameSession,
-    names: &Query<&PlayerName>,
-) -> Option<String> {
+///
+/// 等待掷骰那一行带上日历：行情每回合结束动一次、分红按「几月几日」发，
+/// 玩家要能在动手之前看见今天是哪天，否则「每月 1 号派息」只是一句写在文档里的话。
+fn phase_hint(phase: TurnPhase, turn: &TurnView) -> Option<String> {
     let text = match phase {
         TurnPhase::Boot => "准备中".to_string(),
-        TurnPhase::WaitRoll => match order.current().and_then(|p| names.get(p).ok()) {
-            Some(name) => format!(
-                "{} 的回合 — 请掷骰（第 {} 回合）",
-                name.0, session.turn_count
-            ),
-            None => "请掷骰".to_string(),
-        },
+        TurnPhase::WaitRoll => {
+            let (month, day) =
+                game_core::economy::date_of(turn.clock.tick, turn.rules.days_per_month);
+            match turn.order.current().and_then(|p| turn.names.get(p).ok()) {
+                Some(name) => format!(
+                    "{} 的回合 — 请掷骰（第 {} 回合 · 第 {month} 月 {day} 日）",
+                    name.0, turn.session.turn_count
+                ),
+                None => format!("请掷骰（第 {month} 月 {day} 日）"),
+            }
+        }
         TurnPhase::Walking => "移动中…".to_string(),
         _ => return None,
     };
@@ -221,7 +298,9 @@ pub(crate) struct Notices<'w, 's> {
     jail_skip: MessageReader<'w, 's, JailSkipped>,
     bankrupt: MessageReader<'w, 's, PlayerBankrupt>,
     bank: MessageReader<'w, 's, BankVisited>,
+    bank_ops: MessageReader<'w, 's, BankOpDone>,
     stock: MessageReader<'w, 's, StockVisited>,
+    traded: MessageReader<'w, 's, StockTraded>,
     over: MessageReader<'w, 's, GameOver>,
 }
 
@@ -247,12 +326,29 @@ pub(crate) fn hint_from_events(
         line = Some(format!(
             "{} 来到银行（存款 ${}，贷款 ${}）",
             name(&names, m.player),
-            m.deposit,
-            m.loan
+            comma(m.deposit),
+            comma(m.loan)
+        ));
+    }
+    for m in notices.bank_ops.read() {
+        line = Some(format!(
+            "{} {}${}",
+            name(&names, m.player),
+            op_verb(m.op),
+            comma(m.amount)
         ));
     }
     for m in notices.stock.read() {
         line = Some(format!("{} 来到了证券交易所", name(&names, m.player)));
+    }
+    for m in notices.traded.read() {
+        line = Some(format!(
+            "{} {} {} 股 @ ${:.2}",
+            name(&names, m.player),
+            side_verb(m.side),
+            m.shares,
+            m.price
+        ));
     }
     for m in notices.over.read() {
         line = Some(match m.winner.and_then(|w| names.get(w).ok()) {
@@ -265,6 +361,26 @@ pub(crate) fn hint_from_events(
         && let Ok(mut text) = hints.single_mut()
     {
         *text = Text::new(line);
+    }
+}
+
+/// 银行操作的中文动词。`BankOp` 在规则层是枚举，屏幕上要给人话，映射属于表现层
+/// （与 `tile_info::kind_name` 同一条分工）。
+fn op_verb(op: game_core::prelude::BankOp) -> &'static str {
+    use game_core::prelude::BankOp;
+    match op {
+        BankOp::Deposit => "存了",
+        BankOp::Withdraw => "取了",
+        BankOp::Borrow => "借了",
+        BankOp::Repay => "还了",
+    }
+}
+
+fn side_verb(side: game_core::prelude::TradeSide) -> &'static str {
+    use game_core::prelude::TradeSide;
+    match side {
+        TradeSide::Buy => "买入",
+        TradeSide::Sell => "卖出",
     }
 }
 

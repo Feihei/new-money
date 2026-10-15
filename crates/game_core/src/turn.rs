@@ -8,6 +8,7 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use crate::bank::AtmAccess;
 use crate::msg::{
     DiceRolled, GameOver, JailSkipped, PlayerReleased, RequestRoll, TurnEnded, TurnStarted,
     WalkStarted,
@@ -132,6 +133,7 @@ pub fn begin_turn_system(
     mut order: ResMut<TurnOrder>,
     players: Query<(Entity, Option<&Bankrupt>, &TokenPosition), With<PlayerId>>,
     jailed: Query<Option<&JailSentence>, With<PlayerId>>,
+    mut atm: ResMut<AtmAccess>,
     mut writers: TurnWriters,
     mut next: ResMut<NextState<TurnPhase>>,
 ) {
@@ -148,6 +150,13 @@ pub fn begin_turn_system(
         next.set(TurnPhase::Over);
         return;
     };
+    // ATM 资格活到「持有人自己的下一回合开始」为止，不是任何人的回合开始都清。
+    // 路过那一瞬间正是回合机最赶的时候（行走未完、落格已结算、下一位紧接着开始），
+    // 只给那一帧的窗口等于按不到；放到下一次行动之前，玩家才有真正能点的一段 ——
+    // 与证券面板「掷骰前可操作」是同一个窗口。
+    if atm.0 == Some(player) {
+        atm.0 = None;
+    }
     let Ok((_, _, pos)) = players.get(player) else {
         return;
     };

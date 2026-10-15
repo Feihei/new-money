@@ -332,32 +332,61 @@ fn retile_stock(app: &mut App, tile: u32) {
     retile(app, tile, TileKind::Stock);
 }
 
+/// 行情由**回合结束**推进，与踩到哪格无关（2026-10-15 的规则分叉，见 `market.rs` 文件头）。
+/// 这条断言的是「一天只走一次」：踩证券格不再 tick，否则同一天行情会动两遍、
+/// 日历与分红也对不齐。
 #[test]
-fn stock_visit_ticks_every_price_once() {
+fn prices_move_once_per_turn_end_and_a_stock_tile_adds_no_extra_tick() {
     let (mut app, _) = ready_on(0, 3, DecisionPolicy::DeclineAll);
     retile_stock(&mut app, 3);
-    land(&mut app);
+    assert_eq!(tick_of(&app), 0, "开局那天还没过完");
 
+    land(&mut app);
+    assert_eq!(tick_of(&app), 1, "一个回合结束 = 一天");
     let led = ledger(&app);
     assert_eq!(
         led.iter().filter(|e| e.starts_with("Price(")).count(),
         5,
-        "一次访问 = 每只股各推进一格：{led:?}"
+        "一次 tick = 每只股各推进一格：{led:?}"
     );
     assert!(
         led.contains(&"StockVisit(P0)".to_string()),
-        "访问本身要发一条消息：{led:?}"
+        "踩到证券格仍要发一条消息给提示行：{led:?}"
     );
     assert_ne!(
         price_of(&mut app, "stock_001"),
         80.0,
         "tick 后价格必须动（缺陷 #4：Godot 只在买卖时发「价格变了」，而那里价格不会变）"
     );
+
+    play_turns(&mut app, 3);
+    assert_eq!(
+        tick_of(&app),
+        3,
+        "踩格不该多推行情：走到第 3 天就该是 3 次 tick"
+    );
+    assert_eq!(
+        ledger(&app)
+            .iter()
+            .filter(|e| e.starts_with("Price("))
+            .count(),
+        15,
+        "三天 = 十五条价格流水"
+    );
 }
 
 #[test]
-fn dividends_land_exactly_on_the_interval() {
-    let mut app = boot_default();
+fn dividends_land_on_the_calendar_day_only() {
+    // 3 天一月、每月 2 号派息：tick 1、4、7 发钱，其余日子一分不给
+    let mut app = boot(
+        GameSetup::default(),
+        GameRules {
+            days_per_month: 3,
+            dividend_day: 2,
+            ..GameRules::instant()
+        },
+        GameSeed::default(),
+    );
     assert!(run_until_world(&mut app));
     let p0 = me(&mut app);
     // 建仓用 `credit` 而不是直改钱包：现金审计要求每笔变动都留下流水
@@ -371,26 +400,34 @@ fn dividends_land_exactly_on_the_interval() {
         assert_eq!(filled, 1_000)
     });
 
-    let rules = GameRules::default();
+    let rules = *app.world().resource::<GameRules>();
     let mut paid_total = 0i64;
-    for tick in 1..=10 {
+    let mut paid_on: Vec<u32> = Vec::new();
+    for tick in 1..=7 {
         let before = cash_of(&mut app, p0);
-        run_op(&mut app, move |books, market| market.settle_visit(books));
+        run_op(&mut app, move |books, market| {
+            market.tick_at_turn_end(books)
+        });
         let delta = cash_of(&mut app, p0) - before;
-        let want = if tick % rules.dividend_interval == 0 {
+        let want = if game_core::economy::is_dividend_day(tick, &rules) {
             dividend_per_share(price_of(&mut app, "stock_001"), &rules) * 1_000
         } else {
             0
         };
-        assert_eq!(delta, want, "第 {tick} 次 tick 的现金变动应只来自分红");
-        if tick % 5 != 0 {
-            assert_eq!(delta, 0, "非 5 的倍数不该发钱（第 {tick} 次）");
+        assert_eq!(delta, want, "第 {tick} 天的现金变动应只来自分红");
+        if delta > 0 {
+            paid_on.push(tick);
         }
         paid_total += delta;
     }
+    assert_eq!(
+        paid_on,
+        vec![1, 4, 7],
+        "派息日应恰好落在每月的 2 号（1 月 2 日、2 月 2 日、3 月 2 日）"
+    );
     assert!(
         paid_total > 0,
-        "十次 tick 里一次分红都没发，说明分红线没接通"
+        "七次 tick 里一次分红都没发，说明分红线没接通"
     );
     assert_cash_audit(&mut app, 20_000);
 }

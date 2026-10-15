@@ -11,10 +11,13 @@
 //! - **#5**：`buy()` 现金不足时递归调用自身且无深度保护。这里一次算清可买股数
 //!   （`economy::buy_plan`），并且有一条「花费绝不超过现金」的扫表性质测试。
 //!
-//! ⚠️ 与 §4.5 表格的一处偏离：`stock_tick_system` 原写「`in_state(Landed)` 之前」，
-//! 实际按 Godot 代码走 —— 只有踩到证券格才 tick（`turn_manager.gd:372-378`）。
-//! 顺带记录一个数据缺口：`prototype.json` 的 12 格里**没有 stock 格**，
-//! 所以照搬的话整局行情一动不动、分红永不发放（见 §三 表下的 B3 说明）。
+//! ⚠️ 与 Godot 的一处**规则分叉**（2026-10-15 拍）：行情不再等玩家踩到证券格，
+//! 而是**每个回合结束 tick 一次**（[`market_tick_on_turn_end_system`]）。
+//! 理由：`prototype.json` 的 12 格里没有证券格，照搬 `turn_manager.gd:372-378` 就得到
+//! 「整局行情一动不动、分红永不发放」；更重要的是没有日历的市场不是市场。
+//! 分红因此改挂日历：**每月固定日派息**（`economy::is_dividend_day`），
+//! 一天就是一个回合，于是「每月 1 号」与「行情每天更新」是同一个数。
+//! 踩到证券格（将来 40 格棋盘会有）只报到、不再推行情。
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -23,13 +26,14 @@ use crate::board::TileKind;
 use crate::data::DataHandles;
 use crate::economy;
 use crate::landing::{Landed, Landing};
-use crate::msg::{StockPriceChanged, StockTraded, StockVisited, TradeSide};
+use crate::msg::{StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TradeSide};
 use crate::rng::Rng;
 use crate::settle::Books;
 use crate::stock::{PriceHistory, StockId, StockPrice, StockSet};
+use crate::turn::TurnOrder;
 
 /// 行情钟：全市场统一的 tick 计数（`stock_market.gd:21` 的 `tick_count`）。
-/// 分红按它取模，所以只有一处能加它。
+/// 一个 tick 就是一天，日历（[`crate::economy::date_of`]）由它推出来，分红按它落的那天。
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MarketClock {
     pub tick: u32,
@@ -72,8 +76,9 @@ impl<'w, 's> Market<'w, 's> {
         self.clock.tick
     }
 
-    /// 踩到证券格：推进行情，到点分红（Godot 的 `tick()` + `try_pay_dividends()` 那一对）。
-    pub fn settle_visit(&mut self, books: &mut Books) {
+    /// 一个回合结束 = 一天过去：推行情，到点分红。
+    /// 全项目只有 [`market_tick_on_turn_end_system`] 调它 —— 一天只走一次，日历才对得齐。
+    pub fn tick_at_turn_end(&mut self, books: &mut Books) {
         self.advance_prices(books);
         self.pay_dividends(books);
     }
@@ -99,14 +104,12 @@ impl<'w, 's> Market<'w, 's> {
         }
     }
 
-    /// 分红：每 `dividend_interval` 个 tick 一次，`floor(股价 × rate) × 股数`
-    /// 进现金（`stock_market.gd:156-176`）。破产者不发（Godot 的 `status` 过滤）。
+    /// 分红：**每月固定日**给持股人发现金，`floor(股价 × rate) × 股数`
+    /// （派息规则来自 `stock_market.gd:156-176`，日期口径是新拍的）。破产者不发
+    /// （Godot 的 `status` 过滤）。
     fn pay_dividends(&mut self, books: &mut Books) {
         let rules = *books.rules;
-        if self.clock.tick == 0 || rules.dividend_interval == 0 {
-            return;
-        }
-        if !self.clock.tick.is_multiple_of(rules.dividend_interval) {
+        if !economy::is_dividend_day(self.clock.tick, &rules) {
             return;
         }
         // 先把价格收成小表再发钱：迭代持仓时不该挂着 `self.stocks` 的可变借用
@@ -181,13 +184,9 @@ impl<'w, 's> Market<'w, 's> {
     }
 }
 
-/// 踩到证券格的分派入口。
-pub fn settle_market_landing(
-    mut books: Books,
-    mut market: Market,
-    landing: Res<Landing>,
-    mut visited: MessageWriter<StockVisited>,
-) {
+/// 踩到证券格的分派入口。**只报到**：行情已经改到每回合结束推进（见文件头），
+/// 这里再 tick 一次就会一天走两遍、日历与分红对不齐。
+pub fn settle_market_landing(landing: Res<Landing>, mut visited: MessageWriter<StockVisited>) {
     let Some(Landed {
         player,
         kind: TileKind::Stock,
@@ -196,6 +195,39 @@ pub fn settle_market_landing(
     else {
         return;
     };
-    market.settle_visit(&mut books);
     visited.write(StockVisited { player });
+}
+
+/// 回合结束 = 一天过去。与 `end_turn_system` 同批，两者互不冲突（一个动钱包与行情，
+/// 一个动轮转与回合计数），所以不排顺序 —— 谁先跑都不改结果。
+///
+/// 刻意**不**挂 `not_paused`：暂停挡的是「玩家还能不能行动」，而这一句是状态机自己
+/// 走到 `TurnEnd` 才触发的。若让它被暂停挡住而 `end_turn_system` 照跑，日历就会比
+/// 回合数慢，「每月 1 号派息」变成一句看不见的错话。
+pub fn market_tick_on_turn_end_system(mut books: Books, mut market: Market) {
+    market.tick_at_turn_end(&mut books);
+}
+
+/// 受理买卖请求。只在 `WaitRoll` 里跑 —— 「掷骰之前可以安排本回合的钱怎么花」这条
+/// 窗口由状态机给，不靠 UI 记得把按钮点亮成灰的。
+///
+/// 只认当前回合玩家（与 `roll_dice_system` 同一手法）：别人递进来的请求读掉就丢，
+/// 于是「甲的证券面板替乙买股」在结构上不可能发生。部分成交（现金不够买满）由
+/// `economy::buy_plan` 负责，这里不补判。
+pub fn trade_request_system(
+    mut books: Books,
+    mut market: Market,
+    order: Res<TurnOrder>,
+    mut requests: MessageReader<StockTradeRequested>,
+) {
+    let Some(current) = order.current() else {
+        return;
+    };
+    for r in requests.read() {
+        if r.player != current {
+            debug!("交易被拒：{:?} 不是当前回合玩家", r.player);
+            continue;
+        }
+        market.trade(&mut books, current, &r.stock, r.side, r.shares);
+    }
 }

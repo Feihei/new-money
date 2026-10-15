@@ -189,6 +189,34 @@ pub struct BankVisited {
     pub loan: i64,
 }
 
+/// 银行柜台的四种操作。**存/取与借/还的解锁条件不同**（见 `bank::bank_op_allowed`）：
+/// 路过银行格就能存取（ATM），但借钱必须走进柜台（踩到那一格并停住）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BankOp {
+    Deposit,
+    Withdraw,
+    Borrow,
+    Repay,
+}
+
+/// 请求办一笔银行操作。主语必须是当前回合玩家，且在 [`crate::bank::AtmAccess`]
+/// 或柜台的许可范围内 —— 判据在 `bank::bank_op_system`，不在按钮的 `disabled` 上。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BankOpRequested {
+    pub player: Entity,
+    pub op: BankOp,
+    pub amount: i64,
+}
+
+/// 已办成的银行操作。`amount` 是**实际**处理额（`economy` 的 plan 函数会拒单或打折）。
+/// 被拒的操作不发这条 —— UI 若发现按下去没流水，就该把按钮亮成灰的。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BankOpDone {
+    pub player: Entity,
+    pub op: BankOp,
+    pub amount: i64,
+}
+
 // ===== 股票 =====
 
 /// 股价真的动了：`old → new`。
@@ -219,7 +247,18 @@ pub struct StockTraded {
     pub side: TradeSide,
 }
 
-/// 踩到证券交易格：本 tick 的行情与分红已结算。
+/// 请求买卖 `shares` 股。只有当前回合玩家、且状态是 `WaitRoll`（掷骰之前）才会被受理 ——
+/// 交易是「本回合打算怎么花钱」的一部分，走完路再决定就晚了（见 `market::trade_request_system`）。
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct StockTradeRequested {
+    pub player: Entity,
+    pub stock: StockId,
+    pub side: TradeSide,
+    pub shares: u32,
+}
+
+/// 踩到证券交易格。行情本身已经改到「每个回合结束 tick 一次」，所以踩格只报到、
+/// 不推行情 —— 保留这条消息是因为 UI 的提示行要说「某人来到交易所」。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StockVisited {
     pub player: Entity,

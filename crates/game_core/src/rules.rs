@@ -27,8 +27,12 @@ pub struct GameRules {
     pub max_loan_ratio: f32,
     /// 股价每 tick 的基础漂移，`stock_market.gd:14`。
     pub stock_base_drift: f32,
-    /// 每多少个 tick 分红一次，`stock_market.gd:15`。
-    pub dividend_interval: u32,
+    /// 一个月多少天。一天 == 一个回合结束（行情就在那里 tick 一次），所以这条同时是
+    /// 「多少回合一个月」。B5b 起分红不再挂在 tick 计数上，而是挂在日历的固定日 ——
+    /// 「每月 1 号派息」是玩家能记住的规则，「每 5 次 tick」不是。
+    pub days_per_month: u32,
+    /// 每月哪一天派息（1 起）。被 `economy::date_of` 的日历解释。
+    pub dividend_day: u32,
     /// 每股股息 = 股价 × 该比例，`stock_market.gd:16`。
     pub dividend_rate: f32,
     /// 每只股保留的历史价格条数，`stock_market.gd:17`。
@@ -46,7 +50,8 @@ impl Default for GameRules {
             loan_rate: 0.08,
             max_loan_ratio: 2.0,
             stock_base_drift: 0.002,
-            dividend_interval: 5,
+            days_per_month: 12,
+            dividend_day: 1,
             dividend_rate: 0.015,
             max_price_history: 50,
         }

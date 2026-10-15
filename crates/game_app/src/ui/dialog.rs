@@ -12,20 +12,25 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, Books, CardDrawn, CardKind, CardNotice, Decision, EffectOutcome, LandId, LandType,
-    Pending, PendingDecision, PlayerName, TurnOrder,
+    ActiveBoard, BankOp, Books, CardDrawn, CardKind, CardNotice, Decision, EffectOutcome, LandId,
+    LandType, Pending, PendingDecision, PlayerName, TurnOrder,
 };
 
+use super::finance::{comma, money_row};
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, SECONDARY, UiAction, button, info_row, label, overlay, panel, separator,
 };
 use crate::render::{DevFont, palette};
 
-/// 模态根节点，兼作「现在挂着的是哪个问题」的唯一记录。
+/// 模态根节点，兼作「现在挂着的是哪个问题」与「上次写成什么样」两份记录。
 ///
 /// 键带 `Entity` 而不是只带 `Pending`：同一块地连续两次挂牌（甲拒买、乙又踩到）时
-/// `about` 是相等的，只有玩家不同才会重建 —— 少带这一半就会给乙看甲的现金。
+/// `about` 相等的，只有玩家不同才会重建 —— 少带这一半就会给乙看甲的现金。
+///
+/// `stamp` 只有柜台用得上（其余模态是空的）：柜台是一个**窗口**而不是一个报价，玩家能在
+/// 里面连办四笔，每次余额都变。没有这份签名就会出现「已经存下 1,000，面板还显示存之前
+/// 的现金」—— 而那正是让人按错第二次的形状。
 ///
 /// 为什么不存成 resource（先前是 `OpenModal`）：回主菜单时面板随 `BoardUi` 一起被收走，
 /// 而资源里的 `Entity` 句柄与「上次挂的是什么」会活下来。下一局第一次报价若与上一局
@@ -33,7 +38,10 @@ use crate::render::{DevFont, palette};
 /// **模态永远不再出现**，回合机停在 `WaitDecision` 等一个不存在的按钮。挂在实体上，
 /// 实体没了键就没了，不存在需要重置的残留。
 #[derive(Component)]
-pub(crate) struct ModalRoot(pub (Entity, Pending));
+pub(crate) struct ModalRoot {
+    pub key: (Entity, Pending),
+    pub stamp: String,
+}
 
 /// 卡面正文。`Pending::Card` 只说「有一张牌要读」，不说是哪张 —— 规则层刻意不把字符串
 /// 放进系统状态（`msg.rs` 的 `CardDrawn` 带 `CardNotice`），所以 UI 自己记最近一张。
@@ -41,18 +49,19 @@ pub(crate) struct ModalRoot(pub (Entity, Pending));
 #[derive(Resource, Default)]
 pub(crate) struct RecentCard(pub(crate) Option<CardNotice>);
 
-/// 开发用：`NM_DECISION=buy|upgrade|rent|card` 直接把那个模态挂出来。
+/// 开发用：`NM_DECISION=buy|upgrade|rent|card|bank` 直接把那个模态挂出来。
 ///
-/// 四个模态各有各的触发条件（升级要凑齐同色组、收据要有人踩过别人的地），一局里未必碰得到，
-/// 而 agent 没有鼠标、截图按墙钟 —— 与 `NM_PAUSE`、`NM_PICK_TILE` 同一条理由：
-/// 进不了截图的界面等于没做完。只写 [`PendingDecision`]，不碰回合机：
-/// 模态由状态驱动，挂上就显示。点掉它会再挂出来，这条开关只为核对界面存在。
-#[derive(Clone, Copy)]
+/// 五个模态各有各的触发条件（升级要凑齐同色组、收据要有人踩过别人的地、柜台要正好停在
+/// 银行格上），一局里未必碰得到，而 agent 没有鼠标、截图按墙钟 —— 与 `NM_PAUSE`、
+/// `NM_PICK_TILE` 同一条理由：进不了截图的界面等于没做完。只写 [`PendingDecision`]，
+/// 不碰回合机：模态由状态驱动，挂上就显示。点掉它会再挂出来，这条开关只为核对界面存在。
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModalKind {
     Buy,
     Upgrade,
     Rent,
     Card,
+    Bank,
 }
 
 #[derive(Resource)]
@@ -69,8 +78,9 @@ impl ForceModal {
             "upgrade" => ModalKind::Upgrade,
             "rent" => ModalKind::Rent,
             "card" => ModalKind::Card,
+            "bank" => ModalKind::Bank,
             _ => {
-                warn!("NM_DECISION={name} 不认识，应为 buy|upgrade|rent|card");
+                warn!("NM_DECISION={name} 不认识，应为 buy|upgrade|rent|card|bank");
                 return Self(None);
             }
         };
@@ -92,7 +102,12 @@ pub(crate) fn force_decision(
     let Some(player) = order.current() else {
         return;
     };
-    // 挑一块租金表最长、带同色组的地产：模态内容才不会是空壳
+    // 柜台不关于任何对象，直接挂
+    if kind == ModalKind::Bank {
+        pending.offer(player, Pending::BankTeller);
+        return;
+    }
+    // 其余四个都要一块地：挑一块租金表最长、带同色组的，模态内容才不会是空壳
     let Some(land) = active
         .def
         .lands
@@ -108,6 +123,7 @@ pub(crate) fn force_decision(
         ModalKind::Upgrade => Pending::Upgrade(land),
         ModalKind::Rent => Pending::RentNotice(land),
         ModalKind::Card => Pending::Card,
+        ModalKind::Bank => unreachable!("柜台在上面就已经挂好了"),
     };
     pending.offer(player, about);
 }
@@ -123,6 +139,10 @@ pub(crate) fn remember_drawn_card(
 
 /// 跟着 `PendingDecision` 建/换/收模态。排在 [`remember_drawn_card`] 之后，
 /// 于是卡面消息与面板内容在同一帧到位，不会出现「先弹一张空白卡」。
+///
+/// 重建判据是「问题 + 签名」两半：问题变了当然重建，而柜台那种**窗口**（一个待决事项里
+/// 能办四笔）问的是同一个问题、数字却一直在动 —— 只看问题就会出现「钱已经存进去了，
+/// 面板还停在存之前」。签名只对柜台有意义，其余四个模态的内容弹出即定稿。
 pub(crate) fn sync_modal(
     mut commands: Commands,
     pending: Res<PendingDecision>,
@@ -133,8 +153,15 @@ pub(crate) fn sync_modal(
     open: Query<(Entity, &ModalRoot)>,
 ) {
     let want = pending.active();
+    let stamp = want.map_or(String::new(), |(player, about)| {
+        modal_stamp(about, &books, player)
+    });
     // 两边都是 `None` 时相等：没有待决事项、也没有模态，正是常态
-    if open.iter().next().map(|(_, m)| m.0) == want {
+    if open
+        .iter()
+        .next()
+        .is_some_and(|(_, root)| Some(root.key) == want && root.stamp == stamp)
+    {
         return;
     }
     // 一次只挂一个：换问题时先把旧的整块收走（`despawn` 递归，遮罩是子树根）
@@ -142,15 +169,42 @@ pub(crate) fn sync_modal(
         commands.entity(stale).despawn();
     }
     if let Some((player, about)) = want {
+        let stamp = stamp.clone();
         match about {
-            Pending::Buy(land) => buy_modal(&mut commands, &font, &books, player, land),
-            Pending::Upgrade(land) => upgrade_modal(&mut commands, &font, &books, player, land),
-            Pending::RentNotice(land) => {
-                rent_modal(&mut commands, &font, &books, &names, player, land)
+            Pending::Buy(land) => buy_modal(&mut commands, &font, &books, player, land, stamp),
+            Pending::Upgrade(land) => {
+                upgrade_modal(&mut commands, &font, &books, player, land, stamp)
             }
-            Pending::Card => card_modal(&mut commands, &font, &memory, player),
+            Pending::RentNotice(land) => {
+                rent_modal(&mut commands, &font, &books, &names, player, land, stamp)
+            }
+            Pending::Card => card_modal(&mut commands, &font, &memory, player, stamp),
+            Pending::BankTeller => bank_modal(&mut commands, &font, &books, player, stamp),
         };
     }
+}
+
+/// 这一屏「该写成什么样」的签名。只有柜台需要，别的模态返回空串。
+fn modal_stamp(about: Pending, books: &Books, player: Entity) -> String {
+    let Pending::BankTeller = about else {
+        return String::new();
+    };
+    let bank = books.bank_of(player);
+    format!(
+        "{}|{}|{}|{}",
+        books.balance(player),
+        bank.deposit,
+        bank.loan,
+        loan_room(books, player)
+    )
+}
+
+/// 名下未抵押地块的可贷上限（缺陷 #1 修的就是这个数在 Godot 里恒为 0）。
+fn loan_room(books: &Books, player: Entity) -> i64 {
+    let Some(pid) = books.id_of(player) else {
+        return 0;
+    };
+    game_core::economy::calc_max_loan(&books.active.def, &books.views(), pid, &books.rules)
 }
 
 /// 遮罩 + 居中面板的外壳。遮罩节点是整棵子树的根，`despawn` 它即收走全部内容；
@@ -158,6 +212,7 @@ pub(crate) fn sync_modal(
 fn frame(
     commands: &mut Commands,
     key: (Entity, Pending),
+    stamp: String,
     spec: [f32; 3],
     accent: Color,
     body: impl FnOnce(&mut ChildSpawnerCommands),
@@ -165,7 +220,13 @@ fn frame(
     let (overlay_node, overlay_bg, overlay_z) = overlay(3);
     let (panel_node, panel_transform, panel_bg, panel_border) = panel(spec[0], spec, accent);
     commands
-        .spawn((BoardUi, ModalRoot(key), overlay_node, overlay_bg, overlay_z))
+        .spawn((
+            BoardUi,
+            ModalRoot { key, stamp },
+            overlay_node,
+            overlay_bg,
+            overlay_z,
+        ))
         .with_children(|mask| {
             mask.spawn((panel_node, panel_transform, panel_bg, panel_border))
                 .with_children(|p| body(p));
@@ -215,6 +276,7 @@ fn buy_modal(
     books: &Books,
     player: Entity,
     land: LandId,
+    stamp: String,
 ) -> Entity {
     let def = books.active.def.land(land.0);
     let name = def.map(|l| l.name.clone()).unwrap_or_default();
@@ -243,6 +305,7 @@ fn buy_modal(
     frame(
         commands,
         (player, Pending::Buy(land)),
+        stamp,
         layout::BUY_PANEL,
         col::BORDER_BUY,
         |p| {
@@ -332,6 +395,7 @@ fn upgrade_modal(
     books: &Books,
     player: Entity,
     land: LandId,
+    stamp: String,
 ) -> Entity {
     let Some(view) = books.view(land) else {
         return fallback_note(commands, font, (player, Pending::Upgrade(land)), "升级报价");
@@ -360,6 +424,7 @@ fn upgrade_modal(
     frame(
         commands,
         (player, Pending::Upgrade(land)),
+        stamp,
         layout::UPGRADE_PANEL,
         col::BORDER_UPGRADE,
         |p| {
@@ -473,6 +538,7 @@ fn rent_modal(
     names: &Query<&PlayerName>,
     payer: Entity,
     land: LandId,
+    stamp: String,
 ) -> Entity {
     let def = books.active.def.land(land.0);
     let land_name = def.map(|l| l.name.clone()).unwrap_or_default();
@@ -510,6 +576,7 @@ fn rent_modal(
     frame(
         commands,
         (payer, Pending::RentNotice(land)),
+        stamp,
         layout::RENT_PANEL,
         col::BORDER_RENT,
         |p| {
@@ -547,6 +614,7 @@ fn card_modal(
     font: &DevFont,
     memory: &RecentCard,
     player: Entity,
+    stamp: String,
 ) -> Entity {
     let Some(card) = memory.0.as_ref() else {
         return fallback_note(commands, font, (player, Pending::Card), "卡牌效果已结算");
@@ -560,6 +628,7 @@ fn card_modal(
     frame(
         commands,
         (player, Pending::Card),
+        stamp,
         layout::CARD_PANEL,
         col::BORDER_CARD,
         |p| {
@@ -609,21 +678,170 @@ fn fallback_note(
     text: &str,
 ) -> Entity {
     let text = text.to_string();
-    frame(commands, key, layout::RENT_PANEL, col::BORDER_CARD, |p| {
-        p.spawn(label(&font.0, text, size::DIALOG_TITLE, col::BODY));
-        button_row(p, |line| {
-            button(
-                line,
+    frame(
+        commands,
+        key,
+        String::new(),
+        layout::RENT_PANEL,
+        col::BORDER_CARD,
+        |p| {
+            p.spawn(label(&font.0, text, size::DIALOG_TITLE, col::BODY));
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "确定",
+                        layout::OK_BUTTON,
+                        super::PRIMARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
+}
+
+/// 银行柜台：**踩到**银行格才开（路过只给 ATM 卡，见 [`super::finance`]）。
+///
+/// 与其余四个模态最大的分别是它不是一次报价，而是一个窗口：玩家可以连办四笔，
+/// 每笔之后数字都要重算 —— 所以 [`sync_modal`] 的重建判据里带了金额签名这一半。
+/// 「办完」才把回合交还给结束流程；中途按别的（`Accept`/`Decline`）规则层一律不认。
+///
+/// 这里不再判窗口（`can_bank_op`）：柜台既然开着，四种操作就都在许可内，
+/// 只剩「这笔金额办不办得动」。窗口判据留给 ATM 浮层，那儿才需要区分卡是谁的。
+fn bank_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    books: &Books,
+    player: Entity,
+    stamp: String,
+) -> Entity {
+    let cash = books.balance(player);
+    let bank = books.bank_of(player);
+    let room = loan_room(books, player);
+    // 还能借多少 = 上限 - 现有负债（`economy::loan_plan` 判的就是这个累计口径）
+    let headroom = (room - bank.loan).max(0);
+    // 还清要一次掏够：现金不够就灰着，别让「还 3000」在只有 2000 时静默失败
+    let clear_debt = bank.loan.min(cash);
+    let rules = *books.rules;
+
+    frame(
+        commands,
+        (player, Pending::BankTeller),
+        stamp,
+        layout::BANK_PANEL,
+        col::BORDER_BANK,
+        |p| {
+            p.spawn(center_label(
                 &font.0,
-                ButtonSpec::new(
-                    "确定",
-                    layout::OK_BUTTON,
-                    super::PRIMARY,
-                    UiAction::Decide(Decision::Acknowledge),
-                ),
+                "银行柜台",
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                "存取款、借贷都在这里办，办完才继续",
+                size::ROW,
+                col::MUTED,
+            ));
+            p.spawn(separator());
+            p.spawn(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(layout::INFO_ROW_GAP),
+                ..default()
+            })
+            .with_children(|rows| {
+                let key_w = layout::INFO_KEY_W_WIDE;
+                info_row(rows, &font.0, "现金", &comma(cash), col::CASH_OK, key_w);
+                info_row(
+                    rows,
+                    &font.0,
+                    "存款余额",
+                    &comma(bank.deposit),
+                    col::VALUE,
+                    key_w,
+                );
+                info_row(
+                    rows,
+                    &font.0,
+                    "现有负债",
+                    &comma(bank.loan),
+                    col::COST,
+                    key_w,
+                );
+                info_row(
+                    rows,
+                    &font.0,
+                    "还可借",
+                    &comma(headroom),
+                    if headroom > 0 {
+                        col::GAIN
+                    } else {
+                        col::BANKRUPT
+                    },
+                    key_w,
+                );
+                info_row(
+                    rows,
+                    &font.0,
+                    "利率",
+                    &format!(
+                        "存 {:.1}% / 贷 {:.1}%，每次进银行结一次",
+                        rules.deposit_rate * 100.0,
+                        rules.loan_rate * 100.0
+                    ),
+                    col::KEY,
+                    key_w,
+                );
+            });
+            p.spawn(separator());
+            money_row(
+                p,
+                font,
+                BankOp::Deposit,
+                true,
+                ("存", 1_000, cash >= 1_000),
+                ("存全部", cash, cash > 0),
             );
-        });
-    })
+            money_row(
+                p,
+                font,
+                BankOp::Withdraw,
+                true,
+                ("取", 1_000, bank.deposit >= 1_000),
+                ("取全部", bank.deposit, bank.deposit > 0),
+            );
+            money_row(
+                p,
+                font,
+                BankOp::Borrow,
+                true,
+                ("借", 5_000, headroom >= 5_000),
+                ("借到上限", headroom, headroom > 0),
+            );
+            money_row(
+                p,
+                font,
+                BankOp::Repay,
+                true,
+                ("还", 5_000, bank.loan >= 5_000 && cash >= 5_000),
+                ("还清", clear_debt, bank.loan > 0 && clear_debt >= bank.loan),
+            );
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "办完",
+                        layout::MODAL_BUTTON,
+                        super::PRIMARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
 }
 
 /// 卡面效果行。规则层只发凭据、不拼文案（`msg.rs` 的注释），字符串在这里生成。

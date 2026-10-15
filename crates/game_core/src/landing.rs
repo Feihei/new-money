@@ -72,6 +72,11 @@ pub enum Pending {
     RentNotice(LandId),
     /// 卡面已结算，只需玩家读完
     Card,
+    /// 踩到银行格，柜台开着：存/取/借/还随便办，直到玩家按「办完」。
+    ///
+    /// 与另外四种不同，它**不是一个报价**，而是一个窗口 —— 钱的操作走
+    /// [`crate::msg::BankOpRequested`] 逐笔进来，本条待决事项只负责「回合先别结束」。
+    BankTeller,
 }
 
 /// 系统状态：现在正等谁的什么回答。
@@ -161,6 +166,11 @@ pub fn decision_system(
             }
         }
         (Pending::Buy(_) | Pending::Upgrade(_), Decision::Decline) => {}
+        // 柜台：只有「办完」算回答。四种钱的操作走 `BankOpRequested` 逐笔进来办，
+        // 这里若也认 `Accept`，就成了一条消息既办业务又关窗口 —— 两个语义挤一个动作，
+        // 而面板上根本没有「接受」这个按钮可对上。
+        (Pending::BankTeller, Decision::Acknowledge) => {}
+        (Pending::BankTeller, Decision::Accept | Decision::Decline) => return,
         // 收据与卡面没有「可拒绝」的选项：钱已经扣了、效果已经结算了。
         // 任何回答都算「我看完了」—— 严格拒绝只会把 UI 的一次疏忽变成挂死。
         (Pending::RentNotice(_) | Pending::Card, _) => {}
@@ -228,6 +238,7 @@ mod tests {
             Pending::Upgrade(LandId(2)),
             Pending::RentNotice(LandId(2)),
             Pending::Card,
+            Pending::BankTeller,
         ] {
             let mut pending = PendingDecision::default();
             pending.offer(e, about);

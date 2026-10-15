@@ -31,7 +31,9 @@ pub mod walk;
 pub mod world;
 
 pub mod prelude {
-    pub use crate::bank::settle_bank_landing;
+    pub use crate::bank::{
+        AtmAccess, bank_op_allowed, bank_op_system, grant_atm_access_system, settle_bank_landing,
+    };
     pub use crate::board::{
         BoardDef, BranchDef, BranchKind, GridPos, LandDef, LandType, TileDef, TileIndex, TileKind,
     };
@@ -45,13 +47,17 @@ pub mod prelude {
         decision_system, jail_player, teleport,
     };
     pub use crate::loader::JsonAssetLoader;
-    pub use crate::market::{Market, MarketClock, settle_market_landing};
+    pub use crate::market::{
+        Market, MarketClock, market_tick_on_turn_end_system, settle_market_landing,
+        trade_request_system,
+    };
     pub use crate::msg::{
-        BankVisited, BuyOffered, CardDrawn, CardNotice, CashChanged, Decision, DecisionChosen,
-        DiceRolled, EffectOutcome, GameOver, JailSkipped, LandBought, LandUpgraded, PlayerArrived,
-        PlayerBankrupt, PlayerJailed, PlayerReleased, PlayerTeleported, RentDue, RequestRoll,
-        StockPriceChanged, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
-        TurnStarted, UpgradeOffered, WalkStarted,
+        BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn, CardNotice,
+        CashChanged, Decision, DecisionChosen, DiceRolled, EffectOutcome, GameOver, JailSkipped,
+        LandBought, LandUpgraded, PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased,
+        PlayerTeleported, RentDue, RequestRoll, StockPriceChanged, StockTradeRequested,
+        StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered,
+        WalkStarted,
     };
     pub use crate::player::{
         BankBalance, Bankrupt, GameSetup, JailSentence, PLAYER_COLORS, PlayerColor, PlayerId,
@@ -68,13 +74,15 @@ pub mod prelude {
 }
 
 use prelude::{
-    BankVisited, BoardDef, BuyOffered, CardDrawn, CardSet, CashChanged, DecisionChosen, DiceRolled,
-    GameOver, GameRules, GameSeed, GameSetup, JailSkipped, JsonAssetLoader, LandBought,
-    LandUpgraded, Landing, MarketClock, Paused, PendingDecision, PlayerArrived, PlayerBankrupt,
-    PlayerJailed, PlayerReleased, PlayerTeleported, RentDue, RequestRoll, StockPriceChanged,
-    StockSet, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted,
-    UpgradeOffered, WalkClock, WalkStarted, advance_walk_clock_system, begin_game_system,
-    decision_system, walk_step_system,
+    ActiveBoard, AtmAccess, BankOpDone, BankOpRequested, BankVisited, BoardDef, BuyOffered,
+    CardDrawn, CardSet, CashChanged, DecisionChosen, DiceRolled, GameOver, GameRules, GameSeed,
+    GameSetup, JailSkipped, JsonAssetLoader, LandBought, LandUpgraded, Landing, MarketClock,
+    Paused, PendingDecision, PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased,
+    PlayerTeleported, RentDue, RequestRoll, StockPriceChanged, StockSet, StockTradeRequested,
+    StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered,
+    WalkClock, WalkStarted, advance_walk_clock_system, bank_op_system, begin_game_system,
+    decision_system, grant_atm_access_system, market_tick_on_turn_end_system, trade_request_system,
+    walk_step_system,
 };
 use turn::{begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system};
 use world::CoreSet;
@@ -113,6 +121,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<MarketClock>()
             .init_resource::<Landing>()
             .init_resource::<PendingDecision>()
+            .init_resource::<AtmAccess>()
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
             .add_message::<RequestRoll>()
@@ -135,7 +144,10 @@ impl Plugin for CoreGamePlugin {
             .add_message::<LandUpgraded>()
             .add_message::<RentDue>()
             .add_message::<BankVisited>()
+            .add_message::<BankOpRequested>()
+            .add_message::<BankOpDone>()
             .add_message::<StockVisited>()
+            .add_message::<StockTradeRequested>()
             .add_message::<StockTraded>()
             .add_message::<StockPriceChanged>()
             // ===== 卡牌与决策（B3）=====
@@ -162,7 +174,26 @@ impl Plugin for CoreGamePlugin {
                     decision_system
                         .run_if(in_state(TurnPhase::WaitDecision))
                         .run_if(not_paused),
+                    // 证券交易的窗口就是「还没掷骰」这一段，与掷骰同态、同闸门
+                    trade_request_system
+                        .run_if(in_state(TurnPhase::WaitRoll))
+                        .run_if(not_paused),
                 ),
+            )
+            // ATM 资格与银行操作不挂状态：玩家可能在行走途中、也可能在落格之后按。
+            // 谁能办哪一种由 `bank_op_system` 自己判（AtmAccess / 柜台），
+            // 阶段门禁挡不住「乙替甲办」这类越权，认人才是有效判据。
+            // `grant_atm_access_system` 反过来不闸暂停：它只是记账，而暂停期间根本没有新
+            // 的 `TileStepped` 产生 —— 给它加闸门只会让暂停那一帧的路上银行格被漏记。
+            // `bank_op_system` 要额外等棋盘就位：它带 `Books`（里面是 `Res<ActiveBoard>`），
+            // 而装配前的那些帧还没有这个资源 —— 别的 `Books` 用户都躲在状态门禁后面，
+            // 这一只没有，所以漏一条就是每帧一次「Resource does not exist」。
+            .add_systems(Update, grant_atm_access_system)
+            .add_systems(
+                Update,
+                bank_op_system
+                    .run_if(resource_exists::<ActiveBoard>)
+                    .run_if(not_paused),
             )
             // 时钟在 First 推进、Update 消费：同帧内先累计、后定步
             .add_systems(
@@ -185,7 +216,12 @@ impl Plugin for CoreGamePlugin {
                 )
                     .chain(),
             )
-            .add_systems(OnEnter(TurnPhase::TurnEnd), end_turn_system)
+            // 回合结束 = 一天过去：行情 tick 与回合轮转同批、互不冲突（动的组件不相交），
+            // 所以不排顺序 —— 谁先跑都不改结果
+            .add_systems(
+                OnEnter(TurnPhase::TurnEnd),
+                (end_turn_system, market_tick_on_turn_end_system),
+            )
             .add_systems(OnEnter(TurnPhase::Over), game_over_system);
     }
 }
