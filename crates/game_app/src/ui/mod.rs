@@ -52,10 +52,15 @@ impl Plugin for UiPlugin {
                         pause::sync_pause_menu,
                         tile_info::pick_tile,
                         tile_info::sync_tile_card,
-                        dispatch_ui_actions,
-                        hover_feedback,
                     )
                         .in_set(UiSet::Live),
+                    // 派发与悬停**不**受 `ActiveBoard` 门禁：主菜单上没有 ActiveBoard，
+                    // 而「新游戏」「退出」恰恰只能在那里派发。曾把它们挂进 Live 集
+                    // （`resource_exists::<ActiveBoard>`），后果是菜单按钮点了没反应、
+                    // 只能点窗口关闭——且 `NM_MENULOOP` 直改状态绕过了派发，B5 验收测不到。
+                    // 依赖的资源全部常驻（见 `Gate`/`UiState`），菜单一帧不缺。
+                    dispatch_ui_actions,
+                    hover_feedback,
                 )
                     .chain(),
             );
@@ -75,7 +80,8 @@ impl Plugin for UiPlugin {
 enum UiSet {
     /// 棋盘就位那一刻装配一次
     Boot,
-    /// 逐帧刷新与输入派发。顺序有讲究：阶段旁白 → 事件覆盖 → 模态 → 派发
+    /// 逐帧刷新，只在对局内才有意义（门是 `ActiveBoard`）。
+    /// 派发与悬停不在此集内 —— 它们无条件跑，排在 Live 之后（见 `build`）。
     Live,
 }
 
@@ -453,6 +459,12 @@ fn action_of(
 }
 
 /// 悬停换色。同样走父链，否则鼠标移到按钮文字上就会「掉色」。
+///
+/// **顺序要紧：先清算 Out、再应用 Over。** picking 每帧只 hover 最深的一个节点，
+/// 指针在按钮里从空白处挪到文字上，同一帧会成对出现 `Out(按钮)` + `Over(文字)`；
+/// 若按「先进后出」处理，后到的 Out 会把刚点亮的高亮立刻浇灭 —— 悬停高亮一闪即逝，
+/// 稳态是原色（§6.1 坑 24）。先出后进，同帧「离开旧 + 进入新」指向同一按钮时，
+/// 最终停在 hover 色；彻底离开时只有 Out，自然复原。
 fn hover_feedback(
     mut overs: MessageReader<PointerOver>,
     mut outs: MessageReader<PointerOut>,
@@ -470,11 +482,11 @@ fn hover_feedback(
             bg.0 = if hover { palette.hover } else { palette.normal };
         }
     };
-    for e in overs.read() {
-        repaint(e.entity, true);
-    }
     for e in outs.read() {
         repaint(e.entity, false);
+    }
+    for e in overs.read() {
+        repaint(e.entity, true);
     }
 }
 
@@ -495,29 +507,52 @@ mod tests {
     /// 造一条落在 `entity` 上的左键点击。这些字段平时由 picking 后端填，
     /// 测试里没有窗口也没有指针，只能手拼一份最小可信的。
     fn make_click(entity: Entity) -> PointerClick {
-        // `NormalizedWindowRef` 的字段是私有的，只能借 `WindowRef::normalize` 造
-        let window = WindowRef::Entity(Entity::PLACEHOLDER)
-            .normalize(None)
-            .expect("占位窗口应当能归一化");
         PointerClick {
             entity,
-            pointer: Pointer::new(
-                PointerId::Mouse,
-                Location {
-                    target: NormalizedRenderTarget::Window(window),
-                    position: Vec2::ZERO,
-                },
-            ),
+            pointer: Pointer::new(PointerId::Mouse, test_location()),
             button: PointerButton::Primary,
-            hit: HitData {
-                camera: Entity::PLACEHOLDER,
-                depth: 0.0,
-                position: None,
-                normal: None,
-                extra: None,
-            },
+            hit: test_hit(),
             duration: Duration::ZERO,
             count: 1,
+        }
+    }
+
+    /// 测试用的指针位置（无窗口，字段由 `WindowRef::normalize` 兜出一份合法值）
+    fn test_location() -> Location {
+        Location {
+            target: NormalizedRenderTarget::Window(
+                WindowRef::Entity(Entity::PLACEHOLDER)
+                    .normalize(None)
+                    .expect("占位窗口应当能归一化"),
+            ),
+            position: Vec2::ZERO,
+        }
+    }
+
+    fn test_hit() -> HitData {
+        HitData {
+            camera: Entity::PLACEHOLDER,
+            depth: 0.0,
+            position: None,
+            normal: None,
+            extra: None,
+        }
+    }
+
+    /// 悬停消息与点击同构，共用一份最小可信字段
+    fn make_over(entity: Entity) -> PointerOver {
+        PointerOver {
+            entity,
+            pointer: Pointer::new(PointerId::Mouse, test_location()),
+            hit: test_hit(),
+        }
+    }
+
+    fn make_out(entity: Entity) -> PointerOut {
+        PointerOut {
+            entity,
+            pointer: Pointer::new(PointerId::Mouse, test_location()),
+            hit: test_hit(),
         }
     }
 
@@ -689,5 +724,118 @@ mod tests {
 
         h.click(h.pause);
         assert!(h.app.world().resource::<pause::PauseMenuOpen>().0);
+    }
+
+    /// 回归：派发曾被挂进 `UiSet::Live`（门是 `resource_exists::<ActiveBoard>`），
+    /// 而主菜单上没有 ActiveBoard —— 「新游戏」「退出」点了没反应，只能点窗口关闭。
+    /// B5 验收测不到它：`NM_MENULOOP` 直改 Scene 状态，绕过了派发系统。
+    ///
+    /// 所以这里必须走**真实 Plugin 接线**（不是上面手搓 dispatch 的 Harness）：
+    /// 菜单态、无 ActiveBoard，点一颗带动作的按钮，必须能切进对局。
+    #[test]
+    fn the_menu_dispatches_without_an_active_board() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(StatesPlugin)
+            .add_plugins(crate::scene::ScenePlugin)
+            .add_plugins(UiPlugin)
+            // `dispatch_ui_actions` 依赖的资源平时由 CoreGamePlugin 注册；
+            // headless 下按同一路径补齐（都常驻，与菜单态一致）
+            .init_state::<TurnPhase>()
+            .insert_resource(Paused::default())
+            .insert_resource(PendingDecision::default())
+            .add_message::<PointerClick>()
+            .add_message::<RequestRoll>()
+            .add_message::<DecisionChosen>()
+            .add_message::<AppExit>()
+            // hover_feedback 读的两条 picking 消息，真实应用由 picking 后端注册
+            .add_message::<PointerOver>()
+            .add_message::<PointerOut>()
+            // `spawn_menu` 要 `Res<DevFont>`（0.20 缺资源不再静默跳过而是 panic）；
+            // 占位句柄即可 —— headless 不渲染，只求菜单装配系统跑得过去
+            .insert_resource(crate::render::DevFont(Handle::default()));
+
+        // picking 后端 headless 不跑，按钮点击手拼一份最小可信的消息
+        let button = app.world_mut().spawn(UiAction::NewGame).id();
+        app.world_mut()
+            .resource_mut::<Messages<PointerClick>>()
+            .write(make_click(button));
+        app.update();
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<State<crate::scene::Scene>>().get(),
+            &crate::scene::Scene::Board,
+            "菜单点击没被派发 —— dispatch 是否又被挂回了 ActiveBoard 门后？"
+        );
+    }
+
+    /// 回归：picking 每帧只 hover **最深的一个**节点，指针在按钮里从空白处挪到
+    /// 文字上，同一帧会成对出现 `Out(按钮)` + `Over(文字)`。清算必须**先出后进** ——
+    /// 若先 Over 后 Out，后到的 Out 会把刚点亮的高亮立刻浇灭：悬停高亮一闪即逝，
+    /// 稳态是原色（用户实报，§6.1 坑 24）。光标恰恰最爱停在文字上，所以必现。
+    #[test]
+    fn out_and_over_of_the_same_button_in_one_frame_stays_hovered() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(StatesPlugin)
+            .init_state::<TurnPhase>()
+            .insert_resource(Paused::default())
+            .insert_resource(PendingDecision::default())
+            .add_message::<PointerOver>()
+            .add_message::<PointerOut>()
+            .add_systems(Update, hover_feedback);
+
+        let normal = Color::srgb(0.2, 0.2, 0.2);
+        let hover = Color::srgb(0.9, 0.1, 0.1);
+        let button = app
+            .world_mut()
+            .spawn((
+                UiAction::Roll,
+                BackgroundColor(normal),
+                Palette { normal, hover },
+            ))
+            .id();
+        // 命中测试报的是最深的节点：按钮里的文字
+        let text = app.world_mut().spawn(ChildOf(button)).id();
+
+        // 空白处 → 文字：同帧 Out(按钮) + Over(文字)，最终必须停在 hover 色
+        app.world_mut()
+            .resource_mut::<Messages<PointerOut>>()
+            .write(make_out(button));
+        app.world_mut()
+            .resource_mut::<Messages<PointerOver>>()
+            .write(make_over(text));
+        app.update();
+        assert_eq!(
+            app.world().get::<BackgroundColor>(button).unwrap().0,
+            hover,
+            "同帧「离开旧 + 进入新」指向同一按钮，Out 不得覆盖 Over"
+        );
+
+        // 文字 → 空白处：对称方向，同样停在 hover 色
+        app.world_mut()
+            .resource_mut::<Messages<PointerOut>>()
+            .write(make_out(text));
+        app.world_mut()
+            .resource_mut::<Messages<PointerOver>>()
+            .write(make_over(button));
+        app.update();
+        assert_eq!(
+            app.world().get::<BackgroundColor>(button).unwrap().0,
+            hover,
+            "反方向的按钮↔文字切换同样要保持 hover 色"
+        );
+
+        // 彻底离开：只有 Out，复原 normal
+        app.world_mut()
+            .resource_mut::<Messages<PointerOut>>()
+            .write(make_out(text));
+        app.update();
+        assert_eq!(
+            app.world().get::<BackgroundColor>(button).unwrap().0,
+            normal,
+            "光标离开后应复原"
+        );
     }
 }

@@ -355,10 +355,17 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 
     做法：**「现在显示成什么样」的键挂在实体上**（`ModalRoot((player, Pending))`、`TileCard(TileView)`、`PausePanel` 标记 + 查询），实体没了键自然没了，不需要谁记得去清；只有真正无法从实体推出的记忆（`RecentCard` 这种消息副产品、`PauseMenuOpen`、`Paused`、`SelectedTile`）留在资源里，由 `ui::reset_ui_state` 在 `OnEnter(Menu)` 链上统一清。判据：任何 `Local`/资源缓存都要能回答「换一局时它归谁清」。
 
+23. **把「两个场景都要用」的系统挂进「一个场景才存在的门」里，另一个场景就是死的**（B5 验收后用户实报：主菜单「新游戏」「退出」点了没反应，只能点窗口关闭）。`dispatch_ui_actions`/`hover_feedback` 曾随大流挂进 `UiSet::Live`（`run_if(resource_exists::<ActiveBoard>)`），而 `ActiveBoard` 进对局才插入、回菜单被 `teardown_match` 移除 —— 主菜单上派发系统一帧都不跑，`PointerClick` 没人读，按钮全部哑掉。**B5 验收测不到它**：`NM_MENULOOP` 直改 `Scene` 状态、绕过了派发，等于用「不经过被测代码」的路径验证了被测代码；对局内按钮有 ActiveBoard 撑着，一切正常。修法：派发/悬停移出 Live 集，无条件跑、仍排链尾（依赖资源全部常驻：`Paused`/`PendingDecision` 是 `init_resource`、`TurnOrder` 是 `Option`）。回归测试 `the_menu_dispatches_without_an_active_board` 用**真实 UiPlugin+ScenePlugin 接线**（不是手搓 dispatch 的 Harness）钉住这条缝 —— 接线错误只有走真实接线才测得到。判据：`run_if` 门禁里的资源若只在某个 Scene 存在，门后的系统就只属于那个 Scene；跨场景系统必须不在任何场景门后。
+
+24. **悬停高亮按事件增量涂色，会被同帧的 Out 覆盖成「一闪即逝」**（坑 23 修完后用户紧接着实报：悬停只亮一下就回原样）。picking 每帧只 hover **最深的一个**节点：指针在按钮**空白处**时 hover 集 = `{按钮}`，挪到**文字**上就变成 `{文字}`，于是「空白→文字」这一次最普通的移动会**同帧**发出 `Out(按钮)` + `Over(文字)`。`hover_feedback` 若按「先 Over 后 Out」处理，后到的 Out 把刚点亮的高亮立刻浇灭，而光标恰恰最爱停在文字上（按钮中央），稳态就是原色。修法：**先清算 Out、再应用 Over** —— 同帧「离开旧 + 进入新」指向同一按钮时最终停在 hover 色，彻底离开时只有 Out、自然复原。回归测试 `out_and_over_of_the_same_button_in_one_frame_stays_hovered`（真窗口冒烟：光标停在按钮文字上 8 秒，`NM_SHOT` 自截，按钮保持 hover 色）。判据：靠事件增量维护的视觉状态，同帧内的事件对要按「先失去、后获得」合成，最后写入的必须是语义上的最终态。
+
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
 `game_app` 里做成 `NM_SHOT=<路径>` 的环境开关（**按墙钟 1.5s 触发、2.5s 自行 `exit(0)`**，见上面第 5/10 条），
 后续每个渲染阶段都能用它自动生成对比图。
+（10-15 补）**别用 GDI 抓屏（`BitBlt`/`CopyFromScreen`）核对画面**：flip-model 交换链 + 硬件叠加层（MPO）之下，
+桌面 GDI 抓到游戏窗口那块是**纯白**，看着像渲染挂了，其实窗口显示正常、点击也照常命中 —— 核对画面一律走 `NM_SHOT`
+（GPU 侧截屏）；模拟鼠标冒烟用 SendInput，再靠 `NM_SHOT_AT` 错开时刻让应用自证点击后的状态。
 
 B5 之后这条判据升级为「**每个界面都必须有一条不依赖鼠标键盘的入口**」，否则那个界面等于没被验收过。
 现有的环境变量清单（全部只在开发侧生效，不进游戏逻辑）：
@@ -495,10 +502,18 @@ Godot 端**全项目没有任何字体资源**，也没设 `gui/theme/custom_fon
 `Local<Option<Entity>>` 存着已被 `BoardUi` 收走的面板句柄。修法统一是**把「现在显示成什么样」的键挂到实体上**，
 只有消息副产品（`RecentCard`）留在资源里由 `reset_ui_state` 清。另外 `Over` 阶段的旁白会盖掉胜者那句，改成该阶段不写旁白。
 
-**测试**：`game_app` 新增 7 项 App 级测试（该 crate 现在 8 项全过；规则层 98 项）（`ui::tests`），用 `MinimalPlugins` + 手搓 `PointerClick`
+**测试**：`game_app` 新增 7 项 App 级测试（用 `MinimalPlugins` + 手搓 `PointerClick`
 覆盖点击派发这一层：按到按钮**文字**要能沿父链找到按钮、待决事项/暂停/`Disabled` 三种情况必须拦住掷骰、
-无动作实体（遮罩）不吃事件、`Decide` 的主语是待决玩家而非当前玩家、`CloseInfo`/`TogglePause` 只写 UI 资源。
+无动作实体（遮罩）不吃事件、`Decide` 的主语是待决玩家而非当前玩家、`CloseInfo`/`TogglePause` 只写 UI 资源）。
 这条缝是 B5 唯一「错了不会立刻看得见」的地方，而它不需要窗口。
+
+**B5 验收后用户实报并修掉的缺陷（10-15，§6.1 坑 23）**：主菜单「新游戏」「退出」点击无响应 ——
+派发/悬停系统被误挂进 `UiSet::Live`（门是 `resource_exists::<ActiveBoard>`），主菜单上没有 ActiveBoard，
+点击消息永远无人读；`NM_MENULOOP` 绕过派发，所以验收测不到。修法：两系统移出门禁、无条件跑；
+新增**接线级**回归测试 `the_menu_dispatches_without_an_active_board`（真实 UiPlugin+ScenePlugin 接线 +
+手拼 `PointerClick`，菜单态点「新游戏」必须切进对局 —— Harness 那批测不到接线错误）。
+真人鼠标冒烟（SendInput）：点「退出」→ 进程 2s 内自退；点「新游戏」→ `NM_SHOT_AT=8` 自截 GPU 画面为对局棋盘。
+`game_app` 测试现为 9 项全过（规则层 98 项不变）。
 
 ---
 
