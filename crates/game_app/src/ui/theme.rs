@@ -63,6 +63,9 @@ pub mod col {
     pub const HUD_NAME: Color = Color::srgb(0.88, 0.88, 0.92); // :95
     pub const HUD_CASH: Color = Color::srgb(0.50, 0.85, 0.55); // :104
     pub const HUD_PROPS: Color = Color::srgb(0.65, 0.65, 0.72); // :112
+    /// 点券。取 `palette::tile(TileKind::Coupon)` 那一档 mint：
+    /// 数字与格子的颜色对上，玩家才认得出「HUD 上这笔账是路上捡来的那种钱」
+    pub const HUD_POINTS: Color = Color::srgb(0.35, 0.9, 0.75);
 
     // ===== 主菜单（main_menu.tscn）=====
     pub const MENU_BG: Color = Color::srgb(0.12, 0.12, 0.16); // :21

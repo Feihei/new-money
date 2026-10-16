@@ -7,6 +7,7 @@ use bevy::prelude::*;
 
 use crate::board::BoardDef;
 use crate::card::{CardKind, CardSet};
+use crate::coupon::CouponBoxes;
 use crate::data::DataHandles;
 use crate::deck::Deck;
 use crate::land::{self, LandId};
@@ -52,7 +53,7 @@ pub struct ActiveBoard {
 /// 开局要读的四份资产（棋盘 + 两副牌 + 股票）。
 ///
 /// 打包成系统参数而不是给 `begin_game_system` 挂 `#[allow(clippy::too_many_arguments)]`：
-/// 后者会把「参数确实太多了」这个真信号吃掉（`.agents/MIGRATION.md` §六 坑 8）。
+/// 后者会把「参数确实太多了」这个真信号吃掉（`.agents/ARCHITECTURE.md` §六 坑 8）。
 #[derive(SystemParam)]
 pub struct BootAssets<'w> {
     data: Res<'w, DataHandles>,
@@ -142,6 +143,9 @@ pub fn begin_game_system(
         seed: cfg.seed.0,
     });
     commands.insert_resource(MarketClock::default());
+    // 点券箱的「谁被取走过」是**这一局**的事实：上一局捡空的格子必须在新局重新长出来
+    // （B5 验收那批跨局残留缺陷的同一族，见 ARCHITECTURE §6.1 坑 22/25）
+    commands.insert_resource(CouponBoxes::default());
     next.set(TurnPhase::TurnStart);
 }
 

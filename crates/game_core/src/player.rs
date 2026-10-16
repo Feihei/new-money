@@ -42,6 +42,14 @@ pub struct Wallet {
     pub cash: i64,
 }
 
+/// 点券：与现金**完全分账的第二货币**（PLAN §一 拍板「永不通兑」）。
+///
+/// 单独一个组件而不是 `Wallet` 的第二个字段，是为了让「两套账」在类型上成立：
+/// 点券的变动只走 [`crate::msg::PointsChanged`]，永不进 `CashChanged`，
+/// 于是 B3 那条现金审计（余额 == 起始 + Σ 流水）既抓不到点券、也不该抓到。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Points(pub u32);
+
 /// 银行账户：存款生息、贷款计息（`bank_system.gd` 的 deposit/loan 字段）。
 /// 利息结算不经过现金 —— 存款利息进余额、贷款利息进负债，与 Godot 一致。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -153,6 +161,8 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
                     Wallet {
                         cash: rules.start_cash,
                     },
+                    // 点券开局为 0（PLAN §三：来源只有点券格与小游戏格）
+                    Points::default(),
                     TokenPosition { tile: START_TILE },
                     WalkQueue::default(),
                     BankBalance::default(),

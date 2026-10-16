@@ -9,10 +9,12 @@
 
 use bevy::prelude::*;
 
-use crate::board::{BranchKind, GridPos, TileIndex, TileKind};
+use crate::board::{BranchKind, GridPos, TileIndex};
 use crate::card::{CardDef, CardEffect, CardKind, CardSet};
 use crate::data::DataHandles;
-use crate::landing::{Landed, Landing, Pending, PendingDecision, jail_player, teleport};
+use crate::landing::{
+    Landed, Landing, LandingDomain, Pending, PendingDecision, jail_player, teleport,
+};
 use crate::msg::{CardDrawn, CardNotice, EffectOutcome, PlayerJailed, PlayerTeleported};
 use crate::player::PlayerId;
 use crate::player::TokenPosition;
@@ -118,16 +120,17 @@ pub fn settle_card_landing(
     mut jailed: MessageWriter<'_, PlayerJailed>,
     mut teleported: MessageWriter<'_, PlayerTeleported>,
 ) {
-    let Some(Landed { player, kind, .. }) = landing.0 else {
+    let Some(Landed {
+        player,
+        domain: LandingDomain::Card(expect),
+        ..
+    }) = landing.0
+    else {
         return;
     };
-    let expect = match kind {
-        TileKind::Chance => CardKind::Chance,
-        TileKind::Fate => CardKind::Fate,
-        _ => return,
-    };
 
-    // 牌堆与卡定义按种类配对：机会格抽机会牌，命运格抽命运牌
+    // 牌堆与卡定义按种类配对：机会格抽机会牌，命运格抽命运牌。
+    // 这条配对写在 `domain_of` 的分派表里，所以这里不必再 `match` 一遍格类型。
     let handle = match expect {
         CardKind::Chance => &data.chance,
         CardKind::Fate => &data.fate,

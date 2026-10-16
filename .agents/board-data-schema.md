@@ -49,10 +49,24 @@
 | `land_id` | int? | **仅 property 道路格**有；指向 `lands[]` 的土地 |
 | `branch` | object? | **可选**；存在即为分支接入点 |
 
-**道路格 `type` 取值**：`start` / `road` / `chance` / `fate` / `bank` / `transport` / `property` / `jail`(接入点) / `hospital`(接入点) ……
+**道路格 `type` 取值**：`start` / `road` / `chance` / `fate` / `bank` / `stock` / `coupon` / `transport` / `property` / `jail`(接入点) / `hospital`(接入点) ……
 - `property` 道路格：**必带 `land_id`**，落到此格经 `land_id` 触发土地的购买/收租/升级。
 - 拐角格必须是 `fate`/`bank`/`news` 等特殊类型，**不绑土地**（无 `land_id`）。
 - 其余类型按各自事件处理，无 `land_id`。
+
+### `data` 的字段与归属（P1 起）
+
+| 字段 | 类型 | 属于哪些 `type` | 含义 |
+|------|------|------|------|
+| `turns` | int? | `jail` / `hospital`（死胡同格） | 服刑/住院回合数 |
+| `fine` | int? | 同上 | 交钱提前出来的罚金 |
+| `coupon` | int? | **仅 `coupon`** | 点券面额，**必须为正**（三档 10/30/50 由数据决定，不随机抽，见 PLAN §五） |
+| `refresh` | int? | **仅 `coupon`** | 取走后多少回合重新出现；缺省走 `GameRules::coupon_refresh_turns`（6）。写 `0` 等于每次踩都发，与「一次性」矛盾 |
+
+**不变式**（`BoardDef::validate` + `tools/validate_board.py` 两边都查）：
+- `coupon` 格的 `data.coupon` 缺失或为 0 → 加载期报错。「踩上去什么都不发生」必须是数据错误而不是运行时的静默。
+- 非 `coupon` 格带 `coupon`/`refresh` → 报错（与「非 property 格不该带 `land_id`」同一条理由）。
+- `coupon` 格不绑土地：它是一次性拾取点，没有归属、等级、租金。
 
 ### 对角判定
 相邻 `loop` 元素若 `abs(dcol)==1 && abs(drow)==1`，该段为**对角路**（斜向街道），渲染与移动均按斜线处理。

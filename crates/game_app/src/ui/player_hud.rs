@@ -1,4 +1,4 @@
-//! 底部玩家卡：颜色点、名字、现金、地产数与状态，高亮当前回合那位。
+//! 底部玩家卡：颜色点、名字、现金、点券、地产数与状态，高亮当前回合那位。
 //!
 //! 对应 Godot `player_hud.gd`（220 行、七个信号回调各自找自己的 label 改文字）。
 //!
@@ -11,22 +11,24 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    Bankrupt, JailSentence, LandId, Owner, PlayerColor, PlayerId, PlayerName, TurnOrder, Wallet,
+    Bankrupt, JailSentence, LandId, Owner, PlayerColor, PlayerId, PlayerName, Points, TurnOrder,
+    Wallet,
 };
 
 use super::theme::{col, layout, size};
 use super::{BoardUi, label};
 use crate::render::DevFont;
 
-/// 一张玩家卡：四段文本 + 颜色点，外加「上次写进去的整行内容」。
+/// 一张玩家卡：五段文本 + 颜色点，外加「上次写进去的整行内容」。
 ///
-/// 缓存整张卡而不是逐段比对，是因为这四段本来就要一起变：一次比较，要么全写要么全不写。
+/// 缓存整张卡而不是逐段比对，是因为这几段本来就要一起变：一次比较，要么全写要么全不写。
 /// 高亮另记一个 `bool` —— 它是样式，不在文本里。
 #[derive(Component)]
 pub(crate) struct PlayerCard {
     player: Entity,
     name: Entity,
     cash: Entity,
+    points: Entity,
     props: Entity,
     status: Entity,
     cached: String,
@@ -36,7 +38,14 @@ pub(crate) struct PlayerCard {
 pub(crate) fn spawn_player_hud(
     mut commands: Commands,
     font: Res<DevFont>,
-    players: Query<(Entity, &PlayerId, &PlayerName, &Wallet, &PlayerColor)>,
+    players: Query<(
+        Entity,
+        &PlayerId,
+        &PlayerName,
+        &Wallet,
+        &Points,
+        &PlayerColor,
+    )>,
 ) {
     let mut sorted: Vec<_> = players.iter().collect();
     sorted.sort_by_key(|(_, id, ..)| id.0);
@@ -60,7 +69,7 @@ pub(crate) fn spawn_player_hud(
         ))
         .id();
 
-    for (player, _, name, wallet, color) in sorted {
+    for (player, _, name, wallet, points, color) in sorted {
         let card = commands
             .spawn((
                 Pickable::IGNORE,
@@ -124,6 +133,26 @@ pub(crate) fn spawn_player_hud(
                 c,
             ))
             .id();
+        // 第二套账单独一段：与现金并排、另取一色，「永不通兑」在界面上的表达就是
+        // 它是另一个数字，不是 `$` 后面多出来的几位
+        let (t, f, c) = label(
+            &font.0,
+            format!("点券:{}", points.0),
+            size::BODY,
+            col::HUD_POINTS,
+        );
+        let points_e = commands
+            .spawn((
+                ChildOf(card),
+                Node {
+                    min_width: Val::Px(84.0),
+                    ..default()
+                },
+                t,
+                f,
+                c,
+            ))
+            .id();
         let (t, f, c) = label(&font.0, "地产:0", size::SMALL, col::HUD_PROPS);
         let props_e = commands.spawn((ChildOf(card), t, f, c)).id();
         let (t, f, c) = label(&font.0, String::new(), size::SMALL, col::BODY);
@@ -147,6 +176,7 @@ pub(crate) fn spawn_player_hud(
             player,
             name: name_e,
             cash: cash_e,
+            points: points_e,
             props: props_e,
             status: status_e,
             cached: String::new(),
@@ -161,11 +191,12 @@ type HudPlayer<'w> = (
     &'w PlayerId,
     &'w PlayerName,
     &'w Wallet,
+    &'w Points,
     Option<&'w JailSentence>,
     Option<&'w Bankrupt>,
 );
 
-/// 每帧从世界状态重算四段文案，只在真的变了才写文本（反复赋同一个字符串会让排版重来）。
+/// 每帧从世界状态重算五段文案，只在真的变了才写文本（反复赋同一个字符串会让排版重来）。
 ///
 /// 归属用的是 `PlayerId` 而不是实体句柄（`land.rs:20` 的 `Owner(pub Option<PlayerId>)`），
 /// 所以地产数按 `PlayerId` 数 —— 混用两种指代就会算出「同一块地有两个主人」。
@@ -193,7 +224,7 @@ pub(crate) fn refresh_player_hud(
     }
 
     for (mut card, mut bg, mut border, mut node) in &mut cards {
-        let Ok((pid, name, wallet, jailed, bankrupt)) = players.get(card.player) else {
+        let Ok((pid, name, wallet, points, jailed, bankrupt)) = players.get(card.player) else {
             continue;
         };
         let props = owned
@@ -207,12 +238,14 @@ pub(crate) fn refresh_player_hud(
             (None, None) => ("", col::BODY),
         };
         let cash = format!("${}", wallet.cash);
+        let points = format!("点券:{}", points.0);
 
-        let line = format!("{}|{cash}|{props}|{status}", name.0);
+        let line = format!("{}|{cash}|{points}|{props}|{status}", name.0);
         if line != card.cached {
             card.cached = line;
             write(&mut texts, card.name, &name.0);
             write(&mut texts, card.cash, &cash);
+            write(&mut texts, card.points, &points);
             write(&mut texts, card.props, &format!("地产:{props}"));
             write(&mut texts, card.status, status);
             if let Ok(mut color) = colors.get_mut(card.status) {

@@ -1,7 +1,7 @@
 //! 《暴富》规则层入口。
 //!
 //! 实体分四类（B3 起）：土地（`LandId`+`Owner`+`BuildingLevel`+可选 `Mortgaged`）、
-//! 玩家（`PlayerId`+`Wallet`+`TokenPosition`+`BankBalance`+`StockHoldings`+可选
+//! 玩家（`PlayerId`+`Wallet`+`Points`+`TokenPosition`+`BankBalance`+`StockHoldings`+可选
 //! `JailSentence`/`Bankrupt`）、股票（`StockId`+`StockPrice`+`PriceHistory`）、
 //! 牌堆（`Deck`，机会/命运各一）。道路格**不建实体**，相机/灯光/UI 在 `game_app`。
 
@@ -12,6 +12,7 @@ use bevy::time::TimePlugin;
 pub mod bank;
 pub mod board;
 pub mod card;
+pub mod coupon;
 pub mod data;
 pub mod deck;
 pub mod economy;
@@ -38,13 +39,14 @@ pub mod prelude {
         BoardDef, BranchDef, BranchKind, GridPos, LandDef, LandType, TileDef, TileIndex, TileKind,
     };
     pub use crate::card::{CardDef, CardEffect, CardKind, CardSet};
+    pub use crate::coupon::{CouponBoxes, settle_coupon_landing};
     pub use crate::data::{BOARD_PATH, CHANCE_PATH, DataHandles, FATE_PATH, STOCKS_PATH};
     pub use crate::deck::{CardId, Deck, card_of, settle_card_landing};
     pub use crate::economy::LandView;
     pub use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
     pub use crate::landing::{
-        Landed, Landing, Pending, PendingDecision, classify_landing_system, close_landing_system,
-        decision_system, jail_player, teleport,
+        Landed, Landing, LandingDomain, Pending, PendingDecision, classify_landing_system,
+        close_landing_system, decision_system, domain_of, jail_player, teleport,
     };
     pub use crate::loader::JsonAssetLoader;
     pub use crate::market::{
@@ -55,13 +57,13 @@ pub mod prelude {
         BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn, CardNotice,
         CashChanged, Decision, DecisionChosen, DiceRolled, EffectOutcome, GameOver, JailSkipped,
         LandBought, LandUpgraded, PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased,
-        PlayerTeleported, RentDue, RequestRoll, StockPriceChanged, StockTradeRequested,
-        StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered,
-        WalkStarted,
+        PlayerTeleported, PointsChanged, RentDue, RequestRoll, StockPriceChanged,
+        StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
+        TurnStarted, UpgradeOffered, WalkStarted,
     };
     pub use crate::player::{
         BankBalance, Bankrupt, GameSetup, JailSentence, PLAYER_COLORS, PlayerColor, PlayerId,
-        PlayerName, PlayerSetup, START_TILE, TokenPosition, WalkQueue, Wallet,
+        PlayerName, PlayerSetup, Points, START_TILE, TokenPosition, WalkQueue, Wallet,
     };
     pub use crate::property::settle_property_landing;
     pub use crate::rng::{DIE_FACES, GameSeed, Rng};
@@ -75,14 +77,14 @@ pub mod prelude {
 
 use prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankOpRequested, BankVisited, BoardDef, BuyOffered,
-    CardDrawn, CardSet, CashChanged, DecisionChosen, DiceRolled, GameOver, GameRules, GameSeed,
-    GameSetup, JailSkipped, JsonAssetLoader, LandBought, LandUpgraded, Landing, MarketClock,
-    Paused, PendingDecision, PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased,
-    PlayerTeleported, RentDue, RequestRoll, StockPriceChanged, StockSet, StockTradeRequested,
-    StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered,
-    WalkClock, WalkStarted, advance_walk_clock_system, bank_op_system, begin_game_system,
-    decision_system, grant_atm_access_system, market_tick_on_turn_end_system, trade_request_system,
-    walk_step_system,
+    CardDrawn, CardSet, CashChanged, CouponBoxes, DecisionChosen, DiceRolled, GameOver, GameRules,
+    GameSeed, GameSetup, JailSkipped, JsonAssetLoader, LandBought, LandUpgraded, Landing,
+    MarketClock, Paused, PendingDecision, PlayerArrived, PlayerBankrupt, PlayerJailed,
+    PlayerReleased, PlayerTeleported, PointsChanged, RentDue, RequestRoll, StockPriceChanged,
+    StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase,
+    TurnStarted, UpgradeOffered, WalkClock, WalkStarted, advance_walk_clock_system, bank_op_system,
+    begin_game_system, decision_system, grant_atm_access_system, market_tick_on_turn_end_system,
+    trade_request_system, walk_step_system,
 };
 use turn::{begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system};
 use world::CoreSet;
@@ -122,6 +124,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<Landing>()
             .init_resource::<PendingDecision>()
             .init_resource::<AtmAccess>()
+            .init_resource::<CouponBoxes>()
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
             .add_message::<RequestRoll>()
@@ -137,6 +140,7 @@ impl Plugin for CoreGamePlugin {
             .add_message::<GameOver>()
             // ===== 地产与经济（B3）=====
             .add_message::<CashChanged>()
+            .add_message::<PointsChanged>()
             .add_message::<PlayerBankrupt>()
             .add_message::<BuyOffered>()
             .add_message::<UpgradeOffered>()
@@ -202,8 +206,9 @@ impl Plugin for CoreGamePlugin {
                     .run_if(in_state(TurnPhase::Walking))
                     .run_if(not_paused),
             )
-            // 落格流水线：解释一次格子 → 四个域各自结算 → 由 pending 决定去哪一阶段。
+            // 落格流水线：解释一次格子 → 五个域各自结算 → 由 pending 决定去哪一阶段。
             // 顺序写成显式 chain：域的先后决定同帧消息的次序，靠隐式冲突排序说出来不算数。
+            // 哪个格归哪个域，只在 `landing::domain_of` 那张穷尽表里说一次。
             .add_systems(
                 OnEnter(TurnPhase::Landed),
                 (
@@ -212,6 +217,7 @@ impl Plugin for CoreGamePlugin {
                     bank::settle_bank_landing,
                     market::settle_market_landing,
                     deck::settle_card_landing,
+                    coupon::settle_coupon_landing,
                     landing::close_landing_system,
                 )
                     .chain(),

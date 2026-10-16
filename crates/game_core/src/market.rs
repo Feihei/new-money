@@ -4,7 +4,7 @@
 //! 这里字典没了：每只股一个实体，`StockId` / `StockPrice` / `PriceHistory` 是组件，
 //! 静态配置仍在 `Assets<StockSet>` 里查（一份真相，见 §4.2）。
 //!
-//! 修掉的两条（`.agents/MIGRATION.md` §三）：
+//! 修掉的两条（`.agents/ARCHITECTURE.md` §三）：
 //! - **#4**：买卖时发的 `stock_price_changed(price, current_price)` 两个值相同
 //!   （价格根本没变），真正的波动事件反而没有。这里拆成 `StockPriceChanged`（波动，
 //!   带真实 old/new）与 `StockTraded`（成交，带股数与成交价）。
@@ -22,10 +22,9 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::board::TileKind;
 use crate::data::DataHandles;
 use crate::economy;
-use crate::landing::{Landed, Landing};
+use crate::landing::{Landed, Landing, LandingDomain};
 use crate::msg::{StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TradeSide};
 use crate::rng::Rng;
 use crate::settle::Books;
@@ -189,7 +188,7 @@ impl<'w, 's> Market<'w, 's> {
 pub fn settle_market_landing(landing: Res<Landing>, mut visited: MessageWriter<StockVisited>) {
     let Some(Landed {
         player,
-        kind: TileKind::Stock,
+        domain: LandingDomain::Market,
         ..
     }) = landing.0
     else {

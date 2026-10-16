@@ -7,12 +7,11 @@
 
 use bevy::prelude::*;
 
-use crate::board::TileKind;
 use crate::economy;
 use crate::msg::{BuyOffered, RentDue, UpgradeOffered};
 use crate::settle::Books;
 
-use crate::landing::{Landed, Landing, Pending, PendingDecision};
+use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
 
 /// 踩到地产格：三种归属三种走法（无主 / 自己 / 别人），与 Godot 完全一致。
 pub fn settle_property_landing(
@@ -24,11 +23,11 @@ pub fn settle_property_landing(
     mut upgrades: MessageWriter<UpgradeOffered>,
     mut rents: MessageWriter<RentDue>,
 ) {
-    // 只有 property 格带土地；其余格（含 `land_id` 为 `None` 的 property 坏数据）直接跳过
+    // 只有地产格带土地；其余格（含 `land_id` 为 `None` 的坏数据）直接跳过
     let Some(Landed {
         player,
         land: Some(land),
-        kind: TileKind::Property,
+        domain: LandingDomain::Property,
         ..
     }) = landing.0
     else {

@@ -13,8 +13,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     AtmAccess, BankOpDone, BankVisited, GameOver, GameRules, GameSession, JailSkipped, MarketClock,
-    Paused, PendingDecision, PlayerBankrupt, PlayerName, StockTraded, StockVisited, TurnOrder,
-    TurnPhase,
+    Paused, PendingDecision, PlayerBankrupt, PlayerName, PointsChanged, StockTraded, StockVisited,
+    TurnOrder, TurnPhase,
 };
 
 use super::finance::comma;
@@ -301,6 +301,7 @@ pub(crate) struct Notices<'w, 's> {
     bank_ops: MessageReader<'w, 's, BankOpDone>,
     stock: MessageReader<'w, 's, StockVisited>,
     traded: MessageReader<'w, 's, StockTraded>,
+    points: MessageReader<'w, 's, PointsChanged>,
     over: MessageReader<'w, 's, GameOver>,
 }
 
@@ -348,6 +349,16 @@ pub(crate) fn hint_from_events(
             side_verb(m.side),
             m.shares,
             m.price
+        ));
+    }
+    // 点券到账：它不进现金流水、也没有模态可看，这一行是唯一的播报口。
+    // 和其余事件流水一样会被下一次阶段旁白冲掉（只活两三帧），持久的读数在 HUD 那一段
+    for m in notices.points.read() {
+        line = Some(format!(
+            "{} 捡到 {} 点券（共 {}）",
+            name(&names, m.player),
+            m.delta,
+            m.balance
         ));
     }
     for m in notices.over.read() {

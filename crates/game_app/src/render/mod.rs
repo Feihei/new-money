@@ -1,6 +1,6 @@
 //! 表现层（B4 渲染切片）：把规则层的实体与消息画成等轴测棋盘。
 //!
-//! 分层红线（`.agents/MIGRATION.md` §4.6）：这一层只**读** core 的状态与消息，
+//! 分层红线（`.agents/ARCHITECTURE.md` §4.6）：这一层只**读** core 的状态与消息，
 //! 从不向 core 发「推进回合」的消息 —— 逻辑位置与步时归 core，棋子在这里只是插值出来的球。
 //! 唯一的例外是「玩家意图」那两条（`RequestRoll`/`DecisionChosen`），它们的发送者是输入侧：
 //! B4 期间是 `crate::autopilot`，B5 换成按钮、B6 换成 AI，都不是本模块。
@@ -152,6 +152,9 @@ pub mod palette {
             TileKind::Neutral => Color::srgb(0.4, 0.4, 0.45),
             TileKind::Road => Color::srgb(0.5, 0.5, 0.5),
             TileKind::Transport => Color::srgb(0.5, 0.7, 0.7),
+            // 点券箱没有 Godot 对照（`TYPE_COLORS` 里没这一格）， mint 是与青绿路面
+            // （transport）、紫（stock）、黄（start/lottery）都不撞的那一档
+            TileKind::Coupon => Color::srgb(0.35, 0.9, 0.75),
         }
     }
 

@@ -165,6 +165,13 @@ fn spawn_card(
             rows.push(("租金", format!("Lv{} — ${rent}", i + 1), col::VALUE));
         }
     }
+    // 点券箱的面额写在格子上，玩家点一下就该看见「这一格值多少点券」——
+    // 三档梯度的全部意义是「这段路值得走」，看不见数字就谈不上绕路
+    if let Some(index) = view.index
+        && let Some(coupon) = active.def.tile(index as i64).and_then(|t| t.data.coupon)
+    {
+        rows.push(("面额", format!("{coupon} 点券"), col::GAIN));
+    }
 
     commands
         .spawn((
@@ -216,5 +223,6 @@ fn kind_name(kind: TileKind) -> &'static str {
         TileKind::Neutral => "中立",
         TileKind::Road => "道路",
         TileKind::Transport => "交通",
+        TileKind::Coupon => "点券箱",
     }
 }

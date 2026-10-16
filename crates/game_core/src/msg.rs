@@ -171,6 +171,18 @@ pub struct CashChanged {
     pub balance: i64,
 }
 
+/// 点券变动。**与 [`CashChanged`] 是两套账**：这条流水不计入现金审计，反之也不该出现
+/// 在这里（PLAN §一 拍板「点券与现金永不通兑」）。
+///
+/// `delta` 带符号：捡点券箱是 `+30`，而 P5 的小偷偷一半、P12 的保释 300 都写负数，
+/// 不必为「支出」再开一条消息。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointsChanged {
+    pub player: Entity,
+    pub delta: i64,
+    pub balance: u32,
+}
+
 /// 破产宣告。`unpaid` 是付不出来的那笔钱（租金/罚款/地价）。
 ///
 /// 缺陷 #3 的修复点：Godot `card_effects.gd:34-41` 只回一句「现金不足，破产！」

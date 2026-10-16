@@ -9,6 +9,7 @@
   5. size=2 商业用地恰好被 2 个道路格共享
   6. 土地格不得与道路格重叠
   7. 分支接入点（junction）存在，死胡同格不在主环上
+  8. 点券格（coupon）必带正的 data.coupon 面额，且点券字段只属于点券格
 """
 import json
 import sys
@@ -92,12 +93,24 @@ for t in loop:
             if (bt["col"], bt["row"]) in loop_cells:
                 errors.append(f"分支 '{b['type']}' 死胡同格 {bt['col'],bt['row']} 落在主环上")
 
+# 8. 点券格（与 Rust 侧 `BoardDef::validate` 同一条不变式，两边都要响）
+for t in loop:
+    data = t.get("data") or {}
+    if t["type"] == "coupon":
+        if not data.get("coupon"):
+            errors.append(f"loop[{t['id']}] 是 coupon 但缺正的 data.coupon 面额")
+        if data.get("refresh") == 0:
+            errors.append(f"loop[{t['id']}] coupon 的 refresh=0 等于每次踩都发，与「一次性」矛盾")
+    elif data.get("coupon") is not None or data.get("refresh") is not None:
+        errors.append(f"loop[{t['id']}] 不是 coupon 格，却带了点券字段")
+
 # 报告
 print(f"== 棋盘 '{board['board_name']}' 校验 ==")
 print(f"网格: {cols}x{rows}  cell_size={board['cell_size']}")
 print(f"主环格数: {n}  对角路段: {diagonals}")
 print(f"土地数: {len(lands)}  分支接入点: {sum(1 for t in loop if 'branch' in t)}")
 print(f"property 道路格: {sum(1 for t in loop if t['type']=='property')}")
+print(f"点券格: {sum(1 for t in loop if t['type']=='coupon')}")
 
 if warns:
     print("\n[警告]")

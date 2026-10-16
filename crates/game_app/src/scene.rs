@@ -1,6 +1,6 @@
 //! 场景流转：主菜单 ↔ 对局。
 //!
-//! 用单 App + state（`.agents/MIGRATION.md` §十一 决策 3），不是 Godot 的
+//! 用单 App + state（`.agents/ARCHITECTURE.md` §十一 决策 3），不是 Godot 的
 //! `get_tree().change_scene_to_file()`。两条纪律：
 //! - **进对局才装配世界**：`CoreSet::Boot` 被 `in_state(Scene::Board)` 挡住，
 //!   于是 `TurnPhase` 停在 `Boot`，整台回合机在菜单下都是死的。
@@ -9,8 +9,8 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, CoreSet, GameSession, Gameplay, Landing, MarketClock, PendingDecision, Rng,
-    TurnOrder, TurnPhase, WalkClock,
+    ActiveBoard, CoreSet, CouponBoxes, GameSession, Gameplay, Landing, MarketClock,
+    PendingDecision, Rng, TurnOrder, TurnPhase, WalkClock,
 };
 
 use crate::ui::BoardUi;
@@ -112,8 +112,8 @@ fn despawn_menu(mut commands: Commands, menu: Query<Entity, With<crate::ui::Menu
 /// 回主菜单时把这一局的东西全部收走。
 ///
 /// 表现层的实体由 `crate::render` 自己的标记负责清理，这里只动规则层的东西。
-/// `WalkClock`/`Landing`/`PendingDecision`/`MarketClock` 是 `init_resource` 常驻的
-/// （结算 system 用 `Res<T>` 拿它们），所以重置成默认值而不是移除。
+/// `WalkClock`/`Landing`/`PendingDecision`/`MarketClock`/`CouponBoxes` 是 `init_resource`
+/// 常驻的（结算 system 用 `Res<T>` 拿它们），所以重置成默认值而不是移除。
 fn teardown_match(
     mut commands: Commands,
     mut phase: ResMut<NextState<TurnPhase>>,
@@ -131,6 +131,8 @@ fn teardown_match(
     commands.insert_resource(MarketClock::default());
     commands.insert_resource(Landing::default());
     commands.insert_resource(PendingDecision::default());
+    // 上一局捡空的点券箱必须在新局重新长出来，否则第二局一整盘都是冷却中
+    commands.insert_resource(CouponBoxes::default());
     phase.set(TurnPhase::Boot);
     info!("清场：回收 {count} 个规则层实体，回合机退回 Boot");
 }

@@ -24,16 +24,16 @@ pub enum TileKind {
     Neutral,
     Road,
     Transport,
+    /// 点券箱：一次性拾取、按回合冷却刷新（`.agents/PLAN.md` §五，实现见 `coupon.rs`）。
+    Coupon,
 }
 
 impl TileKind {
     /// 会把玩家关起来的格子类型（对应 Godot 端 `TileType.is_detention_tile`）。
+    ///
+    /// 现在没有调用方：P4 的 `Detention` 模型才是它的主语，届时由那里决定读它还是换形态。
     pub fn is_detention(self) -> bool {
         matches!(self, Self::Jail | Self::Hospital)
-    }
-
-    pub fn is_card(self) -> bool {
-        matches!(self, Self::Chance | Self::Fate)
     }
 }
 
@@ -77,13 +77,21 @@ impl GridPos {
     }
 }
 
-/// 格子附加数据。当前只有拘留格用得到，其余格为 `{}`。
+/// 格子附加数据。拘留格用 `turns`/`fine`，点券格用 `coupon`/`refresh`，其余格为 `{}`。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub struct TileData {
     #[serde(default)]
     pub turns: Option<u32>,
     #[serde(default)]
     pub fine: Option<i64>,
+    /// 点券格的面额。三档 10/30/50 **由数据决定、不随机抽**（`validate` 要求正面额）：
+    /// 随机抽会让三档的期望值全部相同，「这一段路值得走」的梯度当场失效（PLAN §五）。
+    #[serde(default)]
+    pub coupon: Option<u32>,
+    /// 取走后隔多少回合重新出现。缺省走 `GameRules::coupon_refresh_turns`。
+    /// 写 `0` 是数据错误（等于每次踩都发，「一次性」这条规则白写），由 `validate` 拦下。
+    #[serde(default)]
+    pub refresh: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -332,6 +340,32 @@ impl BoardDef {
             }
         }
 
+        // 点券格：面额是它存在的理由，缺失/为 0 就是一颗踩上去什么都不发的格子；
+        // 反过来，点券字段只能住在点券格上（与上面 `land_id` 那组同一条理由：
+        // 数据写歪了要在加载期响，而不是让玩家用一局的时间去发现）。
+        // 只看主环：死胡同格结构上进不了落格分派（`walk_path` 恒为主环下标）。
+        for t in &self.tiles {
+            if t.kind == TileKind::Coupon {
+                if t.data.coupon.unwrap_or(0) == 0 {
+                    errs.push(format!(
+                        "coupon 格 {}({}) 缺 data.coupon 面额",
+                        t.id, t.name
+                    ));
+                }
+                if t.data.refresh == Some(0) {
+                    errs.push(format!(
+                        "coupon 格 {}({}) 的 refresh=0 等于每次踩都发，与「一次性」矛盾",
+                        t.id, t.name
+                    ));
+                }
+            } else if t.data.coupon.is_some() || t.data.refresh.is_some() {
+                errs.push(format!(
+                    "{:?} 格 {}({}) 不该带点券字段",
+                    t.kind, t.id, t.name
+                ));
+            }
+        }
+
         let mut land_cells = std::collections::HashSet::new();
         for l in &self.lands {
             if !(1..=2).contains(&l.size) {
@@ -533,6 +567,19 @@ mod tests {
         );
     }
 
+    /// 点券的面额写在格子上，不在代码里：三档 10/30/50 是数据，改排布不必动 system。
+    #[test]
+    fn prototype_carries_a_coupon_box_face_value() {
+        let b = board();
+        let tile = &b.tiles[10];
+        assert_eq!(tile.kind, TileKind::Coupon);
+        assert_eq!(tile.data.coupon, Some(30));
+        assert_eq!(
+            tile.data.refresh, None,
+            "冷却缺省走 `GameRules::coupon_refresh_turns`，不在格子上重复一份"
+        );
+    }
+
     #[test]
     fn land_lookup_through_tile() {
         let b = board();
@@ -570,6 +617,15 @@ mod tests {
                     b.tiles[2].branch.as_mut().unwrap().tiles[0].row = 7;
                 },
                 "分支不连通",
+            ),
+            (|b| b.tiles[10].data.coupon = None, "点券格没有面额"),
+            (
+                |b| b.tiles[10].data.refresh = Some(0),
+                "点券格的冷却写成 0（等于每次踩都发）",
+            ),
+            (
+                |b| b.tiles[3].data.coupon = Some(50),
+                "点券字段挂在别的格上",
             ),
         ];
 

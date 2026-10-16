@@ -15,8 +15,8 @@ use bevy::prelude::*;
 
 use crate::economy::{self, LandView};
 use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
-use crate::msg::{CashChanged, PlayerBankrupt};
-use crate::player::{BankBalance, Bankrupt, PlayerId, Wallet};
+use crate::msg::{CashChanged, PlayerBankrupt, PointsChanged};
+use crate::player::{BankBalance, Bankrupt, PlayerId, Points, Wallet};
 use crate::rules::GameRules;
 use crate::stock::StockHoldings;
 use crate::world::ActiveBoard;
@@ -34,6 +34,7 @@ pub struct Books<'w, 's> {
     pub active: Res<'w, ActiveBoard>,
     pub rules: Res<'w, GameRules>,
     wallets: Query<'w, 's, &'static mut Wallet, With<PlayerId>>,
+    points: Query<'w, 's, &'static mut Points, With<PlayerId>>,
     banks: Query<'w, 's, &'static mut BankBalance, With<PlayerId>>,
     holdings: Query<'w, 's, &'static mut StockHoldings, With<PlayerId>>,
     faces: Query<'w, 's, (Entity, &'static PlayerId, Option<&'static Bankrupt>)>,
@@ -49,6 +50,7 @@ pub struct Books<'w, 's> {
         ),
     >,
     cash: MessageWriter<'w, CashChanged>,
+    points_changed: MessageWriter<'w, PointsChanged>,
     bankrupts: MessageWriter<'w, PlayerBankrupt>,
 }
 
@@ -239,6 +241,23 @@ impl<'w, 's> Books<'w, 's> {
 
     pub fn bank_of(&self, player: Entity) -> BankBalance {
         self.banks.get(player).copied().unwrap_or_default()
+    }
+
+    /// 点券的唯一入口（捡点券箱、将来的小游戏得分）。与现金分账：这里只发
+    /// [`PointsChanged`]，一次都不碰 `Wallet` —— 所以 B3 的现金审计看不见这笔账，
+    /// 这正是「永不通兑」在代码里的形状（PLAN §一）。
+    ///
+    /// 返回 `None` = 世界里没有这位玩家；面额 > 0 由 `BoardDef::validate` 守住，
+    /// 所以这里不再为「发 0 点」留分支。
+    pub fn award_points(&mut self, player: Entity, amount: u32) -> Option<u32> {
+        let mut points = self.points.get_mut(player).ok()?;
+        points.0 += amount;
+        self.points_changed.write(PointsChanged {
+            player,
+            delta: amount as i64,
+            balance: points.0,
+        });
+        Some(points.0)
     }
 
     pub fn holdings_of(&self, player: Entity) -> Vec<(crate::stock::StockId, u32)> {

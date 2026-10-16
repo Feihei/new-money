@@ -37,6 +37,9 @@ pub struct GameRules {
     pub dividend_rate: f32,
     /// 每只股保留的历史价格条数，`stock_market.gd:17`。
     pub max_price_history: usize,
+    /// 点券箱被取走后隔多少回合重新出现。格子上写了 `data.refresh` 就以格子为准，
+    /// 这条只是缺省值（`4 代路上宝箱是一次性的`，「什么时候再长出来」是我们的参数）。
+    pub coupon_refresh_turns: u32,
 }
 
 impl Default for GameRules {
@@ -54,6 +57,7 @@ impl Default for GameRules {
             dividend_day: 1,
             dividend_rate: 0.015,
             max_price_history: 50,
+            coupon_refresh_turns: 6,
         }
     }
 }

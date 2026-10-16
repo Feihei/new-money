@@ -18,13 +18,14 @@ use bevy::prelude::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankBalance, BankOp, BankOpDone, BankOpRequested, BankVisited, Books,
-    BuildingLevel, BuyOffered, CardDrawn, CardId, CardKind, CashChanged, DataHandles, Decision,
-    DecisionChosen, Deck, DiceRolled, GameOver, GameRules, GameSeed, GameSession, GameSetup,
-    JailSkipped, LandBought, LandId, LandUpgraded, Market, MarketClock, Mortgaged, Owner, Pending,
-    PendingDecision, PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed, PlayerReleased,
-    PlayerTeleported, RentDue, RequestRoll, Rng, StockId, StockPriceChanged, StockTradeRequested,
-    StockTraded, StockVisited, TileIndex, TileStepped, TokenPosition, TradeSide, TurnEnded,
-    TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet,
+    BuildingLevel, BuyOffered, CardDrawn, CardId, CardKind, CashChanged, CouponBoxes, DataHandles,
+    Decision, DecisionChosen, Deck, DiceRolled, GameOver, GameRules, GameSeed, GameSession,
+    GameSetup, JailSkipped, LandBought, LandId, LandUpgraded, Market, MarketClock, Mortgaged,
+    Owner, Pending, PendingDecision, PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed,
+    PlayerReleased, PlayerTeleported, Points, PointsChanged, RentDue, RequestRoll, Rng, StockId,
+    StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
+    TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered,
+    WalkStarted, Wallet,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -106,6 +107,11 @@ pub struct Ledger(pub Vec<String>);
 #[derive(Resource, Default, Debug)]
 pub struct CashAudit(pub Vec<(Entity, i64, i64)>);
 
+/// 点券流水。与 `CashAudit` 分成两张表就是「两套账」这件事的测试形态：
+/// 点券的变动绝不能混进现金那一条去（PLAN §一 拍板永不通兑）。
+#[derive(Resource, Default, Debug)]
+pub struct PointsAudit(pub Vec<(Entity, i64, u32)>);
+
 /// `MessageReader` 打包：流程域的 reader 们（0.20 的 reader 带 `'w`/`'s` 两个生命周期，见坑 13）。
 ///
 /// 字段顺序 = `collect` 的记录顺序 = 同帧多条消息在 `Observed` 里的相对顺序，
@@ -141,6 +147,7 @@ struct BookReaders<'w, 's> {
     traded: MessageReader<'w, 's, StockTraded>,
     prices: MessageReader<'w, 's, StockPriceChanged>,
     cash: MessageReader<'w, 's, CashChanged>,
+    points: MessageReader<'w, 's, PointsChanged>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -236,6 +243,7 @@ fn collect_flow(mut log: ResMut<Observed>, mut r: FlowReaders, players: Query<&P
 fn collect_books(
     mut log: ResMut<Ledger>,
     mut audit: ResMut<CashAudit>,
+    mut points_audit: ResMut<PointsAudit>,
     mut r: BookReaders,
     players: Query<&PlayerId>,
 ) {
@@ -341,6 +349,15 @@ fn collect_books(
     for m in r.cash.read() {
         audit.0.push((m.player, m.delta, m.balance));
     }
+    for m in r.points.read() {
+        log.0.push(format!(
+            "Points({}+{}={})",
+            who(&players, m.player),
+            m.delta,
+            m.balance
+        ));
+        points_audit.0.push((m.player, m.delta, m.balance));
+    }
 }
 
 fn pump_inputs(
@@ -382,6 +399,7 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
         .init_resource::<CashAudit>()
+        .init_resource::<PointsAudit>()
         .add_systems(
             Startup,
             |mut commands: Commands, server: Res<AssetServer>| {
@@ -554,6 +572,55 @@ pub fn cash_of(app: &mut App, player: Entity) -> i64 {
         .get::<Wallet>()
         .expect("玩家应有钱包")
         .cash
+}
+
+/// 某位玩家身上的点券。与 `cash_of` 分开读，正是「两套账」在读数这一侧的形状。
+pub fn points_of(app: &App, player: Entity) -> u32 {
+    app.world()
+        .entity(player)
+        .get::<Points>()
+        .expect("玩家应有点券组件")
+        .0
+}
+
+/// 把某格改成点券箱（面额与冷却都要能单独试，prototype 十二格里只装得下一格）。
+/// 与 `retile` 同一手法：棋盘是 resource 里的一份快照，改它不必动 JSON。
+pub fn coupon_tile(app: &mut App, tile: usize, amount: u32, refresh: Option<u32>) {
+    let mut board = app.world_mut().resource_mut::<ActiveBoard>();
+    let t = &mut board.def.tiles[tile];
+    t.kind = game_core::prelude::TileKind::Coupon;
+    t.data.coupon = Some(amount);
+    t.data.refresh = refresh;
+}
+
+/// 已被取走、还在冷却里的点券箱数量。
+pub fn boxes_taken(app: &App) -> usize {
+    app.world().resource::<CouponBoxes>().taken()
+}
+
+/// 把随机流退回「开局第一条」，下一次掷骰就又是 `seed_rolling_first` 那个点数。
+///
+/// 冷却类用例要的是「同一个人再次踩到同一格」，而为此真跑六个回合会把别的账
+/// （利息、分红、行情）一起卷进来。行情流也跟着重放，但这一组用例不断价格。
+pub fn rewind_dice(app: &mut App) {
+    let seed = app.world().resource::<GameSeed>().0;
+    app.insert_resource(Rng::new(seed));
+}
+
+/// 把轮转指针挪到某位玩家身上（与 `finance.rs` 里直接改 `AtmAccess` 同一类前置）。
+pub fn make_current(app: &mut App, player: Entity) {
+    let mut order = app.world_mut().resource_mut::<TurnOrder>();
+    let at = order
+        .order
+        .iter()
+        .position(|e| *e == player)
+        .expect("玩家在回合序里");
+    order.cursor = at;
+}
+
+/// 把「第几回合」的计数推到 `turn`。冷却读的就是这个数，等它不必真跑一局。
+pub fn set_turn(app: &mut App, turn: u32) {
+    app.world_mut().resource_mut::<GameSession>().turn_count = turn;
 }
 
 // ===== 直接驱动结算层 API =====
@@ -790,5 +857,34 @@ pub fn assert_cash_audit(app: &mut App, start_cash: i64) {
 pub fn assert_no_negative_cash(app: &mut App) {
     for (entity, _, cash, _) in roster(app) {
         assert!(cash >= 0, "玩家 {entity:?} 现金为负：{cash}");
+    }
+}
+
+/// 点券那一侧的同一组断言。两条审计各跑各的、互不读对方的流水，
+/// 这就是「点券与现金永不通兑」在测试里的形状：捡箱子的 +30 只可能出现在这张表上。
+pub fn assert_points_audit(app: &mut App, start: u32) {
+    let players: Vec<Entity> = roster(app).into_iter().map(|(e, ..)| e).collect();
+    let audit = app.world().resource::<PointsAudit>().0.clone();
+    for &player in &players {
+        let sum: i64 = audit
+            .iter()
+            .filter(|(p, ..)| *p == player)
+            .map(|(_, delta, _)| *delta)
+            .sum();
+        assert_eq!(
+            points_of(app, player) as i64,
+            start as i64 + sum,
+            "玩家 {player:?} 的点券与起始 {start} + 流水 {sum} 对不上"
+        );
+    }
+    let mut running: std::collections::HashMap<Entity, i64> =
+        players.iter().map(|e| (*e, start as i64)).collect();
+    for (player, delta, balance) in audit {
+        let at = running.entry(player).or_insert(start as i64);
+        *at += delta;
+        assert_eq!(
+            *at, balance as i64,
+            "玩家 {player:?} 的点券流水余额 {balance} 与实际累计 {at} 不符"
+        );
     }
 }

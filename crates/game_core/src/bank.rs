@@ -19,7 +19,7 @@
 use bevy::prelude::*;
 
 use crate::board::{TileIndex, TileKind};
-use crate::landing::{Landed, Landing, Pending, PendingDecision};
+use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
 use crate::msg::{BankOp, BankOpDone, BankOpRequested, BankVisited, TileStepped};
 use crate::settle::Books;
 use crate::turn::TurnPhase;
@@ -60,7 +60,7 @@ pub fn settle_bank_landing(
 ) {
     let Some(Landed {
         player,
-        kind: TileKind::Bank,
+        domain: LandingDomain::Bank,
         ..
     }) = landing.0
     else {
