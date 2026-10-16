@@ -77,8 +77,14 @@ impl<'w, 's> Market<'w, 's> {
 
     /// 一个回合结束 = 一天过去：推行情，到点分红。
     /// 全项目只有 [`market_tick_on_turn_end_system`] 调它 —— 一天只走一次，日历才对得齐。
+    ///
+    /// 周末**只推日历、不推行情**（PLAN §三「周末股市休市」）。tick 照常 +1，否则
+    /// 「1 回合 = 1 天」这条日历的地基就断了：休市的那两天会变成不存在。
     pub fn tick_at_turn_end(&mut self, books: &mut Books) {
-        self.advance_prices(books);
+        self.clock.tick += 1;
+        if !economy::is_weekend(self.clock.tick, &books.rules) {
+            self.advance_prices(books);
+        }
         self.pay_dividends(books);
     }
 
@@ -86,7 +92,6 @@ impl<'w, 's> Market<'w, 's> {
     /// 同种子同开局即同序列（回放对得齐）。
     fn advance_prices(&mut self, books: &mut Books) {
         let rules = *books.rules;
-        self.clock.tick += 1;
         let cap = rules.max_price_history;
         let set = self.sets.get(&self.data.stocks);
         for (_, id, mut price, mut history) in self.stocks.iter_mut() {
@@ -222,6 +227,14 @@ pub fn trade_request_system(
     let Some(current) = order.current() else {
         return;
     };
+    // 周末休市（PLAN §三）：不开盘就不许下单。与银行那条同一个日历判据，
+    // 但挡在这里而不是 `economy::buy_plan` 里 —— 成交函数不该知道今天是星期几。
+    if economy::is_weekend(market.tick_count(), &books.rules) {
+        for r in requests.read() {
+            debug!("交易被拒：周末股市休市（{:?} {}）", r.player, r.stock.0);
+        }
+        return;
+    }
     for r in requests.read() {
         if r.player != current {
             debug!("交易被拒：{:?} 不是当前回合玩家", r.player);

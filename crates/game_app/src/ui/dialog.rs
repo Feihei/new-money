@@ -10,16 +10,18 @@
 //! 内容在弹出那一刻**烤死**，之后不随世界状态更新：待决事项被回答时 `PendingDecision`
 //! 一定先清空再挂上下一个，所以每次报价都是一整块新面板，没有「忘了刷新」的余地。
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, BankOp, Books, CardDrawn, CardKind, CardNotice, Decision, EffectOutcome, LandId,
-    LandType, Pending, PendingDecision, PlayerName, TurnOrder,
+    LandType, MarketClock, Pending, PendingDecision, PlayerName, TurnOrder,
 };
 
 use super::finance::{comma, money_row};
 use super::theme::{col, layout, size};
 use super::{
-    BoardUi, ButtonSpec, SECONDARY, UiAction, button, info_row, label, overlay, panel, separator,
+    BoardUi, ButtonSpec, SECONDARY, UiAction, button, info_row, is_open_day, label, overlay, panel,
+    separator,
 };
 use crate::render::{DevFont, palette};
 
@@ -137,6 +139,18 @@ pub(crate) fn remember_drawn_card(
     }
 }
 
+/// 模态这一屏要读的世界状态。打包成参数包是这仓库的房规：`sync_modal` 本来就要同时看
+/// 「等谁回答」「上一张卡」「今天几号」「现在挂着的是哪块面板」，
+/// 而 `#[allow(clippy::too_many_arguments)]` 会把「一个 system 要读八样东西」这个信号吃掉
+/// （`.agents/ARCHITECTURE.md` §六 坑 8）。
+#[derive(SystemParam)]
+pub(crate) struct ModalView<'w, 's> {
+    pending: Res<'w, PendingDecision>,
+    memory: Res<'w, RecentCard>,
+    clock: Res<'w, MarketClock>,
+    open: Query<'w, 's, (Entity, &'static ModalRoot)>,
+}
+
 /// 跟着 `PendingDecision` 建/换/收模态。排在 [`remember_drawn_card`] 之后，
 /// 于是卡面消息与面板内容在同一帧到位，不会出现「先弹一张空白卡」。
 ///
@@ -145,19 +159,19 @@ pub(crate) fn remember_drawn_card(
 /// 面板还停在存之前」。签名只对柜台有意义，其余四个模态的内容弹出即定稿。
 pub(crate) fn sync_modal(
     mut commands: Commands,
-    pending: Res<PendingDecision>,
-    memory: Res<RecentCard>,
+    font: Res<DevFont>,
     books: Books,
     names: Query<&PlayerName>,
-    font: Res<DevFont>,
-    open: Query<(Entity, &ModalRoot)>,
+    view: ModalView<'_, '_>,
 ) {
-    let want = pending.active();
+    let want = view.pending.active();
+    let banking_hours = is_open_day(&view.clock, &books.rules);
     let stamp = want.map_or(String::new(), |(player, about)| {
-        modal_stamp(about, &books, player)
+        modal_stamp(about, &books, player, banking_hours)
     });
     // 两边都是 `None` 时相等：没有待决事项、也没有模态，正是常态
-    if open
+    if view
+        .open
         .iter()
         .next()
         .is_some_and(|(_, root)| Some(root.key) == want && root.stamp == stamp)
@@ -165,7 +179,7 @@ pub(crate) fn sync_modal(
         return;
     }
     // 一次只挂一个：换问题时先把旧的整块收走（`despawn` 递归，遮罩是子树根）
-    for (stale, _) in open.iter() {
+    for (stale, _) in view.open.iter() {
         commands.entity(stale).despawn();
     }
     if let Some((player, about)) = want {
@@ -178,20 +192,27 @@ pub(crate) fn sync_modal(
             Pending::RentNotice(land) => {
                 rent_modal(&mut commands, &font, &books, &names, player, land, stamp)
             }
-            Pending::Card => card_modal(&mut commands, &font, &memory, player, stamp),
-            Pending::BankTeller => bank_modal(&mut commands, &font, &books, player, stamp),
+            Pending::Card => card_modal(&mut commands, &font, &view.memory, player, stamp),
+            Pending::BankTeller => {
+                bank_modal(&mut commands, &font, &books, player, stamp, banking_hours)
+            }
         };
     }
 }
 
 /// 这一屏「该写成什么样」的签名。只有柜台需要，别的模态返回空串。
-fn modal_stamp(about: Pending, books: &Books, player: Entity) -> String {
+///
+/// `banking_hours` 也在签名里：正常对局里回合停在 `WaitDecision` 上，日历动不了，
+/// 柜台开着的那几帧不可能跨到周末 —— 但 `NM_DAY` 与「读档回到某一天」都能让日子在
+/// 面板背后跳。签名少了它，面板就会停在按开门那天烤死的样子（灰按钮配「办完才继续」），
+/// 而这正是 §6.1 坑 22 那一族：**刷新判据漏了一个输入，且没有任何报错**。
+fn modal_stamp(about: Pending, books: &Books, player: Entity, banking_hours: bool) -> String {
     let Pending::BankTeller = about else {
         return String::new();
     };
     let bank = books.bank_of(player);
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{banking_hours}",
         books.balance(player),
         bank.deposit,
         bank.loan,
@@ -708,14 +729,17 @@ fn fallback_note(
 /// 每笔之后数字都要重算 —— 所以 [`sync_modal`] 的重建判据里带了金额签名这一半。
 /// 「办完」才把回合交还给结束流程；中途按别的（`Accept`/`Decline`）规则层一律不认。
 ///
-/// 这里不再判窗口（`can_bank_op`）：柜台既然开着，四种操作就都在许可内，
-/// 只剩「这笔金额办不办得动」。窗口判据留给 ATM 浮层，那儿才需要区分卡是谁的。
+/// 窗口判据在这里只剩 `banking_hours` 一条：柜台既然开着，四种操作的主语与地点都已经
+/// 成立，剩下「这笔金额办不办得动」。周末柜台照样开（人踩上去了就是事实），但八颗按钮
+/// 全灰 + 一句「周末休市」—— 规则层的 `bank_op_system` 那两天一律不受理，
+/// 按钮亮着按下去没声音是这里最坏的一种失败。
 fn bank_modal(
     commands: &mut Commands,
     font: &DevFont,
     books: &Books,
     player: Entity,
     stamp: String,
+    banking_hours: bool,
 ) -> Entity {
     let cash = books.balance(player);
     let bank = books.bank_of(player);
@@ -741,9 +765,17 @@ fn bank_modal(
             ));
             p.spawn(center_label(
                 &font.0,
-                "存取款、借贷都在这里办，办完才继续",
+                if banking_hours {
+                    "存取款、借贷都在这里办，办完才继续"
+                } else {
+                    "周末休市，今天八笔都办不了 —— 先办完离开"
+                },
                 size::ROW,
-                col::MUTED,
+                if banking_hours {
+                    col::MUTED
+                } else {
+                    col::BANKRUPT
+                },
             ));
             p.spawn(separator());
             p.spawn(Node {
@@ -787,7 +819,7 @@ fn bank_modal(
                     &font.0,
                     "利率",
                     &format!(
-                        "存 {:.1}% / 贷 {:.1}%，每次进银行结一次",
+                        "存 {:.1}% / 贷 {:.1}%，每月末各结一次",
                         rules.deposit_rate * 100.0,
                         rules.loan_rate * 100.0
                     ),
@@ -800,7 +832,7 @@ fn bank_modal(
                 p,
                 font,
                 BankOp::Deposit,
-                true,
+                banking_hours,
                 ("存", 1_000, cash >= 1_000),
                 ("存全部", cash, cash > 0),
             );
@@ -808,7 +840,7 @@ fn bank_modal(
                 p,
                 font,
                 BankOp::Withdraw,
-                true,
+                banking_hours,
                 ("取", 1_000, bank.deposit >= 1_000),
                 ("取全部", bank.deposit, bank.deposit > 0),
             );
@@ -816,7 +848,7 @@ fn bank_modal(
                 p,
                 font,
                 BankOp::Borrow,
-                true,
+                banking_hours,
                 ("借", 5_000, headroom >= 5_000),
                 ("借到上限", headroom, headroom > 0),
             );
@@ -824,7 +856,7 @@ fn bank_modal(
                 p,
                 font,
                 BankOp::Repay,
-                true,
+                banking_hours,
                 ("还", 5_000, bank.loan >= 5_000 && cash >= 5_000),
                 ("还清", clear_debt, bank.loan > 0 && clear_debt >= bank.loan),
             );

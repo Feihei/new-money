@@ -19,9 +19,11 @@ pub struct GameRules {
     pub max_building_level: u8,
     /// 垄断同色组后的租金倍数（`property_system.gd:75-77` 的 `base_rent *= 2`）。
     pub monopoly_rent_multiplier: i64,
-    /// 存款利率（每回合），`bank_system.gd:8` 的 3%。
+    /// 存款利率（**每月**），月末那一天发。P2④ 之前它是「每回合 3%」并且挂在踩银行格上，
+    /// 一天一回合的口径下等于日复利 3%（一个月 12 天就涨四成），那不是我想要的银行。
     pub deposit_rate: f32,
-    /// 贷款利率（每回合），`bank_system.gd:9` 的 8%。
+    /// 贷款利率（**每月**）。必须高于 [`deposit_rate`]：两个数反过来，「借钱存进银行」
+    /// 就是无风险套利，玩家五分钟就能发现，而规则层没有任何东西挡得住它。
     pub loan_rate: f32,
     /// 最多可贷 = 未抵押地产总价 × 该系数，`bank_system.gd:10`。
     pub max_loan_ratio: f32,
@@ -31,6 +33,10 @@ pub struct GameRules {
     /// 「多少回合一个月」。B5b 起分红不再挂在 tick 计数上，而是挂在日历的固定日 ——
     /// 「每月 1 号派息」是玩家能记住的规则，「每 5 次 tick」不是。
     pub days_per_month: u32,
+    /// 一周多少天。周末（每周最后两天）**股市与银行都休**（PLAN §三「日期系统」行）。
+    /// 与 `days_per_month` 不整除是刻意的：月长 12、周长按 7 走，周末在月内逐月漂移，
+    /// 于是「这个月踩银行格能不能办业务」不是一眼能背出来的表 —— 玩家要抬头看日历。
+    pub days_per_week: u32,
     /// 每月哪一天派息（1 起）。被 `economy::date_of` 的日历解释。
     pub dividend_day: u32,
     /// 每股股息 = 股价 × 该比例，`stock_market.gd:16`。
@@ -49,11 +55,12 @@ impl Default for GameRules {
             walk_step_interval: 0.18,
             max_building_level: 6,
             monopoly_rent_multiplier: 2,
-            deposit_rate: 0.03,
-            loan_rate: 0.08,
+            deposit_rate: 0.10,
+            loan_rate: 0.15,
             max_loan_ratio: 2.0,
             stock_base_drift: 0.002,
             days_per_month: 12,
+            days_per_week: 7,
             dividend_day: 1,
             dividend_rate: 0.015,
             max_price_history: 50,

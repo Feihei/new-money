@@ -221,8 +221,10 @@ fn landing_on_your_own_incomplete_group_ends_the_turn_quietly() {
 
 // ===== 银行 =====
 
+/// P2④ 之前，谁踩到银行格就替**全场所有人**结一次息 —— 访客顺路踩一脚，别人的账也动了，
+/// 而同桌没路过银行的人永远涨不了息。现在利息只认日历：踩银行只开柜台、发 ATM 卡。
 #[test]
-fn bank_visit_compounds_every_players_balance() {
+fn a_bank_visit_no_longer_compounds_anyones_balance() {
     let (mut app, p0) = ready_on(0, 6, DecisionPolicy::DeclineAll); // 6 号是银行
     let p1 = other(&mut app);
     insert(
@@ -244,12 +246,62 @@ fn bank_visit_compounds_every_players_balance() {
     land(&mut app);
 
     assert!(
-        ledger(&app).contains(&"Bank(P0,存10300贷0)".to_string()),
-        "利息进余额：{:?}",
+        ledger(&app).contains(&"Bank(P0,存10000贷0)".to_string()),
+        "到访流水记的是踩上去那一刻的余额：{:?}",
         ledger(&app)
     );
-    assert_eq!(bank_of(&mut app, p0), (10_300, 0), "存款 3%");
-    assert_eq!(bank_of(&mut app, p1), (0, 4_320), "贷款 8%，且不只是访客");
+    assert_eq!(bank_of(&mut app, p0), (10_000, 0), "访客自己也不该结息");
+    assert_eq!(bank_of(&mut app, p1), (0, 4_000));
+}
+
+/// 结息挂上日历之后的两条不变式：日子没到一分不动，到了就**全场**都动。
+/// 「不只是访客」这条老语义留着，只是触发者从「谁踩到银行」换成了「今天几号」。
+#[test]
+fn month_end_compounds_every_players_balance() {
+    // 三天一月：回合 1 结束是 2 号（不该结），回合 2 结束正好 3 号 = 月末
+    let mut app = boot(
+        GameSetup::default(),
+        GameRules {
+            days_per_month: 3,
+            ..GameRules::instant()
+        },
+        seed_rolling_first(1),
+    );
+    app.insert_resource(DecisionPolicy::DeclineAll);
+    let p0 = boot_to_wait_roll(&mut app);
+    place(&mut app, p0, 0);
+    let p1 = other(&mut app);
+    insert(
+        &mut app,
+        p0,
+        BankBalance {
+            deposit: 10_000,
+            loan: 0,
+        },
+    );
+    insert(
+        &mut app,
+        p1,
+        BankBalance {
+            deposit: 0,
+            loan: 4_000,
+        },
+    );
+
+    play_turns(&mut app, 1);
+    assert_eq!(
+        (bank_of(&mut app, p0), bank_of(&mut app, p1)),
+        ((10_000, 0), (0, 4_000)),
+        "2 号不是月末，不该有人涨息"
+    );
+
+    play_turns(&mut app, 2);
+    assert_eq!(bank_of(&mut app, p0), (11_000, 0), "储金月息 10%");
+    assert_eq!(
+        bank_of(&mut app, p1),
+        (0, 4_600),
+        "贷款月息 15%，且这一位整局没碰过银行"
+    );
     assert_eq!(
         cash_of(&mut app, p0),
         20_000,

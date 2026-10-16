@@ -80,7 +80,7 @@
 > - **#4** 股价事件 —— 拆成 `StockPriceChanged{stock,old,new}`（tick 真的动了才发）与 `StockTraded{player,stock,shares,price,side}`；回归 `stock_visit_ticks_every_price_once`。
 > - **#5** 买入递归 —— `economy::buy_plan` 一次算清可买股数；另有扫表性质 `buy_plan_never_asks_for_more_than_the_wallet_has`（39 个价格 × 6 档现金，花费绝不超过余额）。
 >
-> **#9/#10/#11 属后续**：旧格式本来就没搬；`passes_start`/`inflation_index`/`color_circle.gd` 未搬（`inflation_index` 那条 10-16 起改由 [PLAN.md](./PLAN.md) 的 **P2** 真正实现，不再是死代码）。#11 的 `game_saved` 误发随存档一起处理 —— 原 B7，**现 PLAN P15**，仍开着。
+> **#9/#10/#11 属后续**：旧格式本来就没搬；`passes_start`/`inflation_index`/`color_circle.gd` 未搬（`inflation_index` 那条 **10-17 由 PLAN P2③ 真正实现**：`GameSession::price_index` + `charge::stage`，Godot 那个死字段现在在 Rust 侧有公式、有豁免表、有回归 `tests/price_index.rs`）。#11 的 `game_saved` 误发随存档一起处理 —— 原 B7，**现 PLAN P15**，仍开着。
 
 > **B3 过程里新发现、一并修掉的 Godot 错误（编号续在 12 之后）**：
 > - **#13** `player_data.gd:84-91` 破产时只清玩家自己的 `properties` 列表，`PropertyRegistry` 里的业主仍写着死者 → 租金永远打给破产者、同色组永远卡住别人的垄断与升级。`Books::bankrupt` 把名下地块一并放回市场（回归 `cant_pay_rent_bankrupts_the_payer_and_frees_their_lands`）。
@@ -335,6 +335,11 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 
 29. **`Commands` 的删除当帧生效，`NextState` 的转移下一帧才生效 —— 把「收资源」和「叫停状态机」写在同一个 system 里，中间就有一整帧的空档，0.20 会把它 panic 出来**（T1 真鼠标冒烟点「返回主菜单」必崩，exit 101；`git show 37675e8` 核过与 P1 无关，是 B5 就带的）。`teardown_match` 原来同时做两件事：`remove_resource::<TurnOrder>()` + `phase.set(Boot)`。命令在 system 跑完就落地，而转移要等下一帧的 `StateTransition` —— 于是那一帧的后半程 `TurnPhase` 仍写着 `WaitRoll`，`roll_dice_system` 与 `trade_request_system` 照常跑，参数校验拿不到 `TurnOrder` / `ActiveBoard`，Bevy 0.20 默认把这种失败直接 panic。修法：拆成 `stop_turn_machine`（`OnEnter(Scene::Menu)`，只叫停）+ `clear_match`（`Update`，`run_if(in_state(Scene::Menu))` 且 `State<TurnPhase>` 真的是 `Boot` 才收尸）。判据：**"停机器"和"收机器"不能同帧**；凡是 `remove_resource` 与 `NextState::set` 出现在同一个 system 里，就要怀疑中间那一帧谁在跑。覆盖它的测试 `ui::tests::the_match_resources_outlive_the_turn_machine`，可复现的路径是 `NM_MENULOOP`（原来它只走「菜单→对局」，那半程从没踩过 —— 见该表最后一行）。
 
+30. **面板的刷新签名少一位，面板就停在旧世界里，且不报错**（P2④ 补休市着色时踩到，是坑 22 那一族的又一实例）。`sync_modal` 的重建判据是「问题 + 签名」，柜台的签名原本只有四个金额：`现金|存款|负债|可贷`。周末那天这四个数一个都不动，于是「开门时烤出来的常态面板」在休市后继续挂着 —— 八颗按钮亮着、副标题写着「办完才继续」，而规则层一律不受理。修法：把 `banking_hours` 也拼进签名（`dialog.rs::modal_stamp`）。判据：**面板上每一个由判据决定的可见位，都必须是签名的输入**；写签名时逐个对着"这块屏上有什么会因世界变化而变"数一遍，漏一个就是一次静默过期。ATM/证券两块浮层的签名早就带了 `tick`，柜台是最后一个补上的。
+
+31. **逐帧着色 system 与面板重建同帧 → `Commands` 打在已 despawn 的实体上，每次重建刷一叠 `Entity despawned` WARN**（P2④ 拍休市截图时第一次注意到，`NM_STOCK=1` + 日历跨进周末必现，一次 10 条 = 证券浮层的 10 颗买卖按钮）。成因：`refresh_top_bar` 的按钮查询是「全部带 `UiAction` 的实体」（不只顶栏那五颗），它对判据变化的反应是排队 `insert(Disabled)` / `remove::<Disabled>()`；同一帧里 `sync_stock_panel` 因为签名变了把上一批按钮整块 `despawn`。命令是帧末才 flush 的，于是打在空实体上。**不是 P2 引入的**：任何一次面板重建都会，与日历无关（判据：把 `Disabled` 的插入条件从"日"换成"阶段"同样触发）。目前只是日志噪音，无行为后果（新面板 spawn 时按 `ButtonSpec::disabled(...)` 自带正确颜色）。**待修**：把 `refresh_top_bar` 的查询限制到顶栏那五颗（给它们一个 marker），浮层/模态的着色交给各自的构造函数与签名 —— 那本来就是 B5b 定的分工。修法要动 `spawn_top_bar` 与查询两处，单独一次改，别夹在玩法阶段里。
+
+
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
@@ -361,7 +366,8 @@ B5 之后这条判据升级为「**每个界面都必须有一条不依赖鼠标
 | `NM_STOCK=1` | 开局即浮出证券面板 | 顶栏那颗按钮要鼠标点（见 §6.1 坑 27），面板否则进不了截图 |
 | `NM_PAUSE=1` | 开局即暂停 | ESC 按不了，暂停面板否则进不了截图 |
 | `NM_PICK_TILE=列:行` | 开局即选中那格 | 点格详情卡是新增交互，没有鼠标可点 |
-| `NM_DUMP=1` | 挂出 egui 只读 dump 面板（回合/阶段/落格分派/待决/资格 + 每个玩家与每块地） | 结算顺序、分派表、跨局残留这类问题的真相都在世界里，不在画面上；看数字比看像素可靠，而 T1 之前只能靠 `warn!` 一条条猜 |
+| `NM_DUMP=1` | 挂出 egui 只读 dump 面板（回合/阶段/落格分派/待决/资格/修正登记处 + 每个玩家与每块地） | 结算顺序、分派表、跨局残留这类问题的真相都在世界里，不在画面上；看数字比看像素可靠，而 T1 之前只能靠 `warn!` 一条条猜 |
+| `NM_DAY=<tick>` | 每帧把日历钉在第 n 天（一天 = 一个回合结束） | 「今天休不休市」是 ATM/证券/柜台共 22 颗按钮的着色判据，而哪天是周六取决于骰子走到第几回合 —— 截图脚本控制不了。**代价说清楚**：钉住之后行情/派息/结息都不再往前走，它是截图旋钮不是时光机（`ui::pin_day`） |
 | `NM_MENULOOP=<秒>` | 到点回主菜单、开一局、再回菜单、再开一局（每步间隔同样的秒数） | 场景来回切换的错误（§6.1 坑 22、坑 29）只在**第二局**暴露，不自动走这条路径就验不到。前两步是「自转 + 开局」，真正的新覆盖是后两步 |
 
 **已定案（B4，10-14）：`Label3D` 的等价物走「UI 层投影跟随」**。三条路的取舍：
@@ -482,7 +488,7 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 > [`docs/archive/migration-b0-b5b.md`](../docs/archive/migration-b0-b5b.md)。移植线到此结束，「粗估 N 天」那一列随归档一起停更。
 >
 > **排期此后只有一份**：[`PLAN.md`](./PLAN.md)。移植线留下的 B6/B7/B8 三行已并成 PLAN 的 P14–P17（见 PLAN §六）。
-> 本文档里仍然活着的只有：§三 缺陷清单的未结项（#8 后半条 → PLAN P1、#11 → P15）、§六 的依赖矩阵与 27 个坑、
+> 本文档里仍然活着的只有：§三 缺陷清单的未结项（#8 后半条 → PLAN P1、#11 → P15）、§六 的依赖矩阵与 31 个坑（#31 待修，见那条的最后一段）、
 > §七 的表现层待做（字体子集化、glb 处置）、§九 的存档方案（→ P15）。
 
 ---
@@ -513,7 +519,7 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 
 > **本节原文是 B0 前夜写的**（"建 workspace""拷 `data/`""按 §十 顺序做 B1"），那些早已完成，留原话只会误导。10-16 起本项目的「下一步」只有一份，在 [`PLAN.md`](./PLAN.md) §四。
 
-**下一步：[`PLAN.md`](./PLAN.md) 的 P2** —— 结算修正管线 + 效果动词库 + 物价指数 + 日历收口。P1（点券与穷尽分派表）与 T1（egui 只读 dump 面板）已在 10-16 完成，面板正是为 P2 这种「钱为什么变成这个数」的阶段准备的。其后 P3……到 P13（魔法屋），玩法之后是 P14 AI、P15 存档与设置、P16 音频、P17 发行。
+**下一步：[`PLAN.md`](./PLAN.md) 的 P3** —— 卡片：持有与主动出牌 + 命运定序 + 百货公司。P1（点券与穷尽分派表）、T1（egui 只读 dump 面板）、P2（结算修正管线 + 建筑损害阶梯 + 物价指数 + 日历收口）已在 10-16/10-17 完成；P2 留下的两个"第一批用户"就是 P3：`Corrections` 登记处（免罪/免费/嫁祸卡）与 `LandDamage`（怪兽/恶魔卡，顺带补上 prototype 里踩不到的那个缺口）。其后 P4……到 P13（魔法屋），玩法之后是 P14 AI、P15 存档与设置、P16 音频、P17 发行。
 
 > **长期资产只剩两份**：§三 缺陷清单（未结项：#8 后半条 → PLAN P1、#11 → P15）与 §6.1 的 Bevy 0.20 坑清单。
 > ~~§五 映射表~~ 与 ~~§十 进度表~~ 已于 10-16 归档到 [`docs/archive/migration-b0-b5b.md`](../docs/archive/migration-b0-b5b.md)，不再维护。

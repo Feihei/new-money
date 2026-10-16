@@ -17,15 +17,16 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
-    ActiveBoard, AtmAccess, BankBalance, BankOp, BankOpDone, BankOpRequested, BankVisited, Books,
-    BuildingLevel, BuyOffered, CardDrawn, CardId, CardKind, CashChanged, CouponBoxes, DataHandles,
+    ActiveBoard, Adjustment, AtmAccess, BankBalance, BankOp, BankOpDone, BankOpRequested,
+    BankVisited, Books, BuildingLevel, BuyOffered, CardDrawn, CardId, CardKind, CashChanged,
+    ChargeKind, Correction, Corrections, CouponBoxes, DamageArea, DamageTally, DataHandles,
     Decision, DecisionChosen, Deck, DiceRolled, GameOver, GameRules, GameSeed, GameSession,
-    GameSetup, JailSkipped, LandBought, LandId, LandUpgraded, Market, MarketClock, Mortgaged,
-    Owner, Pending, PendingDecision, PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed,
-    PlayerReleased, PlayerTeleported, Points, PointsChanged, RentDue, RequestRoll, Rng, StockId,
-    StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
-    TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered,
-    WalkStarted, Wallet,
+    GameSetup, JailSkipped, LandBought, LandDamage, LandId, LandUpgraded, Market, MarketClock,
+    Mortgaged, Owner, Pending, PendingDecision, PlayerArrived, PlayerBankrupt, PlayerId,
+    PlayerJailed, PlayerReleased, PlayerTeleported, Points, PointsChanged, RentDue, RequestRoll,
+    Rng, Scope, Source, StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
+    TileIndex, TileStepped, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted,
+    UpgradeOffered, WalkStarted, Wallet,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -623,6 +624,61 @@ pub fn set_turn(app: &mut App, turn: u32) {
     app.world_mut().resource_mut::<GameSession>().turn_count = turn;
 }
 
+/// 把物价指数直接摆到 `index`。
+///
+/// P2 的验收要的是「同一笔 5000 租金在四种状态下」，而指数是**跑出来的**（回合末重算），
+/// 要它等于 2.5 得先构造出一场资产翻 2.5 倍的对局 —— 那测的是指数公式而不是管线。
+/// 所以这里直接摆值，公式另有 `price_index.rs::the_index_follows_the_money_supply` 钉住。
+pub fn set_price_index(app: &mut App, index: f32) {
+    app.world_mut().resource_mut::<GameSession>().price_index = index;
+}
+
+/// 把某块地的租金表整条改成同一个数。验收要「5000 这笔租金」，而 prototype 的 L0 是 60。
+pub fn flat_rent(app: &mut App, land: u32, rent: i64) {
+    let mut board = app.world_mut().resource_mut::<ActiveBoard>();
+    let l = board
+        .def
+        .lands
+        .iter_mut()
+        .find(|l| l.id == land)
+        .expect("prototype 里有这块地");
+    l.rent = vec![rent; 6];
+}
+
+/// 往修正登记处塞一条修正 —— **P3 的卡与 P6 的神明将来就是这么接进来的**。
+///
+/// 测试侧用它而不是改管线代码，正是 P2 这条链的验收点：加一种修正不必碰 `charge.rs`。
+pub fn register(app: &mut App, correction: Correction) {
+    app.world_mut()
+        .resource_mut::<Corrections>()
+        .register(correction);
+}
+
+/// 常用的两条修正：整笔抵消（＝将来的免费卡）、乘系数（＝将来的大穷神加倍）。
+pub fn cancel_for(app: &mut App, bearer: Entity) {
+    register(
+        app,
+        Correction {
+            bearer,
+            scope: Scope::Any,
+            adjustment: Adjustment::Cancel,
+            source: Source::Card,
+        },
+    );
+}
+
+pub fn scale_for(app: &mut App, bearer: Entity, by: f64, kind: ChargeKind) {
+    register(
+        app,
+        Correction {
+            bearer,
+            scope: Scope::Domain(game_core::prelude::charge_domain_of(kind)),
+            adjustment: Adjustment::Scale { by },
+            source: Source::God,
+        },
+    );
+}
+
 // ===== 直接驱动结算层 API =====
 ///
 /// 存款/取款/借贷/买卖这些动作在 B3 还没有生产者（银行面板是 B5、AI 是 B6），
@@ -650,6 +706,59 @@ where
     // 提前注册会让装配前的空帧 panic
     app.add_systems(Update, run_op_system);
     app.update();
+}
+
+/// 一次建筑损害请求（[`run_damage`] 的载体）。
+#[derive(Resource)]
+pub struct DamageReq(Option<(LandId, LandDamage, DamageArea)>);
+
+/// 跑完那一拳的产出，供测试断言。
+#[derive(Resource, Default)]
+pub struct DamageOut(Option<DamageTally>);
+
+/// `Books::damage` 要 `Commands`（摘 `Mortgaged` 只能用 deferred 的移除），
+/// 而 [`run_op`] 的闭包签名里没有它 —— 为它改那条签名会把所有既有用例一起卷进来，
+/// 所以这里单开一条一次性的 system，走的仍然是同一个 `Books` 公开入口。
+fn run_damage_system(
+    mut commands: Commands,
+    mut books: Books,
+    mut req: ResMut<DamageReq>,
+    mut out: ResMut<DamageOut>,
+) {
+    let Some((center, depth, area)) = req.0 else {
+        return;
+    };
+    req.0 = None;
+    out.0 = Some(books.damage(&mut commands, center, depth, area));
+}
+
+/// 对真棋盘打一次损害，返回命中统计。prototype 的六个地块：
+/// 0 南京路(col2 row0, brown) / 1 汉口路(col3 row0, brown) / 2 外滩(col6 row2, **2×2**, orange) /
+/// 3 徐家汇(col4 row5, red) / 4 王府井(col2 row5, yellow) / 5 西单(col0 row2, yellow)。
+pub fn run_damage(
+    app: &mut App,
+    center: LandId,
+    depth: LandDamage,
+    area: DamageArea,
+) -> DamageTally {
+    app.insert_resource(DamageReq(Some((center, depth, area))));
+    app.insert_resource(DamageOut::default());
+    app.add_systems(Update, run_damage_system);
+    app.update();
+    app.world()
+        .resource::<DamageOut>()
+        .0
+        .expect("跑了一帧就该有产出")
+}
+
+/// `(业主, 等级, 是否抵押中)` —— 损害阶梯的断言三样都要看。
+pub fn plot_state(app: &mut App, land: u32) -> (Option<u32>, u8, bool) {
+    let w = app.world_mut();
+    let mut q = w.query::<(&LandId, &Owner, &BuildingLevel, Option<&Mortgaged>)>();
+    q.iter(w)
+        .find(|(id, _, _, _)| id.0 == land)
+        .map(|(_, owner, level, mortgaged)| (owner.0.map(|p| p.0), level.0, mortgaged.is_some()))
+        .expect("prototype 里有这块地")
 }
 
 /// 造一颗「第一掷恰好是 face」的种子。对局里的骰子流与独立掷骰同序

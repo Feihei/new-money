@@ -7,6 +7,7 @@ use bevy::prelude::*;
 
 use crate::board::BoardDef;
 use crate::card::{CardKind, CardSet};
+use crate::charge::Corrections;
 use crate::coupon::CouponBoxes;
 use crate::data::DataHandles;
 use crate::deck::Deck;
@@ -141,8 +142,12 @@ pub fn begin_game_system(
     commands.insert_resource(GameSession {
         turn_count: 0,
         seed: cfg.seed.0,
+        price_index: 1.0,
     });
     commands.insert_resource(MarketClock::default());
+    // 修正登记处是**这一局**的账：上一局挂着的免罪卡若不清，新局第一笔租金就会静默归零
+    // （坑 22/25 同一族，所以装配世界时重置而不是等谁去撤销）
+    commands.insert_resource(Corrections::default());
     // 点券箱的「谁被取走过」是**这一局**的事实：上一局捡空的格子必须在新局重新长出来
     // （B5 验收那批跨局残留缺陷的同一族，见 ARCHITECTURE §6.1 坑 22/25）
     commands.insert_resource(CouponBoxes::default());

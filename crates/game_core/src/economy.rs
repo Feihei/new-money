@@ -53,11 +53,12 @@ impl LandView {
 
 /// 购买判定：无主 + 现金够（`property_system.gd:12-23`）。
 /// 「玩家状态是否 active」由调用方保证：回合轮到的人不可能是破产者。
-pub fn can_buy(def: &BoardDef, land: &LandView, cash: i64) -> bool {
-    if land.owner.is_some() {
-        return false;
-    }
-    land_price(def, land).is_some_and(|price| cash >= price)
+/// 能不能买这块地：无主，且**实际要付的价**在现金之内。
+///
+/// `price` 由调用方从修正管线拿（`Books::quoted`）—— 物价指数与免费卡都会改它，
+/// 判定函数不该自己再去读一遍世界。价为 0（免费）当然是买得起。
+pub fn can_buy(land: &LandView, price: i64, cash: i64) -> bool {
+    land.owner.is_none() && cash >= price
 }
 
 pub fn land_price(def: &BoardDef, land: &LandView) -> Option<i64> {
@@ -132,11 +133,14 @@ pub fn group_levels_within_one(all: &[LandView], group: &str) -> bool {
 /// `is_owned_by_key(key, player.player_id)`。只看 `land.owner` 虽然在此刻等价
 /// （落格分派只在「业主本人踩到自己地块」时才问升级），但把「谁在操作」藏进数据里，
 /// B6 的 AI 一有代打场景就会误判 —— 显式参数让这条判定不能被越权调用。
+///
+/// `cost` 同理，是**实际要付的那个数**（物价指数与免费卡都会改它）。判定函数不去读世界，
+/// 于是「模态上写的价」与「扣掉的价」共用同一个入参。
 pub fn can_upgrade(
-    def: &BoardDef,
     land: &LandView,
     by: PlayerId,
     all: &[LandView],
+    cost: i64,
     cash: i64,
     rules: &GameRules,
 ) -> bool {
@@ -149,10 +153,7 @@ pub fn can_upgrade(
     let Some(group) = land.group.as_deref() else {
         return false;
     };
-    if !owns_full_group(all, by, group) || !group_levels_within_one(all, group) {
-        return false;
-    }
-    upgrade_cost(def, land).is_some_and(|cost| cash >= cost)
+    owns_full_group(all, by, group) && group_levels_within_one(all, group) && cash >= cost
 }
 
 // ===== 银行（`bank_system.gd`）=====
@@ -164,6 +165,48 @@ pub fn property_value(def: &BoardDef, all: &[LandView], player: PlayerId) -> i64
         .filter(|l| l.owner == Some(player) && !l.mortgaged)
         .map(|l| land_price(def, l).unwrap_or(0))
         .sum()
+}
+
+/// 名下地产的**名义**账面价值：地价 + 已花出去的加盖费。
+///
+/// 与 [`property_value`] 是两个数，而且必须保持是两个：贷款基数按 Godot 口径只看地价，
+/// 而「全场有多少财富」要把房子算进去 —— 否则玩家每加盖一层就从指数里蒸发一笔钱，
+/// **开发越猛、物价越低**，那与物价指数存在的理由正好相反。
+/// 买地即 Lv1（`settle::buy` 钳到 1），所以已购的加盖次数是 `level - 1`。
+///
+/// 这里给的是**名义**值；物价指数要的是「按今天的价它还值多少」，所以调用方再乘一次
+/// 上一回合的指数（见 `Books::total_assets`）。
+pub fn estate_value(def: &BoardDef, land: &LandView) -> i64 {
+    let price = land_price(def, land).unwrap_or(0);
+    let built = land.level.saturating_sub(1) as i64;
+    price + upgrade_cost(def, land).unwrap_or(0) * built
+}
+
+/// 一个人的现资产：现金 + 存款 − 贷款 + 地产账面 + 股票市值。物价指数的分子按人加它。
+///
+/// 抵押中的地块由调用方挡掉（与 [`property_value`] 同一条理由：抵押就是把地产押给银行，
+/// 算进去会让「抵押换现金」凭空增加全场财富）。
+pub fn net_worth(cash: i64, deposit: i64, loan: i64, estate: i64, stock_value: i64) -> i64 {
+    cash + deposit - loan + estate + stock_value
+}
+
+/// 物价指数 = 现资产总和 ÷ 初始总和（PLAN §三）。不设上限（PC 原版口径）。
+///
+/// **地产按今天的价算**（分子里那块由调用方乘过上一回合的指数），于是「花钱买地」对指数
+/// 是中性的一笔交易：现金少多少，账面就多多少。反过来，如果按名义价算，物价 2 倍时买一块
+/// 地就凭空蒸发掉一半的差额，**全场越买越通缩** —— 那与「物价」两个字正好相反。
+/// 中性还有一条好处：指数只因为**系统里的钱变多**而涨（过起点薪水、股息、破产把现金清零），
+/// 玩家能看懂它为什么动。乘的是上一回合的指数而不是联立解，一步滞后不会发散：
+/// 买地花的钱永远来自现金，`estate × index` 的上界就是付掉的那笔现金。
+///
+/// 分母为非正（空阵容、起始现金配成 0）时返回 1.0 —— 一个没有参照物的比值不该冒充
+/// 「全场免费」。分子为负（全场赤贫到负债超过一切）按 0 算：指数不该是负的，
+/// 那会把每一笔账都翻成负数。
+pub fn price_index(total: i64, initial: i64) -> f32 {
+    if initial <= 0 {
+        return 1.0;
+    }
+    (total.max(0) as f64 / initial as f64) as f32
 }
 
 /// 最大可贷 = 未抵押地产总价 × 系数（`bank_system.gd:10` 的 `MAX_LOAN_RATIO`）。
@@ -196,7 +239,7 @@ pub fn repay_plan(amount: i64, cash: i64, loan: i64) -> Option<i64> {
     (cash >= actual).then_some(actual)
 }
 
-/// 存款利息：进余额不进现金（`bank_system.gd:80-82`）。
+/// 存款利息（**每月**一次，月末那天）：进余额不进现金（`bank_system.gd:80-82`）。
 pub fn deposit_interest(deposit: i64, rules: &GameRules) -> i64 {
     if deposit <= 0 {
         return 0;
@@ -204,7 +247,7 @@ pub fn deposit_interest(deposit: i64, rules: &GameRules) -> i64 {
     (deposit as f32 * rules.deposit_rate).floor() as i64
 }
 
-/// 贷款利息：进负债不进现金（`bank_system.gd:84-87`）。
+/// 贷款利息（**每月**一次，与储金同一天）：进负债不进现金（`bank_system.gd:84-87`）。
 pub fn loan_interest(loan: i64, rules: &GameRules) -> i64 {
     if loan <= 0 {
         return 0;
@@ -286,6 +329,29 @@ pub fn date_of(tick: u32, days_per_month: u32) -> (u32, u32) {
     (tick / span + 1, tick % span + 1)
 }
 
+/// 今天是这周的第几天（1 起，1 = 周一）。`tick 0` 是开局那天 = 1 月 1 日 = 周一。
+pub fn weekday_of(tick: u32, days_per_week: u32) -> u32 {
+    let span = days_per_week.max(1);
+    tick % span + 1
+}
+
+/// 周末吗（每周最后两天）。股市与银行这两天都不开门。
+///
+/// 周长按 7、月长按 12，两者不整除 —— 于是周末在月内逐月漂移，「这个月哪天办不了业务」
+/// 不是一张能背下来的表。这是要的：日历得真的被看一眼。
+pub fn is_weekend(tick: u32, rules: &GameRules) -> bool {
+    let span = rules.days_per_week.max(1);
+    weekday_of(tick, span) + 2 > span
+}
+
+/// 月末吗 —— 储金与贷款结息的那一天（PLAN §三「月末发 10% 储金利息」）。
+///
+/// 口径说清：回合结束时 tick 已经推进到**新的一天**，所以这条问的是「今天开局是不是月末」，
+/// 于是利息在月末那天的**开头**到账，而不是月末过完才补。一次月结一次，不会重也不会漏。
+pub fn is_month_end(tick: u32, rules: &GameRules) -> bool {
+    date_of(tick, rules.days_per_month).1 >= rules.days_per_month.max(1)
+}
+
 /// 今天发不发股息。`dividend_day` 落在月长之外时按月末收拢 —— 配置写错该表现为
 /// 「派息日挪到月末」，而不是「这局永远不发钱」那种静默失效。
 pub fn is_dividend_day(tick: u32, rules: &GameRules) -> bool {
@@ -343,6 +409,12 @@ mod tests {
             .find(|l| l.id == LandId(id))
             .expect("prototype 里有这块地")
             .clone()
+    }
+
+    /// 名义升级费。这些表驱动的用例不套物价，所以「名义＝实付」；
+    /// `can_upgrade` 现在收的是**实付**那个数（见它的注释），测试侧就照这里这样递。
+    fn cost(def: &BoardDef, land: &LandView) -> i64 {
+        upgrade_cost(def, land).unwrap_or(0)
     }
 
     /// prototype 的六块地：
@@ -458,17 +530,17 @@ mod tests {
         // 只拿到 brown 组的一半 → 不可升级（Godot 的 test_cant_upgrade_without_monopoly）
         let all = world(&def, &[(0, p(0), 1, false)]);
         let land = at(&all, 0);
-        assert!(!can_upgrade(&def, &land, me, &all, 99_999, &r));
+        assert!(!can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r));
 
         // 整组在手 → 可升级；现金不够（land 0 的 upgrade_cost=800）→ 不可
         let all = world(&def, &[(0, p(0), 1, false), (1, p(0), 1, false)]);
         let land = at(&all, 0);
         assert!(
-            can_upgrade(&def, &land, me, &all, 99_999, &r),
+            can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r),
             "垄断 → 可升级"
         );
         assert!(
-            !can_upgrade(&def, &land, me, &all, 799, &r),
+            !can_upgrade(&land, me, &all, cost(&def, &land), 799, &r),
             "差一口气也不可"
         );
 
@@ -476,7 +548,7 @@ mod tests {
         let all = world(&def, &[(0, p(0), 1, false), (1, p(0), 3, false)]);
         let land = at(&all, 0);
         assert!(
-            !can_upgrade(&def, &land, me, &all, 99_999, &r),
+            !can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r),
             "等级差必须 ≤1"
         );
 
@@ -484,7 +556,7 @@ mod tests {
         let all = world(&def, &[(0, p(0), 2, false), (1, p(0), 3, false)]);
         let land = at(&all, 0);
         assert!(
-            can_upgrade(&def, &land, me, &all, 99_999, &r),
+            can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r),
             "差 1 时低的那块可升"
         );
 
@@ -492,7 +564,7 @@ mod tests {
         let all = world(&def, &[(0, p(0), max, false), (1, p(0), max, false)]);
         let land = at(&all, 0);
         assert!(
-            !can_upgrade(&def, &land, me, &all, 99_999, &r),
+            !can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r),
             "已达 {max} 级 → 不可升级"
         );
 
@@ -500,7 +572,7 @@ mod tests {
         let all = world(&def, &[(0, p(0), 3, true), (1, p(0), 3, false)]);
         let land = at(&all, 0);
         assert!(
-            !can_upgrade(&def, &land, me, &all, 99_999, &r),
+            !can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r),
             "抵押中不可升级"
         );
 
@@ -508,11 +580,11 @@ mod tests {
         let all = world(&def, &[(0, p(1), 1, false), (1, p(1), 1, false)]);
         let land = at(&all, 0);
         assert!(
-            !can_upgrade(&def, &land, me, &all, 99_999, &r),
+            !can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r),
             "非业主不可升级"
         );
         assert!(
-            can_upgrade(&def, &land, PlayerId(1), &all, 99_999, &r),
+            can_upgrade(&land, PlayerId(1), &all, cost(&def, &land), 99_999, &r),
             "同一个人格检查换回真业主就该放行"
         );
     }
@@ -526,7 +598,7 @@ mod tests {
         // 无主地块不可升级
         let all = world(&def, &[(0, None, 1, false)]);
         let land = at(&all, 0);
-        assert!(!can_upgrade(&def, &land, me, &all, 99_999, &r));
+        assert!(!can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r));
 
         // 造一块没有 group 的地：Godot 会因「空串匹配不到任何格」隐式放行，
         // 这里明确拒绝（见 owns_full_group 的注释）
@@ -535,7 +607,7 @@ mod tests {
         let all2 = world(&def2, &[(0, p(0), 1, false)]);
         let land2 = at(&all2, 0);
         assert!(
-            !can_upgrade(&def2, &land2, me, &all2, 99_999, &r),
+            !can_upgrade(&land2, me, &all2, cost(&def2, &land2), 99_999, &r),
             "无组地块不该白送升级权"
         );
         assert_eq!(
@@ -550,12 +622,70 @@ mod tests {
         let def = board();
         let all = world(&def, &[]);
         let free = at(&all, 0);
-        assert!(can_buy(&def, &free, 1_500), "地价 1500，刚好够");
-        assert!(!can_buy(&def, &free, 1_499), "差一块钱也不算够");
+        assert!(can_buy(&free, 1_500, 1_500), "地价 1500，刚好够");
+        assert!(!can_buy(&free, 1_500, 1_499), "差一块钱也不算够");
+        // 免费卡把价削到 0：付得起是必然的，归属判定不该反过来把它挡掉
+        assert!(can_buy(&free, 0, 0), "价为 0 也是买得起");
 
         let all = world(&def, &[(0, p(1), 1, false)]);
         let taken = at(&all, 0);
-        assert!(!can_buy(&def, &taken, 99_999), "已有人持有 → 不可买");
+        assert!(!can_buy(&taken, 1_500, 99_999), "已有人持有 → 不可买");
+    }
+
+    /// 买地中性：按**缩放价**付钱、按**缩放价**计值，全场总财富不该动。
+    ///
+    /// 这条是物价指数不自毁的关键。地产若按名义价计值，物价 1.5 时每成交一笔全场
+    /// 就凭空蒸发半笔，指数一路往下掉 —— 「越买越通缩」与「物价」两个字正好相反。
+    /// 放在纯函数层而不是集成测试里，是因为集成路径上机会/命运卡会从系统外掏钱进来，
+    /// 那是合法的通胀来源，两种效应混在一条断言里就谁都证不了。
+    #[test]
+    fn buying_at_the_scaled_price_is_value_neutral() {
+        let def = board();
+        let all = world(&def, &[]);
+        let free = at(&all, 0);
+        let index = 1.5;
+
+        let nominal = land_price(&def, &free).expect("prototype 的 L0 有地价");
+        let paid = (nominal as f64 * index).round() as i64;
+        assert_eq!(paid, 2_250, "1500 的地在物价 1.5 时该收 2250");
+
+        let before = net_worth(20_000, 0, 0, 0, 0);
+        let estate = (estate_value(&def, &free) as f64 * index).round() as i64;
+        let after = net_worth(20_000 - paid, 0, 0, estate, 0);
+        assert_eq!(before, after, "买地是现金换账面，不该创造也不该蒸发财富");
+    }
+
+    /// 加盖同理：付掉缩放后的建筑费，账面按同一口径多一层。
+    #[test]
+    fn upgrading_is_value_neutral_too() {
+        let def = board();
+        let all = world(&def, &[(0, p(1), 1, false)]);
+        let one = at(&all, 0);
+        let mut two = one.clone();
+        two.level = 2;
+
+        let index = 2.0;
+        let cost = (upgrade_cost(&def, &one).unwrap() as f64 * index).round() as i64;
+        let before = estate_value(&def, &one) as f64 * index;
+        let after = estate_value(&def, &two) as f64 * index;
+        assert_eq!(
+            (after - before).round() as i64,
+            cost,
+            "加盖一层的账面增量必须等于实付，否则开发本身就在改指数"
+        );
+    }
+
+    /// 指数的两条退化输入：没有参照物时不许冒充「全场免费」，负债超过一切时按 0 收。
+    #[test]
+    fn the_index_degrades_sensibly_on_empty_inputs() {
+        assert_eq!(price_index(0, 0), 1.0, "分母为 0 不该给出 0 或 NaN");
+        assert_eq!(price_index(0, -100), 1.0, "分母为负同理");
+        assert_eq!(
+            price_index(-5_000, 40_000),
+            0.0,
+            "全场赤贫到负债，指数收在 0 而不是负数"
+        );
+        assert_eq!(price_index(80_000, 40_000), 2.0);
     }
 
     /// 缺陷 #1 的回归网：贷款额度的基数是**土地**总价。
@@ -616,12 +746,33 @@ mod tests {
     #[test]
     fn interest_compounds_into_the_balance_not_into_cash() {
         let r = rules();
-        assert_eq!(deposit_interest(10_000, &r), 300, "存款 3% 进余额");
-        assert_eq!(loan_interest(4_000, &r), 320, "贷款 8% 进负债");
+        assert_eq!(deposit_interest(10_000, &r), 1_000, "月末储金 10% 进余额");
+        assert_eq!(loan_interest(10_000, &r), 1_500, "月末贷款 15% 进负债");
         assert_eq!(deposit_interest(0, &r), 0);
         assert_eq!(loan_interest(-5, &r), 0);
         // 不足一分利息时向下取整 → 小额存款可能原地不动，这是 Godot 的 `floori` 语义
-        assert_eq!(deposit_interest(30, &r), 0);
+        // 月息 10% 下要存满 10 块才生得出 1 块，所以 9 是「一辈子拿不到利息」的那类存款
+        assert_eq!(deposit_interest(9, &r), 0);
+    }
+
+    /// 贷款利率必须**高于**储金利率。两个数一旦倒过来，「借满再存进银行」就是无风险套利，
+    /// 而规则层没有任何东西挡得住它 —— 玩家五分钟能发现，AI 第一天就会这么干。
+    /// P2④ 把两条利率从「每回合」改成「每月」时正好把它们拧反过一次，所以这条留在网里。
+    #[test]
+    fn borrowing_to_deposit_earns_nothing() {
+        let r = rules();
+        assert!(
+            r.loan_rate > r.deposit_rate,
+            "贷款利率 {:?} 没高于储金利率 {:?}",
+            r.loan_rate,
+            r.deposit_rate
+        );
+        for principal in [1_000, 10_000, 100_000, 1_000_000] {
+            assert!(
+                loan_interest(principal, &r) >= deposit_interest(principal, &r),
+                "{principal} 存进去赚的比借出来付的多 —— 白捡一条财路"
+            );
+        }
     }
 
     #[test]

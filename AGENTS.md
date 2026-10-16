@@ -1,12 +1,12 @@
 # AGENTS.md — 本仓库的工作约定
 
-《暴富》Godot → Bevy 0.20 重写。**动手前先读 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)**：分层红线、Bevy 0.20 的 API 事实与 29 个坑位、待修缺陷清单全在那里（它原名《MIGRATION.md》，移植线收口后按实际内容改名）。**排期只看 [`.agents/PLAN.md`](./.agents/PLAN.md)**。本文只写约定与指路，不重复那些内容。
+《暴富》Godot → Bevy 0.20 重写。**动手前先读 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)**：分层红线、Bevy 0.20 的 API 事实与 31 个坑位、待修缺陷清单全在那里（它原名《MIGRATION.md》，移植线收口后按实际内容改名）。**排期只看 [`.agents/PLAN.md`](./.agents/PLAN.md)**。本文只写约定与指路，不重复那些内容。
 
 ## 文档地图
 
 | 位置 | 是什么 | 什么时候读 |
 |---|---|---|
-| [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md) | 架构与技术事实（活文档，**唯一被源码注释引用的一份**）。§三=缺陷清单与未结项，§四=目标架构与分层红线（§4.2 道路不建实体、§4.6 core 拥有位置），§六=0.20 依赖矩阵 + §6.1 坑 1–27，§七=表现层要点与待做，§九=存档方案。§五 与 §十 已归档（原位留指针） | 任何碰 Bevy API、分层、结算顺序的改动之前 |
+| [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md) | 架构与技术事实（活文档，**唯一被源码注释引用的一份**）。§三=缺陷清单与未结项，§四=目标架构与分层红线（§4.2 道路不建实体、§4.6 core 拥有位置），§六=0.20 依赖矩阵 + §6.1 坑 1–31，§七=表现层要点与待做，§九=存档方案。§五 与 §十 已归档（原位留指针） | 任何碰 Bevy API、分层、结算顺序的改动之前 |
 | [`.agents/PLAN.md`](./.agents/PLAN.md) | **玩法补齐计划**（活文档，唯一的排期来源）。基线是大宇《大富翁4》，不是 Godot 版。§一=与 4 代的口径偏差（哪些东西其实不存在），§三=缺口对照表，§四=**T1 + P1–P17 实现顺序**与依赖，§五=点券格/小游戏格/新闻中心格设计，§六=AI/存档/音频/发行的安插，§七=待拍板（含已拍板项） | 碰「要不要加某个玩法/格子」；动手做任何阶段之前 |
 | [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) | **冻结的移植历史**，不再维护：Godot→Bevy 概念映射表（原 §五/§5.1）+ B0–B5b 逐阶段产出与两节验收记录（原 §十/§10.1/§10.2） | 只在这两类情况下去查：「Godot 那个文件对应 Rust 哪个模块」、「当初验收时看到了什么」 |
 | [`.agents/ADR-001-board-topology.md`](./.agents/ADR-001-board-topology.md) | 棋盘拓扑决策，状态 **Accepted**（权威，不要重开讨论） | 碰 board / land / 移动逻辑 |
@@ -28,7 +28,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 - **不要用 `... | tail` 之类管道判断成败**，`check.sh` 已经逐步取退出码，照它做。
 - 核对画面：`NM_SHOT=<路径>` 让 `game_app` 截图后自行退出，`NM_SHOT_AT=<秒>` 推迟到对局跑起来之后再截（按墙钟触发，原因见 `.agents/ARCHITECTURE.md` §六 的坑 5/10）。`NM_CAM_SIZE=0` 整盘取景、默认 8 跟随紧取景。别用 `timeout N cargo run` 做冒烟测试。
-- B5 之后 `NM_AUTOROLL=1` 不再是「没有按钮的替代品」，而是**跑完一局的手段**（人点几百次不现实）：配 `NM_AUTOGAP=0` 提速、`NM_SEED` 复现。浮层与模态的开发入口是 `NM_ATM=1`/`NM_STOCK=1`/`NM_DECISION=bank`。要看世界状态本身（回合/阶段/落格分派/待决/每人两套账），用 `NM_DUMP=1` 开只读面板 —— 查「钱为什么是这个数」比猜 `warn!` 快。
+- B5 之后 `NM_AUTOROLL=1` 不再是「没有按钮的替代品」，而是**跑完一局的手段**（人点几百次不现实）：配 `NM_AUTOGAP=0` 提速、`NM_SEED` 复现。浮层与模态的开发入口是 `NM_ATM=1`/`NM_STOCK=1`/`NM_DECISION=bank`，日历入口是 `NM_DAY=<tick>`（P2④ 加的：哪天休市由骰子决定，截图控制不了就得给一条不靠运气的路）。要看世界状态本身（回合/阶段/落格分派/待决/每人两套账/物价指数与修正登记处），用 `NM_DUMP=1` 开只读面板 —— 查「钱为什么是这个数」比猜 `warn!` 快。
 - **真人鼠标冒烟要先激活游戏窗口**（`SetForegroundWindow` + `GetClientRect`/`ClientToScreen` 换算客户区坐标）：窗口被 IDE 压住时点击全落到别人那儿，而 `NM_SHOT` 照常截出游戏画面，看着就像「UI 是死的」（§6.1 坑 27）。**同一条坑的另一半：点击脚本的计时从「它找到窗口」起算，`NM_SHOT_AT` 从「游戏启动」起算** —— 启动前多 `sleep` 几秒，点击就整体落到截图之后，看着同样是「按钮是死的」。先确认点击时刻早于截图时刻。
 
 ## 硬约束
@@ -53,7 +53,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## 当前状态
 
-B0、B1、B2a、B2b、B2c、B3、B4、B5、**B5b** 已完成（数据层、世界装配、回合状态机 + 种子化骰子 + 定步时行走、经济核心 property/bank/stock/card、等轴测渲染切片：几何/建筑/棋子动画/相机跟随/格名投影、UI 与交互：顶栏/HUD/四个模态/暂停/点格详情/主菜单↔对局流转、B5b：ATM 与证券两块常驻浮层 + 银行柜台模态 + 行情按回合 tick + 分红按日历发，缺陷 #1/#3/#4/#5/#13/#14 已修，#8 的格子类型那半随 P1 收口；测试计数以 `./check.sh` 实际运行为准，T1 之后是规则层 129 项 + 表现层 18 项）。B5 的验收记录（55 回合打完一局、9 张界面截图、三个跨局残留缺陷的修法）见 [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) §10.1；验收后实报的「主菜单按钮点击无响应」已修（`ARCHITECTURE.md` §6.1 坑 23，真鼠标冒烟通过）。B5b 的验收记录（两条规则分叉的取舍、6 张截图、真鼠标冒烟翻出的两个误诊）见同一份归档 §10.2。
+B0、B1、B2a、B2b、B2c、B3、B4、B5、**B5b** 已完成（数据层、世界装配、回合状态机 + 种子化骰子 + 定步时行走、经济核心 property/bank/stock/card、等轴测渲染切片：几何/建筑/棋子动画/相机跟随/格名投影、UI 与交互：顶栏/HUD/四个模态/暂停/点格详情/主菜单↔对局流转、B5b：ATM 与证券两块常驻浮层 + 银行柜台模态 + 行情按回合 tick + 分红按日历发，缺陷 #1/#3/#4/#5/#13/#14 已修，#8 的格子类型那半随 P1 收口；B5 的验收记录（55 回合打完一局、9 张界面截图、三个跨局残留缺陷的修法）见 [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) §10.1；验收后实报的「主菜单按钮点击无响应」已修（`ARCHITECTURE.md` §6.1 坑 23，真鼠标冒烟通过）。B5b 的验收记录（两条规则分叉的取舍、6 张截图、真鼠标冒烟翻出的两个误诊）见同一份归档 §10.2。
 
 **移植这条线已追平**：Godot 侧非 addon 源码在 B5 全部有了归属，剩下的 `audio_manager`/`save_manager` 是空壳，B6–B8（AI、存档、K 线）是 Godot 没有的东西。按上面第 6 条，此后不再回头比对 Godot。
 
@@ -61,4 +61,4 @@ B0、B1、B2a、B2b、B2c、B3、B4、B5、**B5b** 已完成（数据层、世�
 - ~~**银行/证券没有交易入口**~~ —— **B5b 已补**：路过银行格发 ATM 卡（存取），踩到开柜台模态（借还），证券常驻顶栏、掷骰前可下单。
 - ~~**`prototype.json` 没有证券格**~~ —— **拍板不补**：证券不是一格要踩的东西。行情改成每回合结束 tick，分红改挂日历（`days_per_month`/`dividend_day`），两条分叉的理由见 [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) §10.2。
 
-下一步换成**玩法补齐**这条线，排期只在 `.agents/PLAN.md`：**P1 已完成（10-16）** —— 点券（`Points` 组件 + `PointsChanged`，与现金两套账、永不通兑）+ 点券格（`TileData.coupon`，一次性 + 按回合冷却）+ 落格分派改成一张穷尽表 `landing::domain_of`（新增格类型漏写分支＝编译失败，ARCHITECTURE §三 的 #8 后半条同时收口）。**T1 也已完成（10-16）** —— `NM_DUMP=1` 的 egui 只读面板（`game_app/src/dump.rs`，core 一条依赖没加），它第一次跑真鼠标冒烟就翻出一个 B5 就带着的必崩缺陷：「对局→主菜单」从没被走过（§6.1 坑 28/29）。此后是 **P2（结算修正管线 + 物价指数）**……到 P13 魔法屋，玩法之后才是 P14 AI、P15 存档设置、P16 音频、P17 发行。原 B6/B7/B8 三行已从移植计划表（已归档那份）并进来。
+下一步换成**玩法补齐**这条线，排期只在 `.agents/PLAN.md`：**P1 已完成（10-16）** —— 点券（`Points` 组件 + `PointsChanged`，与现金两套账、永不通兑）+ 点券格（`TileData.coupon`，一次性 + 按回合冷却）+ 落格分派改成一张穷尽表 `landing::domain_of`（新增格类型漏写分支＝编译失败，ARCHITECTURE §三 的 #8 后半条同时收口）。**T1 也已完成（10-16）** —— `NM_DUMP=1` 的 egui 只读面板（`game_app/src/dump.rs`，core 一条依赖没加），它第一次跑真鼠标冒烟就翻出一个 B5 就带着的必崩缺陷：「对局→主菜单」从没被走过（§6.1 坑 28/29）。**P2 已完成（10-17）** —— 结算修正管线（`game_core/src/charge.rs`：`Charge` + 一张 `Corrections` 登记表 + 纯函数 `stage`，每条账带「可否抵消／可否转嫁」两个位）、建筑损害阶梯（`damage.rs`：`LandDamage::{Degrade,Clear{seize}} × DamageArea::{One,Box,Street,Whole}`，「降层＋夺地」那一格在类型上写不出来）、物价指数（`GameSession::price_index`，白名单豁免股价与神明金额）、日历收口（利息挂 `is_month_end`、周末同时挡行情与银行，利率改成月息 10%/15%）。测试计数以 `./check.sh` 实际运行为准，P2 之后是**规则层 174 项 + 表现层 20 项**。此后是 **P3（卡片：持有与出牌 + 命运定序 + 百货）**……到 P13 魔法屋，玩法之后才是 P14 AI、P15 存档设置、P16 音频、P17 发行。原 B6/B7/B8 三行已从移植计划表（已归档那份）并进来。

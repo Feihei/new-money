@@ -11,6 +11,7 @@ use bevy::prelude::*;
 
 use crate::board::{BranchKind, GridPos, TileIndex};
 use crate::card::{CardDef, CardEffect, CardKind, CardSet};
+use crate::charge::{Charge, ChargeKind};
 use crate::data::DataHandles;
 use crate::landing::{
     Landed, Landing, LandingDomain, Pending, PendingDecision, jail_player, teleport,
@@ -153,16 +154,27 @@ pub fn settle_card_landing(
     for effect in &def.effects {
         match effect {
             CardEffect::AddCash { amount } => {
-                books.credit(player, *amount);
-                outcomes.push(EffectOutcome::Gained(*amount));
+                // 走管线：物价 2.5 时这张「横财」卡真的多给钱，而衰神的「得钱作废」
+                // 是一条 Cancel 就能勾掉的账（所以 Bonus 的 `cancellable` 是开着的）
+                let charge = Charge::new(ChargeKind::Bonus, None, Some(player), *amount);
+                let got = books
+                    .settle(&mut commands, charge)
+                    .map(|done| done.amount)
+                    .unwrap_or(0);
+                outcomes.push(EffectOutcome::Gained(got));
             }
             CardEffect::DeductCash { amount } => {
-                if books.charge(&mut commands, player, *amount).is_err() {
-                    outcomes.push(EffectOutcome::CouldNotPay { needed: *amount });
-                    // 人已破产，卡上剩下的效果不必再执行
-                    break;
+                let charge = Charge::new(ChargeKind::Penalty, Some(player), None, *amount);
+                match books.settle(&mut commands, charge) {
+                    Ok(done) => outcomes.push(EffectOutcome::Lost(done.amount)),
+                    Err(short) => {
+                        outcomes.push(EffectOutcome::CouldNotPay {
+                            needed: short.needed,
+                        });
+                        // 人已破产，卡上剩下的效果不必再执行
+                        break;
+                    }
                 }
-                outcomes.push(EffectOutcome::Lost(*amount));
             }
             CardEffect::GoToJail { turns } => {
                 let board = &books.active.def;

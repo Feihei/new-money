@@ -9,12 +9,15 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::bank::AtmAccess;
+use crate::economy;
+use crate::market::Market;
 use crate::msg::{
     DiceRolled, GameOver, JailSkipped, PlayerReleased, RequestRoll, TurnEnded, TurnStarted,
     WalkStarted,
 };
 use crate::player::{Bankrupt, JailSentence, PlayerId, TokenPosition, WalkQueue};
 use crate::rng::Rng;
+use crate::settle::Books;
 use crate::walk::WalkClock;
 use crate::world::ActiveBoard;
 
@@ -88,10 +91,17 @@ impl TurnOrder {
 ///
 /// `game_id` 不再保留：它只被用在一条错误的 `game_saved.emit`（缺陷 #11）里，
 /// 而取时间戳本身就会让对局不可复现。存档需要标识时从 `seed` 推。
-#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+///
+/// 只 `PartialEq` 不 `Eq`：`price_index` 是浮点，`Eq` 在 `NaN` 上不自反。
+/// 存档比较走逐字段 `==`，不需要把整条资源塞进 `HashMap` 的键。
+#[derive(Resource, Debug, Clone, PartialEq)]
 pub struct GameSession {
     pub turn_count: u32,
     pub seed: u64,
+    /// 物价指数（P2）。开局 1.0，每个回合末按「全员现资产总和 ÷ 全员初始总和」重算，
+    /// 不设上限（PC 原版口径，PLAN §一）。哪些钱受它缩放是 `charge::scales_with_price`
+    /// 那张穷尽表说了算 —— 股价与神明金额是点名豁免的。
+    pub price_index: f32,
 }
 
 /// 暂停总闸（`pause_menu.gd` 的 `get_tree().paused`）。规则层只读，写的永远是输入侧。
@@ -287,6 +297,22 @@ pub fn end_turn_system(
 
     order.advance_to_active(|e| living.contains(&e));
     next.set(TurnPhase::TurnStart);
+}
+
+/// 每个回合结束重算物价指数（P2③）。
+///
+/// 排在 `TurnEnd` 的**最后**，因为分子里的股票市值要等行情 tick 完才是今天的数 ——
+/// 跑在 `market_tick_on_turn_end_system` 之前会拿到昨天的价，那一帧的指数就说不清是哪天的。
+///
+/// 一天一个数、整场共用：它是世界的状态，不是某个玩家的状态，所以不进修正登记处
+/// （那里每条都要有个 bearer），而是管线第一步直接读 [`GameSession::price_index`]。
+pub fn update_price_index_system(mut books: Books, market: Market) {
+    let previous = books.session.price_index;
+    let total = books.total_assets(previous, |id| market.price(id).unwrap_or(0.0));
+    let initial = books.initial_assets();
+    let index = economy::price_index(total, initial);
+    books.session.price_index = index;
+    debug!("物价指数 {previous:.3} → {index:.3}（现资产 {total} / 初始 {initial}）");
 }
 
 /// 终局只负责记账与日志；胜负细节在 `GameOver` 消息里，UI 自己读。

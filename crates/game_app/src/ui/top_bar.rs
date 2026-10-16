@@ -255,20 +255,25 @@ pub(crate) fn refresh_top_bar(
 /// `GameOver` 带来。阶段旁白与事件流水差一帧到位（消息下一帧才读得到，转移也晚一帧），
 /// 于是这里写「游戏结束」会把胜者那句盖掉 —— 而阶段标签已经说了「游戏结束」，重复没有价值。
 ///
-/// 等待掷骰那一行带上日历：行情每回合结束动一次、分红按「几月几日」发，
-/// 玩家要能在动手之前看见今天是哪天，否则「每月 1 号派息」只是一句写在文档里的话。
+/// 等待掷骰那一行带上日历与物价：行情每回合结束动一次、分红按「几月几日」发、
+/// 地价租金按 [`game_core::GameSession::price_index`] 缩放，玩家要能在动手之前看见这三个数，
+/// 否则「每月 1 号派息」与「地价翻了一倍」只是两句写在文档里的话。
 fn phase_hint(phase: TurnPhase, turn: &TurnView) -> Option<String> {
     let text = match phase {
         TurnPhase::Boot => "准备中".to_string(),
         TurnPhase::WaitRoll => {
             let (month, day) =
                 game_core::economy::date_of(turn.clock.tick, turn.rules.days_per_month);
+            // 指数每回合末重算，而这一行在进入 WaitRoll 时才写 —— 两者同帧之后，
+            // 所以这里读到的就是「今天」那个数（旁白不会显示昨天的物价）
+            let index = turn.session.price_index;
             match turn.order.current().and_then(|p| turn.names.get(p).ok()) {
                 Some(name) => format!(
-                    "{} 的回合 — 请掷骰（第 {} 回合 · 第 {month} 月 {day} 日）",
-                    name.0, turn.session.turn_count
+                    "{} 的回合 — 请掷骰（第 {turn_no} 回合 · 第 {month} 月 {day} 日 · 物价 ×{index:.2}）",
+                    name.0,
+                    turn_no = turn.session.turn_count
                 ),
-                None => format!("请掷骰（第 {month} 月 {day} 日）"),
+                None => format!("请掷骰（第 {month} 月 {day} 日 · 物价 ×{index:.2}）"),
             }
         }
         TurnPhase::Walking => "移动中…".to_string(),

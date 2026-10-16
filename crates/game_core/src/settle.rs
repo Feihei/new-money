@@ -13,12 +13,15 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use crate::charge::{self, Charge, ChargeKind, Corrections};
+use crate::damage::{self, DamageArea, DamageTally, LandDamage};
 use crate::economy::{self, LandView};
 use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
 use crate::msg::{CashChanged, PlayerBankrupt, PointsChanged};
 use crate::player::{BankBalance, Bankrupt, PlayerId, Points, Wallet};
 use crate::rules::GameRules;
 use crate::stock::StockHoldings;
+use crate::turn::GameSession;
 use crate::world::ActiveBoard;
 
 /// 付不起钱。带着「要付多少」「有多少」，调用方据此决定是撤销交易还是破产清算。
@@ -33,6 +36,12 @@ pub struct InsufficientFunds {
 pub struct Books<'w, 's> {
     pub active: Res<'w, ActiveBoard>,
     pub rules: Res<'w, GameRules>,
+    /// 物价指数的来源（[`crate::charge`] 的管线读它）。与 `ActiveBoard` 同批插入，
+    /// 所以「棋盘在则它在」这条已经成立，不需要额外的门禁。回合末由
+    /// `turn::update_price_index_system` 写一次。
+    pub session: ResMut<'w, GameSession>,
+    /// 修正登记处。P2 只有物价指数这一个常驻修正；P3 的卡、P6 的神明各自往这里 push。
+    pub corrections: Res<'w, Corrections>,
     wallets: Query<'w, 's, &'static mut Wallet, With<PlayerId>>,
     points: Query<'w, 's, &'static mut Points, With<PlayerId>>,
     banks: Query<'w, 's, &'static mut BankBalance, With<PlayerId>>,
@@ -114,6 +123,99 @@ impl<'w, 's> Books<'w, 's> {
             .filter(|(_, _, bankrupt)| bankrupt.is_none())
             .map(|(e, id, _)| (e, *id))
             .collect()
+    }
+
+    /// 把一笔账过一遍修正管线，**不动钱**。
+    ///
+    /// 报价与成交都调它：`amount` 只从 `base` 算（见 `charge::stage`），所以同一个入参
+    /// 调多少次都是同一个数 —— 「模态上写的价」与「扣掉的价」不可能不一致，除非中间的
+    /// 登记变了（卡被打掉、神明到期），那时候以成交这次为准。
+    pub fn staged(&self, charge: Charge) -> Charge {
+        charge::stage(charge, self.session.price_index, &self.corrections)
+    }
+
+    /// 某个名义价对这位玩家来说实际是多少。UI 报价走这一条。
+    pub fn quoted(&self, kind: ChargeKind, player: Entity, base: i64) -> i64 {
+        self.staged(Charge::new(kind, Some(player), None, base))
+            .amount
+    }
+
+    /// 走管线的一笔收付 —— 「询问 → 修正 → 扣」的第三步，也是**有名目的钱**的唯一入口。
+    ///
+    /// 返回最终那笔账（`amount` 已定，`payer` 可能已被转嫁给别人）。付不起时与
+    /// [`Books::charge`] 同语义：当场破产、收款方一分拿不到，返回 `Err`。
+    ///
+    /// `debit`/`credit` 仍然留在 `pub`：银行存取借还那条路是**自己左口袋换右口袋**，
+    /// 不是一笔债，没有可修正的对象；硬套进管线只会让「存款被物价指数放大」这种
+    /// 荒谬事变成可能。边界写在 [`crate::charge`] 模块头。
+    pub fn settle(
+        &mut self,
+        commands: &mut Commands,
+        charge: Charge,
+    ) -> Result<Charge, InsufficientFunds> {
+        let charge = self.staged(charge);
+        let Some(payer) = charge.payer else {
+            // 纯收入（奖金、股息）：系统出钱，没有「付不起」这一说
+            if let Some(payee) = charge.payee {
+                self.credit(payee, charge.amount);
+            }
+            return Ok(charge);
+        };
+        if let Err(short) = self.debit(payer, charge.amount) {
+            self.bankrupt(commands, payer, short.needed);
+            return Err(short);
+        }
+        if let Some(payee) = charge.payee {
+            self.credit(payee, charge.amount);
+        }
+        Ok(charge)
+    }
+
+    /// 全场现资产总和（物价指数的分子）。破产者不计 —— 他们已经离场，账也清零了。
+    ///
+    /// `index` 是**上一回合**的指数，用来把名义地产折成「按今天的价值多少」；理由与
+    /// 不发散性见 [`economy::price_index`]。传 1.0 就是纯名义口径。
+    ///
+    /// `stock_price` 由调用方给（只有 [`crate::market::Market`] 查得到股价）：账本管的是
+    /// 「谁有多少钱与地」，行情不是它的职责，为了一个乘法去挂股票实体会把边界弄脏。
+    pub fn total_assets(
+        &self,
+        index: f32,
+        stock_price: impl Fn(&crate::stock::StockId) -> f32,
+    ) -> i64 {
+        let def = &self.active.def;
+        let views = self.views();
+        self.solvent()
+            .into_iter()
+            .map(|(player, pid)| {
+                let cash = self.wallets.get(player).map(|w| w.cash).unwrap_or(0);
+                let bank = self.banks.get(player).copied().unwrap_or_default();
+                let nominal = views
+                    .iter()
+                    .filter(|l| l.owner == Some(pid) && !l.mortgaged)
+                    .map(|l| economy::estate_value(def, l))
+                    .sum::<i64>();
+                let estate = (nominal as f64 * index as f64).round() as i64;
+                let stocks = self
+                    .holdings
+                    .get(player)
+                    .map(|h| {
+                        h.0.iter()
+                            .map(|(id, n)| (stock_price(id) * *n as f32) as i64)
+                            .sum()
+                    })
+                    .unwrap_or(0);
+                economy::net_worth(cash, bank.deposit, bank.loan, estate, stocks)
+            })
+            .sum()
+    }
+
+    /// 全场初始资产总和（物价指数的分母）：开局人数 × 起始现金，整局不动。
+    ///
+    /// 破产的人**仍然留在分母里** —— 于是把对手打破产会让全场通缩。这是刻意的：
+    /// 「清算别人并不能让自己的房子更值钱」是这条指数唯一被玩家看得见的性质。
+    pub fn initial_assets(&self) -> i64 {
+        self.faces.iter().count() as i64 * self.rules.start_cash
     }
 
     /// 加钱的唯一入口。`amount <= 0` 什么都不做（与 `player_data.gd:50-55` 一致）。
@@ -219,6 +321,48 @@ impl<'w, 's> Books<'w, 's> {
             "玩家 {} 破产（付不出 {unpaid}）",
             self.id_of(player).map(|p| p.0).unwrap_or_default()
         );
+    }
+
+    /// 打一次建筑损害（P2② 的「拆房 / 征收」动词，形状见 [`crate::damage`]）。
+    ///
+    /// `Mortgaged` 只在**夺地**那一刻摘：抵押中的地被 `Degrade` 或 `Clear{seize:false}`
+    /// 打过之后仍然是他的、仍然欠着 —— 房子被拆不该让债主免单（那是 P9 变卖池才有的账）。
+    /// 反过来若地都无主了还留着抵押，`economy` 那三处「抵押中」判定就会替一个不存在的主人
+    /// 挡掉租金。
+    ///
+    /// 不发消息：表现层读的是 `Owner`/`BuildingLevel` 的**变化**（`render::land::sync_buildings`
+    /// 用 `Ref<T>` 检测），组件改了它就跟着改。等 P11 的新闻要播「外星人拆了哪几块」时
+    /// 再补一条带地块清单的消息，而不是现在就为它准备一个没人读的字段。
+    pub fn damage(
+        &mut self,
+        commands: &mut Commands,
+        center: LandId,
+        depth: LandDamage,
+        area: DamageArea,
+    ) -> DamageTally {
+        let mut tally = DamageTally::default();
+        for land in damage::area_of(&self.active.def, center, area) {
+            let Some(entity) = self.active.lands.get(&land).copied() else {
+                continue;
+            };
+            let Ok((_, _, mut owner, mut level, mortgaged)) = self.plots.get_mut(entity) else {
+                continue;
+            };
+            tally.hit += 1;
+            let before = owner.0;
+            damage::strike(&mut level.0, &mut owner.0, depth);
+            if before.is_some() && owner.0.is_none() {
+                tally.seized += 1;
+                if mortgaged.is_some() {
+                    commands.entity(entity).remove::<Mortgaged>();
+                }
+            }
+        }
+        info!(
+            "建筑损害 {depth:?} × {area:?}（中心 {center:?}）：命中 {} 块、收回 {} 块",
+            tally.hit, tally.seized
+        );
+        tally
     }
 
     /// 回合计息：存款生息进余额、贷款计息进负债，都不经过现金
@@ -340,15 +484,19 @@ impl<'w, 's> Books<'w, 's> {
         true
     }
 
-    /// 买地：扣地价 → 归属落到买家 → 等级置 1（`property_registry.gd:29-33` 的
+    /// 买地：扣**实付**地价 → 归属落到买家 → 等级置 1（`property_registry.gd:29-33` 的
     /// `set_owner_by_key` 顺带把空地升到 1 级）。
     /// 付不起或已有人持有 → `None`，什么都不动。
+    ///
+    /// 价过一遍管线（物价指数 + 小福神「买地免费」那一类 `Cancel`），所以这里返回的
+    /// 是实付额而不是表上的地价 —— 免费时是 0，`LandBought.price` 因此说的是「这笔账」。
     pub fn buy(&mut self, player: Entity, land: LandId) -> Option<i64> {
         let view = self.view(land)?;
-        if !economy::can_buy(&self.active.def, &view, self.balance(player)) {
+        let base = economy::land_price(&self.active.def, &view)?;
+        let price = self.quoted(ChargeKind::BuyLand { land }, player, base);
+        if !economy::can_buy(&view, price, self.balance(player)) {
             return None;
         }
-        let price = economy::land_price(&self.active.def, &view)?;
         let entity = self.land_entity(land)?;
         let pid = self.id_of(player);
         self.debit(player, price).ok()?;
@@ -358,16 +506,18 @@ impl<'w, 's> Books<'w, 's> {
         Some(price)
     }
 
-    /// 升级：扣钱 + 等级 +1。判定全在 `economy::can_upgrade`（垄断 + 等级差 ≤1）。
+    /// 升级：扣**实付**建筑费 + 等级 +1。结构判定（业主本人、未抵押、未满级、垄断、
+    /// 组内等级差 ≤1）全在 `economy::can_upgrade`。
     pub fn upgrade(&mut self, player: Entity, land: LandId) -> Option<u8> {
         let view = self.view(land)?;
         let pid = self.id_of(player)?;
+        let base = economy::upgrade_cost(&self.active.def, &view)?;
+        let cost = self.quoted(ChargeKind::Upgrade { land }, player, base);
         let views = self.views();
         let cash = self.balance(player);
-        if !economy::can_upgrade(&self.active.def, &view, pid, &views, cash, &self.rules) {
+        if !economy::can_upgrade(&view, pid, &views, cost, cash, &self.rules) {
             return None;
         }
-        let cost = economy::upgrade_cost(&self.active.def, &view)?;
         let entity = self.land_entity(land)?;
         self.debit(player, cost).ok()?;
         let (_, _, _, mut level, _) = self.plots.get_mut(entity).ok()?;

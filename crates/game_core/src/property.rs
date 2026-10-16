@@ -7,6 +7,7 @@
 
 use bevy::prelude::*;
 
+use crate::charge::{Charge, ChargeKind};
 use crate::economy;
 use crate::msg::{BuyOffered, RentDue, UpgradeOffered};
 use crate::settle::Books;
@@ -49,11 +50,13 @@ pub fn settle_property_landing(
             pending.offer(player, Pending::Buy(land));
             offers.write(BuyOffered { player, land });
         }
-        // 自己的地 → 只在真能升级时提问（Godot 的 `can_upgrade` 分支）
+        // 自己的地 → 只在真能升级时提问（Godot 的 `can_upgrade` 分支）。
+        // 报价走管线，所以模态上那个 `cost` 与买家按下「升级」时扣掉的数是同一个。
         Some(owner) if owner == self_id => {
+            let base = economy::upgrade_cost(def, &view).unwrap_or(0);
+            let cost = books.quoted(ChargeKind::Upgrade { land }, player, base);
             let views = books.views();
-            if economy::can_upgrade(def, &view, owner, &views, books.balance(player), rules) {
-                let cost = economy::upgrade_cost(def, &view).unwrap_or(0);
+            if economy::can_upgrade(&view, owner, &views, cost, books.balance(player), rules) {
                 pending.offer(player, Pending::Upgrade(land));
                 upgrades.write(UpgradeOffered { player, land, cost });
             }
@@ -68,13 +71,19 @@ pub fn settle_property_landing(
             if rent <= 0 {
                 return;
             }
-            if books.charge(&mut commands, player, rent).is_ok() {
-                books.credit(owner_entity, rent);
+            let charge = Charge::new(
+                ChargeKind::Rent { land },
+                Some(player),
+                Some(owner_entity),
+                rent,
+            );
+            // `payer` 取成交后那个：被嫁祸卡转手时，收据要说的是**实际付钱的人**
+            if let Ok(done) = books.settle(&mut commands, charge) {
                 rents.write(RentDue {
-                    payer: player,
+                    payer: done.payer.unwrap_or(player),
                     owner: owner_entity,
                     land,
-                    amount: rent,
+                    amount: done.amount,
                 });
             }
             pending.offer(player, Pending::RentNotice(land));

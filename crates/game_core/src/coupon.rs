@@ -14,7 +14,6 @@ use bevy::prelude::*;
 use crate::board::TileIndex;
 use crate::landing::{Landed, Landing, LandingDomain};
 use crate::settle::Books;
-use crate::turn::GameSession;
 
 /// 已取走的点券箱：`格 → 哪一回合重新出现`。
 ///
@@ -56,7 +55,6 @@ pub fn settle_coupon_landing(
     landing: Res<Landing>,
     mut books: Books,
     mut boxes: ResMut<CouponBoxes>,
-    session: Res<GameSession>,
 ) {
     let Some(Landed {
         player,
@@ -80,16 +78,19 @@ pub fn settle_coupon_landing(
         return;
     };
     let refresh = def.data.refresh.unwrap_or(books.rules.coupon_refresh_turns);
+    // 回合数从账本里拿：`Books` 现在管着 `GameSession`（物价指数要写它），
+    // 再挂一个 `Res<GameSession>` 参数就撞成 B0002 —— 一个资源只能有一个访问者
+    let turn = books.session.turn_count;
 
-    if !boxes.is_ready(tile, session.turn_count) {
+    if !boxes.is_ready(tile, turn) {
         debug!(
             "点券箱 {} 已被取走，冷却到第 {} 回合",
             tile.0,
-            session.turn_count + refresh
+            turn + refresh
         );
         return;
     }
-    boxes.take(tile, session.turn_count, refresh);
+    boxes.take(tile, turn, refresh);
     books.award_points(player, amount);
 }
 

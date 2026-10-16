@@ -12,7 +12,9 @@ use bevy::time::TimePlugin;
 pub mod bank;
 pub mod board;
 pub mod card;
+pub mod charge;
 pub mod coupon;
+pub mod damage;
 pub mod data;
 pub mod deck;
 pub mod economy;
@@ -33,13 +35,19 @@ pub mod world;
 
 pub mod prelude {
     pub use crate::bank::{
-        AtmAccess, bank_op_allowed, bank_op_system, grant_atm_access_system, settle_bank_landing,
+        AtmAccess, apply_month_end_interest_system, bank_op_allowed, bank_op_system,
+        grant_atm_access_system, settle_bank_landing,
     };
     pub use crate::board::{
         BoardDef, BranchDef, BranchKind, GridPos, LandDef, LandType, TileDef, TileIndex, TileKind,
     };
     pub use crate::card::{CardDef, CardEffect, CardKind, CardSet};
+    pub use crate::charge::{
+        Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, Scope, Source,
+        charge_domain_of, scales_with_price, stage, transferable,
+    };
     pub use crate::coupon::{CouponBoxes, settle_coupon_landing};
+    pub use crate::damage::{DamageArea, DamageTally, LandDamage};
     pub use crate::data::{BOARD_PATH, CHANCE_PATH, DataHandles, FATE_PATH, STOCKS_PATH};
     pub use crate::deck::{CardId, Deck, card_of, settle_card_landing};
     pub use crate::economy::LandView;
@@ -75,18 +83,23 @@ pub mod prelude {
     pub use crate::world::{ActiveBoard, CoreSet, Gameplay, begin_game_system};
 }
 
+use bank::apply_month_end_interest_system;
 use prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankOpRequested, BankVisited, BoardDef, BuyOffered,
-    CardDrawn, CardSet, CashChanged, CouponBoxes, DecisionChosen, DiceRolled, GameOver, GameRules,
-    GameSeed, GameSetup, JailSkipped, JsonAssetLoader, LandBought, LandUpgraded, Landing,
-    MarketClock, Paused, PendingDecision, PlayerArrived, PlayerBankrupt, PlayerJailed,
-    PlayerReleased, PlayerTeleported, PointsChanged, RentDue, RequestRoll, StockPriceChanged,
-    StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase,
-    TurnStarted, UpgradeOffered, WalkClock, WalkStarted, advance_walk_clock_system, bank_op_system,
-    begin_game_system, decision_system, grant_atm_access_system, market_tick_on_turn_end_system,
-    trade_request_system, walk_step_system,
+    CardDrawn, CardSet, CashChanged, Corrections, CouponBoxes, DecisionChosen, DiceRolled,
+    GameOver, GameRules, GameSeed, GameSetup, JailSkipped, JsonAssetLoader, LandBought,
+    LandUpgraded, Landing, MarketClock, Paused, PendingDecision, PlayerArrived, PlayerBankrupt,
+    PlayerJailed, PlayerReleased, PlayerTeleported, PointsChanged, RentDue, RequestRoll,
+    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
+    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkStarted,
+    advance_walk_clock_system, bank_op_system, begin_game_system, decision_system,
+    grant_atm_access_system, market_tick_on_turn_end_system, trade_request_system,
+    walk_step_system,
 };
-use turn::{begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system};
+use turn::{
+    begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system,
+    update_price_index_system,
+};
 use world::CoreSet;
 
 /// 规则层 Plugin：注册数据资产与其 JSON loader、对局 resource、回合消息与状态机。
@@ -125,6 +138,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<PendingDecision>()
             .init_resource::<AtmAccess>()
             .init_resource::<CouponBoxes>()
+            .init_resource::<Corrections>()
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
             .add_message::<RequestRoll>()
@@ -223,10 +237,17 @@ impl Plugin for CoreGamePlugin {
                     .chain(),
             )
             // 回合结束 = 一天过去：行情 tick 与回合轮转同批、互不冲突（动的组件不相交），
-            // 所以不排顺序 —— 谁先跑都不改结果
+            // 所以不排顺序 —— 谁先跑都不改结果。后面两跳都读「今天几号」，而 tick 就是
+            // 在行情那一步推进的，所以必须排在它后面：
+            // 月末结息（改余额）→ 物价指数（分子里有余额）。
             .add_systems(
                 OnEnter(TurnPhase::TurnEnd),
-                (end_turn_system, market_tick_on_turn_end_system),
+                (
+                    (end_turn_system, market_tick_on_turn_end_system),
+                    apply_month_end_interest_system,
+                    update_price_index_system,
+                )
+                    .chain(),
             )
             .add_systems(OnEnter(TurnPhase::Over), game_over_system);
     }

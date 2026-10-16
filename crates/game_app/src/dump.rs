@@ -7,8 +7,8 @@
 //! - **`NM_DUMP=1` 才装载**。egui 与 `bevy_ui` + `bevy_picking` 同场会抢输入，默认装载
 //!   等于给「按钮点不到」那一族坑（ARCHITECTURE §6.1 坑 23/27）新增一个来源。
 //!
-//! 面板上没有「物价指数」那一行，因为 `GameSession::price_index` 是 P2 的东西；
-//! 「手牌」与 `Detention` 同理（P3 / P4）。到时候往 [`dump_panel`] 里加一段就行。
+//! 面板从 P2 起有「物价指数」与「修正登记处」两行，因为这两样正是那条管线唯一的输入。
+//! 「手牌」与 `Detention` 还没有（P3 / P4），到时候往 [`dump_panel`] 里各加一段就行。
 
 use std::sync::Arc;
 
@@ -16,9 +16,9 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
-    ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CouponBoxes, GameRules, GameSeed,
-    GameSession, JailSentence, LandId, Landing, MarketClock, Mortgaged, Owner, Paused,
-    PendingDecision, PlayerId, PlayerName, Points, TurnOrder, TurnPhase, Wallet,
+    ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, Corrections, CouponBoxes,
+    GameRules, GameSeed, GameSession, JailSentence, LandId, Landing, MarketClock, Mortgaged, Owner,
+    Paused, PendingDecision, PlayerId, PlayerName, Points, TurnOrder, TurnPhase, Wallet,
 };
 
 use crate::asset_root;
@@ -125,6 +125,7 @@ pub struct DumpView<'w, 's> {
     pending: Res<'w, PendingDecision>,
     atm: Res<'w, AtmAccess>,
     boxes: Res<'w, CouponBoxes>,
+    corrections: Res<'w, Corrections>,
     players: Query<'w, 's, PlayerRow>,
     plots: Query<
         'w,
@@ -154,6 +155,10 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             row(ui, "待决", format_pending(&view));
             row(ui, "资格", format_access(&view));
             ui.separator();
+            for line in format_corrections(&view) {
+                ui.monospace(line);
+            }
+            ui.separator();
             for line in format_players(&view) {
                 ui.monospace(line);
             }
@@ -173,9 +178,14 @@ fn format_session(view: &DumpView) -> String {
         return format!("世界未装配（种子 {:#x}）", view.seed.0);
     };
     let (month, day) = game_core::economy::date_of(view.clock.tick, view.rules.days_per_month);
+    let closed = if game_core::economy::is_weekend(view.clock.tick, &view.rules) {
+        " · 周末休市"
+    } else {
+        ""
+    };
     format!(
-        "第 {} 回合 · 种子 {:#06x} · 日历 第 {} 月 {} 日（行情 tick {}）",
-        session.turn_count, session.seed, month, day, view.clock.tick
+        "第 {} 回合 · 种子 {:#06x} · 日历 第 {} 月 {} 日（行情 tick {}）{closed} · 物价 ×{:.2}",
+        session.turn_count, session.seed, month, day, view.clock.tick, session.price_index
     )
 }
 
@@ -214,6 +224,23 @@ fn format_access(view: &DumpView) -> String {
         None => "ATM 没人".to_string(),
     };
     format!("{atm} · 点券箱已取走 {} 格", view.boxes.taken())
+}
+
+/// 修正登记处整表打出来。P2 的管线只有两个输入 —— 物价指数（上一行的 `物价 ×`）
+/// 和这张表 —— 有了这两样，屏幕上任何一笔金额都能手算回去。
+/// 今天它永远是空的（第一个往里登记的是 P3 的卡），这一栏先在这儿等着。
+fn format_corrections(view: &DumpView) -> Vec<String> {
+    if view.corrections.is_empty() {
+        return vec!["修正登记处：空（没有人挂着可抵消/转嫁/加倍的账）".to_string()];
+    }
+    let mut lines = vec![format!("修正登记处：{} 条", view.corrections.len())];
+    lines.extend(view.corrections.iter().map(|c| {
+        format!(
+            "  {:?} {:?} {:?} ←{:?}",
+            c.bearer, c.scope, c.adjustment, c.source
+        )
+    }));
+    lines
 }
 
 fn format_players(view: &DumpView) -> Vec<String> {

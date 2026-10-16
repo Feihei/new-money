@@ -19,7 +19,9 @@
 use bevy::prelude::*;
 
 use crate::board::{TileIndex, TileKind};
+use crate::economy;
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
+use crate::market::MarketClock;
 use crate::msg::{BankOp, BankOpDone, BankOpRequested, BankVisited, TileStepped};
 use crate::settle::Books;
 use crate::turn::TurnPhase;
@@ -40,20 +42,27 @@ impl AtmAccess {
 }
 
 /// 哪种操作要在哪个窗口才准办。纯函数，表驱动测试打在 [`op_windows`] 上。
-pub fn bank_op_allowed(op: BankOp, atm: bool, counter: bool) -> bool {
+///
+/// `open` 是「银行今天开不开门」（周末休市，PLAN §三）。它挡的是**全部四种**操作，
+/// 包括 ATM —— 休市是日历事实，不该因为手里有卡就绕过它。
+pub fn bank_op_allowed(op: BankOp, atm: bool, counter: bool, open: bool) -> bool {
+    if !open {
+        return false;
+    }
     match op {
         BankOp::Deposit | BankOp::Withdraw => atm || counter,
         BankOp::Borrow | BankOp::Repay => counter,
     }
 }
 
-/// 踩到银行格：全员结一次息，然后把这一格变成「柜台」—— 挂上待决事项，
-/// 回合停在 `WaitDecision` 直到玩家按「办完」。
+/// 踩到银行格：把这一格变成「柜台」—— 挂上待决事项，回合停在 `WaitDecision`
+/// 直到玩家按「办完」。
 ///
-/// 利息进余额/进负债，**不经过现金**（`bank_system.gd:74-89`），所以这一步不发
-/// `CashChanged` —— B3 的现金审计据此把银行看成外部对手方，只有现金动作进流水。
+/// **不再在这里结息**（P2④）：Godot 的 `bank_system.gd:74-89` 把利息挂在「踩到银行格」上，
+/// 于是「多久结一次息」取决于骰子踩不踩这一格 —— 一局不路过银行就一辈子没有利息。
+/// 现在息由 [`apply_month_end_interest_system`] 按日历发，这一格只剩柜台。
 pub fn settle_bank_landing(
-    mut books: Books,
+    books: Books,
     landing: Res<Landing>,
     mut pending: ResMut<PendingDecision>,
     mut visited: MessageWriter<BankVisited>,
@@ -66,7 +75,6 @@ pub fn settle_bank_landing(
     else {
         return;
     };
-    books.apply_interest_all();
     let bank = books.bank_of(player);
     visited.write(BankVisited {
         player,
@@ -74,6 +82,20 @@ pub fn settle_bank_landing(
         loan: bank.loan,
     });
     pending.offer(player, Pending::BankTeller);
+}
+
+/// 月末结息（P2④）：储金计息进余额、贷款计息进负债，都不经过现金
+/// （`bank_system.gd:74-89` 的这条语义留着），所以这里刻意不发 `CashChanged` ——
+/// B3 的现金审计据此把银行看成外部对手方，只有现金动作进流水。
+///
+/// 排在 `TurnEnd` 里、行情 tick **之后**：两者都要看「今天几号」，而 tick 就是在那一步
+/// 推进的。放在它前面会用昨天的日历判断今天该不该结息，月末那天正好错开。
+pub fn apply_month_end_interest_system(mut books: Books, clock: Res<MarketClock>) {
+    if !economy::is_month_end(clock.tick, &books.rules) {
+        return;
+    }
+    books.apply_interest_all();
+    info!("月末结息（第 {} 天）", clock.tick);
 }
 
 /// 走过银行格即解锁 ATM。挂 `TileStepped` 上，所以「路过」与「停下」都算 ——
@@ -121,15 +143,17 @@ pub fn bank_op_system(
     atm: Res<AtmAccess>,
     pending: Res<PendingDecision>,
     phase: Res<State<TurnPhase>>,
+    clock: Res<MarketClock>,
     mut done: MessageWriter<BankOpDone>,
 ) {
     if matches!(phase.get(), TurnPhase::Boot | TurnPhase::Over) {
         // 终局之后钱还在动，回放与存档就对不上了
         return;
     }
+    let open = !economy::is_weekend(clock.tick, &books.rules);
     for r in requests.read() {
         let at_counter = pending.active() == Some((r.player, Pending::BankTeller));
-        if !bank_op_allowed(r.op, atm.allows(r.player), at_counter) {
+        if !bank_op_allowed(r.op, atm.allows(r.player), at_counter, open) {
             debug!("银行操作被拒：{:?} 此刻办不了 {:?}", r.player, r.op);
             continue;
         }
@@ -157,32 +181,50 @@ mod tests {
     #[test]
     fn borrowing_needs_the_counter_while_atm_covers_cash_moves() {
         let op = BankOp::Deposit;
-        // ATM 或柜台任一即可（踩到银行格的人本来也路过过它）
+        // ATM 或柜台任一即可（踩到银行格的人本来也路过过它）。第四个参数 `open` 这里
+        // 一律给「开门」，休市那条另有 `a_closed_bank_refuses_everything`
         for cash_op in [BankOp::Deposit, BankOp::Withdraw] {
             assert!(
-                bank_op_allowed(cash_op, true, false),
+                bank_op_allowed(cash_op, true, false, true),
                 "{cash_op:?} 路过 ATM 该能办"
             );
             assert!(
-                bank_op_allowed(cash_op, false, true),
+                bank_op_allowed(cash_op, false, true, true),
                 "{cash_op:?} 柜台里该能办"
             );
             assert!(
-                !bank_op_allowed(cash_op, false, false),
+                !bank_op_allowed(cash_op, false, false, true),
                 "{cash_op:?} 两个窗口都没有还放行 —— 这就是凭空印钱"
             );
         }
         // 借贷只在柜台：ATM 上按不出贷款
         for credit_op in [BankOp::Borrow, BankOp::Repay] {
             assert!(
-                !bank_op_allowed(credit_op, true, false),
+                !bank_op_allowed(credit_op, true, false, true),
                 "{credit_op:?} 不该在 ATM 办成"
             );
-            assert!(bank_op_allowed(credit_op, false, true));
-            assert!(bank_op_allowed(credit_op, true, true));
-            assert!(!bank_op_allowed(credit_op, false, false));
+            assert!(bank_op_allowed(credit_op, false, true, true));
+            assert!(bank_op_allowed(credit_op, true, true, true));
+            assert!(!bank_op_allowed(credit_op, false, false, true));
         }
         assert!(matches!(op, BankOp::Deposit));
+    }
+
+    /// 周末休市（P2④）：四种操作全挡，**包括 ATM**。
+    /// 「有卡就能办」在这里不成立 —— 休市是日历事实，卡只是资格。
+    #[test]
+    fn a_closed_bank_refuses_everything() {
+        for op in [
+            BankOp::Deposit,
+            BankOp::Withdraw,
+            BankOp::Borrow,
+            BankOp::Repay,
+        ] {
+            assert!(
+                !bank_op_allowed(op, true, true, false),
+                "{op:?} 在休市的银行还放行 —— 日历就没起作用"
+            );
+        }
     }
 
     #[test]

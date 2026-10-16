@@ -21,7 +21,7 @@ use game_core::prelude::{
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, SECONDARY, UiAction, border_color, button, can_bank_op, can_trade,
-    counter_of, info_row, label,
+    counter_of, info_row, is_open_day, label,
 };
 use crate::render::DevFont;
 
@@ -83,6 +83,8 @@ pub(crate) struct AtmView<'w> {
     open: Res<'w, AtmPanelOpen>,
     pending: Res<'w, PendingDecision>,
     paused: Res<'w, Paused>,
+    clock: Res<'w, MarketClock>,
+    rules: Res<'w, GameRules>,
 }
 
 /// ATM 浮层：现金与存款，四颗金额按钮，一个关闭。
@@ -97,9 +99,16 @@ pub(crate) fn sync_atm_panel(
     // 那种同帧交接的时刻仍然有钱可办）
     let holder = counter_of(&view.pending).or(view.atm.0);
     let want = if view.open.0 { holder } else { None };
+    // 周末银行不开门。写进 stamp 是为了「日子一变面板就重建」——只按余额建，
+    // 休市那天余额没动的玩家会看着四颗亮按钮按下去没声音（§6.1 坑 27 的 UI 版）
+    let banking_hours = is_open_day(&view.clock, &view.rules);
     let stamp = want.map(|player| {
         let bank = books.bank_of(player);
-        format!("{player:?}|{}|{}", books.balance(player), bank.deposit)
+        format!(
+            "{player:?}|{}|{}|{banking_hours}",
+            books.balance(player),
+            bank.deposit
+        )
     });
 
     if shown
@@ -119,8 +128,20 @@ pub(crate) fn sync_atm_panel(
     let deposit = books.bank_of(player).deposit;
     // 窗口判据在外面算好：`with_children` 的闭包拿不到 `Books` 那类借用，
     // 而这两句本来也只依赖状态资源，不依赖余额
-    let deposit_window = can_bank_op(BankOp::Deposit, &view.paused, &view.pending, &view.atm);
-    let withdraw_window = can_bank_op(BankOp::Withdraw, &view.paused, &view.pending, &view.atm);
+    let deposit_window = can_bank_op(
+        BankOp::Deposit,
+        &view.paused,
+        &view.pending,
+        &view.atm,
+        banking_hours,
+    );
+    let withdraw_window = can_bank_op(
+        BankOp::Withdraw,
+        &view.paused,
+        &view.pending,
+        &view.atm,
+        banking_hours,
+    );
 
     let mut root = commands.spawn((
         BoardUi,
@@ -148,6 +169,15 @@ pub(crate) fn sync_atm_panel(
         p.spawn(label(&font.0, "ATM", size::NAME, col::TITLE_GOLD));
         info_row(p, &font.0, "现金", &format!("${cash}"), col::CASH_OK, 60.0);
         info_row(p, &font.0, "存款", &format!("${deposit}"), col::VALUE, 60.0);
+        // 灰按钮必须自带一句为什么，否则「按不动」与「坏了」在玩家眼里是同一件事
+        if !banking_hours {
+            p.spawn(label(
+                &font.0,
+                "周末休市 · 下周再来",
+                size::ROW,
+                col::BANKRUPT,
+            ));
+        }
         // 「全部」的数额在建按钮这一刻算：面板随余额重建，所以它永远是准的
         money_row(
             p,
@@ -247,8 +277,14 @@ pub(crate) fn sync_stock_panel(
         return;
     }
     let player = view.order.as_ref().and_then(|o| o.current());
+    let trading_hours = is_open_day(&view.clock, &view.rules);
     let tradable = player.is_some_and(|p| {
-        can_trade(*view.phase.get(), &view.paused, &view.pending) && same_actor(p, &view.pending)
+        can_trade(
+            *view.phase.get(),
+            &view.paused,
+            &view.pending,
+            trading_hours,
+        ) && same_actor(p, &view.pending)
     });
     let set = view.sets.get(&view.data.stocks);
     let mut rows: Vec<(String, String, f32, f32, u32)> = view
@@ -322,11 +358,17 @@ pub(crate) fn sync_stock_panel(
         ));
         p.spawn(label(
             &font.0,
-            if tradable {
-                format!("现金 ${cash} — 掷骰前可买卖")
-            } else {
-                format!("现金 ${cash} — 只在掷骰前可买卖")
-            },
+            // 三句各有各的「不能」，混成一句就会把休市说成「你不会操作」
+            format!(
+                "现金 ${cash} — {}",
+                if !trading_hours {
+                    "周末休市，下单不受理"
+                } else if tradable {
+                    "掷骰前可买卖"
+                } else {
+                    "只在掷骰前可买卖"
+                }
+            ),
             size::ROW,
             if tradable { col::MUTED } else { col::BANKRUPT },
         ));
