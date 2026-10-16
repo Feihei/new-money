@@ -76,7 +76,7 @@ pub(crate) fn dev_grant_atm(order: Option<Res<TurnOrder>>, mut atm: ResMut<AtmAc
 
 /// ATM 浮层要读的世界状态。打包成参数包是这仓库的房规：需要知道的就是这么多，
 /// 而 `#[allow(clippy::too_many_arguments)]` 会把「一个 system 要读八样东西」这个信号吃掉
-/// （`.agents/MIGRATION.md` §六 坑 8）。
+/// （`.agents/ARCHITECTURE.md` §六 坑 8）。
 #[derive(SystemParam)]
 pub(crate) struct AtmView<'w> {
     atm: Res<'w, AtmAccess>,

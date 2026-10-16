@@ -1,7 +1,7 @@
 //! 卡牌定义：机会 / 命运牌池。效果用内部标签枚举，新增 action 时编译器会强制补分支。
 //!
 //! 对应 Godot 端 `card_data.gd` + `card_effects.gd`（后者是 `Dictionary` 弱类型 match，
-//! 且 `deduct_cash` 失败时只回文案不真的判破产 —— 见 `.agents/MIGRATION.md` §三 第 3 条）。
+//! 且 `deduct_cash` 失败时只回文案不真的判破产 —— 见 `.agents/ARCHITECTURE.md` §三 第 3 条）。
 
 use bevy::asset::Asset;
 use bevy::reflect::TypePath;
