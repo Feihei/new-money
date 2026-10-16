@@ -14,6 +14,7 @@ use game_core::CoreGamePlugin;
 use game_core::prelude::{DataHandles, GameSeed, TurnPhase};
 
 mod autopilot;
+mod dump;
 mod render;
 mod scene;
 mod ui;
@@ -53,6 +54,8 @@ fn main() {
     .add_plugins(ui::UiPlugin)
     .add_plugins(scene::ScenePlugin)
     .add_plugins(autopilot::AutopilotPlugin);
+    // 调试面板排在最后：它只读别人的状态，而且默认不装（见 `dump` 模块头）
+    dump::install_if_requested(&mut app);
 
     insert_boot_resources(app.world_mut());
 
@@ -152,7 +155,8 @@ fn maybe_capture(time: Res<Time>, mut done: Local<bool>, mut commands: Commands)
 
 /// Bevy 0.20 的 `AssetPlugin::file_path` 是相对「可执行文件目录」的，而 `cargo run` 的 CWD 在仓库根，
 /// 两者对不上会让所有资产静默 404，所以这里把根显式钉成绝对路径。
-fn asset_root() -> PathBuf {
+/// `pub(crate)` 是因为 `dump` 面板要在运行时找同一份开发字体（见它的注释）。
+pub(crate) fn asset_root() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let from_cwd = cwd.join("assets");
     if from_cwd.is_dir() {

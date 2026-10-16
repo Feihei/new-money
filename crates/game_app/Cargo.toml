@@ -11,6 +11,7 @@ bevy = { workspace = true, features = [
     "system_font_discovery",
     "complex_script_segmentation",
 ] }
+bevy_egui = "0.43.1"
 game_core = { path = "../game_core" }
 serde = { workspace = true }
 serde_json = { workspace = true }

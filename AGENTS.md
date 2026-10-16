@@ -1,6 +1,6 @@
 # AGENTS.md — 本仓库的工作约定
 
-《暴富》Godot → Bevy 0.20 重写。**动手前先读 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)**：分层红线、Bevy 0.20 的 API 事实与 27 个坑位、待修缺陷清单全在那里（它原名《MIGRATION.md》，移植线收口后按实际内容改名）。**排期只看 [`.agents/PLAN.md`](./.agents/PLAN.md)**。本文只写约定与指路，不重复那些内容。
+《暴富》Godot → Bevy 0.20 重写。**动手前先读 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)**：分层红线、Bevy 0.20 的 API 事实与 29 个坑位、待修缺陷清单全在那里（它原名《MIGRATION.md》，移植线收口后按实际内容改名）。**排期只看 [`.agents/PLAN.md`](./.agents/PLAN.md)**。本文只写约定与指路，不重复那些内容。
 
 ## 文档地图
 
@@ -28,8 +28,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 - **不要用 `... | tail` 之类管道判断成败**，`check.sh` 已经逐步取退出码，照它做。
 - 核对画面：`NM_SHOT=<路径>` 让 `game_app` 截图后自行退出，`NM_SHOT_AT=<秒>` 推迟到对局跑起来之后再截（按墙钟触发，原因见 `.agents/ARCHITECTURE.md` §六 的坑 5/10）。`NM_CAM_SIZE=0` 整盘取景、默认 8 跟随紧取景。别用 `timeout N cargo run` 做冒烟测试。
-- B5 之后 `NM_AUTOROLL=1` 不再是「没有按钮的替代品」，而是**跑完一局的手段**（人点几百次不现实）：配 `NM_AUTOGAP=0` 提速、`NM_SEED` 复现。浮层与模态的开发入口是 `NM_ATM=1`/`NM_STOCK=1`/`NM_DECISION=bank`。
-- **真人鼠标冒烟要先激活游戏窗口**（`SetForegroundWindow` + `GetClientRect`/`ClientToScreen` 换算客户区坐标）：窗口被 IDE 压住时点击全落到别人那儿，而 `NM_SHOT` 照常截出游戏画面，看着就像「UI 是死的」（§6.1 坑 27）。
+- B5 之后 `NM_AUTOROLL=1` 不再是「没有按钮的替代品」，而是**跑完一局的手段**（人点几百次不现实）：配 `NM_AUTOGAP=0` 提速、`NM_SEED` 复现。浮层与模态的开发入口是 `NM_ATM=1`/`NM_STOCK=1`/`NM_DECISION=bank`。要看世界状态本身（回合/阶段/落格分派/待决/每人两套账），用 `NM_DUMP=1` 开只读面板 —— 查「钱为什么是这个数」比猜 `warn!` 快。
+- **真人鼠标冒烟要先激活游戏窗口**（`SetForegroundWindow` + `GetClientRect`/`ClientToScreen` 换算客户区坐标）：窗口被 IDE 压住时点击全落到别人那儿，而 `NM_SHOT` 照常截出游戏画面，看着就像「UI 是死的」（§6.1 坑 27）。**同一条坑的另一半：点击脚本的计时从「它找到窗口」起算，`NM_SHOT_AT` 从「游戏启动」起算** —— 启动前多 `sleep` 几秒，点击就整体落到截图之后，看着同样是「按钮是死的」。先确认点击时刻早于截图时刻。
 
 ## 硬约束
 
@@ -53,7 +53,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## 当前状态
 
-B0、B1、B2a、B2b、B2c、B3、B4、B5、**B5b** 已完成（数据层、世界装配、回合状态机 + 种子化骰子 + 定步时行走、经济核心 property/bank/stock/card、等轴测渲染切片：几何/建筑/棋子动画/相机跟随/格名投影、UI 与交互：顶栏/HUD/四个模态/暂停/点格详情/主菜单↔对局流转、B5b：ATM 与证券两块常驻浮层 + 银行柜台模态 + 行情按回合 tick + 分红按日历发，缺陷 #1/#3/#4/#5/#13/#14 已修，#8 的格子类型那半随 P1 收口；测试计数以 `./check.sh` 实际运行为准，P1 之后是规则层 129 项 + 表现层 17 项）。B5 的验收记录（55 回合打完一局、9 张界面截图、三个跨局残留缺陷的修法）见 [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) §10.1；验收后实报的「主菜单按钮点击无响应」已修（`ARCHITECTURE.md` §6.1 坑 23，真鼠标冒烟通过）。B5b 的验收记录（两条规则分叉的取舍、6 张截图、真鼠标冒烟翻出的两个误诊）见同一份归档 §10.2。
+B0、B1、B2a、B2b、B2c、B3、B4、B5、**B5b** 已完成（数据层、世界装配、回合状态机 + 种子化骰子 + 定步时行走、经济核心 property/bank/stock/card、等轴测渲染切片：几何/建筑/棋子动画/相机跟随/格名投影、UI 与交互：顶栏/HUD/四个模态/暂停/点格详情/主菜单↔对局流转、B5b：ATM 与证券两块常驻浮层 + 银行柜台模态 + 行情按回合 tick + 分红按日历发，缺陷 #1/#3/#4/#5/#13/#14 已修，#8 的格子类型那半随 P1 收口；测试计数以 `./check.sh` 实际运行为准，T1 之后是规则层 129 项 + 表现层 18 项）。B5 的验收记录（55 回合打完一局、9 张界面截图、三个跨局残留缺陷的修法）见 [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) §10.1；验收后实报的「主菜单按钮点击无响应」已修（`ARCHITECTURE.md` §6.1 坑 23，真鼠标冒烟通过）。B5b 的验收记录（两条规则分叉的取舍、6 张截图、真鼠标冒烟翻出的两个误诊）见同一份归档 §10.2。
 
 **移植这条线已追平**：Godot 侧非 addon 源码在 B5 全部有了归属，剩下的 `audio_manager`/`save_manager` 是空壳，B6–B8（AI、存档、K 线）是 Godot 没有的东西。按上面第 6 条，此后不再回头比对 Godot。
 
@@ -61,4 +61,4 @@ B0、B1、B2a、B2b、B2c、B3、B4、B5、**B5b** 已完成（数据层、世�
 - ~~**银行/证券没有交易入口**~~ —— **B5b 已补**：路过银行格发 ATM 卡（存取），踩到开柜台模态（借还），证券常驻顶栏、掷骰前可下单。
 - ~~**`prototype.json` 没有证券格**~~ —— **拍板不补**：证券不是一格要踩的东西。行情改成每回合结束 tick，分红改挂日历（`days_per_month`/`dividend_day`），两条分叉的理由见 [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) §10.2。
 
-下一步换成**玩法补齐**这条线，排期只在 `.agents/PLAN.md`：**P1 已完成（10-16）** —— 点券（`Points` 组件 + `PointsChanged`，与现金两套账、永不通兑）+ 点券格（`TileData.coupon`，一次性 + 按回合冷却）+ 落格分派改成一张穷尽表 `landing::domain_of`（新增格类型漏写分支＝编译失败，ARCHITECTURE §三 的 #8 后半条同时收口）。此后是 **T1（egui 只读 dump 面板）**、**P2（结算修正管线 + 物价指数）**……到 P13 魔法屋，玩法之后才是 P14 AI、P15 存档设置、P16 音频、P17 发行。原 B6/B7/B8 三行已从移植计划表（已归档那份）并进来。
+下一步换成**玩法补齐**这条线，排期只在 `.agents/PLAN.md`：**P1 已完成（10-16）** —— 点券（`Points` 组件 + `PointsChanged`，与现金两套账、永不通兑）+ 点券格（`TileData.coupon`，一次性 + 按回合冷却）+ 落格分派改成一张穷尽表 `landing::domain_of`（新增格类型漏写分支＝编译失败，ARCHITECTURE §三 的 #8 后半条同时收口）。**T1 也已完成（10-16）** —— `NM_DUMP=1` 的 egui 只读面板（`game_app/src/dump.rs`，core 一条依赖没加），它第一次跑真鼠标冒烟就翻出一个 B5 就带着的必崩缺陷：「对局→主菜单」从没被走过（§6.1 坑 28/29）。此后是 **P2（结算修正管线 + 物价指数）**……到 P13 魔法屋，玩法之后才是 P14 AI、P15 存档设置、P16 音频、P17 发行。原 B6/B7/B8 三行已从移植计划表（已归档那份）并进来。

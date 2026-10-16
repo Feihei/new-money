@@ -271,7 +271,7 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 | 中文字体 | 0.19 起 `bevy_text` 换 Parley；0.19 加 `bevy/system_font_discovery` feature 与 `FontSource::Family`；0.20 把 `resolve_font_source` 改为 `FontSource::resolve_font_family` | 桌面端可按系统字体族名加载中文字体；发行仍建议自带子集（§七） |
 
 > ~~如果 `bevy_inspector_egui` 的缺口你认为不可接受，唯一退路是**降到 bevy 0.19**（生态已适配面更广）。这是 §十一 的待决问题之一。~~
-> **✅ 已拍板（10-13）且不降版**：锁 0.20，缺口用 `bevy_egui` 自写只读 dump 面板补。但那条面板到 10-16 核对时**仍未落地**（`Cargo.toml` 里根本没有 `bevy_egui`），现已排进 [`PLAN.md`](./PLAN.md) 的 **T1**。
+> **✅ 已拍板（10-13）且不降版**：锁 0.20，缺口用 `bevy_egui` 自写只读 dump 面板补。10-16 核对时那条面板**还没落地**（`Cargo.toml` 里根本没有 `bevy_egui`），于是排进 [`PLAN.md`](./PLAN.md) 的 **T1**；**同日 T1 落地**（`game_app/src/dump.rs`，`NM_DUMP=1` 装载），踩过的两个坑是 §6.1 坑 28。
 
 ### 6.1 0.20 API 事实核对表（B0 已从本地 crate 源码 + 官方 examples 逐个核实）
 | 事项 | 0.20 的确切形态 | 对方案的影响 |
@@ -329,6 +329,12 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 
 27. **合成鼠标点击要先 `SetForegroundWindow`，否则点击落到别人窗口上，冒烟会把「我的 UI 是死的」当成结论**（B5b 真鼠标冒烟连栽三次）。`SetCursorPos` + `mouse_event` 送的是**屏幕坐标**，落在哪一层窗口由 Z 序决定：游戏窗口被 IDE 压住时，点击全部进了 IDE，`NM_SHOT` 那张图却照常是游戏画面（GPU 侧截屏不看遮挡），于是「图是对的、数字没变」看起来像 UI bug。判据：自动化点击脚本第一步取 `MainWindowHandle` → `ShowWindow(SW_RESTORE)` + `BringWindowToTop` + `SetForegroundWindow`，再用 `GetClientRect`+`ClientToScreen` 换算客户区原点（窗口每次启动被系统级联，别把坐标写死）；并且**同一目标点多次、截图时刻推后**，让投递抖动不至于推翻结论。这条与坑 26 是同一场误诊的两半：先确认「按没按到」，再谈「亮不亮」。
 
+    **同一条坑的第二半（T1，10-16 又栽两次）：点击脚本的时间轴从「它找到窗口」起算，`NM_SHOT_AT` 从「游戏启动」起算 —— 脚本晚起 N 秒，点击就整体落到截图之后**。表现是「点了没反应」，而真实原因那次是点击根本还没发生。判据：**先确认点击时刻 < 截图时刻**（脚本前别再 `sleep`，或者干脆把 `NM_SHOT_AT` 推到脚本结束之后），再谈按没按到。
+
+28. **`bevy_egui` 的主上下文钉在「第一台相机」上，而我们的相机是随场景生灭的 —— 换场景等于把上下文一起扔掉，且它不会自己重来**（T1 只读面板第一次上屏时踩到：插件加载了、渲染器起来了、`EguiPrimaryContextPass` 也注册了，面板一帧都不画）。0.43 的自动创建只在**第一台** `Camera` 的 `Added` 时刻插 `PrimaryEguiContext`，并且用一个内部 `Local<bool>` 记账 —— 菜单那台 `Camera2d` 先出生拿走上下文，进对局时随 `MenuPiece` 收走，上下文跟着实体一起没了，此后永远不再补。修法见 `dump.rs::attach_context`：`Update` 里查 `Query<(Entity, &mut EguiContext)>`，为空就把 `PrimaryEguiContext` 补到当时活着的相机上。**第二半必须一起做**：补出来的那个 `egui::Context` 是全新的，字体表回到默认 —— 只在第一次装字体会得到「菜单里是中文、进对局全变方框」，实测就是这么翻的车。所以字体跟着**宿主实体**装（`Local<Option<Entity>>` 换值即重装）。判据：**凡是「给某个上下文/资源做过一次性设置」的代码，先问它跟着哪个对象生灭**；重建的落点与设置的落点必须是同一个系统，否则设置会随旧对象一起蒸发。附带一条 API 事实：`EguiContexts` 内部已经握着 `&mut EguiContext` 的查询，同场再要一个 `Query<Entity, With<EguiContext>>` 会撞借用冲突 —— 要实体就直接查 `(Entity, &mut EguiContext)`。
+
+29. **`Commands` 的删除当帧生效，`NextState` 的转移下一帧才生效 —— 把「收资源」和「叫停状态机」写在同一个 system 里，中间就有一整帧的空档，0.20 会把它 panic 出来**（T1 真鼠标冒烟点「返回主菜单」必崩，exit 101；`git show 37675e8` 核过与 P1 无关，是 B5 就带的）。`teardown_match` 原来同时做两件事：`remove_resource::<TurnOrder>()` + `phase.set(Boot)`。命令在 system 跑完就落地，而转移要等下一帧的 `StateTransition` —— 于是那一帧的后半程 `TurnPhase` 仍写着 `WaitRoll`，`roll_dice_system` 与 `trade_request_system` 照常跑，参数校验拿不到 `TurnOrder` / `ActiveBoard`，Bevy 0.20 默认把这种失败直接 panic。修法：拆成 `stop_turn_machine`（`OnEnter(Scene::Menu)`，只叫停）+ `clear_match`（`Update`，`run_if(in_state(Scene::Menu))` 且 `State<TurnPhase>` 真的是 `Boot` 才收尸）。判据：**"停机器"和"收机器"不能同帧**；凡是 `remove_resource` 与 `NextState::set` 出现在同一个 system 里，就要怀疑中间那一帧谁在跑。覆盖它的测试 `ui::tests::the_match_resources_outlive_the_turn_machine`，可复现的路径是 `NM_MENULOOP`（原来它只走「菜单→对局」，那半程从没踩过 —— 见该表最后一行）。
+
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
@@ -355,7 +361,8 @@ B5 之后这条判据升级为「**每个界面都必须有一条不依赖鼠标
 | `NM_STOCK=1` | 开局即浮出证券面板 | 顶栏那颗按钮要鼠标点（见 §6.1 坑 27），面板否则进不了截图 |
 | `NM_PAUSE=1` | 开局即暂停 | ESC 按不了，暂停面板否则进不了截图 |
 | `NM_PICK_TILE=列:行` | 开局即选中那格 | 点格详情卡是新增交互，没有鼠标可点 |
-| `NM_MENULOOP=<秒>` | 到点回主菜单，再过同样的秒数自动开一局 | 场景来回切换的错误（§6.1 坑 22）只在**第二局**暴露，不自动走这条路径就验不到 |
+| `NM_DUMP=1` | 挂出 egui 只读 dump 面板（回合/阶段/落格分派/待决/资格 + 每个玩家与每块地） | 结算顺序、分派表、跨局残留这类问题的真相都在世界里，不在画面上；看数字比看像素可靠，而 T1 之前只能靠 `warn!` 一条条猜 |
+| `NM_MENULOOP=<秒>` | 到点回主菜单、开一局、再回菜单、再开一局（每步间隔同样的秒数） | 场景来回切换的错误（§6.1 坑 22、坑 29）只在**第二局**暴露，不自动走这条路径就验不到。前两步是「自转 + 开局」，真正的新覆盖是后两步 |
 
 **已定案（B4，10-14）：`Label3D` 的等价物走「UI 层投影跟随」**。三条路的取舍：
 
@@ -485,7 +492,7 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 | 风险 | 概率 | 影响 | 应对 |
 |---|---|---|---|
 | **Bevy 0.20 太新**（发布 5 天），插件与文档滞后；0.21 一升级 API 又变 | 高 | 中 | 锁 `=0.20.0`；`game_core` 只依赖无渲染子集隔离冲击；**禁止 `cargo update`**；升级 Bevy 作为独立任务单做 |
-| `bevy_inspector_egui` 无 0.20 版，失去运行时实体可视化（对 agent 调试影响最大的一项） | 已发生 | 中 | ✅ **已拍板（10-13）选 ①**：用 `bevy_egui` 自写只读 dump 面板。⚠️ **10-16 核对：拍板至今没落地**（依赖里没有 egui），排进 [`PLAN.md`](./PLAN.md) **T1**（P1 之后、P2 之前） |
+| `bevy_inspector_egui` 无 0.20 版，失去运行时实体可视化（对 agent 调试影响最大的一项） | 已发生 | 中 | ✅ **已拍板（10-13）选 ①**：用 `bevy_egui` 自写只读 dump 面板。10-16 核对时还没落地，同日 **T1 落地**（`game_app/src/dump.rs` + `NM_DUMP=1`，见 §6.1 坑 28）—— 缺口已补，但它是**手写 Debug 打印**不是通用 inspector：新组件要手动往面板加一行 |
 | UI 无编辑器、代码排版迭代慢 | 高 | 高 | B4/B5 排在逻辑之后；主题常量集中；预留 1.5–2 倍工时 |
 | 中文渲染第一天就踩空（无内建回退） | 高 | 低 | 开工第一件事就是"屏上显示 3 行中文"的 spike（并入 B0 验收） |
 | `bevy_settings` / `bevy_world_serialization` 是 0.20 首发 API | 中 | 中 | 存档走手写 `GameSnapshot`；设置项自己存 JSON 也行，不赌新 API |
@@ -506,7 +513,7 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 
 > **本节原文是 B0 前夜写的**（"建 workspace""拷 `data/`""按 §十 顺序做 B1"），那些早已完成，留原话只会误导。10-16 起本项目的「下一步」只有一份，在 [`PLAN.md`](./PLAN.md) §四。
 
-**下一步：[`PLAN.md`](./PLAN.md) 的 P1** —— 点券 + 点券格 + 把落格分派改成编译期穷尽（顺带收口本文 §三 的 #8 后半条）。其后 T1（egui dump 面板）、P2（结算修正管线 + 物价指数）……到 P13（魔法屋），玩法之后是 P14 AI、P15 存档与设置、P16 音频、P17 发行。
+**下一步：[`PLAN.md`](./PLAN.md) 的 P2** —— 结算修正管线 + 效果动词库 + 物价指数 + 日历收口。P1（点券与穷尽分派表）与 T1（egui 只读 dump 面板）已在 10-16 完成，面板正是为 P2 这种「钱为什么变成这个数」的阶段准备的。其后 P3……到 P13（魔法屋），玩法之后是 P14 AI、P15 存档与设置、P16 音频、P17 发行。
 
 > **长期资产只剩两份**：§三 缺陷清单（未结项：#8 后半条 → PLAN P1、#11 → P15）与 §6.1 的 Bevy 0.20 坑清单。
 > ~~§五 映射表~~ 与 ~~§十 进度表~~ 已于 10-16 归档到 [`docs/archive/migration-b0-b5b.md`](../docs/archive/migration-b0-b5b.md)，不再维护。
