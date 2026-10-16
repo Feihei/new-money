@@ -2,7 +2,7 @@
 
 用 [Bevy](https://bevyengine.org) 0.20 重写的《暴富》—— 大富翁4 风格的模拟经营棋类游戏：在环形棋盘上掷骰移动，靠买地升级、股票买卖和随机事件积累财富，直到对手破产。
 
-源项目是 Godot 版 `E:\play\Godot\new-money`（GDScript，做到 Phase 1.5/2）。换引擎的动因是测试：原来 2400 行测试要起一个 headless Godot 进程，现在是 `cargo test`。移植方案、阶段计划与进度全部在 [`.agents/MIGRATION.md`](./.agents/MIGRATION.md)。
+源项目是 Godot 版 `E:\play\Godot\new-money`（GDScript，做到 Phase 1.5/2）。换引擎的动因是测试：原来 2400 行测试要起一个 headless Godot 进程，现在是 `cargo test`。移植已完成（B0–B5b），分层红线、Bevy 0.20 的 API 事实与坑位记录、缺陷清单在 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)（原名《MIGRATION.md》），逐阶段的移植历史已归档；**下一步做什么排在 [`.agents/PLAN.md`](./.agents/PLAN.md)**（以大宇《大富翁4》为基线的玩法补齐计划）。
 
 ## 快速开始
 
@@ -18,7 +18,7 @@ cargo test -p game_core   # 规则层测试，不需要窗口
 `NM_SHOT=<路径>` + `NM_SHOT_AT=<秒>`（截一张 PNG 后自行退出，给 agent 自查画面用）、
 `NM_AUTOROLL=1`（自动玩家替人点按钮，跑长对局用；配 `NM_AUTOGAP=0` 提速、`NM_SEED=<十进制>` 复现）、
 `NM_ATM=1` / `NM_STOCK=1`（开局即浮出 ATM / 证券面板，`NM_ATM` 顺带把 ATM 卡发到当前玩家手里）。
-完整清单与每条的存在理由见 [`.agents/MIGRATION.md` §6.1](./.agents/MIGRATION.md)。
+完整清单与每条的存在理由见 [`.agents/ARCHITECTURE.md` §6.1](./.agents/ARCHITECTURE.md)。
 
 Bevy 精确锁定 `=0.20.0`（见 `Cargo.toml`），**不要 `cargo update`**。
 
@@ -40,7 +40,7 @@ Bevy 精确锁定 `=0.20.0`（见 `Cargo.toml`），**不要 `cargo update`**。
   **踩到**银行格开柜台模态（借 / 还 / 存取，办完才继续）、证券浮层常驻顶栏且只在掷骰前可下单。
   行情改成每回合结束动一次、分红按「几月几日」发（顶栏与证券面板都显示今天是几号、距派息几天）
 
-待做：B6 AI（`Controller::Ai` + utility 决策）→ B7 音频/设置/存档 → B8 打磨发布（K 线图、结算画面、打包）。逐阶段的验收标准见 [`.agents/MIGRATION.md` §十](./.agents/MIGRATION.md)。
+待做按 `.agents/PLAN.md` §四 的 P 序列走（基线＝大宇《大富翁4》）：**P1** 点券与点券格 → **T1** 只读调试面板 → **P2** 结算修正管线与物价指数 → **P3** 卡片持有与主动出牌 → P4 拘留 → P5 道具与道路放置物 → P6 神明 → P7 小游戏格 → P8 乐透 → P9 拍卖 → P10 收费原型与商业设施 → P11 新闻中心 → P12 四大恶人 → P13 魔法屋，玩法之后才是 P14 AI、P15 存档与设置、P16 音频、P17 发行（K 线图、飘字、结算画面、字体子集化、打包）。移植线的 B6/B7/B8 三行已并进这条序列。
 
 ## 目录结构
 
@@ -52,13 +52,16 @@ assets/font/        开发期 CJK 字体（gitignore，发行前换成子集字�
 tools/              与引擎无关的 Python 脚本：棋盘校验、SVG 可视化
 .agents/            agent 开发文档（见下表）
 docs/godot/         附件：Godot 源项目文档的原样副本
+docs/archive/       冻结的历史（B0–B5b 移植记录），不再维护
 ```
 
 ## 文档索引
 
 | 文档 | 内容 |
 |---|---|
-| [`.agents/MIGRATION.md`](./.agents/MIGRATION.md) | 移植方案与活文档：Godot→Bevy 概念映射表、待修缺陷清单、Bevy 0.20 依赖矩阵与坑位记录、B0–B8 阶段计划 |
+| [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md) | 架构与技术事实（原名《MIGRATION.md》）：分层红线与 crate 布局、Bevy 0.20 依赖矩阵与 §6.1 的 27 个坑、缺陷清单、表现层待做、存档方案。**唯一被源码注释引用的一份** |
+| [`.agents/PLAN.md`](./.agents/PLAN.md) | **玩法补齐计划**（唯一的排期来源）：以大宇《大富翁4》为基线的缺口对照、T1 + P1–P17 实现顺序与依赖、点券格/小游戏格/新闻中心格设计、待拍板清单 |
+| [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) | 冻结的移植历史，不再维护：Godot→Bevy 概念映射表 + B0–B5b 逐阶段产出与验收记录 |
 | [`.agents/ADR-001-board-topology.md`](./.agents/ADR-001-board-topology.md) | 棋盘拓扑决策（已确认）：网格路网 + 单向主环 + 事件死胡同分支 + 土地-道路绑定 |
 | [`.agents/board-data-schema.md`](./.agents/board-data-schema.md) | 棋盘数据 JSON schema：`loop` / `lands` / `branches` 字段与实现约束 |
 | [`.agents/GLOSSARY-board.md`](./.agents/GLOSSARY-board.md) | 棋盘术语表：主环、接入点、分支、对角路、土地绑定等用语统一定义 |
@@ -69,4 +72,4 @@ docs/godot/         附件：Godot 源项目文档的原样副本
 
 ## 许可与资产
 
-代码 MIT。`assets/font/dev_*` 是思源黑体的本地开发副本，不入库；发行前需替换为可再分发的子集化字体（做法记录在 `.agents/MIGRATION.md` §7.3）。
+代码 MIT。`assets/font/dev_*` 是思源黑体的本地开发副本，不入库；发行前需替换为可再分发的子集化字体（做法记录在 `.agents/ARCHITECTURE.md` §7.3）。
