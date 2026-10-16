@@ -35,7 +35,7 @@ impl Plugin for ScenePlugin {
             .add_systems(
                 OnEnter(Scene::Menu),
                 (
-                    teardown_match,
+                    stop_turn_machine,
                     crate::ui::reset_ui_state,
                     despawn_board_view,
                     menu::spawn_menu_camera,
@@ -44,15 +44,19 @@ impl Plugin for ScenePlugin {
                     .chain(),
             )
             .add_systems(OnEnter(Scene::Board), despawn_menu)
+            .add_systems(Update, clear_match.run_if(in_state(Scene::Menu)))
             .add_systems(Update, auto_scene_loop);
     }
 }
 
-/// `NM_MENULOOP=<秒>`：到点回主菜单，再等同样的秒数自动开一局。
+/// `NM_MENULOOP=<秒>`：到点开一局，再隔同样的秒数回主菜单、再开一局。
 ///
 /// 场景来回切换是 B5 唯一「错了不会立刻看得见」的路径 —— 上一局留下的 UI 记忆会让新局
 /// 开局即冻结、或第一次报价永远弹不出模态，而画面看着一切正常。没有鼠标可点的 agent
 /// 要能跑到这条路径，才有资格说它做完了（与 `NM_PAUSE`、`NM_PICK_TILE` 同一条理由）。
+///
+/// 后两步（回菜单、再开一局）是补的：从菜单出发时第一步 `set(Menu)` 只是一次自转，
+/// 于是「对局→菜单」那半程从来没被踩到过 —— 清场的顺序缺陷就是这么漏出去的（`clear_match`）。
 fn auto_scene_loop(time: Res<Time>, mut next: ResMut<NextState<Scene>>, mut step: Local<u8>) {
     let Ok(spec) = std::env::var("NM_MENULOOP") else {
         return;
@@ -66,6 +70,12 @@ fn auto_scene_loop(time: Res<Time>, mut next: ResMut<NextState<Scene>>, mut step
         next.set(Scene::Menu);
     } else if *step == 1 && t >= secs * 2.0 {
         *step = 2;
+        next.set(Scene::Board);
+    } else if *step == 2 && t >= secs * 3.0 {
+        *step = 3;
+        next.set(Scene::Menu);
+    } else if *step == 3 && t >= secs * 4.0 {
+        *step = 4;
         next.set(Scene::Board);
     }
 }
@@ -109,16 +119,36 @@ fn despawn_menu(mut commands: Commands, menu: Query<Entity, With<crate::ui::Menu
     }
 }
 
-/// 回主菜单时把这一局的东西全部收走。
+/// 回主菜单第一半：叫停回合机。只叫停、不收尸，收尸是 [`clear_match`] 的活。
+fn stop_turn_machine(mut phase: ResMut<NextState<TurnPhase>>) {
+    phase.set(TurnPhase::Boot);
+}
+
+/// 回菜单第二半：等回合机真的停稳，再收走上一局的实体与对局资源。
+///
+/// 为什么不能和 [`stop_turn_machine`] 同帧做完：`Commands` 的删除在系统跑完就生效，而
+/// `NextState` 的转移要到**下一帧**的 `StateTransition` 才应用。于是「回菜单」那一帧的
+/// 后半程里 `TurnPhase` 还写着 `WaitRoll`，`roll_dice_system` 与 `trade_request_system`
+/// 照常跑，可它们要的 `TurnOrder` / `ActiveBoard` 已经没了 —— Bevy 0.20 把这种参数校验
+/// 失败直接 panic，真鼠标点「返回主菜单」必崩（exit 101）。停在 `Boot` 之后回合机上
+/// 没有任何 system 会跑，这时候收才是安全的。
+///
+/// 两道门各挡一半：`in_state(Scene::Menu)` 保证不会在重新开局的那一帧动手（开局走
+/// `CoreSet::Boot`，那一帧 Scene 已经是 `Board`）；`TurnOrder` 还在则保证整个菜单期间
+/// 只收一次。
 ///
 /// 表现层的实体由 `crate::render` 自己的标记负责清理，这里只动规则层的东西。
 /// `WalkClock`/`Landing`/`PendingDecision`/`MarketClock`/`CouponBoxes` 是 `init_resource`
 /// 常驻的（结算 system 用 `Res<T>` 拿它们），所以重置成默认值而不是移除。
-fn teardown_match(
+fn clear_match(
     mut commands: Commands,
-    mut phase: ResMut<NextState<TurnPhase>>,
+    phase: Res<State<TurnPhase>>,
+    order: Option<Res<TurnOrder>>,
     game: Query<Entity, With<Gameplay>>,
 ) {
+    if phase.get() != &TurnPhase::Boot || order.is_none() {
+        return;
+    }
     let count = game.iter().count();
     for entity in &game {
         commands.entity(entity).despawn();
@@ -133,8 +163,7 @@ fn teardown_match(
     commands.insert_resource(PendingDecision::default());
     // 上一局捡空的点券箱必须在新局重新长出来，否则第二局一整盘都是冷却中
     commands.insert_resource(CouponBoxes::default());
-    phase.set(TurnPhase::Boot);
-    info!("清场：回收 {count} 个规则层实体，回合机退回 Boot");
+    info!("清场：回收 {count} 个规则层实体，回合机已停在 Boot");
 }
 
 #[cfg(test)]

@@ -633,7 +633,7 @@ mod tests {
     };
     use bevy::state::app::StatesPlugin;
     use bevy::window::WindowRef;
-    use game_core::prelude::{Decision, LandId, Pending, PlayerId};
+    use game_core::prelude::{Decision, LandId, Pending, PlayerId, TurnOrder};
     use std::time::Duration;
 
     /// 造一条落在 `entity` 上的左键点击。这些字段平时由 picking 后端填，
@@ -1071,6 +1071,46 @@ mod tests {
         assert!(
             !app.world().resource::<finance::StockPanelOpen>().0,
             "回主菜单没关证券浮层"
+        );
+    }
+
+    /// 回归：真鼠标点「返回主菜单」会让进程直接崩掉（exit 101）。清场在同一帧里既
+    /// `remove_resource` 又把 `NextState<TurnPhase>` 设成 `Boot`，可命令是立刻生效、
+    /// 状态转移要到下一帧 —— 于是那一帧的后半程 `TurnPhase` 还写着 `WaitRoll`，
+    /// `roll_dice_system` 照跑，却拿不到它的 `TurnOrder`（Bevy 0.20 把参数校验失败
+    /// 直接 panic）。`NM_MENULOOP` 挡不住它：从菜单出发第一步只是自转，那半程没走过。
+    ///
+    /// 这里断言的是**顺序**而不是崩溃本身（这个 harness 没装 core 的 system，崩不了）：
+    /// 回合机停稳之前资源必须还在，停稳之后才收走。
+    #[test]
+    fn the_match_resources_outlive_the_turn_machine() {
+        let mut app = wired();
+        app.world_mut()
+            .resource_mut::<NextState<crate::scene::Scene>>()
+            .set(crate::scene::Scene::Board);
+        app.update();
+        app.insert_resource(TurnOrder::new(Vec::new()));
+        app.world_mut()
+            .resource_mut::<NextState<TurnPhase>>()
+            .set(TurnPhase::WaitRoll);
+        app.world_mut()
+            .resource_mut::<NextState<crate::scene::Scene>>()
+            .set(crate::scene::Scene::Menu);
+
+        let mut frames = 0;
+        while app.world().contains_resource::<TurnOrder>() && frames < 5 {
+            app.update();
+            frames += 1;
+        }
+
+        assert_eq!(
+            app.world().resource::<State<TurnPhase>>().get(),
+            &TurnPhase::Boot,
+            "跑了 {frames} 帧回合机还没停到 Boot，清场条件根本不成立"
+        );
+        assert!(
+            !app.world().contains_resource::<TurnOrder>(),
+            "回合机已停在 Boot，清场却还没动手"
         );
     }
 
