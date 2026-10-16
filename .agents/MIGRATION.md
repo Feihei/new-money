@@ -470,7 +470,21 @@ Godot 端**全项目没有任何字体资源**，也没设 `gui/theme/custom_fon
 | ② Git LFS | 二进制该走的路，但要装 `git-lfs`、托管端有配额，且 clone 方必须能取 LFS 对象 —— 对单人开发的本仓库是净增复杂度 |
 | ③ 一直留在仓库外 | 最轻，但「新机器 clone 下来跑不起来」会回来，且必须写清原件在哪 |
 
-**待补**：这两个文件的**出处**（哪个建模工程 / 谁的资产 / 什么授权）。被忽略的二进制一旦没人指路就找不回来了 —— 补在这里，或补在文件同级的 `.md` 里。
+**出处（10-15 补，详见 [`.agents/CHARACTERS.md`](./CHARACTERS.md) §十一）**：自制资产，无第三方素材、无授权问题。
+原件是工作区 `.tmp/characters.blend`（31MB，同目录另有未压缩导出 `Character-ATB.glb` 49MB、`Character-SXM.glb` 40MB），
+入库的两颗由 Blender 5.2 的 Khronos glTF Blender I/O v5.2.40 导出。
+各约 48k 三角面 / 35k 顶点，单 mesh 无骨骼无动画，一个材质、三张 2048² 贴图（baseColor / normal / metallic-roughness），
+模型高 1.14 单位、脚底在原点、原生朝 +Z。
+
+**前提已出现一处例外**：`crates/game_app/examples/character_preview.rs`（一次性试装场景）引用了这两个路径，
+文件缺失时它自己 panic。不影响 `build` 与 `test`，但"没有任何代码引用"这句从现在起只对运行代码成立。
+
+**观感结论**（同一份文档 §十一 末）：`render/` 里一个光源都没有、材质全 `unlit`，
+PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术方向（加主光重调配色，或改成半 unlit 平涂）。
+尺寸上 1.0 缩放在 `CAM_SIZE=8` 下只有约 66px 高，比现在那颗球还小，要 1.6 倍才读得出脸。
+
+**美术方向已定，这条不用再回答**：角色走平涂剪纸 sprite，不是 3D 模型（见 `.agents/CHARACTERS.md` §十二）。
+这两颗 glb 退回形体参考。`assets/sprite/` 的横条比照本节同样不入库。
 
 ---
 

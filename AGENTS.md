@@ -10,6 +10,7 @@
 | [`.agents/ADR-001-board-topology.md`](./.agents/ADR-001-board-topology.md) | 棋盘拓扑决策，状态 **Accepted**（权威，不要重开讨论） | 碰 board / land / 移动逻辑 |
 | [`.agents/board-data-schema.md`](./.agents/board-data-schema.md) | 棋盘 JSON schema 与不变式（权威） | 改 `assets/data/**` 或对应 serde 结构 |
 | [`.agents/GLOSSARY-board.md`](./.agents/GLOSSARY-board.md) | 棋盘术语表 | 命名与讨论时用统一用语 |
+| [`.agents/CHARACTERS.md`](./.agents/CHARACTERS.md) | 角色设定（活文档）：三层结构与配比、入境诨名命名法、首发十二人档案、**开局参数表 + AI 四维**（角色不带规则分支，见其 §八）、**神明系谱**（四部下发钱、赵公明收钱＝巡回赛骨架，提案未拍板）、沈万三＝隐藏位、**IP 边界与红线清单**、**美术方向＝会动的剪纸 sprite（§十二，含 I2V 管线与踩坑）**、两颗 glb 退回形体参考 | 碰角色/文案/UI 文本/`assets/sprite`/`assets/model`/B6 的 AI 先验；任何要往 UI 或宣传里写角色名的时候 |
 | [`docs/godot/DEV_PLAN.md`](./docs/godot/DEV_PLAN.md) / [`docs/godot/PHASE_1_5_PLAN.md`](./docs/godot/PHASE_1_5_PLAN.md) | 附件：Godot 源项目文档的**原样副本**。已知与代码偏离 → 以 Godot 代码为准，文档只作设计意图参考。副本内的相对路径指向 Godot 仓库，本仓库不对齐 | 需要原始需求、里程碑背景时 |
 | [`README.md`](./README.md) | 面向使用者的项目说明与快速开始 | 需要给外部解释这个项目时 |
 
@@ -37,7 +38,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 5. **移植时顺手修掉 §三 缺陷清单里的条目**，不要照搬 Godot 的错误行为；修完在 §三 的表下方标注归属阶段与覆盖它的测试。
 6. **Godot 端从 2026-10-15 起不再是参照主线**（B5 之后拍的）。它只剩两个用处：前期 ADR/规格出处，和 §三 缺陷清单的反例。**画面、UI 排版、交互路径一律不对齐**，Bevy 侧按自己的判断设计；经济/规则要改动也不必回头比对 Godot。§五 映射表因此**停止逐文件维护**，作为 B0–B5 的历史记录保留，不要再往里加行。
 7. `assets/font/dev_*` 是开发授权字体（已 gitignore），**不要提交字体**；发行前必须换成可分发的子集（§7.3）。
-8. `assets/model/` 下的 glb **不入库**（已 gitignore）：二进制没法 diff，每重导一次就在历史里多存一份完整拷贝。现在忽略它们不会让克隆跑不起来，因为**没有任何代码引用**这两个文件、棋子仍是程序化几何；等渲染真的换成 glb，按 §7.5 的三条路重新评估。别顺手 `git add -f` 它们。
+8. `assets/model/` 的 glb 与 `assets/sprite/` 的横条 **都不入库**（已 gitignore）：二进制没法 diff，每重导一次就在历史里多存一份完整拷贝；sprite 那条还额外在改（风格、帧数、白边宽度都没定稿）。现在忽略它们不会让克隆跑不起来，因为**没有任何运行代码引用**它们、棋子仍是程序化几何（唯一的例外是 `examples/character_preview.rs` 这个一次性试装场景，缺文件时它自己 panic，不影响 build 与测试）；等渲染真的换成 sprite 或 glb，再按 §7.5 的三条路重新评估。别顺手 `git add -f` 它们。glb 的出处见 [`.agents/CHARACTERS.md`](./.agents/CHARACTERS.md) §十一，sprite 的生成管线与重跑方法见同文件 §十二。
 
 ## 提交与文档维护
 
