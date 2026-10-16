@@ -7,6 +7,7 @@
 | 位置 | 是什么 | 什么时候读 |
 |---|---|---|
 | [`.agents/MIGRATION.md`](./.agents/MIGRATION.md) | 移植方案（活文档）。§三=待修缺陷清单，§五=概念映射速查，§六=0.20 依赖矩阵/API 核对表+环境级坑，§十=B0–B8 阶段与验收 | 任何非单点修复的改动之前；每完成一个阶段回来更新 |
+| [`.agents/PLAN.md`](./.agents/PLAN.md) | **玩法补齐计划**（活文档）。基线是大宇《大富翁4》，不是 Godot 版。§一=与 4 代的口径偏差（哪些东西其实不存在），§三=缺口对照表，§四=**P1–P13 实现顺序**与依赖，§五=点券格/小游戏格/新闻中心格设计，§六=B6/B7/B8 改期建议，§七=待拍板（含已拍板项） | 碰「要不要加某个玩法/格子」；动手做 P 阶段之前 |
 | [`.agents/ADR-001-board-topology.md`](./.agents/ADR-001-board-topology.md) | 棋盘拓扑决策，状态 **Accepted**（权威，不要重开讨论） | 碰 board / land / 移动逻辑 |
 | [`.agents/board-data-schema.md`](./.agents/board-data-schema.md) | 棋盘 JSON schema 与不变式（权威） | 改 `assets/data/**` 或对应 serde 结构 |
 | [`.agents/GLOSSARY-board.md`](./.agents/GLOSSARY-board.md) | 棋盘术语表 | 命名与讨论时用统一用语 |
@@ -43,7 +44,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## 提交与文档维护
 
 - Commit message 用中文 conventional commits，标题带阶段号，沿用现有风格：`feat(B2c): 定步时行走……`。
-- 阶段完成时把进度写回 `.agents/MIGRATION.md`（§十 的表加一行状态 + §三 缺陷清单的归属），**不另开计划文档**；一个阶段在途只有一份计划。
+- 阶段完成时把进度写回对应那份计划：搬 Godot 的写 `.agents/MIGRATION.md`（§十 的表加一行状态 + §三 缺陷清单的归属），补玩法的写 `.agents/PLAN.md`（§四 的 P 表加状态 + §七 拍板项落定）。**一个阶段在途只有一份计划**，别为单个阶段再开第三份。
 - 质量门结果、测试计数以实际运行为准，不沿用文档里的旧数字。
 - 行尾由 `.gitattributes` 锁定 LF。
 
@@ -57,4 +58,4 @@ B0、B1、B2a、B2b、B2c、B3、B4、B5、**B5b** 已完成（数据层、世�
 - ~~**银行/证券没有交易入口**~~ —— **B5b 已补**：路过银行格发 ATM 卡（存取），踩到开柜台模态（借还），证券常驻顶栏、掷骰前可下单。
 - ~~**`prototype.json` 没有证券格**~~ —— **拍板不补**：证券不是一格要踩的东西。行情改成每回合结束 tick，分红改挂日历（`days_per_month`/`dividend_day`），两条分叉的理由见 §10.2。
 
-下一步是 B6（AI 玩家）。
+下一步换成**玩法补齐**这条线：`.agents/PLAN.md` §四 的 **P1（点券 + 点券格 + 把落格分派改成编译期穷尽）**。B6（AI）按 PLAN.md §六 让位到 P11 之后 —— 动作集没定型前写 AI 会返工两次。
