@@ -53,7 +53,7 @@
 | 5 | `stock_market.gd:110` | `buy()` 现金不足时递归调用自身，无深度保护 | 改为一次算 `can_afford` 的循环/直接式 |
 | 6 | `dice.gd:19-20` + `card_deck.gd:53` | 骰子用全局 `randi_range`，洗牌用 `_rng.randomize()` → **不可复现**。`roll_seeded()` 只是个 `assert` 后原样返回的假种子函数，仅 `test_dice.gd:18-20` 在用 | `Rng` 作为 Resource 持有 `SeedableRng`（`ChaCha8Rng`）+ `GameSeed` resource。顺带解锁：回放、失败复现、将来 lockstep 联机（`DEV_PLAN.md` §6.2.7 的诉求） |
 | 7 | `board.gd:704` 发 `dice_rolled` | **表现层驱动游戏逻辑**：骰子点数由棋盘视图发出，`TurnManager` 监听（`turn_manager.gd:96`）。后果是逻辑无法脱离渲染运行，headless 测试根本掷不了骰 | `roll_dice_system` 属于 core（`in_state(WaitRoll)` + `RequestRoll` 消息触发），render 只订阅结果 |
-| 8 | `player_data.gd:15,30,35,85,96` `turn_manager.gd:158,249-265` | 状态是裸字符串 `"active"/"jailed"/"bankrupt"`，格子类型是裸字符串 `"property"/"stock"/...`，比较散落各处（`board_tile.gd:72` 还有一份硬编码类型列表和 `tile_type.gd:31-35` 重复） | `#[repr(u8)] enum PlayerStatus` / `enum TileKind`，`match` 穷尽性由编译器保证，新增类型时漏分支直接编译失败 |
+| 8 | `player_data.gd:15,30,35,85,96` `turn_manager.gd:158,249-265` | 状态是裸字符串 `"active"/"jailed"/"bankrupt"`，格子类型是裸字符串 `"property"/"stock"/...`，比较散落各处（`board_tile.gd:72` 还有一份硬编码类型列表和 `tile_type.gd:31-35` 重复） | `JailSentence`/`Bankrupt` 是组件存在性（**已修**，见下方 B2b）；**格子类型那半没成立** —— 现在不是单个穷尽 `match`，而是四个域各自 `filter`（见下面的 P1 归属说明） |
 | 9 | `board_data.gd:258-304` `_compute_legacy_positions`（47 行 Curve3D 烘焙）+ `board_data.gd:6-9` 双格式分支 | 兼容"旧格式 `tiles[]`+`position:float`"，但 `data/boards/` 下**只剩 `prototype.json`**（新格式），旧格式棋盘文件不存在 | **不移植旧格式**，连带删除 `BoardData.has_coords`、`_legacy_positions`、`property_registry` 的 `set_owner/get_owner` 兼容层（`:73-106`，54 行）。这是移植带来的净删减 |
 | 10 | `board_data.gd:63-67` `passes_start`、`game_state.gd:20` `inflation_index`、`scripts/entities/color_circle.gd`、`card_notice` 的 `HSeparator` 主题 | 死代码：`passes_start` 全项目无调用；`inflation_index` 只在 `test_game_state.gd:23-28` 被赋值和断言，不进任何公式；`color_circle.gd` 未被任何场景/脚本引用 | 不搬 |
 | 11 | `game_state.gd:45` | 新开对局却 `EventBus.game_saved.emit(game_id)` | 消息语义对齐后自然消失 |
@@ -65,23 +65,26 @@
 
 > **截至 B2b（10-13）已修并有回归网的**：#2（`turn_flow.rs::assert_turns_balanced`）、#6（`same_seed_replays_the_same_match`）、#7（`requests_from_somebody_else_are_ignored` + 骰子在 core 的 `roll_dice_system` 里）、#8 的玩家状态部分（`JailSentence`/`Bankrupt` 是组件存在性，见 `jail_skips_two_turns_then_releases`）、#12（`world_boot.rs::setup_and_rules_are_the_only_sources`）。
 
+> **#8 只修了一半（10-16 核对，归属 [`PLAN.md`](./PLAN.md) 的 P1）**：`TileKind` 那条声称的「新增格类型漏写分支直接编译失败」**并不成立**。落格分派是 [game_core/src/lib.rs:208](../crates/game_core/src/lib.rs) 那条 chain 里四个域各自 `filter` 自己关心的 kind（`settle_property_landing` 解构 `kind: TileKind::Property`、`settle_bank_landing`、`settle_market_landing`、`settle_card_landing`），没有一处穷尽 `match`；`Lottery`/`GodDeity`/`Neutral`/`Transport`/`Hospital`/`Start` 踩上去静默无事，`is_detention()` 零调用方。[landing.rs](../crates/game_core/src/landing.rs) 的文件头注释也重复了这句不成立的承诺 —— 注释比代码可信度高时，改代码而不是改注释。P1 第一步兑现它，做完回收这条并给分派表加一条「漏分支编译不过」的用例。
+
 > **B3（10-14）修完的四条**：
 > - **#1** 贷款额度 —— `economy::calc_max_loan` 的入参是 `LandView`（内部 `LandId`），`TileIndex` 喂进来编译不过；端到端回归 `settle.rs::loan_limit_comes_from_owned_lands`（顶格 6000 贷得到、再加 1 块拒）。
 > - **#3** 扣款失败必须真破产 —— `Wallet` 只能经 `Books::credit`/`debit` 改动，付不起时 `charge` 直接走 `bankrupt`。回归：`a_fine_you_cannot_pay_bankrupts_you_for_real`（`CouldNotPay` 与 `PlayerBankrupt` 同帧成对、`Bankrupt` 组件真的挂上）。
 > - **#4** 股价事件 —— 拆成 `StockPriceChanged{stock,old,new}`（tick 真的动了才发）与 `StockTraded{player,stock,shares,price,side}`；回归 `stock_visit_ticks_every_price_once`。
 > - **#5** 买入递归 —— `economy::buy_plan` 一次算清可买股数；另有扫表性质 `buy_plan_never_asks_for_more_than_the_wallet_has`（39 个价格 × 6 档现金，花费绝不超过余额）。
 >
-> **#9/#10/#11 属后续**：旧格式本来就没搬；`passes_start`/`inflation_index`/`color_circle.gd` 未搬；#11 的 `game_saved` 误发随 B7 存档一起处理。
+> **#9/#10/#11 属后续**：旧格式本来就没搬；`passes_start`/`inflation_index`/`color_circle.gd` 未搬（`inflation_index` 那条 10-16 起改由 [PLAN.md](./PLAN.md) 的 **P2** 真正实现，不再是死代码）。#11 的 `game_saved` 误发随存档一起处理 —— 原 B7，**现 PLAN P15**，仍开着。
 
 > **B3 过程里新发现、一并修掉的 Godot 错误（编号续在 12 之后）**：
 > - **#13** `player_data.gd:84-91` 破产时只清玩家自己的 `properties` 列表，`PropertyRegistry` 里的业主仍写着死者 → 租金永远打给破产者、同色组永远卡住别人的垄断与升级。`Books::bankrupt` 把名下地块一并放回市场（回归 `cant_pay_rent_bankrupts_the_payer_and_frees_their_lands`）。
 > - **#14** `property_system.gd:151-161` 的 `_owns_full_group` 用空串匹配会得到「没有任何格子能匹配 → 全都满足」的隐式 `true`，坏数据上等于白送垄断与升级权。Rust 侧无 `group` 的地块明确返回 `false`（`economy::owns_full_group`，回归 `groupless_land_gets_no_free_monopoly`）。
 >
-> **B3 记录的数据缺口（没动数据，等你定）**：`prototype.json` 的 12 格里**没有 `stock` 格**，而 `stock_market.gd:68` 的 `tick()` 只在踩到证券格时调用 —— 照搬之下整局行情一动不动、分红永不发放。市场逻辑已完整实现并有测试（测试里临时把某格改成 `stock` 类型跑这条路径），真实对局要跑到它需要给棋盘加一个证券格。
+> **B3 记录的数据缺口 —— ✅ 已定（B5b，10-15）**：`prototype.json` 的 12 格里**没有 `stock` 格**，而 `stock_market.gd:68` 的 `tick()` 只在踩到证券格时调用 —— 照搬之下整局行情一动不动、分红永不发放。市场逻辑已完整实现并有测试（测试里临时把某格改成 `stock` 类型跑这条路径）。**结论是不加证券格**：行情改挂「每回合结束 tick」、分红改挂日历，证券做成掷骰前随时可下的单而非一格要踩的东西。两条分叉的理由与验收见 §10.2。
 
 > **B5 核对过、决定照搬的源游戏规则怪癖**（不是移植错误，改它等于改玩法，需要单独拍板）：
 > - **Lv0 空地已经收 `rent[0]`，所以「升级到 Lv1」租金增幅为 0**。`property_system.gd:59-61` 先 `if level < 1: level = 1` 再取 `rent_array[level - 1]`，即空地与一级房收同一档租；升级面板如实显示「+$0」（截图核对过）。要改就得同时改 `calculate_rent` 与租金表语义。
-> - **终局提示只有一行「游戏结束」是 Godot 的原样行为**：`board.gd` 的阶段旁白会盖掉胜者那句。Rust 侧反过来做了 —— `Over` 阶段不写旁白，让 `GameOver` 的「胜者：X！」留在屏幕上。这是刻意分叉，已记在 §5.1。
+>   **⚠️ 这条的「照搬」前提已经作废（10-16）**：当时比的是 Godot，而玩法基线后来换成大富翁 4 代 —— 4 代住宅是 空地→平房→店铺→商场→商业大楼→摩天大楼（**加盖 5 次，0→5 共六态**），我们现在是 Lv0 也收租 + `rent[6]` 表 + Lv0 视作 Lv1，等于两套级数混在一起，而且「空地＝有房子的 Lv1」这个隐式钳位本身就是玩家读不懂的行为。归属 [`PLAN.md`](./PLAN.md) 的 **P10**（建筑名与级数），改法要与 `building_kind` 一起定，别单独动 `calculate_rent`。
+> - **终局提示只有一行「游戏结束」是 Godot 的原样行为**：`board.gd` 的阶段旁白会盖掉胜者那句。Rust 侧反过来做了 —— `Over` 阶段不写旁白，让 `GameOver` 的「胜者：X！」留在屏幕上。这是刻意分叉，已记在 §5.1。**这条已收口，无需回头。**
 
 ---
 
@@ -296,7 +299,7 @@ Godot 端把这件事做成了"逻辑等渲染"（`turn_manager.gd:219` 等 `boa
 | `main_menu.gd`(34) + `main_menu.tscn` | `ui/menu.rs`（B5） | 「读档」「设置」灰掉（B7 之前没有后端）；`quit` 走 `AppExit`；菜单需要一台 `Camera2d` 才画得出来（§6.1 坑 19） |
 | —— | `ui/tile_info.rs`（B5，**源项目没有这条交互**） | 新增：点一格 → 右上角详情卡（名字/类型/位置/地价/归属/等级/整张租金表）。只认带 `TilePick` 的道路格地板，点建筑、棋子、空白都不开卡；内容全部回 `BoardDef` + 组件现算，实体上只留 `(col,row)` |
 
-**尚未移植**：`autoload/audio_manager.gd`、`save_manager.gd`（B7）、`game_state.gd` 的存档语义（B7）、`entities/color_circle.gd`（死代码，不搬 #10）。`board.gd` 到 B5 已全部拆完（几何/相机 B4，UI/对话框 B5）。
+**尚未移植**：`autoload/audio_manager.gd`（空壳 → [PLAN.md](./PLAN.md) **P16**）、`save_manager.gd`（空壳 → **P15**）、`game_state.gd` 的存档语义（→ **P15**，见 §九）、`entities/color_circle.gd`（死代码，不搬 #10）。`board.gd` 到 B5 已全部拆完（几何/相机 B4，UI/对话框 B5）。
 
 ## 六、Bevy 0.20 依赖矩阵（已核实）
 
@@ -316,7 +319,8 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 | `bevy_world_serialization` | 0.20 内置新 crate（`DynamicWorld`/`WorldAsset`，带 serde 特性） | 🆕 存档可用，但**同为 0.20 首发 API，风险高**，先做手写快照（§九） |
 | 中文字体 | 0.19 起 `bevy_text` 换 Parley；0.19 加 `bevy/system_font_discovery` feature 与 `FontSource::Family`；0.20 把 `resolve_font_source` 改为 `FontSource::resolve_font_family` | 桌面端可按系统字体族名加载中文字体；发行仍建议自带子集（§七） |
 
-> 如果 `bevy_inspector_egui` 的缺口你认为不可接受，唯一退路是**降到 bevy 0.19**（生态已适配面更广）。这是 §十一 的待决问题之一。
+> ~~如果 `bevy_inspector_egui` 的缺口你认为不可接受，唯一退路是**降到 bevy 0.19**（生态已适配面更广）。这是 §十一 的待决问题之一。~~
+> **✅ 已拍板（10-13）且不降版**：锁 0.20，缺口用 `bevy_egui` 自写只读 dump 面板补。但那条面板到 10-16 核对时**仍未落地**（`Cargo.toml` 里根本没有 `bevy_egui`），现已排进 [`PLAN.md`](./PLAN.md) 的 **T1**。
 
 ### 6.1 0.20 API 事实核对表（B0 已从本地 crate 源码 + 官方 examples 逐个核实）
 | 事项 | 0.20 的确切形态 | 对方案的影响 |
@@ -510,6 +514,8 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 
 顺带把 §4.2 的**种子化 RNG + 帧末批量消息**变成回放能力：存档只要保存 `GameSeed + 决策消息序列 + 玩家/回合数`，理论可整局重放（`DEV_PLAN.md` 表格中"存档系统：全局状态序列化、**回放**"的野心从这里开始变得廉价）。
 
+> **10-16 状态**：整节未开工，排进 [PLAN.md](./PLAN.md) 的 **P15**（放在全部玩法之后）。两层方案的**选择本身还没拍板**，已列进 PLAN §七 待你定 —— 但 §十一 的倾向（走手写 `GameSnapshot`、不赌 0.20 首发 API）仍然有效。另：P 序列里每个阶段仍要跑一次「回主菜单再开一局」的冒烟，跨局残留那条纪律（坑 22/25）不因为存档推迟而可以松。
+
 ---
 
 ## 十、分阶段移植计划
@@ -527,11 +533,13 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 | **B4** 等轴测渲染切片 ✅ 完成 (10-14) | `render/{board,land,token,camera,labels}.rs` + `RenderPlugin`：地面密铺、主环与分支路面（含对角，**顺带修掉 B0 的 90° 旋转错位**）、道路格地板按 `TileKind` 配色、组色条朝向绑定的土地、建筑按 `BuildingLevel` 显隐 + 按 `PlayerColor` 换色、棋子按 `TileStepped` 逐格插值带正弦弹跳、入狱/瞬移 0.4s 滑移、正交相机 rig 指数平滑跟随、`ClearColor`、格名走 UI 投影（§六 定案）；`NM_AUTOROLL` 开发用自动玩家（B5 没删，改成跑长对局的验收工具，见 §10.1） | `check.sh` 五项退出码 0；`NM_SHOT` 出图三张（`target/b4_static.png` 整盘、`target/b4_play.png` 跟随 + 30 回合后的建筑与现金流、`target/b4_wide.png`）；运行日志零 WARN。~~与 Godot 版并排肉眼对比~~ —— **10-15 取消**，画面不再对齐（见文首参照范围说明） | 1.5–2 天 |
 | **B5** UI + 交互 ✅ 完成 (10-14) | 顶栏（提示行/阶段/掷骰/暂停/返回主菜单）、底部玩家 HUD、四个模态（买地/升级/租金收据/卡面）由 `PendingDecision` **状态驱动**、暂停菜单 + core 的 `Paused` 闸门、主菜单↔对局流转（`Scene` 状态 + 清场 + `reset_ui_state`）、`bevy_picking` 按钮与点格、**新增交互：点格显示详情卡**；开发侧旋钮 `NM_SCENE`/`NM_SEED`/`NM_AUTOGAP`/`NM_AUTODECISION`/`NM_DECISION`/`NM_PAUSE`/`NM_PICK_TILE`/`NM_MENULOOP` | 见 §10.1 的 B5 验收记录 | 2–3 天 |
 | **B5b** 银行与证券的交易入口 ✅ 完成 (10-15) | **规则层**：`AtmAccess`（路过银行格发的那张卡，撑到持有人下一次 `TurnStart`）、`bank_op_allowed` 四种操作各自的窗口、`BankOpRequested`/`BankOpDone`/`StockTradeRequested` 三条请求消息、`bank_op_system` 认人不认阶段、行情改成**每回合结束 tick**、分红改挂**日历**（`days_per_month`/`dividend_day` + `date_of`/`is_dividend_day`/`days_until_dividend`）；`prototype.json` **不加证券格**（证券是随时可下的单，不是一格）。**表现层**：顶栏「ATM」「证券」两颗入口、两块常驻浮层（ATM 左上、证券左下，随世界状态刷新，键挂 `FinanceStamp`）、第五个模态「银行柜台」（踩到才开，八颗金额按钮 + 办完）、`UiAction` 新增四种动作、旁白补「存/取/借/还/买入/卖出」流水与「第 N 回合 · 几月几日」。开发侧新增 `NM_ATM`/`NM_STOCK`/`NM_DECISION=bank` | 见 §10.2 的 B5b 验收记录 | 1.5–2 天 |
-| **B6** AI | `Controller::Ai` + utility 决策 system（规则树版），发同样的 `RequestRoll`/`DecisionChosen`；伪延迟 `500–1500ms` | 3 AI + 1 人类可完局；AI 不阻塞（分帧） | 2 天 |
-| **B7** 音频/设置/存档 | `bevy_audio` BGM+SFX、`GameRules.walk_step_interval` 挂到设置、`GameSnapshot` 存读、自动存档 | 存读回归测试：存档→读档→再存档字节一致 | 1.5 天 |
-| **B8** 打磨/发布 | K 线图、飘字、结算画面、i18n、Windows 打包 | `DEV_PLAN.md` M3 里程碑 | 2 天+ |
+| ~~**B6** AI~~ → **PLAN P14** | 移植线没有 AI 可参照（Godot 侧根本没有 AI），原描述（`Controller::Ai` + utility 决策 + 伪延迟）仍然有效，但**动作集未定型前写它必返工** | 移交 [PLAN.md](./PLAN.md) | — |
+| ~~**B7** 音频/设置/存档~~ → **PLAN P15/P16** | 拆两份：存档+设置＝P15（§九 的手写 `GameSnapshot` 方案不变）、音频＝P16（`audio_manager.gd` 是空壳，纯净新增） | 移交 [PLAN.md](./PLAN.md) | — |
+| ~~**B8** 打磨/发布~~ → **PLAN P17** | K 线图（§7.2 那条）、飘字、结算画面、i18n、**字体子集化**（§7.3，发行前必做）、Windows 打包 | 移交 [PLAN.md](./PLAN.md) | — |
 
-逻辑层（B0–B3）**已完成**，追平现有 Godot 进度并顺手修掉 §三 的 14 处缺陷（#1–#8、#12–#14；#9/#10 是「刻意不搬」，#11 随 B7）。表现层的几何与动画（B4）**已完成**。**B5 也已完成** —— 「能打完一局」这条线在 10-14 打通，验收记录见下面 §10.1。
+> **10-16：B6/B7/B8 整条尾巴移交 [`PLAN.md`](./PLAN.md)**。移植线到 B5b 就没有 Godot 参照物了，这三行原本按「Godot 还差什么」排，而实际缺口已经变成「4 代有而我们没有」——那是另一条线、另一套依赖，继续写在这里会让两份计划互相假装对方在做。本文此后只保留 §三 与 §6.1 两份长期资产。
+
+逻辑层（B0–B3）**已完成**，追平现有 Godot 进度并顺手修掉 §三 的 14 处缺陷（#1–#8、#12–#14；#9/#10 是「刻意不搬」，#11 随 PLAN P15 存档，**#8 的格子类型那半没成立**，见 §三 的 P1 归属说明）。表现层的几何与动画（B4）**已完成**。**B5 也已完成** —— 「能打完一局」这条线在 10-14 打通，验收记录见下面 §10.1。
 
 ### 10.1 B5 验收记录（10-14）
 
@@ -614,7 +622,7 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 | 风险 | 概率 | 影响 | 应对 |
 |---|---|---|---|
 | **Bevy 0.20 太新**（发布 5 天），插件与文档滞后；0.21 一升级 API 又变 | 高 | 中 | 锁 `=0.20.0`；`game_core` 只依赖无渲染子集隔离冲击；**禁止 `cargo update`**；升级 Bevy 作为独立任务单做 |
-| `bevy_inspector_egui` 无 0.20 版，失去运行时实体可视化（对 agent 调试影响最大的一项） | 已发生 | 中 | ① 用 `bevy_egui` 自写只读 dump 面板；② 或整体降到 0.19 换回生态 —— **需你决定** |
+| `bevy_inspector_egui` 无 0.20 版，失去运行时实体可视化（对 agent 调试影响最大的一项） | 已发生 | 中 | ✅ **已拍板（10-13）选 ①**：用 `bevy_egui` 自写只读 dump 面板。⚠️ **10-16 核对：拍板至今没落地**（依赖里没有 egui），排进 [`PLAN.md`](./PLAN.md) **T1**（P1 之后、P2 之前） |
 | UI 无编辑器、代码排版迭代慢 | 高 | 高 | B4/B5 排在逻辑之后；主题常量集中；预留 1.5–2 倍工时 |
 | 中文渲染第一天就踩空（无内建回退） | 高 | 低 | 开工第一件事就是"屏上显示 3 行中文"的 spike（并入 B0 验收） |
 | `bevy_settings` / `bevy_world_serialization` 是 0.20 首发 API | 中 | 中 | 存档走手写 `GameSnapshot`；设置项自己存 JSON 也行，不赌新 API |
@@ -633,11 +641,10 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 
 ## 十二、下一步
 
-我建议的第一批动作（不需要你做更多决定，B0 的中文 spike 除外）：
-1. 建 workspace + `game_core`（`bevy/default-features=false`）+ `game_app` 空窗口，把"屏幕上渲染出一行中文 + 一个等轴测方块"作为 B0 验收（**这是全项目最可能翻车的两个点，值得第一天就证伪**）。
-2. 拷 `data/` 与规格文档（ADR-001、board-data-schema、GLOSSARY，现居 `.agents/`）进新目录 —— 它们是移植的规格来源。
-3. 按 §十 顺序做 B1。
+> **本节原文是 B0 前夜写的**（"建 workspace""拷 `data/`""按 §十 顺序做 B1"），那些早已完成，留原话只会误导。10-16 起本项目的「下一步」只有一份，在 [`PLAN.md`](./PLAN.md) §四。
+
+**下一步：[`PLAN.md`](./PLAN.md) 的 P1** —— 点券 + 点券格 + 把落格分派改成编译期穷尽（顺带收口本文 §三 的 #8 后半条）。其后 T1（egui dump 面板）、P2（结算修正管线 + 物价指数）……到 P13（魔法屋），玩法之后是 P14 AI、P15 存档与设置、P16 音频、P17 发行。
 
 > 本文档的 §三（缺陷清单）和 §五（映射表）建议当作长期资产维护：每移植完一个 Godot 文件，就在表里划掉并注明差异，避免两边行为悄悄分叉。
 > **（10-15 作废）** 移植线已追平、Bevy 转为主线，§5.1 冻结为 B0–B5 存档，不再逐文件加行；长期资产只剩 §三 与 §6.1。
-> 进度以 §十 的表为准：B0–B5b 已完成，下一步是 B6（AI）。
+> **（10-16 更新）** 进度以 §十 的表为准：**B0–B5b 已完成，移植线到此收口**，剩下的 #8 后半条与 §三 未结项已标注归属并移交 PLAN.md。
