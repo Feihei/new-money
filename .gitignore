@@ -1,14 +1,17 @@
 /target/
 # tmp files
 .tmp/
-# 开发期 CJK 字体（思源黑体开发授权版，未子集化所以体积大；将来子集化后再入库）
+# 整个 assets/ 不入库：贴图、模型、sprite、字体全是二进制，git 没法 diff，每重导一次就在
+# 历史里永久多存一份完整拷贝（10-19 把这条从逐目录点名改成整目录，`assets/textures/` 那
+# 14 张 PNG 就是这么冒出来的）。**唯一反过来的是 `data/`** —— 棋盘与三副牌 JSON 是运行时代码
+# 和测试直接读的内容，缺了它克隆就跑不起来。写不成 `assets/` 而必须写 `assets/*`：git 在父
+# 目录本身被排除时不再往下走，`!assets/data/` 就翻不回来。
+assets/*
+!assets/data/
+# 这一条在上面的整目录规则之后已经冗余，留着是因为它记着一次决定：发行前换成可分发的子集
+# 字体之后再入库（AGENTS.md 硬约束第 7 条）。
 assets/font/dev_*
-# 角色模型：二进制、git 无法 diff，每重新导出一次就在历史里永久多存一份完整拷贝。
-# 迭代期只留在工作区；理由与「定稿后再决定」见 .agents/MIGRATION.md §7.5
-assets/model/
-# 角色 sprite 横条：同样是二进制，而且现在还在改（风格、帧数、白边宽度都没定稿）。
-# 生成它们的那套脚本与设定图源文件在 .tmp/ 下，也还没入库——将来定稿时一起决定怎么落。
-# 出处与重跑方法见 .agents/CHARACTERS.md §十二
-assets/sprite/
+# 角色模型与 sprite 横条的出处、重跑方法与「定稿后再决定」见 .agents/ARCHITECTURE.md §7.5
+# 与 .agents/CHARACTERS.md §十二；生成脚本与设定图源文件在 .tmp/ 下，同样没入库。
 *.pdb
 *.exe
