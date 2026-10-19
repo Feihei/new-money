@@ -21,7 +21,7 @@ use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision, d
 use crate::msg::{
     CardDrawn, CardNotice, EffectOutcome, LandBought, PlayerDetained, PlayerTeleported,
 };
-use crate::player::{Detention, Heading, PlayerId, StaySentence, TokenPosition};
+use crate::player::{Heading, PlayerId, StaySentence, TokenPosition};
 use crate::rng::Rng;
 use crate::settle::Books;
 
@@ -198,9 +198,10 @@ pub struct CardSink<'w, 's> {
     /// 绕行方向。转向卡要**就地**翻它（见 [`apply_card`] 里那一支），所以是 `&mut` 查询
     /// 而不是 `Commands`。
     pub headings: Query<'w, 's, &'static mut Heading, With<PlayerId>>,
-    /// 拘留计时。与 `headings` 同样是**就地**写（见 [`crate::landing::detain`]）：
-    /// 同一帧两张拘留卡，第二条要看得见第一条，否则会各搬一次棋子、各发一份凭据。
-    pub detentions: Query<'w, 's, &'static mut Detention, With<PlayerId>>,
+    /// 拘留计时**不在这里**，在 `sink.books.detained`（P4②）：账本要读得到「谁被关着」才填得出
+    /// `LandView.owner_detained`，而同一个 system 里对 `Detention` 一读一写会直接撞成借用冲突
+    /// （与本文件头那句「三块都要 `&mut Wallet` 就得集中一处」同一条理由）。就地写那条不变，
+    /// 见 [`crate::landing::detain`]。
     /// 停留计时。与 `headings` 同样是**就地**写（见 [`apply_card`] 的 `Stay` 那一支）：
     /// 第二张停留卡要看得见第一张，而这里读出来的数还要原样报进凭据。
     pub stays: Query<'w, 's, &'static mut StaySentence>,
@@ -276,7 +277,7 @@ pub fn apply_card(
                 let Some((held, junction, end)) = detain(
                     &mut sink.commands,
                     &mut sink.positions,
-                    &mut sink.detentions,
+                    &mut sink.books.detained,
                     &sink.books.active.def,
                     victim,
                     *place,

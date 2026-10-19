@@ -18,7 +18,7 @@ use crate::damage::{self, DamageTally, LandDamage};
 use crate::economy::{self, LandView};
 use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
 use crate::msg::{CashChanged, ChargeWaived, PlayerBankrupt, PointsChanged};
-use crate::player::{BankBalance, Bankrupt, PlayerId, Points, Wallet};
+use crate::player::{BankBalance, Bankrupt, Detention, PlayerId, Points, Wallet};
 use crate::plot::{PlotArea, area_of};
 use crate::rules::GameRules;
 use crate::status::{LandStatus, Timed};
@@ -68,6 +68,17 @@ pub struct Books<'w, 's> {
     /// （写走 `stamp_status` + `Commands`），而 `plots` 带着两个 `mut`；混在一起会让
     /// 「谁在改地块状态」这件事从类型上看不出来。
     statuses: Query<'w, 's, Option<&'static Timed<LandStatus>>, With<LandId>>,
+    /// 拘留计时（P4）。**放在账本里而不是 `CardSink` 上**：「谁被关着」这件事账本必须读得到
+    /// —— 收租权剥夺走的是 `LandView.owner_detained`（P4②），而那份快照只能由账本自己填。
+    /// 写它的两条路（命运牌、陷害卡）也就在这里，`CardSink` 改用它（同一 system 里两条
+    /// 对 `Detention` 的一读一写会在参数建立期直接撞成借用冲突，与本文件头那句同一条理由）。
+    ///
+    /// 就地写而不是 `Commands`：同一帧两张拘留卡，第二条要看得见第一条（见
+    /// [`crate::landing::detain`]）。
+    ///
+    /// **只有 `Detention` 这一族**：P3d④c 的停留（`StaySentence`）不在这里 —— 被停留按住的
+    /// 人还在场上，名下的地照收租，而卡面上没写「顺便收不到租」这一条（`tests/stay.rs` 钉着）。
+    pub detained: Query<'w, 's, &'static mut Detention, With<PlayerId>>,
     cash: MessageWriter<'w, CashChanged>,
     /// 一次性修正生效那一笔的凭据（免费卡免掉了多少）。与 `cash` 分开写，
     /// 因为这里没有钱动 —— 见 [`ChargeWaived`]。
@@ -80,21 +91,37 @@ impl<'w, 's> Books<'w, 's> {
     /// 地块运行时快照（全表）。租金/垄断/等级差/贷款额度都要看整盘，六到四十块地
     /// 线性扫一遍比再挂一层索引划算。
     pub fn views(&self) -> Vec<LandView> {
+        let locked = self.locked();
         self.plots
             .iter()
             .map(|(entity, id, owner, level, mortgaged)| {
                 // 状态查不到 = 这块地没挂限时状态。`single` 那类查询在实体缺席时才是错，
                 // 这里缺席是常态（绝大多数时候街上没有条子）
                 let status = self.statuses.get(entity).ok().flatten().map(|t| t.kind);
+                let who = owner.0;
                 LandView::new(
                     &self.active.def,
                     *id,
-                    owner.0,
+                    who,
                     level.0,
                     mortgaged.held(),
                     status,
+                    who.is_some_and(|o| locked.contains(&o)),
                 )
             })
+            .collect()
+    }
+
+    /// 被关着的人的名单，一次算好给整盘快照用。地块 ≤40、人 ≤4，线性 `contains` 比再挂
+    /// 一层集合划算，也比每块地查一次组件少一次借用。
+    ///
+    /// 从 `faces` 那一侧走：它是账本里唯一同时拿着实体与 `PlayerId` 的查询，而 `detained`
+    /// 的键是实体。名单要的是编号 —— 地块快照手上只有 `Owner.0` 那个 `PlayerId`。
+    fn locked(&self) -> Vec<PlayerId> {
+        self.faces
+            .iter()
+            .filter(|(entity, _, _)| self.detained.get(*entity).is_ok())
+            .map(|(_, id, _)| *id)
             .collect()
     }
 
@@ -103,13 +130,16 @@ impl<'w, 's> Books<'w, 's> {
         let entity = *self.active.lands.get(&land)?;
         let (_, id, owner, level, mortgaged) = self.plots.get(entity).ok()?;
         let status = self.statuses.get(entity).ok().flatten().map(|t| t.kind);
+        let who = owner.0;
+        let locked = self.locked();
         Some(LandView::new(
             &self.active.def,
             *id,
-            owner.0,
+            who,
             level.0,
             mortgaged.held(),
             status,
+            who.is_some_and(|o| locked.contains(&o)),
         ))
     }
 

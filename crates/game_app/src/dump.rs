@@ -407,6 +407,14 @@ fn format_players(view: &DumpView) -> Vec<String> {
 
 fn format_lands(view: &DumpView) -> Vec<String> {
     let def = view.active.as_ref().map(|a| &a.def);
+    // 谁被关着（P4②）。地块那一栏要说得出「业主在住院，所以这一趟不收租」—— 查「这个 0
+    // 是怎么来的」正是这个面板存在的理由。读的是 `players` 那一栏的同一个来源，
+    // 不在这里再查一次组件（那会出现第二种问法）
+    let locked: Vec<(u32, &str)> = view
+        .players
+        .iter()
+        .filter_map(|(_, pid, _, _, _, _, held, ..)| held.map(|d| (pid.0, d.place.label())))
+        .collect();
     let mut rows: Vec<(u32, String)> = view
         .plots
         .iter()
@@ -417,7 +425,7 @@ fn format_lands(view: &DumpView) -> Vec<String> {
             (
                 id.0,
                 format!(
-                    "L{:<2} {:<8} owner {:?} Lv{} {} {}",
+                    "L{:<2} {:<8} owner {:?} Lv{} {} {} {}",
                     id.0,
                     name,
                     owner.0.map(|p| p.0),
@@ -434,6 +442,15 @@ fn format_lands(view: &DumpView) -> Vec<String> {
                         t.kind.label(),
                         t.days_left
                     )),
+                    owner
+                        .0
+                        .and_then(|p| {
+                            locked
+                                .iter()
+                                .find(|(id, _)| *id == p.0)
+                                .map(|(_, label)| format!("业主在{label}·不收租"))
+                        })
+                        .unwrap_or_default(),
                 ),
             )
         })

@@ -982,7 +982,7 @@ pub fn own(app: &mut App, land: u32, owner: Option<u32>, level: u8, mortgaged: b
     let proceeds = if mortgaged {
         let w = app.world();
         let def = &w.resource::<ActiveBoard>().def;
-        let view = LandView::new(def, LandId(land), pid, level, true, None);
+        let view = LandView::new(def, LandId(land), pid, level, true, None, false);
         game_core::economy::mortgage_cashout(def, &view, w.resource::<GameRules>())
     } else {
         0

@@ -33,6 +33,16 @@ pub struct LandView {
     /// 限时状态（涨价 / 查封，P3c）。`None` = 没挂着。租金与加盖判定都读它，
     /// 所以它必须在快照里 —— 判定函数不去查世界，才能做到「报价与成交同一个数」。
     pub status: Option<LandStatus>,
+    /// 业主此刻**不在牌桌上**（P4② 收租权剥夺）。与 `mortgaged`、`status` 同一类事实：
+    /// 地还是他的，只是这一趟收不到钱。
+    ///
+    /// 为什么也在快照里而不是让 `Books::rent_of` 自己查一次组件：`calculate_rent` 是纯函数，
+    /// 报价（模态上那个数）与成交（真的扣钱）读的是同一个判定 —— 让「业主在不在」只出现在
+    /// 其中一侧，就会出现「模态写着 $500 而收据写着 $0」。
+    ///
+    /// **它只装 `Detention` 那一族**。P3d④c 的停留（`StaySentence`）不在这里：被停留按住的人
+    /// 还在场上，名下的地照收租，而卡面上没写「顺便收不到租」这一条（`tests/stay.rs` 钉着）。
+    pub owner_detained: bool,
 }
 
 impl LandView {
@@ -43,6 +53,7 @@ impl LandView {
         level: u8,
         mortgaged: bool,
         status: Option<LandStatus>,
+        owner_detained: bool,
     ) -> Self {
         Self {
             id,
@@ -51,6 +62,7 @@ impl LandView {
             level,
             mortgaged,
             status,
+            owner_detained,
         }
     }
 }
@@ -83,6 +95,11 @@ pub fn calculate_rent(def: &BoardDef, land: &LandView, all: &[LandView], rules: 
         return 0;
     };
     if land.mortgaged {
+        return 0;
+    }
+    // 业主被关着（P4②）：这一趟没人来收钱。与抵押、查封同一类短路 —— 「零」不是从某个数
+    // 乘出来的。注意它**不改变归属**：地还是他的，出狱之后立刻照收（也照样被人踩）。
+    if land.owner_detained {
         return 0;
     }
     // 查封：法院贴着条子，这一趟谁都不收钱。放在租金表之前短路，是因为「零」不是
@@ -444,11 +461,21 @@ mod tests {
             .iter()
             .map(|l| match rows.iter().find(|r| r.0 == l.id) {
                 Some((_, owner, level, mortgaged)) => {
-                    LandView::new(def, LandId(l.id), *owner, *level, *mortgaged, None)
+                    LandView::new(def, LandId(l.id), *owner, *level, *mortgaged, None, false)
                 }
-                None => LandView::new(def, LandId(l.id), None, 0, false, None),
+                None => LandView::new(def, LandId(l.id), None, 0, false, None, false),
             })
             .collect()
+    }
+
+    /// 在一份现成的快照上宣布「这块地的业主不在牌桌上」（P4②）。
+    /// 与 [`stamped`] 同一条理由：既有那二十来条表驱动用例没有一条关心收租权，
+    /// 而这一格恰恰是「三个去处共用一条判据」在钱上的落点，得单独能盖。
+    fn locked(mut all: Vec<LandView>, id: u32) -> Vec<LandView> {
+        if let Some(view) = all.iter_mut().find(|v| v.id.0 == id) {
+            view.owner_detained = true;
+        }
+        all
     }
 
     /// 在一份现成的快照上给某块地盖限时状态。
@@ -492,6 +519,35 @@ mod tests {
                 level - 1
             );
         }
+    }
+
+    /// 业主被关着（P4②）：受影响的是**收钱这一件事**，不是他名下的一切。
+    ///
+    /// 后半个断言才是这条用例存在的理由：如果「他在里面」顺手把地也从资产里摘掉，
+    /// 物价指数就会在有人进监狱的那一刻掉一截，而那是**下一回合每一笔租金的乘数** ——
+    /// 「谁被关着」就变成了替全场房租定价。P3d③ 的抵押是同一条理由（押着的地仍算资产、
+    /// 同时记一笔等额负债），那一半已有用例，这一半在这里钉住。
+    #[test]
+    fn a_locked_owner_collects_nothing_but_still_owns_everything() {
+        let def = board();
+        let r = rules();
+        let all = locked(world(&def, &[(0, p(0), 3, false)]), 0);
+        let land = at(&all, 0);
+
+        assert_eq!(
+            calculate_rent(&def, &land, &all, &r),
+            0,
+            "人在里面，这一趟没人来收钱"
+        );
+        assert_eq!(land.owner, p(0), "剥夺的是收租权，不是归属");
+        assert!(
+            property_value(&def, &all, PlayerId(0)) > 0,
+            "被关着不该把他的地从资产里摘掉"
+        );
+        assert!(
+            calc_max_loan(&def, &all, PlayerId(0), &r) > 0,
+            "被关着也不该把他的可贷额度清零"
+        );
     }
 
     #[test]

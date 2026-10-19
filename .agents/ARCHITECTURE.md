@@ -467,7 +467,7 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 ## 八、测试策略（迁移的主要收益）
 
 - `cargo test` 三个层次：
-  1. **纯函数单测**：`BoardDef::world_pos` / `destination` / `calculate_rent`（垄断 ×2、抵押 0、level 越界）/ 股价公式 clamp / `serve_jail_turn` —— 不需要 ECS。
+  1. **纯函数单测**：`BoardDef::world_pos` / `destination` / `calculate_rent`（垄断 ×2、抵押 0、业主被关 0、level 越界）/ 股价公式 clamp / `serve_jail_turn` —— 不需要 ECS。
   2. **App 级单测**：`App::new()` + `CoreGamePlugin` + `init_state::<TurnPhase>()`，`app.update()` 步进，断言 component/resource。等价于现在的 `test_board_index_sync.gd`、`test_jail_flow.gd`。
   3. **对局级集成**：2 玩家 × 12 格跑 N 回合，固定 `GameSeed`，断言"不 panic、现金流守恒、终局可达"。这是现在 GUT 做不到但最该做的事（`DEV_PLAN.md:504` 数值平衡需要它）。
 - GUT → Rust 的语义转换模板：`EventBus.xxx.connect(spy)` 类断言改为"测试里挂一个 `collect_messages_system`，把 `MessageReader<T>` 转存进 `Vec` resource 后断言"。`test_card_teleport_signal.gd`、`test_event_bus.gd` 这类"断言信号发过"的测试都走这个模式。
