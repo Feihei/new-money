@@ -1,12 +1,12 @@
 # AGENTS.md — 本仓库的工作约定
 
-《暴富》Godot → Bevy 0.20 重写。**动手前先读 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)**：分层红线、Bevy 0.20 的 API 事实与 31 个坑位、待修缺陷清单全在那里（它原名《MIGRATION.md》，移植线收口后按实际内容改名）。**排期只看 [`.agents/PLAN.md`](./.agents/PLAN.md)**。本文只写约定与指路，不重复那些内容。
+《暴富》Godot → Bevy 0.20 重写。**动手前先读 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)**：分层红线、Bevy 0.20 的 API 事实与 32 个坑位、待修缺陷清单全在那里（它原名《MIGRATION.md》，移植线收口后按实际内容改名）。**排期只看 [`.agents/PLAN.md`](./.agents/PLAN.md)**。本文只写约定与指路，不重复那些内容。
 
 ## 文档地图
 
 | 位置 | 是什么 | 什么时候读 |
 |---|---|---|
-| [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md) | 架构与技术事实（活文档，**唯一被源码注释引用的一份**）。§三=缺陷清单与未结项，§四=目标架构与分层红线（§4.2 道路不建实体、§4.6 core 拥有位置），§六=0.20 依赖矩阵 + §6.1 坑 1–31，§七=表现层要点与待做，§九=存档方案。§五 与 §十 已归档（原位留指针） | 任何碰 Bevy API、分层、结算顺序的改动之前 |
+| [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md) | 架构与技术事实（活文档，**唯一被源码注释引用的一份**）。§三=缺陷清单与未结项，§四=目标架构与分层红线（§4.2 道路不建实体、§4.6 core 拥有位置），§六=0.20 依赖矩阵 + §6.1 坑 1–32（含 32：dev profile 的调试信息与 jobs 上限，本机死机的根因），§七=表现层要点与待做，§九=存档方案。§五 与 §十 已归档（原位留指针） | 任何碰 Bevy API、分层、结算顺序的改动之前 |
 | [`.agents/PLAN.md`](./.agents/PLAN.md) | **玩法补齐计划**（活文档，唯一的排期来源）。基线是大宇《大富翁4》，不是 Godot 版。§一=与 4 代的口径偏差（哪些东西其实不存在），§三=缺口对照表，§四=**T1 + P1–P17 实现顺序**与依赖，§五=点券格/小游戏格/新闻中心格设计，§六=AI/存档/音频/发行的安插，§七=待拍板（含已拍板项） | 碰「要不要加某个玩法/格子」；动手做任何阶段之前 |
 | [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) | **冻结的移植历史**，不再维护：Godot→Bevy 概念映射表（原 §五/§5.1）+ B0–B5b 逐阶段产出与两节验收记录（原 §十/§10.1/§10.2） | 只在这两类情况下去查：「Godot 那个文件对应 Rust 哪个模块」、「当初验收时看到了什么」 |
 | [`.agents/ADR-001-board-topology.md`](./.agents/ADR-001-board-topology.md) | 棋盘拓扑决策，状态 **Accepted**（权威，不要重开讨论） | 碰 board / land / 移动逻辑 |
@@ -27,6 +27,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 - **不要用 `... | tail` 之类管道判断成败**，`check.sh` 已经逐步取退出码，照它做。
+- **别给 cargo 加 `-j`，也别把根 `Cargo.toml` 里 `[profile.dev]` 的两个 `debug` 键调回去**：这台机器 12 核 / 32 GB，`.cargo/config.toml` 把并行度钉在 6，而 `cargo test -p game_core` 是「1 个库 + 10 条集成测试二进制」。实测（数字见 §6.1 坑 32）：默认 12 路时工具链私有内存 18.2 GB，把依赖调试信息加回去之后 3 路就 29.7 GB 物理内存 —— 连续两次整机死机就是这么来的。清缓存也别用裸 `cargo clean`（那会把全部依赖重编 ~21 分钟），要清就 `cargo clean -p game_core`。
 - 核对画面：`NM_SHOT=<路径>` 让 `game_app` 截图后自行退出，`NM_SHOT_AT=<秒>` 推迟到对局跑起来之后再截（按墙钟触发，原因见 `.agents/ARCHITECTURE.md` §六 的坑 5/10）。`NM_CAM_SIZE=0` 整盘取景、默认 8 跟随紧取景。别用 `timeout N cargo run` 做冒烟测试。
 - B5 之后 `NM_AUTOROLL=1` 不再是「没有按钮的替代品」，而是**跑完一局的手段**（人点几百次不现实）：配 `NM_AUTOGAP=0` 提速、`NM_SEED` 复现。浮层与模态的开发入口是 `NM_ATM=1`/`NM_STOCK=1`/`NM_DECISION=bank`，日历入口是 `NM_DAY=<tick>`（P2④ 加的：哪天休市由骰子决定，截图控制不了就得给一条不靠运气的路）。要看世界状态本身（回合/阶段/落格分派/待决/每人两套账/物价指数与修正登记处），用 `NM_DUMP=1` 开只读面板 —— 查「钱为什么是这个数」比猜 `warn!` 快。
 - **真人鼠标冒烟要先激活游戏窗口**（`SetForegroundWindow` + `GetClientRect`/`ClientToScreen` 换算客户区坐标）：窗口被 IDE 压住时点击全落到别人那儿，而 `NM_SHOT` 照常截出游戏画面，看着就像「UI 是死的」（§6.1 坑 27）。**同一条坑的另一半：点击脚本的计时从「它找到窗口」起算，`NM_SHOT_AT` 从「游戏启动」起算** —— 启动前多 `sleep` 几秒，点击就整体落到截图之后，看着同样是「按钮是死的」。先确认点击时刻早于截图时刻。

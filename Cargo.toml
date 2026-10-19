@@ -17,6 +17,12 @@ rand_chacha = "0.9"
 
 [profile.dev]
 opt-level = 0
+# 只留行号表，不留完整调试信息：panic 回溯仍然指得到文件行，而 LLVM 不必再生成
+# 整套类型信息（本地实测见 `.agents/ARCHITECTURE.md` §六 坑 32）
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+# 依赖（bevy 那一整棵树）彻底不带调试信息。这条比上面一条更值钱：`cargo test` 要链
+# 十条集成测试二进制，每条都把依赖的调试信息再消化一遍 —— 少它一个 job 就要多要几 GB
+debug = false

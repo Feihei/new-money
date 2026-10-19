@@ -339,6 +339,10 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 
 31. **逐帧着色 system 与面板重建同帧 → `Commands` 打在已 despawn 的实体上，每次重建刷一叠 `Entity despawned` WARN**（P2④ 拍休市截图时第一次注意到，`NM_STOCK=1` + 日历跨进周末必现，一次 10 条 = 证券浮层的 10 颗买卖按钮）。成因：`refresh_top_bar` 的按钮查询是「全部带 `UiAction` 的实体」（不只顶栏那五颗），它对判据变化的反应是排队 `insert(Disabled)` / `remove::<Disabled>()`；同一帧里 `sync_stock_panel` 因为签名变了把上一批按钮整块 `despawn`。命令是帧末才 flush 的，于是打在空实体上。**不是 P2 引入的**：任何一次面板重建都会，与日历无关（判据：把 `Disabled` 的插入条件从"日"换成"阶段"同样触发）。目前只是日志噪音，无行为后果（新面板 spawn 时按 `ButtonSpec::disabled(...)` 自带正确颜色）。**待修**：把 `refresh_top_bar` 的查询限制到顶栏那五颗（给它们一个 marker），浮层/模态的着色交给各自的构造函数与签名 —— 那本来就是 B5b 定的分工。修法要动 `spawn_top_bar` 与查询两处，单独一次改，别夹在玩法阶段里。
 
+32. **dev profile 不管调试信息 + 并行度放满 = 整机死机**（P3a 期间连续两次，都是 `cargo test` 编译到一半机器冻住，只能硬重启）。两条成因叠在一起：① 根 `Cargo.toml` 里 `[profile.dev.package."*"] opt-level = 3` 让**每个依赖 crate 以 O3 编译、又默认带完整调试信息**；② `cargo test -p game_core` 不是一个二进制，是 1 个库 + **10 条集成测试二进制**，每条都要把依赖那棵树的调试信息再消化一遍。实测（12 核 / 32 GB，测法是 [`tools/mem_probe.ps1`](../tools/mem_probe.ps1) 每 300 ms 采一次 `FreePhysicalMemory` 与 rustc/link 的 `PrivateMemorySize64`）：旧 profile 只开 **3 路**就吃掉 29.7 GB 物理内存、工具链私有内存峰值 14.6 GB（≈ 4.9 GB/job）—— 按默认 12 路外推就是 ~58 GB 提交内存，页面文件风暴，于是死机。旁证：`cargo clean -p game_core` 当时报 **11892 个文件 / 20.1 GiB**，全是本项目自己根本没在用的调试信息。
+    修法两条，都在**根 `Cargo.toml` 的 `[profile.dev]`**：工作区 `debug = "line-tables-only"`、依赖 `debug = false`。改完 `cargo clean -p game_core` 报的产物量从 20.1 GiB 降到 **1.4 GiB / 2040 个文件**，同一件事的私有内存峰值从 14.6 GB（3 路）降到 7.0 GB（4 路）。断言失败打印的 panic 位置本来就不依赖调试信息，仍然精确到文件行；丢的是「用调试器单步进 bevy」——本项目从不这么查问题（查画面用 `NM_SHOT`、查状态用 `NM_DUMP`）。
+    **但光换 profile 不够**：默认 `-j 12` 复测仍有 18.2 GB 工具链私有内存、24.6 GB 物理峰值，旁边开着 IDE 就悬。所以再加 `.cargo/config.toml` 的 `[build] jobs = 6`，复测降到 10.0 GB，而那一次重建的耗时没变（25 s → 26 s）：关键路径是「先编完库、再链 10 条二进制」，链接本身很便宜，多开并行本来就几乎没有收益。判据：**这台机器上别把 jobs 放满**，也别为了"快一点"回去调那两个 `debug` 键 —— 改 profile 会让**全部依赖重编一次**（实测 1285 s ≈ 21 分钟，一次性代价）。同理别顺手 `cargo clean`（全清），要清就 `cargo clean -p game_core`。改完之后 `./check.sh` 五项全绿用 242 s（那一次还含 clippy 按新 profile 把依赖重校一遍的代价）。
+
 
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
@@ -488,7 +492,7 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 > [`docs/archive/migration-b0-b5b.md`](../docs/archive/migration-b0-b5b.md)。移植线到此结束，「粗估 N 天」那一列随归档一起停更。
 >
 > **排期此后只有一份**：[`PLAN.md`](./PLAN.md)。移植线留下的 B6/B7/B8 三行已并成 PLAN 的 P14–P17（见 PLAN §六）。
-> 本文档里仍然活着的只有：§三 缺陷清单的未结项（#8 后半条 → PLAN P1、#11 → P15）、§六 的依赖矩阵与 31 个坑（#31 待修，见那条的最后一段）、
+> 本文档里仍然活着的只有：§三 缺陷清单的未结项（#8 后半条 → PLAN P1、#11 → P15）、§六 的依赖矩阵与 32 个坑（#31 待修，见那条的最后一段）、
 > §七 的表现层待做（字体子集化、glb 处置）、§九 的存档方案（→ P15）。
 
 ---

@@ -59,7 +59,7 @@ docs/archive/       冻结的历史（B0–B5b 移植记录），不再维护
 
 | 文档 | 内容 |
 |---|---|
-| [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md) | 架构与技术事实（原名《MIGRATION.md》）：分层红线与 crate 布局、Bevy 0.20 依赖矩阵与 §6.1 的 31 个坑、缺陷清单、表现层待做、存档方案。**唯一被源码注释引用的一份** |
+| [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md) | 架构与技术事实（原名《MIGRATION.md》）：分层红线与 crate 布局、Bevy 0.20 依赖矩阵与 §6.1 的 32 个坑、缺陷清单、表现层待做、存档方案。**唯一被源码注释引用的一份** |
 | [`.agents/PLAN.md`](./.agents/PLAN.md) | **玩法补齐计划**（唯一的排期来源）：以大宇《大富翁4》为基线的缺口对照、T1 + P1–P17 实现顺序与依赖、点券格/小游戏格/新闻中心格设计、待拍板清单 |
 | [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) | 冻结的移植历史，不再维护：Godot→Bevy 概念映射表 + B0–B5b 逐阶段产出与验收记录 |
 | [`.agents/ADR-001-board-topology.md`](./.agents/ADR-001-board-topology.md) | 棋盘拓扑决策（已确认）：网格路网 + 单向主环 + 事件死胡同分支 + 土地-道路绑定 |
