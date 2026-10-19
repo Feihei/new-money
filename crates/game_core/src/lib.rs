@@ -56,7 +56,9 @@ pub mod prelude {
     pub use crate::data::{
         BOARD_PATH, CHANCE_PATH, DataHandles, FATE_PATH, ITEMS_PATH, STOCKS_PATH,
     };
-    pub use crate::deck::{CardId, Deck, Shelf, apply_card, card_of, settle_card_landing};
+    pub use crate::deck::{
+        CardId, Deck, DeckOrder, Shelf, apply_card, card_of, order_of, settle_card_landing,
+    };
     pub use crate::economy::LandView;
     pub use crate::hand::{CardAim, Hand, PlayWindow, deal_to, play_card_system};
     pub use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};

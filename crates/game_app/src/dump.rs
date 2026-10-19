@@ -17,8 +17,8 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind, Corrections,
-    CouponBoxes, GameRules, GameSeed, GameSession, Hand, Insulation, JailSentence, LandId,
-    LandStatus, Landing, MarketClock, Mortgaged, Owner, Paused, PendingDecision, PlayerId,
+    CouponBoxes, Deck, DeckOrder, GameRules, GameSeed, GameSession, Hand, Insulation, JailSentence,
+    LandId, LandStatus, Landing, MarketClock, Mortgaged, Owner, Paused, PendingDecision, PlayerId,
     PlayerName, Points, Shelf, Timed, TurnOrder, TurnPhase, Wallet,
 };
 
@@ -144,6 +144,9 @@ pub struct DumpView<'w, 's> {
     shelf: Shelf<'w>,
     players: Query<'w, 's, PlayerRow>,
     plots: Query<'w, 's, PlotRow>,
+    /// 两副牌各发到哪了。「为什么抽到这张」在定序那副牌上是能从行序算出来的，
+    /// 前提是这个面板说得出它发到第几张
+    decks: Query<'w, 's, &'static Deck>,
 }
 
 fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
@@ -161,6 +164,7 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             row(ui, "落格", format_landing(&view));
             row(ui, "待决", format_pending(&view));
             row(ui, "资格", format_access(&view));
+            row(ui, "牌堆", format_decks(&view));
             ui.separator();
             for line in format_corrections(&view) {
                 ui.monospace(line);
@@ -259,6 +263,43 @@ fn format_corrections(view: &DumpView) -> Vec<String> {
         )
     }));
     lines
+}
+
+/// 牌堆那一行。定序与洗牌在盘面上是两件事：前者「下一张是谁」能从数据行序算出来，
+/// 后者只能看这一局抽到了什么。少了这个位，「命运怎么每次都发同一张」就只能回去读代码。
+fn format_decks(view: &DumpView) -> String {
+    let mut rows: Vec<(u8, String)> = view
+        .decks
+        .iter()
+        .map(|d| {
+            (
+                match d.kind {
+                    CardKind::Chance => 0,
+                    CardKind::Fate => 1,
+                    CardKind::Item => 2,
+                },
+                format!(
+                    "{:?}{} {}/{}",
+                    d.kind,
+                    match d.order {
+                        DeckOrder::Fixed => " 定序",
+                        DeckOrder::Shuffled => " 洗牌",
+                    },
+                    d.remaining(),
+                    d.total(),
+                ),
+            )
+        })
+        .collect();
+    // 查询顺序是生成顺序，截图与断言不该依赖它（与玩家、地块那两栏同一条）
+    rows.sort();
+    if rows.is_empty() {
+        return "世界未装配".to_string();
+    }
+    rows.into_iter()
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn format_players(view: &DumpView) -> Vec<String> {

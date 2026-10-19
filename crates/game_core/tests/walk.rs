@@ -13,7 +13,7 @@ use bevy::app::App;
 use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::prelude::{
-    GameRules, GameSeed, GameSetup, Rng, TileIndex, TokenPosition, TurnPhase, WalkClock,
+    GameRules, GameSeed, GameSetup, Rng, TileIndex, TileKind, TokenPosition, TurnPhase, WalkClock,
 };
 
 /// 找一颗「第一掷恰好是 face」的种子，让测试不依赖对默认种子点数的记忆。
@@ -176,6 +176,10 @@ fn paced_walking_steps_once_per_interval() {
         seed_with_first_roll(3),
     );
     let p0 = boot_to_wait_roll(&mut app);
+    // 3 号格是命运格。这一条测的是**迈步的节奏**，到站之后抽到什么不该掺进来 ——
+    // 而定序之后命运第一张恰好是「直接入狱」（人会被搬走），所以就地把它换成一格什么都不做的
+    // 彩票格（与 `tests/coupon.rs` 的 `an_unimplemented_tile_still_closes_the_turn` 同一手法）
+    retile(&mut app, 3, TileKind::Lottery);
 
     roll(&mut app, p0);
     app.update(); // 掷骰帧：定路径、清零时钟

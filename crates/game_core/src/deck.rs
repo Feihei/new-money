@@ -3,9 +3,11 @@
 //! 卡定义是静态资产（`Assets<CardSet>`），牌堆实体只持 **下标**（`CardId`），
 //! 于是「洗牌」是排下标，不复制卡面数据，也不会出现两份卡面真相。
 //!
-//! 与 Godot 的实质差别只有一处：洗牌用全局 `_rng.randomize()`（`card_deck.gd:53`）
-//! 不可复现（缺陷 #6），这里改用 `Rng` 的**牌堆子流** —— 同种子复现同一副顺序，
-//! 而抽卡不会挪动骰子流（见 `rng.rs` 的分流理由）。
+//! 与 Godot 有两处实质差别：
+//! - 洗牌用全局 `_rng.randomize()`（`card_deck.gd:53`）不可复现（缺陷 #6），这里改用 `Rng`
+//!   的**牌堆子流** —— 同种子复现同一副顺序，而抽卡不会挪动骰子流（见 `rng.rs` 的分流理由）。
+//! - 命运那副**不再洗**：PLAN §三 把 4 代的命运记成「固定顺序循环」，于是发法成了牌堆自己的
+//!   一个位（[`DeckOrder`]），而不是散在抽卡处的一个 `if`。机会照旧随机。
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -31,25 +33,53 @@ use crate::settle::Books;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CardId(pub u32);
 
+/// 一副牌怎么发。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeckOrder {
+    /// 开局洗一次，抽穿再洗（机会格 —— 4 代那里也是随机的）。
+    Shuffled,
+    /// 按**数据顺序**循环发，抽穿回到第一张（命运格，PLAN §三「固定顺序循环」）。
+    ///
+    /// 这一支不读随机流：顺序完全由 `fate_cards.json` 的行序决定。所以「连踩四次命运能
+    /// 数出顺序」这条验收与种子无关，而存档也只要存「发到第几张」。
+    Fixed,
+}
+
+/// 每种牌怎么发。**穷尽表，不许出现 `_`** —— 与 [`crate::landing::domain_of`]、
+/// [`crate::charge::scales_with_price`] 同一条纪律：新增一副池必须当场决定它的发法。
+pub const fn order_of(kind: CardKind) -> DeckOrder {
+    match kind {
+        CardKind::Chance => DeckOrder::Shuffled,
+        CardKind::Fate => DeckOrder::Fixed,
+        // 道具卡没有牌堆（它的来源是货架，`settle_card_landing` 对 `Item` 直接 return）。
+        // 这一格写什么都行，写在这里是为了「哪天给道具卡开一格」时当场暴露这个决定还没做。
+        CardKind::Item => DeckOrder::Shuffled,
+    }
+}
+
 /// 一副可循环抽的牌。存在即「这一堆牌」，机会 / 命运各一个实体。
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct Deck {
     pub kind: CardKind,
+    /// 发法。由 [`order_of`] 在装配时定，之后不变。
+    pub order: DeckOrder,
     /// 还能抽的牌，`last` 是堆顶（与 `card_deck.gd:63` 的 `pop_back()` 一致）。
     pub draw_pile: Vec<CardId>,
-    /// 已抽出的牌。抽穿后整副重洗（`card_deck.gd:59-62` 的自动洗牌）。
+    /// 已抽出的牌。抽穿后整副重发（`card_deck.gd:59-62` 的自动洗牌）。
     pub discard: Vec<CardId>,
 }
 
 impl Deck {
-    /// 按 `rng` 洗出一副完整牌堆（开局装配用）。
-    pub fn shuffled(kind: CardKind, cards: &CardSet, rng: &mut Rng) -> Self {
+    /// 按 `kind` 的发法装配一副满牌（开局用）。
+    pub fn dealt(kind: CardKind, cards: &CardSet, rng: &mut Rng) -> Self {
+        let n = cards.0.len();
         let mut deck = Self {
             kind,
-            draw_pile: (0..cards.0.len() as u32).map(CardId).collect(),
+            order: order_of(kind),
+            draw_pile: Vec::new(),
             discard: Vec::new(),
         };
-        deck.shuffle(rng);
+        deck.deal(n, rng);
         deck
     }
 
@@ -61,16 +91,30 @@ impl Deck {
         self.draw_pile.len() + self.discard.len()
     }
 
-    /// 整副重洗：恢复成完整的 n 张再打乱（`card_deck.gd:48-54` 的 `shuffle()` 就是这个，
-    /// 不是「弃牌堆倒回去」—— 弃牌堆只是记账，供存档与回放看「这局抽过哪些牌」。
-    pub fn shuffle(&mut self, rng: &mut Rng) {
-        let n = self.total();
-        self.draw_pile = (0..n as u32).map(CardId).collect();
+    /// 发满 `n` 张。开局装配与抽穿重发走**同一条**，所以「循环」这件事只有一处实现。
+    ///
+    /// `Fixed` 那支按索引**倒序**入堆：`draw_pile` 从堆尾弹出，倒着放才正着发。
+    fn deal(&mut self, n: usize, rng: &mut Rng) {
         self.discard.clear();
-        fisher_yates(&mut self.draw_pile, rng);
+        self.draw_pile = match self.order {
+            DeckOrder::Fixed => (0..n as u32).rev().map(CardId).collect(),
+            DeckOrder::Shuffled => {
+                let mut pile: Vec<CardId> = (0..n as u32).map(CardId).collect();
+                fisher_yates(&mut pile, rng);
+                pile
+            }
+        };
     }
 
-    /// 抽一张。牌堆空了先自动重洗（Godot 的 `test_deck_auto_reshuffle_when_empty`）。
+    /// 整副重洗：恢复成完整的 n 张再打乱（`card_deck.gd:48-54` 的 `shuffle()` 就是这个，
+    /// 不是「弃牌堆倒回去」—— 弃牌堆只是记账，供存档与回放看「这局抽过哪些牌」。
+    /// 定序那副牌没有「重洗」这回事，走到这里会直接按顺序重发。
+    pub fn shuffle(&mut self, rng: &mut Rng) {
+        let n = self.total();
+        self.deal(n, rng);
+    }
+
+    /// 抽一张。牌堆空了先自动重发（Godot 的 `test_deck_auto_reshuffle_when_empty`）。
     /// 空牌堆（一副都没有）返回 `None` —— 数据错误由 `CardSet::validate` 拦在加载期。
     pub fn draw(&mut self, rng: &mut Rng) -> Option<CardId> {
         if self.draw_pile.is_empty() {
@@ -435,7 +479,7 @@ mod tests {
     fn shuffled_deck_holds_every_card_exactly_once() {
         let cards = set(10, CardKind::Chance);
         let mut rng = Rng::new(3);
-        let deck = Deck::shuffled(CardKind::Chance, &cards, &mut rng);
+        let deck = Deck::dealt(CardKind::Chance, &cards, &mut rng);
         assert_eq!(deck.remaining(), 10, "总张数不能因洗牌增减");
         let mut sorted = deck.draw_pile.clone();
         sorted.sort();
@@ -448,17 +492,50 @@ mod tests {
 
     #[test]
     fn shuffle_is_seeded_and_seed_sensitive() {
-        let cards = set(7, CardKind::Fate);
+        let cards = set(7, CardKind::Chance);
         let order =
-            |seed: u64| Deck::shuffled(CardKind::Fate, &cards, &mut Rng::new(seed)).draw_pile;
+            |seed: u64| Deck::dealt(CardKind::Chance, &cards, &mut Rng::new(seed)).draw_pile;
         assert_eq!(order(21), order(21), "同种子必须复现同一副顺序");
         assert_ne!(order(21), order(22), "换种子却同一副顺序说明洗牌没读种子");
+    }
+
+    /// 命运那副按**数据顺序**发，而且抽穿回到第一张（PLAN §三「固定顺序循环」）。
+    /// 「换种子顺序不变」这一半是重点：定序意味着它**不该**读随机流，
+    /// 于是存档只要存「发到第几张」，不必存一副洗好的牌。
+    #[test]
+    fn the_fate_deck_deals_in_data_order_and_wraps() {
+        let cards = set(3, CardKind::Fate);
+        let mut deck = Deck::dealt(CardKind::Fate, &cards, &mut Rng::new(77));
+        assert_eq!(deck.order, DeckOrder::Fixed, "命运的发法被改掉了");
+        let drawn: Vec<CardId> = (0..7)
+            .map(|_| deck.draw(&mut Rng::new(1)).expect("循环发牌不该抽空"))
+            .collect();
+        assert_eq!(
+            drawn,
+            vec![
+                CardId(0),
+                CardId(1),
+                CardId(2),
+                CardId(0),
+                CardId(1),
+                CardId(2),
+                CardId(0)
+            ],
+            "第三张之后该回到第一张"
+        );
+
+        let other_seed = Deck::dealt(CardKind::Fate, &cards, &mut Rng::new(5)).draw_pile;
+        assert_eq!(
+            other_seed,
+            Deck::dealt(CardKind::Fate, &cards, &mut Rng::new(9)).draw_pile,
+            "定序的牌堆读了种子，那 32 条的顺序就不是数据说了算的了"
+        );
     }
 
     #[test]
     fn drawing_decrements_and_never_repeats_within_a_pass() {
         let cards = set(5, CardKind::Chance);
-        let mut deck = Deck::shuffled(CardKind::Chance, &cards, &mut Rng::new(9));
+        let mut deck = Deck::dealt(CardKind::Chance, &cards, &mut Rng::new(9));
         assert_eq!(deck.remaining(), 5);
         let mut drawn = Vec::new();
         for _ in 0..5 {
@@ -476,7 +553,7 @@ mod tests {
     fn empty_pile_reshuffles_and_keeps_going() {
         // Godot 的 test_deck_auto_reshuffle_when_empty：抽穿后下一张照样有
         let cards = set(3, CardKind::Chance);
-        let mut deck = Deck::shuffled(CardKind::Chance, &cards, &mut Rng::new(4));
+        let mut deck = Deck::dealt(CardKind::Chance, &cards, &mut Rng::new(4));
         let mut rng = Rng::new(4);
         let mut second_pass = Vec::new();
         for i in 0..6 {
@@ -496,6 +573,7 @@ mod tests {
         let cards = CardSet(Vec::new());
         let mut deck = Deck {
             kind: CardKind::Chance,
+            order: DeckOrder::Shuffled,
             draw_pile: Vec::new(),
             discard: Vec::new(),
         };

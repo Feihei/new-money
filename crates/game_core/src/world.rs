@@ -120,8 +120,8 @@ pub fn begin_game_system(
     let players = player::spawn_players(&mut commands, &cfg.setup, &cfg.rules);
     spawn_stocks(&mut commands, &stocks);
     for deck in [
-        Deck::shuffled(CardKind::Chance, chance, &mut rng),
-        Deck::shuffled(CardKind::Fate, fate, &mut rng),
+        Deck::dealt(CardKind::Chance, chance, &mut rng),
+        Deck::dealt(CardKind::Fate, fate, &mut rng),
     ] {
         commands.spawn((deck, Gameplay));
     }
