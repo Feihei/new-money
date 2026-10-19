@@ -11,8 +11,8 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, Bankrupt, CardAim, CardDef, CardGained, CardId, CardKind, CardTarget, GameRules,
-    Hand, Insulation, LandId, Owner, Paused, PendingDecision, PlayerId, PlayerName, Shelf,
+    ActiveBoard, Bankrupt, Books, CardAim, CardDef, CardGained, CardId, CardKind, CardTarget,
+    GameRules, Hand, Insulation, LandId, Paused, PendingDecision, PlayerId, PlayerName, Shelf,
     TurnOrder, TurnPhase, deal_to,
 };
 
@@ -46,14 +46,16 @@ pub(crate) struct HandStamp(pub String);
 
 /// 样例卡。按 id 找而不是按数组位置：改数据顺序不该让这个旋钮发出别的卡。
 ///
-/// 四种形状各一张：给自己（免罪）、给对手（陷害）、给一块地（涨价）、给一条街（查封）。
-/// 少一种，那个形状的按钮排就永远拍不到 —— 而「拍不到」在验收里读起来和「没做」一样。
-const SAMPLE_CARDS: [&str; 5] = [
+/// 每种出牌形状各一张：给自己（免罪）、存着待用（免费）、给对手（陷害）、给一条街
+/// （涨价 / 查封）、给一块无主地（购地）。少一种，那个形状的按钮排就永远拍不到 ——
+/// 而「拍不到」在验收里读起来和「没做」一样。
+const SAMPLE_CARDS: [&str; 6] = [
     "item_frame",
     "item_insulate",
     "item_hike",
     "item_seal",
     "item_free",
+    "item_grab",
 ];
 
 /// 开发用：给当前回合玩家发 [`SAMPLE_CARDS`] —— 一张要选对手、一张给自己，两种形状都要拍到。
@@ -99,7 +101,11 @@ pub(crate) fn dev_deal_sample(
     *dealt = true;
 }
 
-/// 「一张卡在该长什么样子」要读的那几样：货架、手牌、护身、别人还在不在、哪些地有主。
+/// 「一张卡在该长什么样子」要读的那几样：货架、手牌、护身、别人还在不在、地块表（走账本）。
+///
+/// 地块那一读**刻意不查组件**：`Books` 里的地块查询带着 `&mut Owner`，与面板上另开一条
+/// `Query<&Owner>` 在同一条 system 里就是访问冲突（Bevy 会在运行时撞车）。少一条查询的
+/// 另一个好处是归属只有一份真相 —— 涨价卡的候选排与购地卡的候选排都从 `books.views()` 数出来。
 #[derive(SystemParam)]
 pub(crate) struct HandView<'w, 's> {
     open: Res<'w, HandPanelOpen>,
@@ -113,7 +119,12 @@ pub(crate) struct HandView<'w, 's> {
     board: Option<Res<'w, ActiveBoard>>,
     hands: Query<'w, 's, &'static Hand, With<PlayerId>>,
     shields: Query<'w, 's, &'static Insulation>,
-    plots: Query<'w, 's, (&'static LandId, &'static Owner)>,
+    /// 地块表 + 「这块无主地买得下来吗」的那句判据（[`Books::buy_price`]）。
+    /// 按钮上的价不在这里另算：修正登记处（小福神买地免费那一类）与物价指数只住在账本
+    /// 那一侧，抄一份就迟早分叉成「按钮写着 1,200、实际扣 2,400」。
+    /// 带 `Books` 的 system 都躲在 `UiSet::Live` 那道 `resource_exists::<ActiveBoard>`
+    /// 门后面（同 `dialog::sync_modal`）。
+    books: Books<'w, 's>,
     faces: Query<
         'w,
         's,
@@ -137,8 +148,8 @@ pub(crate) struct PlayButton {
     pub blocked: Option<&'static str>,
 }
 
-/// 地块类卡的一颗候选按钮。`label` 由 [`sync_hand_panel`] 拼好（「谁的 + 地名」要读名字与
-/// 归属，那两样只在那里有），`play_buttons` 只管形状不管世界。
+/// 地块类卡的一颗候选按钮。`label` 由 [`sync_hand_panel`] 拼好（「谁的 + 地名」与「地名 +
+/// 实付价」要读名字、归属与账本，那几样只在那里有），`play_buttons` 只管形状不管世界。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LandPick {
     pub label: String,
@@ -146,7 +157,8 @@ pub(crate) struct LandPick {
 }
 
 /// 这张卡该长出哪几颗按钮。`opponents` 是「还活着的别人」（不含出牌人自己），
-/// `lands` 是「此刻真有人持有的地块」（无主地不在里面 —— 规则层也不认，同一句判据）。
+/// `lands` 是「此刻真有人持有的地块」（无主地不在里面 —— 规则层也不认，同一句判据），
+/// `parcels` 是「此刻**买得下来**的无主地」（买不起的不在里面，同一句判据的另一半）。
 ///
 /// 写成对 `CardTarget` 的穷尽匹配、不留 `_`：新增一种目标时必须当场决定它长什么样，
 /// 而不是等截图时才发现有颗哑弹。
@@ -154,6 +166,7 @@ pub(crate) fn play_buttons(
     def: &CardDef,
     opponents: &[(Entity, String)],
     lands: &[LandPick],
+    parcels: &[LandPick],
 ) -> Vec<PlayButton> {
     match def.target {
         CardTarget::SelfOnly => vec![PlayButton {
@@ -191,6 +204,22 @@ pub(crate) fn play_buttons(
                 blocked: None,
             })
             .collect(),
+        // 这句说的是「买得起的无主地」而不是「没有无主地」：候选排是账本筛出来的，
+        // 面板只读得到「筛完是空」，读不到空在哪一头。反过来写就是一句假话
+        // （地全有主时同样「没有买得起的无主地」，那句话倒是永远成立）
+        CardTarget::UnownedLand if parcels.is_empty() => vec![PlayButton {
+            text: "用".into(),
+            aim: None,
+            blocked: Some("没有买得起的无主地"),
+        }],
+        CardTarget::UnownedLand => parcels
+            .iter()
+            .map(|pick| PlayButton {
+                text: format!("→ {}", pick.label),
+                aim: Some(CardAim::Land(pick.land)),
+                blocked: None,
+            })
+            .collect(),
     }
 }
 
@@ -200,6 +229,7 @@ fn aim_text(def: &CardDef) -> &'static str {
         CardTarget::SelfOnly => "对自己",
         CardTarget::Player => "对一名对手",
         CardTarget::Land => "对一块地",
+        CardTarget::UnownedLand => "对一块无主地",
     }
 }
 
@@ -239,36 +269,57 @@ pub(crate) fn sync_hand_panel(
         .collect();
     opponents.sort_by(|a, b| a.1.cmp(&b.1));
 
-    // 地块类卡的候选 = 此刻真有人持有的那些地（无主地不进列表，规则层也不认它 ——
-    // 同一句判据两处用，见 `game_core::hand::aim_is_legal`）。
+    // 地块类卡的候选 = 地块表里两类各一排：涨价/查封数「此刻真有人持有的地」，购地数
+    // 「此刻买得下来的无主地」。两排都从账本数出来（`Books::views()` / `Books::buy_price`），
+    // 而不是面板自己查组件或自己乘物价 —— 与规则层同一句判据，所以「按钮亮着却被拒」
+    // 与「按钮上的价不是扣掉的价」都不会发生。
     // label 里带上业主，而且自己的地写「我的」：涨价是往自己街上加钱、查封是往别人
     // 街上贴条子，这两件事按错一个方向就是完全相反的意图，玩家一眼就得看出来。
     let mut lands: Vec<LandPick> = Vec::new();
+    let mut parcels: Vec<LandPick> = Vec::new();
     let mine = player
         .and_then(|p| view.faces.get(p).ok())
         .map(|(_, pid, _, _)| *pid);
     if let Some(board) = view.board.as_deref() {
-        for (id, owner) in view.plots.iter() {
-            let Some(owner) = owner.0 else { continue };
-            let Some(def) = board.def.land(id.0) else {
+        for plot in view.books.views() {
+            let Some(def) = board.def.land(plot.id.0) else {
                 continue;
             };
-            let who = view
-                .faces
-                .iter()
-                .find(|(_, pid, _, _)| **pid == owner)
-                .map(|(_, _, name, _)| name.0.clone());
-            // 业主查不到 = 数据里的归属指向一个不在场的人，宁可不列也不编一个名字
-            let Some(who) = who else { continue };
-            let label = if mine == Some(owner) {
-                format!("我的{}", def.name)
-            } else {
-                format!("{who}的{}", def.name)
-            };
-            lands.push(LandPick { label, land: *id });
+            match plot.owner {
+                Some(owner) => {
+                    let who = view
+                        .faces
+                        .iter()
+                        .find(|(_, pid, _, _)| **pid == owner)
+                        .map(|(_, _, name, _)| name.0.clone());
+                    // 业主查不到 = 数据里的归属指向一个不在场的人，宁可不列也不编一个名字
+                    let Some(who) = who else { continue };
+                    let label = if mine == Some(owner) {
+                        format!("我的{}", def.name)
+                    } else {
+                        format!("{who}的{}", def.name)
+                    };
+                    lands.push(LandPick {
+                        label,
+                        land: plot.id,
+                    });
+                }
+                // 无主地那颗按钮要写实付价：玩家按下去之前唯一需要判断的就是这个数，
+                // 而物价 2 倍时「南京路」三个字底下藏着两个不同的价
+                None => {
+                    let Some(price) = player.and_then(|p| view.books.buy_price(p, plot.id)) else {
+                        continue;
+                    };
+                    parcels.push(LandPick {
+                        label: format!("{} ${price}", def.name),
+                        land: plot.id,
+                    });
+                }
+            }
         }
     }
     lands.sort_by(|a, b| a.label.cmp(&b.label));
+    parcels.sort_by(|a, b| a.label.cmp(&b.label));
 
     let hand: Vec<CardId> = player
         .and_then(|p| view.hands.get(p).ok())
@@ -277,9 +328,11 @@ pub(crate) fn sync_hand_panel(
     let shield = shield_text(player.and_then(|p| view.shields.get(p).ok()));
     // 签名要覆盖面板上每一个由判据决定的可见位（§6.1 坑 30：少一位就是一次静默过期）。
     // `lands` 那一位是 P3c 加上的：地块卡的按钮排跟着「谁买了哪块地」变，
-    // 少了它，玩家刚买下的那块地不会出现在按钮排里，而下一次别的原因重建面板时才冒出来
+    // 少了它，玩家刚买下的那块地不会出现在按钮排里，而下一次别的原因重建面板时才冒出来。
+    // `parcels` 是同一件事的购地卡那一半，而且它比 `lands` 更脆：那一排连**现金**都读
+    // （花过一笔钱、物价跳一格，候选排就变了）
     let stamp = format!(
-        "{}|{playable}|{}|{}|{}|{}",
+        "{}|{playable}|{}|{}|{}|{}|{}",
         player.map_or_else(|| "-".into(), |p| format!("{p:?}")),
         opponents
             .iter()
@@ -292,6 +345,11 @@ pub(crate) fn sync_hand_panel(
             .join(","),
         shield.clone().unwrap_or_default(),
         lands
+            .iter()
+            .map(|p| p.label.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        parcels
             .iter()
             .map(|p| p.label.as_str())
             .collect::<Vec<_>>()
@@ -368,7 +426,7 @@ pub(crate) fn sync_hand_panel(
                 ));
                 continue;
             };
-            let buttons = play_buttons(def, &opponents, &lands);
+            let buttons = play_buttons(def, &opponents, &lands, &parcels);
             // 三行分开：合成一行的话，两张卡名加两颗按钮在 1024 宽的屏上就顶到边了
             let mut title = p.spawn(Node {
                 flex_direction: FlexDirection::Row,
@@ -396,13 +454,14 @@ pub(crate) fn sync_hand_panel(
                 align_items: AlignItems::Center,
                 ..default()
             });
-            // 地块那颗按钮上要写「谁的 + 地名」，比「用」与「→ 名字」长一截：
+            // 地块那颗按钮上要写「谁的 + 地名」或「地名 + 价」，比「用」与「→ 名字」长一截：
             // 单独给它一个宽度与字号，而不是把三种形状挤进同一个 96 像素
-            let (box_size, box_font) = if def.target == CardTarget::Land {
-                (layout::LAND_BUTTON, size::ROW)
-            } else {
-                (layout::CARD_BUTTON, size::BODY)
-            };
+            let (box_size, box_font) =
+                if matches!(def.target, CardTarget::Land | CardTarget::UnownedLand) {
+                    (layout::LAND_BUTTON, size::ROW)
+                } else {
+                    (layout::CARD_BUTTON, size::BODY)
+                };
             actions.with_children(|line| {
                 for pb in &buttons {
                     button(
@@ -483,6 +542,8 @@ mod tests {
 
     /// 空的地块候选：开局那一回合还没有人买地。
     const NO_PLOTS: &[LandPick] = &[];
+    /// 空的无主地候选：一块现在买得下来的地都没有。
+    const NO_PARCELS: &[LandPick] = &[];
 
     #[test]
     fn a_self_only_card_grows_exactly_one_button_and_no_target() {
@@ -490,6 +551,7 @@ mod tests {
             &def(CardTarget::SelfOnly),
             &[foe(2, "孙小美"), foe(3, "阿土伯")],
             &[pick("我的南京路", 0)],
+            &[pick("外滩北 $1500", 2)],
         );
         assert_eq!(buttons.len(), 1, "给自己的卡不该长出「对谁」这一排按钮");
         assert_eq!(buttons[0].aim, None);
@@ -499,7 +561,7 @@ mod tests {
     #[test]
     fn a_framing_card_grows_one_button_per_opponent_carrying_that_target() {
         let foes = [foe(2, "孙小美"), foe(3, "阿土伯")];
-        let buttons = play_buttons(&def(CardTarget::Player), &foes, NO_PLOTS);
+        let buttons = play_buttons(&def(CardTarget::Player), &foes, NO_PLOTS, NO_PARCELS);
         assert_eq!(buttons.len(), 2, "两个对手就该有两颗可选的按钮");
         // 目标烤在按钮里：按下去就是一个完整意图，规则层不必再挂「选目标」的待决
         assert_eq!(buttons[0].aim, Some(CardAim::Player(foes[0].0)));
@@ -512,17 +574,23 @@ mod tests {
     fn a_player_card_with_nobody_left_is_greyed_with_a_reason() {
         // 单人不残局：其他人都破产离场了。按下去规则层会静默拒绝，
         // 而玩家看见的必须是一句话，不是一颗死按钮（坑 27 的 UI 版）
-        let buttons = play_buttons(&def(CardTarget::Player), &[], NO_PLOTS);
+        let buttons = play_buttons(&def(CardTarget::Player), &[], NO_PLOTS, NO_PARCELS);
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("场上没有别的人了"));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
     }
 
     #[test]
-    fn a_land_card_grows_one_button_per_owned_plot_and_ignores_the_player_list() {
-        // 地块卡数的是地，不是人：候选排里混进「→ 孙小美」会让人以为能直接封人
+    fn a_land_card_grows_one_button_per_owned_plot_and_ignores_the_other_two_lists() {
+        // 地块卡数的是地，不是人：候选排里混进「→ 孙小美」会让人以为能直接封人。
+        // 无主地那一排同样不归它 —— 查封一块无主地没有业主可办，那条判据在规则层
         let picks = [pick("我的南京路", 0), pick("孙小美的徐家汇", 3)];
-        let buttons = play_buttons(&def(CardTarget::Land), &[foe(2, "孙小美")], &picks);
+        let buttons = play_buttons(
+            &def(CardTarget::Land),
+            &[foe(2, "孙小美")],
+            &picks,
+            &[pick("外滩北 $1500", 2)],
+        );
         assert_eq!(buttons.len(), 2, "两块有主的地就该有两颗按钮");
         assert_eq!(
             buttons[0].text, "→ 我的南京路",
@@ -536,9 +604,40 @@ mod tests {
     #[test]
     fn a_land_card_with_nothing_owned_is_greyed_with_a_reason() {
         // 开局第一回合谁都没买地。这时打地块卡是空转，而空转该读成一句话
-        let buttons = play_buttons(&def(CardTarget::Land), &[], NO_PLOTS);
+        let buttons = play_buttons(&def(CardTarget::Land), &[], NO_PLOTS, NO_PARCELS);
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("还没有人有地"));
+        assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
+    }
+
+    #[test]
+    fn a_grab_card_grows_one_button_per_buyable_parcel_and_ignores_owned_plots() {
+        // 购地卡与涨价卡指着同一种东西（一块地），候选排却互斥：有主的地对它没意义，
+        // 而无主的地要按现金筛过才敢亮 —— 所以这两排不能合成一排
+        let parcels = [pick("汉口路 $1000", 1), pick("外滩北 $1500", 2)];
+        let buttons = play_buttons(
+            &def(CardTarget::UnownedLand),
+            &[foe(2, "孙小美")],
+            &[pick("我的南京路", 0)],
+            &parcels,
+        );
+        assert_eq!(buttons.len(), 2, "两块买得下来的无主地就该有两颗按钮");
+        assert_eq!(
+            buttons[1].text, "→ 外滩北 $1500",
+            "价要写在按钮上：按下去之前唯一要判断的就是这个数"
+        );
+        assert_eq!(buttons[0].aim, Some(CardAim::Land(LandId(1))));
+        assert!(buttons.iter().all(|b| b.blocked.is_none()));
+    }
+
+    #[test]
+    fn a_grab_card_with_nothing_buyable_says_the_one_sentence_that_is_always_true() {
+        // 那句是「买得起的无主地」而不是「没有无主地」：候选排是账本按现金筛过的，
+        // 面板读得到「筛完是空」，读不到空在哪一头。地全有主时那句话照样成立，
+        // 而「没有无主地」在钱不够的那一格就是句假话（同百货「这一趟没有货」那次改法）
+        let buttons = play_buttons(&def(CardTarget::UnownedLand), &[], NO_PLOTS, NO_PARCELS);
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].blocked, Some("没有买得起的无主地"));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
     }
 

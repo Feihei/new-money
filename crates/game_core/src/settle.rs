@@ -698,12 +698,7 @@ impl<'w, 's> Books<'w, 's> {
     /// 价过一遍管线（物价指数 + 小福神「买地免费」那一类 `Cancel`），所以这里返回的
     /// 是实付额而不是表上的地价 —— 免费时是 0，`LandBought.price` 因此说的是「这笔账」。
     pub fn buy(&mut self, player: Entity, land: LandId) -> Option<i64> {
-        let view = self.view(land)?;
-        let base = economy::land_price(&self.active.def, &view)?;
-        let price = self.quoted(ChargeKind::BuyLand { land }, player, base);
-        if !economy::can_buy(&view, price, self.balance(player)) {
-            return None;
-        }
+        let price = self.buy_price(player, land)?;
         let entity = self.land_entity(land)?;
         let pid = self.id_of(player);
         self.debit(player, price).ok()?;
@@ -711,6 +706,20 @@ impl<'w, 's> Books<'w, 's> {
         owner.0 = pid;
         level.0 = 1;
         Some(price)
+    }
+
+    /// 这块地**此刻**对这位玩家而言买得下来吗？买下来实付多少？`None` = 买不了
+    /// （棋盘上没这块地 / 已经有人持有 / 过了物价与修正之后的价付不起）。
+    ///
+    /// [`Self::buy`] 扣的就是这个数，所以它同时是「能不能买」与「买了要付多少」两份事实的
+    /// 唯一来源：手牌浮层那颗 `→ 南京路 $1,200` 的按钮与购地卡的合法性判据读的都是这一句，
+    /// 「按钮亮着而规则层拒了」与「按钮上的价与实际扣的价不一样」在结构上不可能发生。
+    /// 报价侧照旧不花钱（`quoted` 只算不调账本）。
+    pub fn buy_price(&self, player: Entity, land: LandId) -> Option<i64> {
+        let view = self.view(land)?;
+        let base = economy::land_price(&self.active.def, &view)?;
+        let price = self.quoted(ChargeKind::BuyLand { land }, player, base);
+        economy::can_buy(&view, price, self.balance(player)).then_some(price)
     }
 
     /// 升级：扣**实付**建筑费 + 等级 +1。结构判定（业主本人、未抵押、未满级、垄断、

@@ -20,7 +20,9 @@ use crate::data::DataHandles;
 use crate::landing::{
     Landed, Landing, LandingDomain, Pending, PendingDecision, jail_player, teleport,
 };
-use crate::msg::{CardDrawn, CardNotice, EffectOutcome, PlayerJailed, PlayerTeleported};
+use crate::msg::{
+    CardDrawn, CardNotice, EffectOutcome, LandBought, PlayerJailed, PlayerTeleported,
+};
 use crate::player::PlayerId;
 use crate::player::TokenPosition;
 use crate::rng::Rng;
@@ -198,6 +200,9 @@ pub struct CardSink<'w, 's> {
     pub insulations: Query<'w, 's, &'static mut Insulation>,
     pub jailed: MessageWriter<'w, PlayerJailed>,
     pub teleported: MessageWriter<'w, PlayerTeleported>,
+    /// 买地成交的流水。购地卡走的是 `Books::buy` 那条正路，所以它必须和「踩到无主地买下来」
+    /// 发同一条凭据 —— 归属变了这件事只有一种说法，而顶栏与 dump 读的就是这一条。
+    pub bought: MessageWriter<'w, LandBought>,
 }
 
 /// 免费卡免的是哪几族钱（PLAN §三「**免费**抵 >2000×物价 的租金/罚金/税」）。
@@ -366,6 +371,31 @@ pub fn apply_card(
                     *floor,
                 ));
                 outcomes.push(EffectOutcome::FreePassArmed { floor: *floor });
+            }
+            CardEffect::BuyLand => {
+                // 要买哪块地同样来自**请求**，不在卡面上（与 `LandStatus` 的锚点同一条理由）。
+                // 抽卡那条路没有 aim，所以数据把这张卡写进机会/命运池就是静默失效 ——
+                // `validate` 已在加载期要求 `target: "unowned_land"`，这一句是第二道
+                let Some(crate::hand::CardAim::Land(land)) = aim else {
+                    debug!("{} 要买地，但这次没有地块目标", def.id);
+                    continue;
+                };
+                // 买这一句走的是账本的正路：地价过物价、过小福神的「买地免费」，
+                // 扣的是实付额，归属与等级也由 `Books::buy` 一处改
+                match sink.books.buy(victim, land) {
+                    Some(price) => {
+                        sink.bought.write(LandBought {
+                            player: victim,
+                            land,
+                            price,
+                        });
+                        outcomes.push(EffectOutcome::Purchased { land, price });
+                    }
+                    // 出牌那道门（`aim_is_legal`）读的正是 `buy` 读的同一个价，同一帧同一份
+                    // 账本 —— 走到这里只剩一种可能：两道判据哪天开始分叉了。那是 bug，
+                    // 不是玩家能遇到的处境，所以报给日志而不是编一条永远看不见的凭据
+                    None => warn!("{} 打出去了却没买下这块地：出牌判据与账本分叉了", def.id),
+                }
             }
         }
     }

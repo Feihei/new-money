@@ -17,6 +17,13 @@ winit 的游戏窗口反而排在后面。于是量到的是控制台的 960x480
 坐标从哪儿来：`NM_SHOT` 那张 PNG 就是客户区的物理像素，用连通块量出按钮包围盒即可，
 不需要猜 DPI（脚本会打印 LOGPIXELSX 与缩放；不是 96 时先把点击坐标按缩放换算过再用）。
 
+坑 27 的第四半（P3d④a 踩到）：**窗口位置要钉住，原点要每次点击前重量**。winit 每次启动按
+级联往下右挪二十几像素，于是「同一份点击脚本 + 同一个客户区坐标」在不同次运行里落到屏幕上
+不同的地方，挪远了就落到别的窗口那儿 —— 症状仍是「图是对的、数字没变」，却会被误记成
+「对局还没装配完，点早了」（本机实测：同一份命令连跑三次，一次成、两次空，差别只在级联位置）。
+现在启动时 `MoveWindow` 到固定位置（保留宽高，客户区仍是 1280x720），每次按之前重量一次
+`ClientToScreen` 并把窗口提回前台，挪了位会打在输出里（`moved: origin ...`）。
+
 时间轴：点击时刻按**进程启动**起算，与 `NM_SHOT_AT`（游戏启动起算）同向 —— 游戏比进程晚
 零点几秒就绪，所以点击相对游戏时间只会更早，不会落到截图之后。这是坑 27 第二半的解法：
 让脚本自己拉起游戏，两个钟就没有错位的可能。
@@ -49,6 +56,8 @@ public static class Win {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr h, int x, int y, int w, int ht, bool repaint);
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
@@ -133,6 +142,14 @@ $h = $game.H
 [void][Win]::BringWindowToTop($h)
 [void][Win]::SetForegroundWindow($h)
 
+# 把窗口钉到屏幕上一个固定位置（保留它自己的宽高，所以客户区仍是 1280x720）。
+# winit 每次启动按级联往下右挪二十几像素，于是「同一份点击脚本 + 同一个客户区坐标」在
+# 不同次运行里落到屏幕上不同的地方 —— 挪得远了就落到别的窗口那儿（坑 27 的第一半），
+# 症状还是那句「图是对的、数字没变」。钉住之后量出来的坐标跨次可复用，失败也不再伪装成 UI bug
+$wr = New-Object Win+RECT
+[void][Win]::GetWindowRect($h, [ref]$wr)
+[void][Win]::MoveWindow($h, 20, 20, ($wr.right - $wr.left), ($wr.bottom - $wr.top), $true)
+
 $rect = New-Object Win+RECT
 $origin = New-Object Win+POINT
 [void][Win]::GetClientRect($h, [ref]$rect)
@@ -148,8 +165,27 @@ foreach ($spec in ($Click -split ";" | Where-Object { $_ -ne "" })) {
     $cx, $cy = $xy -split ",", 2
     # 等到「进程启动后第 at 秒」再动鼠标：等待期间不用大颗粒 sleep，抖动会让点击落到截图之后
     while (((Get-Date) - $t0).TotalSeconds -lt [double]$at) { Start-Sleep -Milliseconds 20 }
+    # **每次点击前重新量一次原点**。窗口在创建之后还会自己挪位（winit 的级联与首帧的
+    # SW_RESTORE 都会挪），启动那一瞬量到的原点会差出整整一个级联步（实测 26 像素）——
+    # 而 26 像素正好够一颗 36 像素高的按钮从「点中」变成「点到它下面那行空隙」。
+    # 这就是过去几次「点了没反应」里被误记成「对局还没装配完」的那一半根因
+    $o = New-Object Win+POINT
+    $r = New-Object Win+RECT
+    [void][Win]::GetClientRect($h, [ref]$r)
+    [void][Win]::ClientToScreen($h, [ref]$o)
+    if ($r.right -ne $rect.right -or $r.bottom -ne $rect.bottom) {
+        Write-Output ("warn: client size changed before the click, {0}x{1} -> {2}x{3}" -f $rect.right, $rect.bottom, $r.right, $r.bottom)
+    }
+    if ($o.x -ne $origin.x -or $o.y -ne $origin.y) {
+        Write-Output ("moved: origin ({0},{1}) -> ({2},{3})" -f $origin.x, $origin.y, $o.x, $o.y)
+        $origin = $o
+    }
     $sx = $origin.x + [int]$cx
     $sy = $origin.y + [int]$cy
+    # 等待期间别的窗口可能抢到前台（那半秒里 IDE 只要被点了一下，合成点击就送给它）：
+    # 每次按之前重新把游戏窗口提到最前，症状「图是对的、数字没变」的另一半就是这么来的
+    [void][Win]::BringWindowToTop($h)
+    [void][Win]::SetForegroundWindow($h)
     [void][Win]::SetCursorPos($sx, $sy)
     Start-Sleep -Milliseconds 40
     [Win]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero) | Out-Null # LEFTDOWN

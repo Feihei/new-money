@@ -29,8 +29,16 @@ pub enum CardTarget {
     SelfOnly,
     /// 选一名对手（陷害、嫁祸）
     Player,
-    /// 选一块地（购地、涨价、查封、怪兽）
+    /// 选一块**有主**的地（涨价、查封、怪兽）
     Land,
+    /// 选一块**无主**的地（购地卡，P3d④）。
+    ///
+    /// 为什么不并进 [`Self::Land`]：这两句话的承受者不是同一个人。`Land` 的承受者是那块地的
+    /// **业主**（涨价是往别人钱袋上加钱），而无主地根本没有业主可承受 —— 购地卡的承受者就是
+    /// 出牌人自己。并成一格的话，[`crate::hand::victim_of`] 与
+    /// [`crate::hand::aim_is_legal`] 就得反过来读 `effects` 才知道该问谁，
+    /// 「这张卡打给谁」这件事从此散在两张表里。
+    UnownedLand,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -80,6 +88,13 @@ pub enum CardEffect {
     FreePass {
         floor: i64,
     },
+    /// 当场买下一块无主地（购地卡，P3d④）。**卡面上不带地块编号**：选哪块地是玩家按下去
+    /// 那一刻定的，来自出牌请求的 `aim`（与 [`Self::LandStatus`] 同一条理由）。
+    ///
+    /// 价格不在卡面上，也不必在卡面上：走的是 `Books::buy` 那条正路，所以地价过一遍
+    /// P2 管线 —— 物价指数照乘、小福神「买地免费」那一类 `Cancel` 照免。这张卡买的不是折扣，
+    /// 买的是**不用走到那一格**这件事。
+    BuyLand,
 }
 
 const fn default_jail_turns() -> u32 {
@@ -194,6 +209,14 @@ impl CardSet {
                             ));
                         }
                     }
+                    CardEffect::BuyLand => {
+                        // 与 `LandStatus` 同一条绑定：这块地来自出牌请求，不在卡面上。
+                        // 目标写成 `land` 的话，购地卡会去问一块**有主**的地（那条判据要业主），
+                        // 而它要买的恰恰是无主的 —— 两个判据互相矛盾，抽到/打出都只会静默失败
+                        if c.target != CardTarget::UnownedLand {
+                            errs.push(format!("卡牌 {} 要买地，但 target 不是 unowned_land", c.id));
+                        }
+                    }
                 }
             }
         }
@@ -290,6 +313,40 @@ mod tests {
         assert!(has(|e| matches!(e, CardEffect::Insulate { .. })));
         assert!(has(|e| matches!(e, CardEffect::LandStatus { .. }),));
         assert!(has(|e| matches!(e, CardEffect::FreePass { .. })));
+        assert!(has(|e| matches!(e, CardEffect::BuyLand)));
+    }
+
+    /// 「卡上的效果」与「卡要落在什么头上」必须成对，否则数据能过加载、卡却永远打不出去。
+    /// 两条绑定各测一个反例：写歪的那一半会在 `validate` 里响，而不是等到玩家按下去。
+    #[test]
+    fn an_effect_that_needs_a_target_is_bound_to_that_target() {
+        let items = CardSet::from_json(ITEMS).unwrap();
+
+        let mut hike = items.clone();
+        hike.0
+            .iter_mut()
+            .find(|c| {
+                c.effects
+                    .iter()
+                    .any(|e| matches!(e, CardEffect::LandStatus { .. }))
+            })
+            .expect("货架上该有盖状态的卡")
+            .target = CardTarget::SelfOnly;
+        assert!(
+            hike.validate(CardKind::Item).is_err(),
+            "盖地块状态的卡没了 land 目标就该被拦下"
+        );
+
+        let mut grab = items;
+        grab.0
+            .iter_mut()
+            .find(|c| c.effects.contains(&CardEffect::BuyLand))
+            .expect("货架上该有购地卡")
+            .target = CardTarget::Land;
+        assert!(
+            grab.validate(CardKind::Item).is_err(),
+            "买无主地的卡指着有主的地，两条判据当场矛盾"
+        );
     }
 
     #[test]

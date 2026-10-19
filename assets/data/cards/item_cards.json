@@ -41,5 +41,14 @@
     "desc": "存着等那笔大的：接下来一笔超过 2000（随物价水涨）的过路费或罚款，整笔免掉",
     "cost_points": 45,
     "effects": [{ "action": "free_pass", "floor": 2000 }]
+  },
+  {
+    "id": "item_grab",
+    "type": "item",
+    "title": "购地卡",
+    "desc": "挑一块还没有主人的地，按市价当场买下来 —— 不必走到那一格",
+    "cost_points": 30,
+    "target": "unowned_land",
+    "effects": [{ "action": "buy_land" }]
   }
 ]

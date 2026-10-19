@@ -89,6 +89,8 @@ pub enum CardAim {
 /// 地块类填的是**这块地的业主**（P3c）：涨价与查封都是往别人钱袋上做事，流水里要说的是
 /// 「谁的地被办了」。查不到业主（无主、或那块地压根不在棋盘上）就返回 `None` —— 宁可拒发
 /// 也不猜一个承受者，猜出来的那个「业主」会在流水里变成一次莫须有的查封。
+/// 购地卡（P3d④）是另一块地：它挑的**就是**无主地，所以它的承受者是出牌人自己，
+/// 这也是它不并进 `Land` 那一格的原因（两种地块目标问不出同一个承受者）。
 ///
 /// `land_owner` 由调用方查好再传进来（`Books::owner_of`），而不是在这里收一个 `Books`：
 /// 这张表要能在单测里逐格断言，而 `Books` 是 SystemParam、造不出来给单元测试。
@@ -103,8 +105,13 @@ fn victim_of(
         (CardTarget::SelfOnly, _) => Some(player),
         (CardTarget::Player, Some(CardAim::Player(target))) => Some(target),
         (CardTarget::Land, Some(CardAim::Land(_))) => land_owner,
+        // 购地卡承受的也是出牌人自己：无主地没有业主可承受，而买下来之后地就归他 ——
+        // 流水里那句「P0 → P1」在这里说的就是「他买下了这块地」，不是「他对谁做了事」
+        (CardTarget::UnownedLand, Some(CardAim::Land(_))) => Some(player),
         (CardTarget::Land, None)
         | (CardTarget::Land, Some(CardAim::Player(_)))
+        | (CardTarget::UnownedLand, None)
+        | (CardTarget::UnownedLand, Some(CardAim::Player(_)))
         | (CardTarget::Player, None)
         | (CardTarget::Player, Some(CardAim::Land(_))) => None,
     }
@@ -113,7 +120,7 @@ fn victim_of(
 /// 目标合不合法。判据集中在这里，UI 的「该不该亮」与规则层的「认不认」共用同一句
 /// （同 `can_bank_op` 与 `bank_op_allowed` 的关系）。
 ///
-/// 写成 `target × aim` 的九格全表、不留 `_`：新增一种 `CardTarget` 或一种 `CardAim`
+/// 写成 `target × aim` 的十二格全表、不留 `_`：新增一种 `CardTarget` 或一种 `CardAim`
 /// 时必须当场决定它和其余每种目标能不能配对（同 `landing::domain_of` 那条纪律）。
 fn aim_is_legal(def: &CardDef, aim: Option<CardAim>, player: Entity, books: &Books) -> bool {
     match (def.target, aim) {
@@ -130,6 +137,16 @@ fn aim_is_legal(def: &CardDef, aim: Option<CardAim>, player: Entity, books: &Boo
         // 没有业主可办，而 UI 的候选列表用的就是这同一句判据）
         (CardTarget::Land, Some(CardAim::Land(land))) => books.owner_of(land).is_some(),
         (CardTarget::Land, None) | (CardTarget::Land, Some(CardAim::Player(_))) => false,
+        // 购地卡：这块地此刻**买得下来吗**。判据直接借账本那句（`Books::buy_price` =
+        // 无主 + 过了物价与修正之后的价付得起），因为出牌走的本来就是它。
+        // 在这里另写一份 `owner.is_none() && cash >= 地价` 迟早会和账本分叉，
+        // 而分叉长成「卡扣掉了、地没到手」那种查不动的样子
+        (CardTarget::UnownedLand, Some(CardAim::Land(land))) => {
+            books.buy_price(player, land).is_some()
+        }
+        (CardTarget::UnownedLand, None) | (CardTarget::UnownedLand, Some(CardAim::Player(_))) => {
+            false
+        }
     }
 }
 
@@ -381,6 +398,38 @@ mod tests {
         assert_eq!(
             victim_of(&land_def(), Some(CardAim::Land(LandId(0))), me, None),
             None
+        );
+    }
+
+    /// 购地卡与涨价卡指着同一种东西（一块地），承受者却相反：前者的买家是自己。
+    /// 这两格在 `CardTarget` 上分成两格，就是为了让这张表不必去读 `effects` 才知道该问谁。
+    #[test]
+    fn buying_an_unowned_plot_makes_the_buyer_the_victim() {
+        let grab = CardDef {
+            id: "item_grab".into(),
+            kind: CardKind::Item,
+            title: "购地卡".into(),
+            desc: String::new(),
+            cost_points: Some(30),
+            target: CardTarget::UnownedLand,
+            effects: vec![crate::card::CardEffect::BuyLand],
+        };
+        let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
+        let owner = Entity::from_raw_u32(7).expect("索引不该撞上保留值");
+        assert_eq!(
+            victim_of(&grab, Some(CardAim::Land(LandId(0))), me, None),
+            Some(me),
+            "无主地没有业主，买它的人就是承受者"
+        );
+        // 带着一个查得到的业主也不改答案：购地卡买的是无主地，那一格在这里什么都不说明
+        assert_eq!(
+            victim_of(&grab, Some(CardAim::Land(LandId(0))), me, Some(owner)),
+            Some(me)
+        );
+        assert_eq!(
+            victim_of(&grab, None, me, None),
+            None,
+            "没选地就没有「买下哪块」这件事"
         );
     }
 }

@@ -428,6 +428,12 @@ pub enum EffectOutcome {
     FreePassArmed {
         floor: i64,
     },
+    /// 买下了这块地（购地卡，P3d④）。`price` 是**实付**额（过了物价与修正），与
+    /// [`LandBought`] 上那个数同源 —— 那条说的是「归属变了」，这条说的是「这张卡办成的」。
+    Purchased {
+        land: crate::land::LandId,
+        price: i64,
+    },
 }
 
 /// 一条一次性修正**真的生效了**：`saved` 这笔账从这位身上免掉了，那张卡就此消失。
