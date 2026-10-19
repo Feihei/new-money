@@ -94,12 +94,12 @@ fn a_shifted_bill_names_the_real_payer() {
     flat_rent(&mut app, 0, 5_000);
     register(
         &mut app,
-        Correction {
-            bearer: payer,
-            scope: Scope::Any,
-            adjustment: Adjustment::TransferTo { to: owner },
-            source: Source::Card,
-        },
+        Correction::always(
+            payer,
+            Scope::Any,
+            Adjustment::TransferTo { to: owner },
+            Source::Card,
+        ),
     );
     land(&mut app);
 

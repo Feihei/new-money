@@ -71,11 +71,11 @@ pub mod prelude {
     };
     pub use crate::msg::{
         BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn, CardGained,
-        CardNotice, CardPlayed, CashChanged, Decision, DecisionChosen, DiceRolled, EffectOutcome,
-        GameOver, JailSkipped, LandBought, LandUpgraded, PlayCardRequested, PlayerArrived,
-        PlayerBankrupt, PlayerJailed, PlayerReleased, PlayerTeleported, PointsChanged, RentDue,
-        RequestRoll, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
-        TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkStarted,
+        CardNotice, CardPlayed, CashChanged, ChargeWaived, Decision, DecisionChosen, DiceRolled,
+        EffectOutcome, GameOver, JailSkipped, LandBought, LandUpgraded, PlayCardRequested,
+        PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased, PlayerTeleported,
+        PointsChanged, RentDue, RequestRoll, StockPriceChanged, StockTradeRequested, StockTraded,
+        StockVisited, TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkStarted,
     };
     pub use crate::player::{
         BankBalance, Bankrupt, GameSetup, JailSentence, PLAYER_COLORS, PlayerColor, PlayerId,
@@ -96,8 +96,8 @@ pub mod prelude {
 use bank::apply_month_end_interest_system;
 use prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankOpRequested, BankVisited, BoardDef, BuyOffered,
-    CardDrawn, CardGained, CardPlayed, CardSet, CashChanged, Corrections, CouponBoxes,
-    DecisionChosen, DiceRolled, GameOver, GameRules, GameSeed, GameSetup, JailSkipped,
+    CardDrawn, CardGained, CardPlayed, CardSet, CashChanged, ChargeWaived, Corrections,
+    CouponBoxes, DecisionChosen, DiceRolled, GameOver, GameRules, GameSeed, GameSetup, JailSkipped,
     JsonAssetLoader, LandBought, LandUpgraded, Landing, MarketClock, Paused, PendingDecision,
     PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased,
     PlayerTeleported, PointsChanged, RentDue, RequestRoll, StockPriceChanged, StockSet,
@@ -171,6 +171,9 @@ impl Plugin for CoreGamePlugin {
             .add_message::<LandBought>()
             .add_message::<LandUpgraded>()
             .add_message::<RentDue>()
+            // 一次性修正生效那一笔（免费卡花掉了）。不注册的话 `Books` 的 writer
+            // 参数校验直接失败 —— 而 `Books` 被每个 system 用着，症状是整局不跑
+            .add_message::<ChargeWaived>()
             .add_message::<BankVisited>()
             .add_message::<BankOpRequested>()
             .add_message::<BankOpDone>()

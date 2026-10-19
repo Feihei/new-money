@@ -235,16 +235,27 @@ fn format_access(view: &DumpView) -> String {
 
 /// 修正登记处整表打出来。P2 的管线只有两个输入 —— 物价指数（上一行的 `物价 ×`）
 /// 和这张表 —— 有了这两样，屏幕上任何一笔金额都能手算回去。
-/// 今天它永远是空的（第一个往里登记的是 P3 的卡），这一栏先在这儿等着。
+///
+/// 门槛与「一次性」必须跟着打出来：免费卡那种账「今天没免掉」的原因就是这两个位，
+/// 少了它们，这一栏只说得出「挂着一条 Cancel」，而玩家问的是「为什么这一笔还是 2400」。
 fn format_corrections(view: &DumpView) -> Vec<String> {
     if view.corrections.is_empty() {
         return vec!["修正登记处：空（没有人挂着可抵消/转嫁/加倍的账）".to_string()];
     }
     let mut lines = vec![format!("修正登记处：{} 条", view.corrections.len())];
-    lines.extend(view.corrections.iter().map(|c| {
+    lines.extend(view.corrections.iter().map(|(at, c)| {
         format!(
-            "  {:?} {:?} {:?} ←{:?}",
-            c.bearer, c.scope, c.adjustment, c.source
+            "  #{at} {:?} {:?} {:?} ←{:?}{}{}",
+            c.bearer,
+            c.scope,
+            c.adjustment,
+            c.source,
+            if c.floor > 0 {
+                format!(" 门槛{}", c.floor)
+            } else {
+                String::new()
+            },
+            if c.one_shot { " 一次性" } else { "" },
         )
     }));
     lines

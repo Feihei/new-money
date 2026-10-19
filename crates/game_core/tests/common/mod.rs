@@ -19,10 +19,10 @@ use game_core::CoreGamePlugin;
 use game_core::prelude::{
     ActiveBoard, Adjustment, AtmAccess, BankBalance, BankOp, BankOpDone, BankOpRequested,
     BankVisited, Books, BuildingLevel, BuyOffered, CardAim, CardDrawn, CardGained, CardId,
-    CardKind, CardPlayed, CardSet, CashChanged, ChargeKind, Correction, Corrections, CouponBoxes,
-    DamageTally, DataHandles, Decision, DecisionChosen, Deck, DiceRolled, GameOver, GameRules,
-    GameSeed, GameSession, GameSetup, Hand, Insulation, JailSkipped, LandBought, LandDamage,
-    LandId, LandStatus, LandUpgraded, Market, MarketClock, Mortgaged, Owner, Pending,
+    CardKind, CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived, Correction, Corrections,
+    CouponBoxes, DamageTally, DataHandles, Decision, DecisionChosen, Deck, DiceRolled, GameOver,
+    GameRules, GameSeed, GameSession, GameSetup, Hand, Insulation, JailSkipped, LandBought,
+    LandDamage, LandId, LandStatus, LandUpgraded, Market, MarketClock, Mortgaged, Owner, Pending,
     PendingDecision, PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed,
     PlayerReleased, PlayerTeleported, PlotArea, Points, PointsChanged, RentDue, RequestRoll, Rng,
     Scope, Shelf, Source, StockId, StockPriceChanged, StockTradeRequested, StockTraded,
@@ -144,6 +144,9 @@ struct BookReaders<'w, 's> {
     bought: MessageReader<'w, 's, LandBought>,
     upgraded: MessageReader<'w, 's, LandUpgraded>,
     rents: MessageReader<'w, 's, RentDue>,
+    /// 一次性修正生效那一笔（免费卡花掉了）。它**没有**对应的 `CashChanged`，
+    /// 所以「钱一分没动而卡没了」这件事只有这一条流水能证明。
+    waived: MessageReader<'w, 's, ChargeWaived>,
     bankrupts: MessageReader<'w, 's, PlayerBankrupt>,
     jailed: MessageReader<'w, 's, PlayerJailed>,
     teleported: MessageReader<'w, 's, PlayerTeleported>,
@@ -294,6 +297,14 @@ fn collect_books(
             who(&players, m.owner),
             m.land.0,
             m.amount
+        ));
+    }
+    for m in r.waived.read() {
+        log.0.push(format!(
+            "Waive({}${}·{:?})",
+            who(&players, m.player),
+            m.saved,
+            m.via
         ));
     }
     for m in r.bankrupts.read() {
@@ -709,25 +720,26 @@ pub fn register(app: &mut App, correction: Correction) {
 pub fn cancel_for(app: &mut App, bearer: Entity) {
     register(
         app,
-        Correction {
-            bearer,
-            scope: Scope::Any,
-            adjustment: Adjustment::Cancel,
-            source: Source::Card,
-        },
+        Correction::always(bearer, Scope::Any, Adjustment::Cancel, Source::Card),
     );
 }
 
 pub fn scale_for(app: &mut App, bearer: Entity, by: f64, kind: ChargeKind) {
     register(
         app,
-        Correction {
+        Correction::always(
             bearer,
-            scope: Scope::Domain(game_core::prelude::charge_domain_of(kind)),
-            adjustment: Adjustment::Scale { by },
-            source: Source::God,
-        },
+            Scope::Domain(game_core::prelude::charge_domain_of(kind)),
+            Adjustment::Scale { by },
+            Source::God,
+        ),
     );
+}
+
+/// 登记表里现在挂着几条修正。免费卡那两条验收读的是「卡有没有被花掉」，
+/// 而那张卡在管线里的唯一痕迹就是这一行。
+pub fn corrections_len(app: &App) -> usize {
+    app.world().resource::<Corrections>().len()
 }
 
 // ===== 直接驱动结算层 API =====

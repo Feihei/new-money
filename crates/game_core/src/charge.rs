@@ -45,9 +45,16 @@ pub enum ChargeKind {
 
 /// 「这类钱归哪个域」。修正的作用域按域筛，不按 `ChargeKind` 筛 ——
 /// kind 带着地块号，不能当键用。
+///
+/// **过路费与「取得不动产」是两个域**，虽然它们都是钱与地的关系：4 代里「踩别人地不付钱」
+/// 与「买地免费」是两张不同的卡（免费卡 / 大福神），P10 的董事长特权又只吃前者。
+/// 把它们并成一个 `Property` 的话，第一张想要其中一半的规则就得回来拆这张表。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChargeDomain {
-    Property,
+    /// 踩到别人地付的那笔 —— 「过路费」这一族，P10 的设施收费也归这里
+    Rent,
+    /// 买地、加盖：钱换的是**资产**，不是免掉的债
+    Acquire,
     Penalty,
     Bonus,
     God,
@@ -56,9 +63,8 @@ pub enum ChargeDomain {
 /// kind → 域。**不许出现 `_`**。
 pub const fn charge_domain_of(kind: ChargeKind) -> ChargeDomain {
     match kind {
-        ChargeKind::Rent { .. } | ChargeKind::BuyLand { .. } | ChargeKind::Upgrade { .. } => {
-            ChargeDomain::Property
-        }
+        ChargeKind::Rent { .. } => ChargeDomain::Rent,
+        ChargeKind::BuyLand { .. } | ChargeKind::Upgrade { .. } => ChargeDomain::Acquire,
         ChargeKind::Penalty => ChargeDomain::Penalty,
         ChargeKind::Bonus => ChargeDomain::Bonus,
         ChargeKind::God => ChargeDomain::God,
@@ -132,13 +138,25 @@ pub enum Scope {
     Any,
     /// 只吃某一类
     Domain(ChargeDomain),
+    /// 只吃列出来的那几类。留着复数这一格，是因为「一张卡管两族钱」确实存在 ——
+    /// 免费卡管的是**租金与罚金**，两者不同域，而它显然是同一张卡：登记成两条的话，
+    /// 一次生效就烧掉两张。
+    ///
+    /// 切片必须是 `&'static`（`Correction` 要 `Copy`），所以这一格只能吃**写下来的表**，
+    /// 运行时算出来的单个域请走 [`Scope::Domain`] —— 那不是妥协，是同一件事的两种来源。
+    Domains(&'static [ChargeDomain]),
 }
 
 impl Scope {
+    pub const fn domains(list: &'static [ChargeDomain]) -> Self {
+        Self::Domains(list)
+    }
+
     pub fn matches(self, kind: ChargeKind) -> bool {
         match self {
             Scope::Any => true,
             Scope::Domain(domain) => charge_domain_of(kind) == domain,
+            Scope::Domains(list) => list.contains(&charge_domain_of(kind)),
         }
     }
 }
@@ -176,12 +194,64 @@ pub struct Correction {
     pub scope: Scope,
     pub adjustment: Adjustment,
     pub source: Source,
+    /// **门槛（名义额）**：过完物价的实付金额超过 `floor × 物价` 才生效。
+    /// 0 = 没有门槛（今天只有免费卡用这一位，而它写的是 2000）。
+    ///
+    /// 门槛跟着物价走，是为了让「值不值得免」这件事不随通胀贬值：钉死 2000 的话，
+    /// 物价 5 倍时这张卡连一格空地都免得掉，那就成了永久免费券。
+    pub floor: i64,
+    /// 生效一次就消失。`true` 时 [`stage_and_spend`] 会回报它的下标，
+    /// 由**真正扣款的那条路**（[`crate::settle::Books::settle`]）注销它。
+    ///
+    /// 一次性消耗为什么不做成「登记时就知道到期」：免费卡打出之后**什么时候**用掉
+    /// 取决于哪笔账先来，那是世界的行为而不是登记时的信息。所以寿命规则留在这里，
+    /// 而「到此为止」这个动作由管线回报。
+    pub one_shot: bool,
+}
+
+impl Correction {
+    /// 常开的一条：寿命由它的来源管（神明到期时那边清场），管线不会主动注销它。
+    pub const fn always(
+        bearer: Entity,
+        scope: Scope,
+        adjustment: Adjustment,
+        source: Source,
+    ) -> Self {
+        Self {
+            bearer,
+            scope,
+            adjustment,
+            source,
+            floor: 0,
+            one_shot: false,
+        }
+    }
+
+    /// 一次性的一条，带门槛（名义额）。两个构造函数分开放，是因为「这条什么时候消失」
+    /// 是登记方必须说清的事，而六字段的字面量会让每个调用点各自决定一遍。
+    pub const fn one_shot(
+        bearer: Entity,
+        scope: Scope,
+        adjustment: Adjustment,
+        source: Source,
+        floor: i64,
+    ) -> Self {
+        Self {
+            bearer,
+            scope,
+            adjustment,
+            source,
+            floor,
+            one_shot: true,
+        }
+    }
 }
 
 /// 修正登记处。P3 的卡、P6 的神明往这里 push，管线本身不动。
 ///
-/// 没有「撤销」接口是有意的：一条修正的寿命由它的来源管（卡片打出即消失、神明到期即清场），
-/// 那里才知道「什么时候该消失」。这里只留登记与读取两侧。
+/// 这里**没有**「按名字撤销某条」的接口，是有意的：一条修正的寿命由它的来源管（神明到期即
+/// 清场），那里才知道「什么时候该消失」。唯一的例外是 [`Self::spend`] —— 一次性消耗什么时候
+/// 算用掉，只有管线知道，所以那条路必须由管线回报。
 /// 玩家破产、实体被回收也不会误伤：`Entity` 相等是连**世代**一起比的，
 /// 复用的那个索引带着新世代，`for_bearer` 认不出来，登记的条目就此变成惰性的。
 #[derive(Resource, Debug, Default)]
@@ -198,9 +268,30 @@ impl Corrections {
         self.items.iter().filter(move |c| c.bearer == bearer)
     }
 
-    /// 全表，只给调试面板用（`NM_DUMP=1` 那一栏要能数出「现在挂着几条」）。
-    pub fn iter(&self) -> impl Iterator<Item = &Correction> + '_ {
-        self.items.iter()
+    /// 全表带下标。下标是给 [`stage_and_spend`] 用的（它要能回报「哪一条被花掉了」），
+    /// 调试面板那一栏只用条目本身。
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &Correction)> + '_ {
+        self.items.iter().enumerate()
+    }
+
+    /// 注销 [`stage_and_spend`] 回报的那几条，返回 `(原来的下标, 条目)`，按下标升序。
+    /// 把下标一起交回去是为了让调用方能按号找到对应的那笔「省下多少」，而不必赌两边长度一致。
+    ///
+    /// 倒序删：从前头删会把后面所有下标都挪一位，而那种错不崩、只是少花一张卡 —— 正是最难查的那类。
+    /// 越界的下标直接跳过，因为调用方给的是**同一帧同一次回报**里的下标，越界意味着有人在
+    /// 中间又删过一轮，那件事值得用「没删掉」暴露出来，不值得为此 panic 一局对局。
+    pub fn spend(&mut self, at: &[usize]) -> Vec<(usize, Correction)> {
+        let mut holes = at.to_vec();
+        holes.sort_unstable();
+        holes.dedup();
+        let mut taken: Vec<(usize, Correction)> = Vec::with_capacity(holes.len());
+        for at in holes.into_iter().rev() {
+            if at < self.items.len() {
+                taken.push((at, self.items.remove(at)));
+            }
+        }
+        taken.reverse();
+        taken
     }
 
     pub fn len(&self) -> usize {
@@ -212,7 +303,24 @@ impl Corrections {
     }
 }
 
-/// 过一遍链：先物价指数（世界的状态，永远在），再按登记顺序应用各条修正。
+/// 一条一次性修正**当真的生效了**：`at` 是它在这张表里的下标，`saved` 是 bearer 因此
+/// 少付（或少收）多少。`saved` 是给流水用的，不是给算账用的 —— 金额已经落在 `charge.amount` 上了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spent {
+    pub at: usize,
+    pub saved: i64,
+}
+
+/// 过一遍链：先物价指数（世界的状态，永远在），再按登记顺序应用各条修正。**只问金额**。
+///
+/// 报价侧（[`crate::settle::Books::quoted`]）走这一条而不是 [`stage_and_spend`]：它拿不到下标，
+/// 于是**结构上不可能**在报一次价的时候把玩家手里那张卡花掉。P3a 给免罪卡立的同一条纪律，
+/// 在这里由返回类型而不是由注释保证。
+pub fn stage(charge: Charge, price_index: f32, corrections: &Corrections) -> Charge {
+    stage_and_spend(charge, price_index, corrections).0
+}
+
+/// 同一条链，外加回报「这一笔花掉了哪几条一次性修正」。
 ///
 /// 顺序是**规则**不是实现细节：物价 2.5 × 穷神加倍 = 5 倍，反过来先加倍再乘物价是同一个数，
 /// 但「先抵消再乘」和「先乘再抵消」不是 —— 这里选前者（`Cancel` 之后 `amount` 归零，
@@ -220,34 +328,68 @@ impl Corrections {
 ///
 /// 转嫁之后**不再走一遍新付款人的修正**：A 的嫁祸会被 B 的免罪吃掉，那是另一条规则，
 /// P3 做卡的时候再拍，别在这儿默认。
-pub fn stage(mut charge: Charge, price_index: f32, corrections: &Corrections) -> Charge {
+pub fn stage_and_spend(
+    mut charge: Charge,
+    price_index: f32,
+    corrections: &Corrections,
+) -> (Charge, Vec<Spent>) {
     charge.amount = if scales_with_price(charge.kind) {
         scale(charge.base, price_index as f64)
     } else {
         charge.base
     };
     let Some(bearer) = charge.bearer() else {
-        return charge;
+        return (charge, Vec::new());
     };
-    for correction in corrections.for_bearer(bearer) {
-        if !correction.scope.matches(charge.kind) {
+    let mut spent = Vec::new();
+    for (at, correction) in corrections.iter() {
+        if correction.bearer != bearer || !correction.scope.matches(charge.kind) {
             continue;
         }
+        // 门槛读的是**过完物价之后**的实付金额，而门槛自己也要乘物价，否则通胀会把这张卡
+        // 稀释成永久免费券（见 `Correction::floor`）
+        if correction.floor > 0 && charge.amount <= scale(correction.floor, price_index as f64) {
+            continue;
+        }
+        let before = charge.amount;
+        // 「生效了」必须是一个算出来的事实，而不是「这条修正被走到了」：两张免费卡挂在同一个人
+        // 身上，一笔 3000 的租金只该烧掉一张 —— 第二张走到这里时金额已经是 0，什么都没改变，
+        // 于是它没被花掉。
+        let mut fired = false;
         match correction.adjustment {
-            Adjustment::Cancel if charge.cancellable => charge.amount = 0,
-            Adjustment::Scale { by } => charge.amount = scale(charge.amount, by),
-            Adjustment::Flat { delta } => charge.amount = (charge.amount + delta).max(0),
+            Adjustment::Cancel if charge.cancellable && charge.amount > 0 => {
+                charge.amount = 0;
+                fired = true;
+            }
+            Adjustment::Scale { by } => {
+                charge.amount = scale(charge.amount, by);
+                fired = charge.amount != before;
+            }
+            Adjustment::Flat { delta } => {
+                charge.amount = (charge.amount + delta).max(0);
+                fired = charge.amount != before;
+            }
             Adjustment::TransferTo { to }
                 if charge.transferable && charge.payer.is_some() && to != bearer =>
             {
                 charge.payer = Some(to);
+                fired = true;
             }
-            // 位没开的那两条：什么都不做。写成显式分支是为了让「为什么没生效」这件事
-            // 留在代码里，而不是消失在 match 的空白处
+            // 位没开、或金额本来就是 0 的那几条：什么都不做。写成显式分支是为了让
+            // 「为什么没生效」这件事留在代码里，而不是消失在 match 的空白处
             Adjustment::Cancel | Adjustment::TransferTo { .. } => {}
         }
+        if correction.one_shot && fired {
+            // 转嫁那一支改的是 `payer` 不是 `amount`，所以它的「省下」是整笔
+            let saved = if matches!(correction.adjustment, Adjustment::TransferTo { .. }) {
+                before
+            } else {
+                before - charge.amount
+            };
+            spent.push(Spent { at, saved });
+        }
     }
-    charge
+    (charge, spent)
 }
 
 /// 乘系数回到整数。四舍五入而不是 floor：物价 2.5 这种半数下，floor 会让相邻两级
@@ -279,19 +421,19 @@ mod tests {
         let rows: [(ChargeKind, ChargeDomain, bool, bool); 6] = [
             (
                 ChargeKind::Rent { land: land(1) },
-                ChargeDomain::Property,
+                ChargeDomain::Rent,
                 true,
                 true,
             ),
             (
                 ChargeKind::BuyLand { land: land(1) },
-                ChargeDomain::Property,
+                ChargeDomain::Acquire,
                 true,
                 false,
             ),
             (
                 ChargeKind::Upgrade { land: land(1) },
-                ChargeDomain::Property,
+                ChargeDomain::Acquire,
                 true,
                 false,
             ),
@@ -341,12 +483,12 @@ mod tests {
     #[test]
     fn an_index_of_one_changes_nothing() {
         let mut corrections = Corrections::default();
-        corrections.register(Correction {
-            bearer: player(2),
-            scope: Scope::Any,
-            adjustment: Adjustment::Scale { by: 2.0 },
-            source: Source::God,
-        });
+        corrections.register(Correction::always(
+            player(2),
+            Scope::Any,
+            Adjustment::Scale { by: 2.0 },
+            Source::God,
+        ));
         let charge = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 2_000);
         assert_eq!(stage(charge, 1.0, &corrections).amount, 2_000);
     }
@@ -355,12 +497,12 @@ mod tests {
     #[test]
     fn the_two_bits_gate_the_adjustments() {
         let mut corrections = Corrections::default();
-        corrections.register(Correction {
-            bearer: player(1),
-            scope: Scope::Any,
-            adjustment: Adjustment::Cancel,
-            source: Source::Card,
-        });
+        corrections.register(Correction::always(
+            player(1),
+            Scope::Any,
+            Adjustment::Cancel,
+            Source::Card,
+        ));
         let mut charge = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 800);
         charge.cancellable = false;
         assert_eq!(
@@ -370,12 +512,12 @@ mod tests {
         );
 
         let mut corrections = Corrections::default();
-        corrections.register(Correction {
-            bearer: player(1),
-            scope: Scope::Any,
-            adjustment: Adjustment::TransferTo { to: player(2) },
-            source: Source::Card,
-        });
+        corrections.register(Correction::always(
+            player(1),
+            Scope::Any,
+            Adjustment::TransferTo { to: player(2) },
+            Source::Card,
+        ));
         let mut charge = Charge::new(
             ChargeKind::BuyLand { land: land(3) },
             Some(player(1)),
@@ -399,12 +541,12 @@ mod tests {
     #[test]
     fn staging_is_idempotent_because_it_reads_base() {
         let mut corrections = Corrections::default();
-        corrections.register(Correction {
-            bearer: player(1),
-            scope: Scope::Domain(ChargeDomain::Property),
-            adjustment: Adjustment::Scale { by: 2.0 },
-            source: Source::God,
-        });
+        corrections.register(Correction::always(
+            player(1),
+            Scope::domains(&[ChargeDomain::Rent]),
+            Adjustment::Scale { by: 2.0 },
+            Source::God,
+        ));
         let charge = Charge::new(
             ChargeKind::Rent { land: land(1) },
             Some(player(1)),
@@ -418,16 +560,54 @@ mod tests {
         assert_eq!(twice.amount, 20_000);
     }
 
-    /// 域筛得不对，修正就会误伤：只免地产钱的卡不该把罚款也勾掉。
+    /// 域筛得不对，修正就会误伤：只免过路费的卡不该把买地钱与罚款也勾掉。
+    /// （`Rent` 与 `Acquire` 分成两个域就是为了这一条能写出来 —— 免费卡与大福神
+    /// 在 4 代里是两张不同的卡，合成一个 `Property` 就没法只说中其中一张。）
+    ///
+    /// 两种写法各测一遍：`Domain` 是运行时算出来的单个域，`Domains` 是写下来的表。
     #[test]
     fn scope_filters_by_domain() {
+        for scope in [
+            Scope::Domain(ChargeDomain::Rent),
+            Scope::domains(&[ChargeDomain::Rent]),
+        ] {
+            let mut corrections = Corrections::default();
+            corrections.register(Correction::always(
+                player(1),
+                scope,
+                Adjustment::Cancel,
+                Source::Card,
+            ));
+            let rent = Charge::new(
+                ChargeKind::Rent { land: land(1) },
+                Some(player(1)),
+                Some(player(2)),
+                5_000,
+            );
+            let buy = Charge::new(
+                ChargeKind::BuyLand { land: land(1) },
+                Some(player(1)),
+                None,
+                5_000,
+            );
+            let fine = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 500);
+            assert_eq!(stage(rent, 1.0, &corrections).amount, 0, "{scope:?}");
+            assert_eq!(stage(buy, 1.0, &corrections).amount, 5_000, "{scope:?}");
+            assert_eq!(stage(fine, 1.0, &corrections).amount, 500, "{scope:?}");
+        }
+    }
+
+    /// 免费卡那一族「两域一张卡」的形状：一次生效只烧一条登记。
+    #[test]
+    fn a_multi_domain_scope_covers_both_family_without_two_rows() {
         let mut corrections = Corrections::default();
-        corrections.register(Correction {
-            bearer: player(1),
-            scope: Scope::Domain(ChargeDomain::Property),
-            adjustment: Adjustment::Cancel,
-            source: Source::Card,
-        });
+        corrections.register(Correction::one_shot(
+            player(1),
+            Scope::domains(&[ChargeDomain::Rent, ChargeDomain::Penalty]),
+            Adjustment::Cancel,
+            Source::Card,
+            0,
+        ));
         let rent = Charge::new(
             ChargeKind::Rent { land: land(1) },
             Some(player(1)),
@@ -435,20 +615,22 @@ mod tests {
             5_000,
         );
         let fine = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 500);
-        assert_eq!(stage(rent, 1.0, &corrections).amount, 0);
-        assert_eq!(stage(fine, 1.0, &corrections).amount, 500);
+        let (rent, spent_a) = stage_and_spend(rent, 1.0, &corrections);
+        let (fine, spent_b) = stage_and_spend(fine, 1.0, &corrections);
+        assert_eq!((rent.amount, fine.amount), (0, 0));
+        assert_eq!((spent_a.len(), spent_b.len()), (1, 1), "两笔各花掉一次");
     }
 
     /// 别人的修正吃不到我的账。
     #[test]
     fn corrections_only_hit_their_bearer() {
         let mut corrections = Corrections::default();
-        corrections.register(Correction {
-            bearer: player(9),
-            scope: Scope::Any,
-            adjustment: Adjustment::Cancel,
-            source: Source::Card,
-        });
+        corrections.register(Correction::always(
+            player(9),
+            Scope::Any,
+            Adjustment::Cancel,
+            Source::Card,
+        ));
         let charge = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 500);
         assert_eq!(stage(charge, 1.0, &corrections).amount, 500);
         assert_eq!(corrections.len(), 1);
@@ -459,12 +641,12 @@ mod tests {
     #[test]
     fn a_payout_bears_on_its_receiver() {
         let mut corrections = Corrections::default();
-        corrections.register(Correction {
-            bearer: player(2),
-            scope: Scope::Any,
-            adjustment: Adjustment::Cancel,
-            source: Source::God,
-        });
+        corrections.register(Correction::always(
+            player(2),
+            Scope::Any,
+            Adjustment::Cancel,
+            Source::God,
+        ));
         let bonus = Charge::new(ChargeKind::Bonus, None, Some(player(2)), 3_000);
         assert_eq!(bonus.bearer(), Some(player(2)));
         assert_eq!(stage(bonus, 1.0, &corrections).amount, 0);
@@ -474,13 +656,108 @@ mod tests {
     #[test]
     fn flat_never_goes_below_zero() {
         let mut corrections = Corrections::default();
-        corrections.register(Correction {
-            bearer: player(1),
-            scope: Scope::Any,
-            adjustment: Adjustment::Flat { delta: -10_000 },
-            source: Source::Rule,
-        });
+        corrections.register(Correction::always(
+            player(1),
+            Scope::Any,
+            Adjustment::Flat { delta: -10_000 },
+            Source::Rule,
+        ));
         let charge = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 500);
         assert_eq!(stage(charge, 1.0, &corrections).amount, 0);
+    }
+
+    /// 免费卡的门槛：不到就不生效，也就**不烧卡**。这一位是这张卡的全部玩法 ——
+    /// 没有门槛的话它是一张「以后所有账一律免」的券，那不该是 40 点券的东西。
+    #[test]
+    fn a_floor_too_high_for_the_bill_leaves_the_card_unspent() {
+        let mut corrections = Corrections::default();
+        corrections.register(Correction::one_shot(
+            player(1),
+            Scope::Any,
+            Adjustment::Cancel,
+            Source::Card,
+            2_000,
+        ));
+        let small = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 1_500);
+        let (small, spent) = stage_and_spend(small, 1.0, &corrections);
+        assert_eq!(small.amount, 1_500, "没到门槛的账不该被免掉");
+        assert!(spent.is_empty(), "没生效就不该花掉那张卡");
+
+        let big = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 2_400);
+        let (big, spent) = stage_and_spend(big, 1.0, &corrections);
+        assert_eq!(big.amount, 0);
+        assert_eq!(
+            spent,
+            vec![Spent {
+                at: 0,
+                saved: 2_400
+            }]
+        );
+    }
+
+    /// 门槛跟着物价走（PLAN §三 那句「>2000×物价」）。物价 2.0 时 3000 的账**仍然不免**：
+    /// 名义 1500 × 2 = 3000 而门槛也是 2000 × 2 = 4000。钉死门槛的话，通胀会把这张卡
+    /// 稀释成一张永久免费券。
+    #[test]
+    fn the_floor_scales_with_the_price_index() {
+        let mut corrections = Corrections::default();
+        corrections.register(Correction::one_shot(
+            player(1),
+            Scope::Any,
+            Adjustment::Cancel,
+            Source::Card,
+            2_000,
+        ));
+        let charge = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 1_500);
+        assert_eq!(stage_and_spend(charge, 2.0, &corrections).1, Vec::new());
+        let bigger = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 2_100);
+        assert_eq!(stage_and_spend(bigger, 2.0, &corrections).0.amount, 0);
+    }
+
+    /// 两张卡挂在同一个人身上，一笔账只该烧掉一张。第二张走到这里时金额已经是 0，
+    /// 「什么都没改变」就是它没生效 —— 这条判据不是细节，是「少花一张卡」与「多花一张卡」的区别。
+    #[test]
+    fn one_bill_burns_exactly_one_of_two_stacked_cards() {
+        let mut corrections = Corrections::default();
+        for _ in 0..2 {
+            corrections.register(Correction::one_shot(
+                player(1),
+                Scope::Any,
+                Adjustment::Cancel,
+                Source::Card,
+                0,
+            ));
+        }
+        let charge = Charge::new(ChargeKind::Penalty, Some(player(1)), None, 900);
+        let (charge, spent) = stage_and_spend(charge, 1.0, &corrections);
+        assert_eq!(charge.amount, 0);
+        assert_eq!(spent.len(), 1, "一笔账烧了两张卡");
+        let left = corrections.spend(&spent.iter().map(|s| s.at).collect::<Vec<_>>());
+        assert_eq!(left.len(), 1);
+        assert_eq!(corrections.len(), 1, "注销之后该剩一张");
+    }
+
+    /// 报价侧走 [`stage`]：它连下标都拿不到，所以**结构上**不可能在报一次价的时候花掉玩家的卡。
+    /// 这条是 P3a 给免罪卡立的纪律在管线签名上的形状。
+    #[test]
+    fn quoting_never_spends_a_one_shot() {
+        let mut corrections = Corrections::default();
+        corrections.register(Correction::one_shot(
+            player(1),
+            Scope::Any,
+            Adjustment::Cancel,
+            Source::Card,
+            0,
+        ));
+        let charge = Charge::new(
+            ChargeKind::Rent { land: land(1) },
+            Some(player(1)),
+            None,
+            5_000,
+        );
+        for _ in 0..3 {
+            assert_eq!(stage(charge, 1.0, &corrections).amount, 0);
+        }
+        assert_eq!(corrections.len(), 1, "报价报了三次，卡还在");
     }
 }

@@ -69,6 +69,17 @@ pub enum CardEffect {
         days: u32,
         area: crate::plot::PlotArea,
     },
+    /// 挂上一条**待用**的免付（免费卡，P3c②）。`floor` 是门槛的名义额：过完物价的实付
+    /// 金额要**超过** `floor × 物价` 才免得掉，而且只免一次。
+    ///
+    /// 为什么不当场折现：这张卡的全部玩法在「留着等那笔大的」。打出去就结算的话，
+    /// 它只是一张按市价换现金的券，玩家永远不必判断。
+    ///
+    /// 它抵的是**钱**，所以走 `Corrections` 那条管线；免罪卡抵的是**事**，走
+    /// [`crate::afflict`]。两张表 P13 的免疫矩阵要各读一遍（PLAN §三「反制链」行）。
+    FreePass {
+        floor: i64,
+    },
 }
 
 const fn default_jail_turns() -> u32 {
@@ -173,6 +184,16 @@ impl CardSet {
                             errs.push(format!("卡牌 {} 要盖地块状态，但 target 不是 land", c.id));
                         }
                     }
+                    CardEffect::FreePass { floor } => {
+                        // 门槛写成 0（或负）的免费卡是「以后所有账一律免」，那不该是
+                        // 一张卖几十点券的东西 —— 它的玩法形状全在这个数上
+                        if *floor <= 0 {
+                            errs.push(format!(
+                                "卡牌 {} 的免付门槛是 {floor}，没有门槛的免付不是这张卡",
+                                c.id
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -267,6 +288,8 @@ mod tests {
             |e| matches!(e, CardEffect::MoveTo { tile_name } if tile_name == "起点")
         ));
         assert!(has(|e| matches!(e, CardEffect::Insulate { .. })));
+        assert!(has(|e| matches!(e, CardEffect::LandStatus { .. }),));
+        assert!(has(|e| matches!(e, CardEffect::FreePass { .. })));
     }
 
     #[test]

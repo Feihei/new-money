@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use crate::afflict::{AfflictDomain, Affliction, Insulation};
 use crate::board::{BranchKind, GridPos, TileIndex};
 use crate::card::{CardDef, CardEffect, CardKind, CardSet};
-use crate::charge::{Charge, ChargeKind};
+use crate::charge::{Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Scope, Source};
 use crate::data::DataHandles;
 use crate::landing::{
     Landed, Landing, LandingDomain, Pending, PendingDecision, jail_player, teleport,
@@ -155,6 +155,13 @@ pub struct CardSink<'w, 's> {
     pub jailed: MessageWriter<'w, PlayerJailed>,
     pub teleported: MessageWriter<'w, PlayerTeleported>,
 }
+
+/// 免费卡免的是哪几族钱（PLAN §三「**免费**抵 >2000×物价 的租金/罚金/税」）。
+///
+/// 税（地价税、所得税）今天还没出生，但它落在 `Penalty` 那一族 —— 那张卡不必等 P11 就
+/// 已经覆盖了三条里的两条，第三条来了也归这里。**不含 `Acquire`（买地、加盖）**：
+/// 「买地免费」是大福神的特权（PLAN §三 神明行），两张卡各自有价，合成一个域就分不开了。
+const FREE_PASS_DOMAINS: &[ChargeDomain] = &[ChargeDomain::Rent, ChargeDomain::Penalty];
 
 /// 把一张卡的全部效果打在 `victim` 头上，返回每条效果的凭据给 UI 拼文案。
 ///
@@ -298,6 +305,23 @@ pub fn apply_card(
                     lands,
                     days: *days,
                 });
+            }
+            CardEffect::FreePass { floor } => {
+                // 登记一条**带门槛的一次性 `Cancel`**。三样信息各有归属：门槛与「免哪几族钱」
+                // 是这张卡的玩法（所以写在这里，不写在管线里），而「什么时候算用掉」是世界的
+                // 行为（所以由 `Books::settle` 在生效那一笔注销，这里不承诺寿命）。
+                //
+                // 打出去那一刻**什么都不发生** —— 没有流水金额、没有组件、屏幕上没有变化。
+                // 这不是静默失效：`FreePassArmed` 那条凭据就是「从今天起可以免一次」，
+                // 而它值多少钱取决于下一笔多大的账先来。
+                sink.books.register(Correction::one_shot(
+                    victim,
+                    Scope::domains(FREE_PASS_DOMAINS),
+                    Adjustment::Cancel,
+                    Source::Card,
+                    *floor,
+                ));
+                outcomes.push(EffectOutcome::FreePassArmed { floor: *floor });
             }
         }
     }

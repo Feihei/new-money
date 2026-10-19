@@ -47,7 +47,13 @@ pub(crate) struct HandStamp(pub String);
 ///
 /// 四种形状各一张：给自己（免罪）、给对手（陷害）、给一块地（涨价）、给一条街（查封）。
 /// 少一种，那个形状的按钮排就永远拍不到 —— 而「拍不到」在验收里读起来和「没做」一样。
-const SAMPLE_CARDS: [&str; 4] = ["item_frame", "item_insulate", "item_hike", "item_seal"];
+const SAMPLE_CARDS: [&str; 5] = [
+    "item_frame",
+    "item_insulate",
+    "item_hike",
+    "item_seal",
+    "item_free",
+];
 
 /// 开发用：给当前回合玩家发 [`SAMPLE_CARDS`] —— 一张要选对手、一张给自己，两种形状都要拍到。
 ///

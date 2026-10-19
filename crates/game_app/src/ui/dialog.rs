@@ -914,5 +914,11 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
             lands,
             days,
         } => format!("{} {lands} 块地 {days} 天", status.label()),
+        // 打出去那一刻**什么都不发生**，所以这一句必须说清「从今天起可以免一次」——
+        // 否则玩家以为自己按错了。门槛要连着物价一起写，因为「现在值不值得用」正是这张卡
+        // 唯一需要判断的地方
+        EffectOutcome::FreePassArmed { floor } => {
+            format!("存下一次免付（超过 {floor}×物价 的账才免）")
+        }
     }
 }

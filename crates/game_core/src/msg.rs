@@ -364,6 +364,24 @@ pub enum EffectOutcome {
         lands: u32,
         days: u32,
     },
+    /// 挂上了一条待用的免付（免费卡）。`floor` 是门槛的名义额 —— 这条凭据说的是
+    /// 「从今天起，超过这个数的账可以免一次」，而**不是**「已经免了」。真免掉那笔是
+    /// 另一条消息 [`ChargeWaived`]，两件事之间可以隔几十个回合。
+    FreePassArmed {
+        floor: i64,
+    },
+}
+
+/// 一条一次性修正**真的生效了**：`saved` 这笔账从这位身上免掉了，那张卡就此消失。
+///
+/// 与 [`CashChanged`] 分开，是因为这里**没有钱动** —— 「少付」不是一笔收入，把它记成
+/// `+2400` 会让现金审计对不上账（P1 那两套账同一条理由）。而没有这条消息，玩家看见的
+/// 就是「租金那一格显示 0」，读不出自己刚花掉一张卡。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChargeWaived {
+    pub player: Entity,
+    pub saved: i64,
+    pub via: crate::charge::Source,
 }
 
 // ===== 决策 =====

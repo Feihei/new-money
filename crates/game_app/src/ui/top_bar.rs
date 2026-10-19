@@ -12,9 +12,9 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    AtmAccess, BankOpDone, BankVisited, CardPlayed, GameOver, GameRules, GameSession, JailSkipped,
-    MarketClock, Paused, PendingDecision, PlayerBankrupt, PlayerName, PointsChanged, StockTraded,
-    StockVisited, TurnOrder, TurnPhase,
+    AtmAccess, BankOpDone, BankVisited, CardPlayed, ChargeWaived, GameOver, GameRules, GameSession,
+    JailSkipped, MarketClock, Paused, PendingDecision, PlayerBankrupt, PlayerName, PointsChanged,
+    StockTraded, StockVisited, TurnOrder, TurnPhase,
 };
 
 use super::finance::comma;
@@ -363,6 +363,9 @@ pub(crate) struct Notices<'w, 's> {
     /// 出牌的结果。手牌面板随手牌重建，把一次性结果烤进去下一次就没了 ——
     /// 持久的读数只有这一行（与点券那一条同一个道理）
     played: MessageReader<'w, 's, CardPlayed>,
+    /// 一次性修正生效那一笔（免费卡花掉了）。**没有对应的 `CashChanged`**：钱一分没动而
+    /// 卡没了，玩家能看见的只有这一行
+    waived: MessageReader<'w, 's, ChargeWaived>,
     over: MessageReader<'w, 's, GameOver>,
 }
 
@@ -420,6 +423,15 @@ pub(crate) fn hint_from_events(
             name(&names, m.player),
             m.delta,
             m.balance
+        ));
+    }
+    // 免付要说「免掉了多少」而不是「付了 0」：前者是一次事件的凭据，后者读起来像租金表坏了
+    for m in notices.waived.read() {
+        line = Some(format!(
+            "{} 免付了一笔 ${}（{}）",
+            name(&names, m.player),
+            comma(m.saved),
+            source_word(m.via)
         ));
     }
     // 出牌的结果必须在这儿说清楚，尤其要说「有没有生效」：一张陷害卡打在带护身的人头上
@@ -484,6 +496,17 @@ fn side_verb(side: game_core::prelude::TradeSide) -> &'static str {
     match side {
         TradeSide::Buy => "买入",
         TradeSide::Sell => "卖出",
+    }
+}
+
+/// 免付是谁给的。今天只有卡，但这一栏不能省：将来神明（大财神赖账）与规则（P10 的
+/// 董事长免费）都走同一条凭据，而玩家有权知道自己这次是靠什么少付的。
+fn source_word(via: game_core::prelude::Source) -> &'static str {
+    use game_core::prelude::Source;
+    match via {
+        Source::Card => "卡片",
+        Source::God => "神明",
+        Source::Rule => "规则",
     }
 }
 
