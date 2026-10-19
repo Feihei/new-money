@@ -205,10 +205,11 @@ pub fn estate_value(def: &BoardDef, land: &LandView) -> i64 {
     price + upgrade_cost(def, land).unwrap_or(0) * built
 }
 
-/// 一个人的现资产：现金 + 存款 − 贷款 + 地产账面 + 股票市值。物价指数的分子按人加它。
+/// 一个人的现资产：现金 + 存款 − 负债 + 地产账面 + 股票市值。物价指数的分子按人加它。
 ///
-/// 抵押中的地块由调用方挡掉（与 [`property_value`] 同一条理由：抵押就是把地产押给银行，
-/// 算进去会让「抵押换现金」凭空增加全场财富）。
+/// `loan` 那一格**含抵押本金**（`Books::total_assets` 把两者加在一起传进来）：押出去换到的
+/// 现金进了分子，那块地却还在分子里（可赎回），所以必须有一笔债把它抵平 ——
+/// 少了这笔，「谁缺钱了」就在替「所有人的房租」定价。
 pub fn net_worth(cash: i64, deposit: i64, loan: i64, estate: i64, stock_value: i64) -> i64 {
     cash + deposit - loan + estate + stock_value
 }
@@ -236,6 +237,27 @@ pub fn price_index(total: i64, initial: i64) -> f32 {
 pub fn calc_max_loan(def: &BoardDef, all: &[LandView], player: PlayerId, rules: &GameRules) -> i64 {
     let value = property_value(def, all, player);
     (value as f32 * rules.max_loan_ratio).floor() as i64
+}
+
+/// 抵押一块地到手多少：账面价值 × `mortgage_percent` / 100，**向下取整**。
+///
+/// 基数是 [`estate_value`]（地价 + 已花的加盖费）而不是只按地价 —— 加盖花掉的钱不该在抵押
+/// 那一刻蒸发。而抵押中的地不能加盖（[`can_upgrade`] 那条），所以这个数一旦定下就冻结，
+/// [`redeem_cost`] 才有「按本金加一成」可算。
+///
+/// **不乘物价指数**：这是一笔债，不是一份资产。可贷额度那条也是按名义地价算的（[`calc_max_loan`]），
+/// 两个窗口按同一口径才不会互相套利。
+pub fn mortgage_cashout(def: &BoardDef, land: &LandView, rules: &GameRules) -> i64 {
+    estate_value(def, land).saturating_mul(rules.mortgage_percent as i64) / 100
+}
+
+/// 赎回要付多少：本金 × `redeem_percent` / 100，**向下取整**（本金 750、一成 → 825）。
+///
+/// 收的是**当初到手那笔**而不是「今天重算一遍」：`Mortgaged::proceeds` 存的就是它。
+/// 重算在今天的规则下会得到同一个数，但那个「今天」是靠 `can_upgrade` 挡着加盖换来的 ——
+/// 一笔债的价不该寄存在另一条规则的不变式上（见 `land::Mortgaged` 的注释）。
+pub fn redeem_cost(principal: i64, rules: &GameRules) -> i64 {
+    principal.saturating_mul(rules.redeem_percent as i64) / 100
 }
 
 /// 存款合法额：`amount > 0` 且现金够（`bank_system.gd:14-24`）。

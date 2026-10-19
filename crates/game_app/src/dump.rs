@@ -119,7 +119,7 @@ type PlotRow = (
     &'static LandId,
     &'static Owner,
     &'static BuildingLevel,
-    Option<&'static Mortgaged>,
+    &'static Mortgaged,
     Option<&'static Timed<LandStatus>>,
 );
 
@@ -388,7 +388,7 @@ fn format_lands(view: &DumpView) -> Vec<String> {
     let mut rows: Vec<(u32, String)> = view
         .plots
         .iter()
-        .map(|(id, owner, level, mortgaged, status)| {
+        .map(|(id, owner, level, mortgage, status)| {
             let name = def
                 .and_then(|d| d.land(id.0))
                 .map_or("", |l| l.name.as_str());
@@ -400,7 +400,12 @@ fn format_lands(view: &DumpView) -> Vec<String> {
                     name,
                     owner.0.map(|p| p.0),
                     level.0,
-                    if mortgaged.is_some() { "抵押" } else { "" },
+                    // 本金要说得出数：「抵押」与「押了 750、赎回要 825」在查账时是两件事
+                    if mortgage.held() {
+                        format!("抵押{}", mortgage.proceeds)
+                    } else {
+                        String::new()
+                    },
                     // 限时状态要说得出还剩几天：「涨价封住了这条街」和「明天就到期」在盘面上是两件事
                     status.map_or_else(String::new, |t| format!(
                         "{}剩{}天",

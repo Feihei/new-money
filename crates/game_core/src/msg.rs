@@ -232,6 +232,36 @@ pub struct BankOpDone {
     pub amount: i64,
 }
 
+/// 柜台上的两件**地产变现**业务（P3d③）。与 [`BankOp`] 分两个枚举而不是并成六个变体：
+/// 那四件的主语是「一个人 + 一个金额」，这两件的主语是「一个人 + **一块地**」，
+/// 硬塞进同一张表就要给 `Deposit` 配一个永远用不上的 `land` 字段。
+/// 两者共用同一个窗口（`Pending::BankTeller`）与同一条休市判据。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MortgageOp {
+    /// 押出去：到手 `账面 × mortgage_percent / 100`
+    Take,
+    /// 赎回来：付掉本金那一笔 + 手续费
+    Redeem,
+}
+
+/// 请求办一件抵押/赎回。主语必须是**站在柜台前的那个人**，且这块地得是他的 ——
+/// 判据在 `mortgage::mortgage_op_allowed`，不在按钮的 `disabled` 上。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MortgageRequested {
+    pub player: Entity,
+    pub op: MortgageOp,
+    pub land: LandId,
+}
+
+/// 已办成的那一笔。`amount` 是**实际**过手的钱（到手额或赎回费），被拒的不发这条。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MortgageDone {
+    pub player: Entity,
+    pub op: MortgageOp,
+    pub land: LandId,
+    pub amount: i64,
+}
+
 // ===== 股票 =====
 
 /// 股价真的动了：`old → new`。

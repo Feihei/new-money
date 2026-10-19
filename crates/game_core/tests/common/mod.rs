@@ -22,13 +22,13 @@ use game_core::prelude::{
     CardKind, CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived, Correction, Corrections,
     CouponBoxes, DamageTally, DataHandles, Decision, DecisionChosen, Deck, DiceRolled, GameOver,
     GameRules, GameSeed, GameSession, GameSetup, Hand, Insulation, JailSkipped, LandBought,
-    LandDamage, LandId, LandStatus, LandUpgraded, Market, MarketClock, Mortgaged, Owner, Pending,
-    PendingDecision, PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed,
-    PlayerReleased, PlayerTeleported, PlotArea, Points, PointsChanged, RentDue, RequestRoll, Rng,
-    Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StockId, StockPriceChanged,
-    StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition,
-    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet,
-    deal_to,
+    LandDamage, LandId, LandStatus, LandUpgraded, LandView, Market, MarketClock, MortgageDone,
+    MortgageOp, MortgageRequested, Mortgaged, Owner, Pending, PendingDecision, PlayCardRequested,
+    PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed, PlayerReleased, PlayerTeleported,
+    PlotArea, Points, PointsChanged, RentDue, RequestRoll, Rng, Scope, Shelf, ShopOpDone,
+    ShopOpRequested, ShopStock, Source, StockId, StockPriceChanged, StockTradeRequested,
+    StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded,
+    TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet, deal_to,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -61,6 +61,11 @@ pub struct Plays(pub Vec<PlayCardRequested>);
 /// （`Pending::Shop` 挂的是谁）被真走到，而不是被测试绕过。
 #[derive(Resource, Default)]
 pub struct ShopRequests(pub Vec<ShopOpRequested>);
+
+/// 测试侧的「点银行柜台上的抵押/赎回按钮」。同样走队列 → 真消息，于是那条窗口判据
+/// （`Pending::BankTeller` 挂的是谁、银行今天开不开门）被真走到，而不是被测试绕过。
+#[derive(Resource, Default)]
+pub struct MortgageRequests(pub Vec<MortgageRequested>);
 
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
@@ -165,6 +170,9 @@ struct BookReaders<'w, 's> {
     /// 百货成交凭据（P3d②）。与 `gained` 分开记：买入那一次两件事各有一条流水，
     /// 「花了多少点券」与「卡进没进手牌」不是同一个断言。
     shop_ops: MessageReader<'w, 's, ShopOpDone>,
+    /// 抵押柜台的成交凭据（P3d③）。与 `bank_ops` 分开记：那四条是「一个人 + 一个金额」，
+    /// 这两件是「一个人 + 一块地」，而断言要的正是「哪块地、过手多少」。
+    mortgages: MessageReader<'w, 's, MortgageDone>,
     stock_visit: MessageReader<'w, 's, StockVisited>,
     traded: MessageReader<'w, 's, StockTraded>,
     prices: MessageReader<'w, 's, StockPriceChanged>,
@@ -403,6 +411,18 @@ fn collect_books(
             m.points
         ));
     }
+    for m in r.mortgages.read() {
+        log.0.push(format!(
+            "Mortgage({}{}{}·{})",
+            who(&players, m.player),
+            match m.op {
+                MortgageOp::Take => "押",
+                MortgageOp::Redeem => "赎",
+            },
+            land(m.land),
+            m.amount
+        ));
+    }
     for m in r.traded.read() {
         log.0.push(format!(
             "Trade({}{}{}{}股@{:.2})",
@@ -431,8 +451,8 @@ fn collect_books(
     }
 }
 
-/// 五组「测试侧的点击」与五条对应的消息写出。装一个参数包而不是十个函数参数，
-/// 与生产代码同一条房规（§六 坑 8），而且这五对本来就是同一件事：把队列排空成消息。
+/// 六组「测试侧的点击」与六条对应的消息写出。装一个参数包而不是十二个函数参数，
+/// 与生产代码同一条房规（§六 坑 8），而且这六对本来就是同一件事：把队列排空成消息。
 #[derive(SystemParam)]
 struct Pump<'w> {
     inputs: ResMut<'w, Inputs>,
@@ -440,11 +460,13 @@ struct Pump<'w> {
     asks: ResMut<'w, BankRequests>,
     plays: ResMut<'w, Plays>,
     shops: ResMut<'w, ShopRequests>,
+    mortgages: ResMut<'w, MortgageRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
     op_writes: MessageWriter<'w, BankOpRequested>,
     card_writes: MessageWriter<'w, PlayCardRequested>,
     shop_writes: MessageWriter<'w, ShopOpRequested>,
+    mortgage_writes: MessageWriter<'w, MortgageRequested>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
@@ -462,6 +484,9 @@ fn pump_inputs(mut pump: Pump<'_>) {
     }
     for s in pump.shops.0.drain(..) {
         pump.shop_writes.write(s);
+    }
+    for m in pump.mortgages.0.drain(..) {
+        pump.mortgage_writes.write(m);
     }
 }
 
@@ -483,6 +508,7 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<BankRequests>()
         .init_resource::<Plays>()
         .init_resource::<ShopRequests>()
+        .init_resource::<MortgageRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -804,20 +830,15 @@ pub struct DamageReq(Option<(LandId, LandDamage, PlotArea)>);
 #[derive(Resource, Default)]
 pub struct DamageOut(Option<DamageTally>);
 
-/// `Books::damage` 要 `Commands`（摘 `Mortgaged` 只能用 deferred 的移除），
-/// 而 [`run_op`] 的闭包签名里没有它 —— 为它改那条签名会把所有既有用例一起卷进来，
-/// 所以这里单开一条一次性的 system，走的仍然是同一个 `Books` 公开入口。
-fn run_damage_system(
-    mut commands: Commands,
-    mut books: Books,
-    mut req: ResMut<DamageReq>,
-    mut out: ResMut<DamageOut>,
-) {
+/// 损害要写回一个资源，而 [`run_op`] 的闭包只拿到 `Books` 与 `Market`、碰不到
+/// `ResMut<DamageOut>` —— 为它改那条签名会把所有既有用例一起卷进来，所以这里单开一条
+/// 一次性的 system，走的仍然是同一个 `Books` 公开入口。
+fn run_damage_system(mut books: Books, mut req: ResMut<DamageReq>, mut out: ResMut<DamageOut>) {
     let Some((center, depth, area)) = req.0 else {
         return;
     };
     req.0 = None;
-    out.0 = Some(books.damage(&mut commands, center, depth, area));
+    out.0 = Some(books.damage(center, depth, area));
 }
 
 /// 对真棋盘打一次损害，返回命中统计。prototype 的六个地块：
@@ -837,10 +858,10 @@ pub fn run_damage(app: &mut App, center: LandId, depth: LandDamage, area: PlotAr
 /// `(业主, 等级, 是否抵押中)` —— 损害阶梯的断言三样都要看。
 pub fn plot_state(app: &mut App, land: u32) -> (Option<u32>, u8, bool) {
     let w = app.world_mut();
-    let mut q = w.query::<(&LandId, &Owner, &BuildingLevel, Option<&Mortgaged>)>();
+    let mut q = w.query::<(&LandId, &Owner, &BuildingLevel, &Mortgaged)>();
     q.iter(w)
         .find(|(id, _, _, _)| id.0 == land)
-        .map(|(_, owner, level, mortgaged)| (owner.0.map(|p| p.0), level.0, mortgaged.is_some()))
+        .map(|(_, owner, level, mortgage)| (owner.0.map(|p| p.0), level.0, mortgage.held()))
         .expect("prototype 里有这块地")
 }
 
@@ -940,14 +961,18 @@ pub fn own(app: &mut App, land: u32, owner: Option<u32>, level: u8, mortgaged: b
             .map(|(e, _)| e)
             .expect("prototype 里有这块地")
     };
-    let w = app.world_mut();
-    let mut e = w.entity_mut(target);
-    if mortgaged {
-        e.insert((Owner(pid), BuildingLevel(level), Mortgaged));
+    // 本金走同一条纯函数算，不在这里另写一个数 —— 「这块地押着多少」的真相只有一处
+    let proceeds = if mortgaged {
+        let w = app.world();
+        let def = &w.resource::<ActiveBoard>().def;
+        let view = LandView::new(def, LandId(land), pid, level, true, None);
+        game_core::economy::mortgage_cashout(def, &view, w.resource::<GameRules>())
     } else {
-        e.insert((Owner(pid), BuildingLevel(level)))
-            .remove::<Mortgaged>();
-    }
+        0
+    };
+    let w = app.world_mut();
+    w.entity_mut(target)
+        .insert((Owner(pid), BuildingLevel(level), Mortgaged { proceeds }));
 }
 
 /// 把牌堆顶压成指定的那张卡（`CardId` 是 `*_cards.json` 里的下标）。
@@ -1034,6 +1059,29 @@ pub fn shop_ask(app: &mut App, player: Entity, side: TradeSide, index: u32) {
 /// 现在货架上摆着哪几张（按陈列顺序）。
 pub fn shelf_of(app: &App) -> Vec<CardId> {
     app.world().resource::<ShopStock>().slots.clone()
+}
+
+/// 替 `player` 按一次柜台上的抵押/赎回按钮（`land` 是地块编号，prototype 里 0..=5）。
+/// 同样走队列 → 真消息，于是「站在银行柜台前的那个人才办得成」与休市两条都被真走到。
+pub fn mortgage_ask(app: &mut App, player: Entity, op: MortgageOp, land: u32) {
+    app.world_mut()
+        .resource_mut::<MortgageRequests>()
+        .0
+        .push(MortgageRequested {
+            player,
+            op,
+            land: LandId(land),
+        });
+}
+
+/// 这块地押着多少本金（`None` = 没押）。读的是组件，所以它同时是「`Mortgaged` 到底写没写进去」
+/// 那条断言的探针。走 `ActiveBoard` 的索引拿实体，不必为一次读数开一条 query。
+pub fn mortgage_of(app: &App, land: u32) -> Option<i64> {
+    let w = app.world();
+    let entity = *w.resource::<ActiveBoard>().lands.get(&LandId(land))?;
+    w.entity(entity)
+        .get::<Mortgaged>()
+        .and_then(|m| m.held().then_some(m.proceeds))
 }
 
 /// 把货架压成指定的那几张。换货是抽签（`shop::restock`），而用例要断言的是「买这一张
@@ -1157,6 +1205,13 @@ pub fn tick_of(app: &App) -> u32 {
     app.world().resource::<MarketClock>().tick
 }
 
+/// 把日历拨到第 `tick` 天。与 `NM_DAY` 同一条理由：哪天是周末由骰子走到第几回合决定，
+/// 用例要钉的就是「休市那天办不办得成」，不能等运气。
+/// **代价**同那个旋钮：拨完那天行情与结息都不再往前走，它是前置不是时光机。
+pub fn set_tick(app: &mut App, tick: u32) {
+    app.world_mut().resource_mut::<MarketClock>().tick = tick;
+}
+
 /// 现金审计：每位玩家的 `Σ delta` 与钱包余额逐一对账。
 ///
 /// 这是 B3 的「现金流守恒」断言的实际形态：银行与证券市场是**外部对手方**
@@ -1234,6 +1289,33 @@ pub fn status_of(app: &mut App, land: u32) -> Option<(LandStatus, u32)> {
     q.iter(w)
         .find(|(_, id, _)| id.0 == land)
         .map(|(_, _, timed)| (timed.kind, timed.days_left))
+}
+
+/// 直接给某块地盖一个限时状态。与 [`own`] 同一条理由：要测的是「查封中的地办不办得成」，
+/// 而不是「查封怎么盖上去」（那条由 `tests/plot_status.rs` 从真卡那一侧钉）。
+pub fn stamp(app: &mut App, land: u32, status: LandStatus, days: u32) {
+    let target = {
+        let w = app.world_mut();
+        let mut q = w.query::<(Entity, &LandId)>();
+        q.iter(w)
+            .find(|(_, id)| id.0 == land)
+            .map(|(e, _)| e)
+            .expect("prototype 里有这块地")
+    };
+    app.world_mut()
+        .entity_mut(target)
+        .insert(Timed::new(status, days));
+}
+
+/// 全场现资产总和（物价指数的分子）。**走 `Books::total_assets`**，所以回合末那次重算
+/// 读的就是这个数；股票持仓按 0 计（这批用例里没人买过股票）。
+pub fn total_assets(app: &mut App, index: f32) -> i64 {
+    let out = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sink = out.clone();
+    run_op(app, move |books, _| {
+        *sink.lock().unwrap() = Some(books.total_assets(index, |_| 0.0));
+    });
+    out.lock().unwrap().expect("跑了一帧就该有读数")
 }
 
 /// 这块地现在的租金。**走 `Books::rent_of`**，也就是踩上去要收的那同一个数 ——

@@ -12,9 +12,10 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    AtmAccess, BankOpDone, BankVisited, CardPlayed, ChargeWaived, GameOver, GameRules, GameSession,
-    JailSkipped, MarketClock, Paused, PendingDecision, PlayerBankrupt, PlayerName, PointsChanged,
-    ShopOpDone, StockTraded, StockVisited, TradeSide, TurnOrder, TurnPhase,
+    ActiveBoard, AtmAccess, BankOpDone, BankVisited, CardPlayed, ChargeWaived, GameOver, GameRules,
+    GameSession, JailSkipped, MarketClock, MortgageDone, MortgageOp, Paused, PendingDecision,
+    PlayerBankrupt, PlayerName, PointsChanged, ShopOpDone, StockTraded, StockVisited, TradeSide,
+    TurnOrder, TurnPhase,
 };
 
 use super::finance::comma;
@@ -363,6 +364,9 @@ pub(crate) struct Notices<'w, 's> {
     /// 百货成交（P3d②）。排在 `points` 之后：同一帧里那笔点券变动与这张成交凭据说的
     /// 是同一件事，而带卡名的那条更能回答「我刚按下去发生了什么」
     shop: MessageReader<'w, 's, ShopOpDone>,
+    /// 抵押柜台的成交（P3d③）。排在 `shop` 之后、`bank_ops` 那一族之外单开一条：
+    /// 它说的是「哪块地、过手多少」，而那四条银行操作只带金额。
+    mortgage: MessageReader<'w, 's, MortgageDone>,
     /// 出牌的结果。手牌面板随手牌重建，把一次性结果烤进去下一次就没了 ——
     /// 持久的读数只有这一行（与点券那一条同一个道理）
     played: MessageReader<'w, 's, CardPlayed>,
@@ -375,6 +379,9 @@ pub(crate) struct Notices<'w, 's> {
 pub(crate) fn hint_from_events(
     mut notices: Notices,
     names: Query<&PlayerName>,
+    // 抵押与赎回的凭据带的是 `LandId`（与 `RentDue` 同一条口径：地块靠编号，卡才带卡面），
+    // 所以这里要查一次定义才能说出「哪块地」。菜单态没有棋盘，故 `Option`
+    board: Option<Res<ActiveBoard>>,
     mut hints: Query<&mut Text, With<HintText>>,
 ) {
     // 一帧里可能同时有多条（例如破产紧跟在回合结束旁白之后）：按流水顺序取最后一条，
@@ -452,6 +459,28 @@ pub(crate) fn hint_from_events(
                 name(&names, m.player),
                 m.card.title,
                 m.points
+            ),
+        });
+    }
+    // 抵押与赎回：这一行要说得出「哪块地」与「多少钱」，因为柜台下一刻就重建了。
+    // 赎回那一条把「比到手多多少」写出来 —— 那一成手续费是玩家此刻唯一要看的数
+    for m in notices.mortgage.read() {
+        let plot = board
+            .as_ref()
+            .and_then(|b| b.def.land(m.land.0))
+            .map_or("？", |l| l.name.as_str());
+        line = Some(match m.op {
+            MortgageOp::Take => format!(
+                "{} 抵押了{}，到手 {}（不计息，赎回加一成）",
+                name(&names, m.player),
+                plot,
+                comma(m.amount)
+            ),
+            MortgageOp::Redeem => format!(
+                "{} 赎回了{}，付掉 {}",
+                name(&names, m.player),
+                plot,
+                comma(m.amount)
             ),
         });
     }

@@ -23,9 +23,9 @@ pub mod top_bar;
 use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankOp, BankOpRequested, CardAim, CardId, Decision, DecisionChosen,
-    GameRules, MarketClock, Paused, Pending, PendingDecision, PlayCardRequested, RequestRoll,
-    ShopOpRequested, StockId, StockTradeRequested, TradeSide, TurnOrder, TurnPhase,
-    bank_op_allowed,
+    GameRules, LandId, MarketClock, MortgageOp, MortgageRequested, Paused, Pending,
+    PendingDecision, PlayCardRequested, RequestRoll, ShopOpRequested, StockId, StockTradeRequested,
+    TradeSide, TurnOrder, TurnPhase, bank_op_allowed,
 };
 
 use theme::{col, layout, size};
@@ -110,6 +110,15 @@ impl Plugin for UiPlugin {
                 dialog::dev_open_shop.run_if(resource_exists::<ActiveBoard>),
             );
         }
+        // `NM_PLOTS=<n>`：把前 n 块地划给当前回合玩家。银行柜台那一节「你的地产」要有地块
+        // 才拍得到，而「名下有地」在正经玩法里同样要靠骰子踩中无主地（判据：每个界面都得有
+        // 一条不靠鼠标的入口）。与 `NM_DECISION=bank` 配用就是柜台那一屏。
+        if std::env::var_os("NM_PLOTS").is_some() {
+            app.add_systems(
+                Update,
+                dialog::dev_grant_plots.run_if(resource_exists::<ActiveBoard>),
+            );
+        }
         // `NM_DAY=<tick>`：把日历钉在第 n 天。P2④ 之后「今天休不休市」是面板上十二颗按钮
         // 的着色判据，而哪天是周六由骰子走到哪一回合决定 —— 同一条理由，给它一条不靠运气的入口。
         // 每帧都钉：装配世界时 `begin_game_system` 会把 `MarketClock` 重置成默认值，
@@ -185,6 +194,13 @@ pub enum UiAction {
     ShopOp {
         side: TradeSide,
         card: CardId,
+    },
+    /// 在银行柜台抵押或赎回一块自己的地（P3d③）。与 [`UiAction::ShopOp`] 同一条：
+    /// 按钮上写的数额只是给玩家看的，到手多少、赎回多少仍由规则层从账面与本金算。
+    /// 主语也不在按钮里 —— 派发时取「此刻柜台前站着的那个人」。
+    MortgageOp {
+        land: LandId,
+        op: MortgageOp,
     },
 }
 
@@ -566,6 +582,7 @@ struct Sends<'w> {
     trades: MessageWriter<'w, StockTradeRequested>,
     cards: MessageWriter<'w, PlayCardRequested>,
     shops: MessageWriter<'w, ShopOpRequested>,
+    mortgages: MessageWriter<'w, MortgageRequested>,
     exit: MessageWriter<'w, AppExit>,
 }
 
@@ -701,6 +718,23 @@ fn dispatch_ui_actions(
                     card: *card,
                 });
             }
+            // 抵押与赎回走的是**银行柜台**那个人（`counter_of`），与四种 `BankOp` 同一个窗口。
+            // 休市与「这块地办不办得动」都不在这里判：前者 `can_bank_op` 那条路径已经管不到
+            // 这一支，所以由规则层的 `mortgage_op_allowed` 挡（它读同一份日历），
+            // 后者由面板的灰按钮 + 同一张表挡。
+            UiAction::MortgageOp { land, op } => {
+                if gate.paused.0 {
+                    continue;
+                }
+                let Some(player) = counter_of(&gate.pending) else {
+                    continue;
+                };
+                sends.mortgages.write(MortgageRequested {
+                    player,
+                    op: *op,
+                    land: *land,
+                });
+            }
         }
     }
 }
@@ -831,31 +865,40 @@ mod tests {
         trades: Vec<(Entity, String, TradeSide, u32)>,
         plays: Vec<(Entity, CardId, Option<CardAim>)>,
         shops: Vec<(Entity, TradeSide, CardId)>,
+        mortgages: Vec<(Entity, LandId, MortgageOp)>,
     }
 
-    fn collect(
-        mut seen: ResMut<Seen>,
-        mut rolls: MessageReader<RequestRoll>,
-        mut answers: MessageReader<DecisionChosen>,
-        mut ops: MessageReader<BankOpRequested>,
-        mut trades: MessageReader<StockTradeRequested>,
-        mut plays: MessageReader<PlayCardRequested>,
-        mut shops: MessageReader<ShopOpRequested>,
-    ) {
-        seen.rolls.extend(rolls.read().map(|r| r.player));
+    /// 派发出口的读者们。装成参数包而不是八个函数参数：这仓库遇到 `too_many_arguments`
+    /// 不挂 `#[allow]` 而是打包（§六 坑 8），而这里加一颗按钮就多一个读者是**预期内的长**，
+    /// 不是「这个 system 真的要知道八件事」那种需要被警告吃掉的信号。
+    #[derive(SystemParam)]
+    struct Readers<'w, 's> {
+        rolls: MessageReader<'w, 's, RequestRoll>,
+        answers: MessageReader<'w, 's, DecisionChosen>,
+        ops: MessageReader<'w, 's, BankOpRequested>,
+        trades: MessageReader<'w, 's, StockTradeRequested>,
+        plays: MessageReader<'w, 's, PlayCardRequested>,
+        shops: MessageReader<'w, 's, ShopOpRequested>,
+        mortgages: MessageReader<'w, 's, MortgageRequested>,
+    }
+
+    fn collect(mut seen: ResMut<Seen>, mut r: Readers<'_, '_>) {
+        seen.rolls.extend(r.rolls.read().map(|x| x.player));
         seen.answers
-            .extend(answers.read().map(|a| (a.player, a.action)));
+            .extend(r.answers.read().map(|a| (a.player, a.action)));
         seen.ops
-            .extend(ops.read().map(|o| (o.player, o.op, o.amount)));
+            .extend(r.ops.read().map(|o| (o.player, o.op, o.amount)));
         seen.trades.extend(
-            trades
+            r.trades
                 .read()
                 .map(|t| (t.player, t.stock.0.clone(), t.side, t.shares)),
         );
         seen.plays
-            .extend(plays.read().map(|p| (p.player, p.card, p.aim)));
+            .extend(r.plays.read().map(|p| (p.player, p.card, p.aim)));
         seen.shops
-            .extend(shops.read().map(|s| (s.player, s.side, s.card)));
+            .extend(r.shops.read().map(|s| (s.player, s.side, s.card)));
+        seen.mortgages
+            .extend(r.mortgages.read().map(|m| (m.player, m.land, m.op)));
     }
 
     /// 一套只装配到「能跑 UI 派发」的对局骨架：两名玩家、一颗掷骰按钮（文字是它的子节点）、
@@ -879,6 +922,8 @@ mod tests {
         insulate: Entity,
         /// 百货柜台上的一颗「买」按钮（P3d②）
         shop_buy: Entity,
+        /// 银行柜台上的一颗「押」按钮（P3d③）
+        mortgage_take: Entity,
         toggle_atm: Entity,
         toggle_stock: Entity,
         toggle_hand: Entity,
@@ -898,6 +943,7 @@ mod tests {
                 .add_message::<StockTradeRequested>()
                 .add_message::<PlayCardRequested>()
                 .add_message::<ShopOpRequested>()
+                .add_message::<MortgageRequested>()
                 .add_message::<AppExit>()
                 .init_resource::<Seen>()
                 .init_resource::<tile_info::SelectedTile>()
@@ -970,6 +1016,14 @@ mod tests {
                 })
                 .id();
             let toggle_atm = app.world_mut().spawn(UiAction::ToggleAtm).id();
+            // 柜台那颗「押 750」：与百货同一形 —— 主语在 `PendingDecision` 里，金额在规则层算
+            let mortgage_take = app
+                .world_mut()
+                .spawn(UiAction::MortgageOp {
+                    land: LandId(0),
+                    op: MortgageOp::Take,
+                })
+                .id();
             let toggle_stock = app.world_mut().spawn(UiAction::ToggleStock).id();
             let toggle_hand = app.world_mut().spawn(UiAction::ToggleHand).id();
 
@@ -990,6 +1044,7 @@ mod tests {
                 frame,
                 insulate,
                 shop_buy,
+                mortgage_take,
                 toggle_atm,
                 toggle_stock,
                 toggle_hand,
@@ -1290,6 +1345,45 @@ mod tests {
         assert!(held.seen().shops.is_empty(), "暂停时还派发了买卖请求");
     }
 
+    /// 抵押与赎回走的是**银行**那个人（`counter_of`）。它与上面那条同形，但守的是另一件事：
+    /// 两个柜台共用一个 `Pending` 家族，派发要是错用了 `shop_customer`，面板上按「押」
+    /// 就会在百货柜台里办成银行的事。
+    #[test]
+    fn a_mortgage_op_names_the_bank_customer_not_the_shop_one() {
+        let mut h = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        h.click(h.mortgage_take);
+        assert!(
+            h.seen().mortgages.is_empty(),
+            "没有柜台也派发了抵押请求 —— 凭空就能变现一块地"
+        );
+
+        let customer = h.player;
+        h.offer(customer, Pending::BankTeller);
+        h.click(h.mortgage_take);
+        assert_eq!(
+            h.seen().mortgages,
+            vec![(customer, LandId(0), MortgageOp::Take)],
+            "柜台开着的那位才是这笔抵押的主语"
+        );
+
+        // 百货柜台开着不算银行柜台：同一颗按钮，换个窗口就该被挡下
+        let mut shop = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let shopper = shop.player;
+        shop.offer(shopper, Pending::Shop);
+        shop.click(shop.mortgage_take);
+        assert!(
+            shop.seen().mortgages.is_empty(),
+            "站在百货柜台里就把地押给了银行"
+        );
+
+        // 暂停挡住一切（与买卖那一条同判据）
+        let mut held = Harness::new(TurnPhase::WaitDecision, true, PendingDecision::default());
+        let banker = held.player;
+        held.offer(banker, Pending::BankTeller);
+        held.click(held.mortgage_take);
+        assert!(held.seen().mortgages.is_empty(), "暂停时还派发了抵押请求");
+    }
+
     /// 银行柜台与百货柜台是**两个**窗口，所以 `counter_of` 与 `shop_customer` 不能合成
     /// 一个「任何窗口」：并起来的第一条被放宽的就是「站在银行里能买百货」这种不该存在的口子。
     #[test]
@@ -1377,6 +1471,10 @@ mod tests {
             // P3d②：派发多了百货那一个出口。漏一条不是「那个按钮不灵」而是
             // `dispatch_ui_actions` **整条不跑**（参数校验失败，症状是所有按钮都死）
             .add_message::<ShopOpRequested>()
+            // P3d③ 同一条坑，两遍：`MortgageRequested` 是派发的出口，`MortgageDone` 是
+            // 顶栏提示行读的 —— 少任何一条，崩的都是「一片按钮没反应」而不是这一个
+            .add_message::<MortgageRequested>()
+            .add_message::<game_core::prelude::MortgageDone>()
             .add_message::<AppExit>()
             // hover_feedback 读的两条 picking 消息，真实应用由 picking 后端注册
             .add_message::<PointerOver>()

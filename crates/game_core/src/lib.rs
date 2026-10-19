@@ -24,6 +24,7 @@ pub mod land;
 pub mod landing;
 pub mod loader;
 pub mod market;
+pub mod mortgage;
 pub mod msg;
 pub mod player;
 pub mod plot;
@@ -72,14 +73,18 @@ pub mod prelude {
         Market, MarketClock, market_tick_on_turn_end_system, settle_market_landing,
         trade_request_system,
     };
+    pub use crate::mortgage::{
+        MortgageDeny, MortgageFacts, counter_plots, mortgage_op_allowed, mortgage_op_system,
+        read_facts,
+    };
     pub use crate::msg::{
         BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn, CardGained,
         CardNotice, CardPlayed, CashChanged, ChargeWaived, Decision, DecisionChosen, DiceRolled,
-        EffectOutcome, GameOver, JailSkipped, LandBought, LandUpgraded, PlayCardRequested,
-        PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased, PlayerTeleported,
-        PointsChanged, RentDue, RequestRoll, ShopOpDone, ShopOpRequested, StockPriceChanged,
-        StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
-        TurnStarted, UpgradeOffered, WalkStarted,
+        EffectOutcome, GameOver, JailSkipped, LandBought, LandUpgraded, MortgageDone, MortgageOp,
+        MortgageRequested, PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerJailed,
+        PlayerReleased, PlayerTeleported, PointsChanged, RentDue, RequestRoll, ShopOpDone,
+        ShopOpRequested, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
+        TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkStarted,
     };
     pub use crate::player::{
         BankBalance, Bankrupt, GameSetup, JailSentence, PLAYER_COLORS, PlayerColor, PlayerId,
@@ -105,14 +110,15 @@ use prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankOpRequested, BankVisited, BoardDef, BuyOffered,
     CardDrawn, CardGained, CardPlayed, CardSet, CashChanged, ChargeWaived, Corrections,
     CouponBoxes, DecisionChosen, DiceRolled, GameOver, GameRules, GameSeed, GameSetup, JailSkipped,
-    JsonAssetLoader, LandBought, LandUpgraded, Landing, MarketClock, Paused, PendingDecision,
-    PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased,
-    PlayerTeleported, PointsChanged, RentDue, RequestRoll, ShopOpDone, ShopOpRequested, ShopStock,
-    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
-    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkStarted,
-    advance_walk_clock_system, bank_op_system, begin_game_system, decision_system,
-    expire_land_status_system, grant_atm_access_system, market_tick_on_turn_end_system,
-    play_card_system, shop_op_system, trade_request_system, walk_step_system,
+    JsonAssetLoader, LandBought, LandUpgraded, Landing, MarketClock, MortgageDone,
+    MortgageRequested, Paused, PendingDecision, PlayCardRequested, PlayerArrived, PlayerBankrupt,
+    PlayerJailed, PlayerReleased, PlayerTeleported, PointsChanged, RentDue, RequestRoll,
+    ShopOpDone, ShopOpRequested, ShopStock, StockPriceChanged, StockSet, StockTradeRequested,
+    StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered,
+    WalkClock, WalkStarted, advance_walk_clock_system, bank_op_system, begin_game_system,
+    decision_system, expire_land_status_system, grant_atm_access_system,
+    market_tick_on_turn_end_system, mortgage_op_system, play_card_system, shop_op_system,
+    trade_request_system, walk_step_system,
 };
 use turn::{
     begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system,
@@ -201,6 +207,9 @@ impl Plugin for CoreGamePlugin {
             // 漏一条就是 `Books` 那批参数整局不跑（症状见 ARCHITECTURE §六 的消息表注）
             .add_message::<ShopOpRequested>()
             .add_message::<ShopOpDone>()
+            // ===== 抵押与赎回（P3d③）=====
+            .add_message::<MortgageRequested>()
+            .add_message::<MortgageDone>()
             .init_state::<TurnPhase>()
             // 装配世界：初始态的 OnEnter 不会触发，所以用 in_state(Boot)
             .add_systems(
@@ -252,6 +261,12 @@ impl Plugin for CoreGamePlugin {
                     // `chain` 而不是并排放进一个元组：两条并行会直接撞成调度期借用冲突。
                     // 谁先办都不改结果 —— 它们读的是同一个「此刻站在哪个柜台前」。
                     shop_op_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
+                    // 抵押柜台与银行柜台是同一个窗口、同一批账（都带 `Books`），
+                    // 所以三条一起 `chain`。它与 `bank_op_system` 的先后不改结果：
+                    // 两者读的都是「此刻站在哪个柜台前」，而谁都不动回合状态。
+                    mortgage_op_system
                         .run_if(resource_exists::<ActiveBoard>)
                         .run_if(not_paused),
                 )

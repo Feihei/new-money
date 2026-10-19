@@ -61,7 +61,7 @@ pub struct Books<'w, 's> {
             &'static LandId,
             &'static mut Owner,
             &'static mut BuildingLevel,
-            Option<&'static Mortgaged>,
+            &'static mut Mortgaged,
         ),
     >,
     /// 地块的限时状态（涨价 / 查封）。**单独一条查询而不是塞进 `plots`**：它是只读的
@@ -91,7 +91,7 @@ impl<'w, 's> Books<'w, 's> {
                     *id,
                     owner.0,
                     level.0,
-                    mortgaged.is_some(),
+                    mortgaged.held(),
                     status,
                 )
             })
@@ -108,9 +108,21 @@ impl<'w, 's> Books<'w, 's> {
             *id,
             owner.0,
             level.0,
-            mortgaged.is_some(),
+            mortgaged.held(),
             status,
         ))
+    }
+
+    /// 这个人押在银行的地块上，总共欠着多少本金（P3d③）。
+    ///
+    /// 物价指数要把它当负债扣掉：抵押到手的那笔现金进了分子，而那块地已经从分子里出去了，
+    /// 不扣本金就等于「抵押一次、全场通缩一点」—— 那笔钱并没有离开游戏，只是换了个口袋。
+    pub fn mortgage_debt(&self, player: PlayerId) -> i64 {
+        self.plots
+            .iter()
+            .filter(|(_, _, owner, _, _)| owner.0 == Some(player))
+            .map(|(_, _, _, _, mortgage)| mortgage.proceeds)
+            .sum()
     }
 
     pub fn land_entity(&self, land: LandId) -> Option<Entity> {
@@ -233,6 +245,17 @@ impl<'w, 's> Books<'w, 's> {
 
     /// 全场现资产总和（物价指数的分子）。破产者不计 —— 他们已经离场，账也清零了。
     ///
+    /// **抵押中的地块照样算资产，同时把本金当负债扣掉**，于是「押一块地换现金」对指数是
+    /// 中性的一笔：现金进 750、债记 750，那块地还在（它是*可赎回*的，不是卖掉了）。反过来
+    /// 若把地踢出分子又不记债，抵押一次就凭空通缩一点全场物价 —— 而物价指数是下一回合
+    /// 每一笔租金的乘数，那等于让「谁缺钱了」去决定「所有人的房租」。
+    /// 赎回那一笔付掉的手续费**是**真的离开游戏（付给银行这个外部对手方），指数随之降一点 ——
+    /// 与罚款、贷款利息同一条口径。
+    ///
+    /// 注意这与 [`crate::economy::property_value`] 是两回事：那条问的是「这块地还能不能替
+    /// 你担保借款」，押出去当然就不担保了；这里问的是「你有多少财富」。同一个 `mortgaged`
+    /// 位回答两个问题，两个答案相反，所以两处各自写清楚。
+    ///
     /// `index` 是**上一回合**的指数，用来把名义地产折成「按今天的价值多少」；理由与
     /// 不发散性见 [`economy::price_index`]。传 1.0 就是纯名义口径。
     ///
@@ -252,7 +275,7 @@ impl<'w, 's> Books<'w, 's> {
                 let bank = self.banks.get(player).copied().unwrap_or_default();
                 let nominal = views
                     .iter()
-                    .filter(|l| l.owner == Some(pid) && !l.mortgaged)
+                    .filter(|l| l.owner == Some(pid))
                     .map(|l| economy::estate_value(def, l))
                     .sum::<i64>();
                 let estate = (nominal as f64 * index as f64).round() as i64;
@@ -265,7 +288,15 @@ impl<'w, 's> Books<'w, 's> {
                             .sum()
                     })
                     .unwrap_or(0);
-                economy::net_worth(cash, bank.deposit, bank.loan, estate, stocks)
+                // 抵押本金与贷款同格：都是「欠银行的钱」。不扣它，抵押就成了把钱从指数里
+                // 抹掉的动作（地块出分子、现金进分子，而债哪儿都不在）
+                economy::net_worth(
+                    cash,
+                    bank.deposit,
+                    bank.loan + self.mortgage_debt(pid),
+                    estate,
+                    stocks,
+                )
             })
             .sum()
     }
@@ -365,13 +396,14 @@ impl<'w, 's> Books<'w, 's> {
             holdings.0.clear();
         }
         if let Some(pid) = self.id_of(player) {
-            for (entity, _, mut owner, mut level, mortgaged) in self.plots.iter_mut() {
+            for (_, _, mut owner, mut level, mut mortgage) in self.plots.iter_mut() {
                 if owner.0 == Some(pid) {
                     owner.0 = None;
                     level.0 = 0;
-                    if mortgaged.is_some() {
-                        commands.entity(entity).remove::<Mortgaged>();
-                    }
+                    // 抵押跟着人走：人离场了，押在银行的地与那笔债一起清零
+                    // （与 [`Self::damage`] 的夺地同一口径 —— 无主地上留着抵押等于替一个
+                    // 不存在的主人挡租金）
+                    mortgage.proceeds = 0;
                 }
             }
         }
@@ -385,27 +417,21 @@ impl<'w, 's> Books<'w, 's> {
 
     /// 打一次建筑损害（P2② 的「拆房 / 征收」动词，形状见 [`crate::damage`]）。
     ///
-    /// `Mortgaged` 只在**夺地**那一刻摘：抵押中的地被 `Degrade` 或 `Clear{seize:false}`
-    /// 打过之后仍然是他的、仍然欠着 —— 房子被拆不该让债主免单（那是 P9 变卖池才有的账）。
+    /// 抵押本金只在**夺地**那一刻清：抵押中的地被 `Degrade` 或 `Clear{seize:false}` 打过
+    /// 之后仍然是他的、仍然欠着 —— 房子被拆不该让债主免单（那是 P9 变卖池才有的账）。
     /// 反过来若地都无主了还留着抵押，`economy` 那三处「抵押中」判定就会替一个不存在的主人
     /// 挡掉租金。
     ///
     /// 不发消息：表现层读的是 `Owner`/`BuildingLevel` 的**变化**（`render::land::sync_buildings`
     /// 用 `Ref<T>` 检测），组件改了它就跟着改。等 P11 的新闻要播「外星人拆了哪几块」时
     /// 再补一条带地块清单的消息，而不是现在就为它准备一个没人读的字段。
-    pub fn damage(
-        &mut self,
-        commands: &mut Commands,
-        center: LandId,
-        depth: LandDamage,
-        area: PlotArea,
-    ) -> DamageTally {
+    pub fn damage(&mut self, center: LandId, depth: LandDamage, area: PlotArea) -> DamageTally {
         let mut tally = DamageTally::default();
         for land in area_of(&self.active.def, center, area) {
             let Some(entity) = self.active.lands.get(&land).copied() else {
                 continue;
             };
-            let Ok((_, _, mut owner, mut level, mortgaged)) = self.plots.get_mut(entity) else {
+            let Ok((_, _, mut owner, mut level, mut mortgage)) = self.plots.get_mut(entity) else {
                 continue;
             };
             tally.hit += 1;
@@ -413,9 +439,7 @@ impl<'w, 's> Books<'w, 's> {
             damage::strike(&mut level.0, &mut owner.0, depth);
             if before.is_some() && owner.0.is_none() {
                 tally.seized += 1;
-                if mortgaged.is_some() {
-                    commands.entity(entity).remove::<Mortgaged>();
-                }
+                mortgage.proceeds = 0;
             }
         }
         info!(
@@ -604,6 +628,67 @@ impl<'w, 's> Books<'w, 's> {
         bank.loan -= paid;
         self.debit(player, paid).expect("repay_plan 已确认现金够");
         true
+    }
+
+    /// 抵押一块名下的地（P3d③）：到手 `账面 × mortgage_percent / 100`，本金写在地块上。
+    ///
+    /// 与 [`Self::borrow`] 的分工：这条**不计息也不占可贷额度**，代价是这块地不收租、不算
+    /// 垄断、也不再是抵押品（`economy::property_value` 把它排除，于是可贷额度同时掉下去）。
+    /// 所以「先借后押」是显然的顺序，押是留给「额度借满了、或不想再滚利息」那一个人的出口。
+    ///
+    /// 窗口与资格的判据在调用方（`mortgage::mortgage_op_allowed`），这里只再认一次主语：
+    /// 不是你的地、或已经押着 → `None`，钱与地块都不动。
+    pub fn mortgage(&mut self, player: Entity, land: LandId) -> Option<i64> {
+        let view = self.view(land)?;
+        let pid = self.id_of(player)?;
+        if view.owner != Some(pid) || view.mortgaged {
+            return None;
+        }
+        let got = economy::mortgage_cashout(&self.active.def, &view, &self.rules);
+        if got <= 0 {
+            // 押不出钱的地若真写进 `Mortgaged`，就成了「押着、本金 0、还挡租金」的怪状态
+            return None;
+        }
+        let entity = self.land_entity(land)?;
+        let (_, _, _, _, mut mortgage) = self.plots.get_mut(entity).ok()?;
+        mortgage.proceeds = got;
+        self.credit(player, got);
+        Some(got)
+    }
+
+    /// 赎回：付「本金 × `redeem_percent` / 100」，地块回到未抵押。
+    ///
+    /// 价按**当初到手那笔**算而不是今天重算一遍（理由见 [`crate::land::Mortgaged`]）。
+    /// 钱不够 → `None`，**地还押着、一分不扣**（与 [`Self::debit`] 同一条不许半途的纪律）。
+    pub fn redeem(&mut self, player: Entity, land: LandId) -> Option<i64> {
+        let view = self.view(land)?;
+        let pid = self.id_of(player)?;
+        if view.owner != Some(pid) || !view.mortgaged {
+            return None;
+        }
+        let entity = self.land_entity(land)?;
+        let principal = self.plots.get(entity).ok()?.4.proceeds;
+        let cost = economy::redeem_cost(principal, &self.rules);
+        self.debit(player, cost).ok()?;
+        let (_, _, _, _, mut mortgage) = self.plots.get_mut(entity).ok()?;
+        mortgage.proceeds = 0;
+        Some(cost)
+    }
+
+    /// 这块地押着多少本金；没押 → `None`。表现层与测试都问这一句，别去查组件。
+    pub fn mortgage_principal(&self, land: LandId) -> Option<i64> {
+        let entity = self.land_entity(land)?;
+        let mortgage = self.plots.get(entity).ok()?.4;
+        mortgage.held().then_some(mortgage.proceeds)
+    }
+
+    /// 赎回这块地要付多少（本金 × `redeem_percent` / 100）；没押 → `None`。
+    ///
+    /// 挂在账本上而不是让调用方各算一遍：本金只在 `Mortgaged` 组件里，而「谁能查组件」
+    /// 这件事的边界就是这里（`mortgage::read_facts` 与手牌面板读的是同一个数）。
+    pub fn redeem_cost_of(&self, land: LandId) -> Option<i64> {
+        let principal = self.mortgage_principal(land)?;
+        Some(economy::redeem_cost(principal, &self.rules))
     }
 
     /// 买地：扣**实付**地价 → 归属落到买家 → 等级置 1（`property_registry.gd:29-33` 的

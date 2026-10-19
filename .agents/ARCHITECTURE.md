@@ -127,7 +127,7 @@ new-money-bevy/
 |---|---|---|
 | 主环道路格 | N（prototype 12，正式 40） | **不建实体**（B2a 修正，见下）：`TileIndex`/`TileKind`/`GridPos` 全部经 `BoardDef` 查询取得 |
 | 分支死胡同格 | 每分支若干 | `BranchTile{junction:TileIndex, order:u8, kind}` `GridPos` —— 对应 `board_branch.gd:11` "从靠近接入点 → 末端"有序链 |
-| 路旁土地 | 若干 | `LandId(u32)` `GridPos` `LandSize(u8=1\|2)` `LandDef`(Arc：group/land_type/price/rent[6]/upgrade_cost) `OwnerAddr(Option<PlayerId>)` `BuildingLevel(u8)` `Mortgaged`（marker） |
+| 路旁土地 | 若干 | `LandId(u32)` `GridPos` `LandSize(u8=1\|2)` `LandDef`(Arc：group/land_type/price/rent[6]/upgrade_cost) `OwnerAddr(Option<PlayerId>)` `BuildingLevel(u8)` `Mortgaged{proceeds:i64}`（**每块地都挂着，`proceeds>0` 即押着** —— P3d③ 之前它是「存在即抵押」的单位标记；改成带本金的值有两个理由：赎回要按「当初到手那笔 + 手续费」算，而标记存不下那个数；且 `Commands` 的延迟写会让同一帧内两条押同一块地的请求都读到「还没押」，钱付两遍） |
 | 玩家 | 2–4 | `PlayerId(u32)` `PlayerName` `PlayerColor` `Wallet{cash:i64}` `TokenPosition{tile:TileIndex, off_board:Option<GridPos>}` `JailSentence{turns_left}` `StockHoldings(HashMap<StockId,u32>)` `BankBalance{deposit,loan:i64}` `Controller`（`Human \| Ai{difficulty}`）`Bankrupt`（marker，取代 `status=="bankrupt"` 判断） |
 | 棋子（视觉） | 每玩家 1 | `TokenVisual{player:PlayerId}` `Transform` `WalkQueue{path,step_clock}` |
 | 卡牌堆 | 2（机会/命运） | `Deck{kind, pile:Vec<CardId>, discard:Vec<CardId>}`，卡定义走 `Assets<CardDef>` |
@@ -371,6 +371,7 @@ B5 之后这条判据升级为「**每个界面都必须有一条不依赖鼠标
 | `NM_STOCK=1` | 开局即浮出证券面板 | 顶栏那颗按钮要鼠标点（见 §6.1 坑 27），面板否则进不了截图 |
 | `NM_HAND=1` | 开局即浮出手牌面板，并给当前玩家发五种形状的样例卡 | 道具牌的正经来源是百货公司（P3d② 已落），但要拍齐**五种按钮形状**（自我／对手／地块／带 aim／灰着）仍得逐张发到手 —— 一次进店只抽得到三个货位，凑不齐。样例卡按 id 找、走 `deal_to` 发（上限与挤档规则本来就在它里面），有一条测试钉着「这两张 id 必须还在货架上」 |
 | `NM_SHOP=1` | 挂出百货柜台模态，并备齐进得了店的两样前提：一次换货 + 100 点券 | 这块面板的正经入口是**踩到 12 号那一格**，而那一掷由骰子说了算；货架与点券两个前提缺一个，面板就只剩一句灰话。**代价说清楚**：换货由 `Local<bool>` 保证只补一次，所以同一进程里开第二局不重新摆货（`dialog::dev_open_shop`） |
+| `NM_PLOTS=<n>` | 把棋盘上前 n 块地划给当前回合玩家（Lv1、未抵押） | 银行柜台那一节「你的地产」要有地块才拍得到，而「名下有地」在正经玩法里同样要靠骰子踩中无主地。配 `NM_DECISION=bank` 就是柜台那一屏。**不走 `Books::buy`**：那条要扣现金、要有报价在前，而这个旋钮只想改归属，所以它**不发 `LandBought`、不动现金**（`dialog::dev_grant_plots`） |
 | `NM_PAUSE=1` | 开局即暂停 | ESC 按不了，暂停面板否则进不了截图 |
 | `NM_PICK_TILE=列:行` | 开局即选中那格 | 点格详情卡是新增交互，没有鼠标可点 |
 | `NM_DUMP=1` | 挂出 egui 只读 dump 面板（回合/阶段/落格分派/待决/资格/修正登记处 + 每个玩家与每块地） | 结算顺序、分派表、跨局残留这类问题的真相都在世界里，不在画面上；看数字比看像素可靠，而 T1 之前只能靠 `warn!` 一条条猜 |

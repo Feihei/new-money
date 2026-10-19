@@ -13,10 +13,11 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, AfflictDomain, BankOp, Books, CardDef, CardDrawn, CardId, CardKind, CardNotice,
-    Decision, EffectOutcome, Hand, LandId, LandType, MarketClock, Pending, PendingDecision,
-    PlayerId, PlayerName, Rng, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, buyback, restock,
-    shop_op_allowed,
+    ActiveBoard, AfflictDomain, BankOp, Books, BuildingLevel, CardDef, CardDrawn, CardId, CardKind,
+    CardNotice, Decision, EffectOutcome, Hand, LandId, LandStatus, LandType, MarketClock,
+    MortgageDeny, MortgageOp, Owner, Pending, PendingDecision, PlayerId, PlayerName, Rng, Shelf,
+    ShopDeny, ShopStock, TradeSide, TurnOrder, buyback, counter_plots, mortgage_op_allowed,
+    read_facts, restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -179,8 +180,21 @@ pub(crate) fn sync_modal(
         .and_then(|(player, _)| view.hands.get(player).ok())
         .map(|hand| hand.cards.iter().copied().collect())
         .unwrap_or_default();
+    // 银行柜台那一节「你的地产」：只有柜台开着才算，别的模态不读地块表
+    let plots: Vec<PlotRow> = match want {
+        Some((player, Pending::BankTeller)) => plot_rows(&books, player, banking_hours),
+        _ => Vec::new(),
+    };
     let stamp = want.map_or(String::new(), |(player, about)| {
-        modal_stamp(about, &books, player, banking_hours, &view.stock, &held)
+        modal_stamp(
+            about,
+            &books,
+            player,
+            banking_hours,
+            &view.stock,
+            &held,
+            &plots,
+        )
     });
     // 两边都是 `None` 时相等：没有待决事项、也没有模态，正是常态
     if view
@@ -206,9 +220,15 @@ pub(crate) fn sync_modal(
                 rent_modal(&mut commands, &font, &books, &names, player, land, stamp)
             }
             Pending::Card => card_modal(&mut commands, &font, &view.memory, player, stamp),
-            Pending::BankTeller => {
-                bank_modal(&mut commands, &font, &books, player, stamp, banking_hours)
-            }
+            Pending::BankTeller => bank_modal(
+                &mut commands,
+                &font,
+                &books,
+                player,
+                stamp,
+                banking_hours,
+                &plots,
+            ),
             Pending::Shop => shop_modal(
                 &mut commands,
                 &font,
@@ -237,16 +257,25 @@ fn modal_stamp(
     banking_hours: bool,
     stock: &ShopStock,
     held: &[CardId],
+    plots: &[PlotRow],
 ) -> String {
     match about {
         Pending::BankTeller => {
             let bank = books.bank_of(player);
             format!(
-                "{}|{}|{}|{}|{banking_hours}",
+                "{}|{}|{}|{}|{banking_hours}|{}",
                 books.balance(player),
                 bank.deposit,
                 bank.loan,
-                loan_room(books, player)
+                loan_room(books, player),
+                // 地产那一节的每一行都是「由判据决定」的可见东西：押没押、封没封、
+                // 赎回要多少。少进签名一位，玩家就会对着一个「已经押掉了、按钮还亮着」
+                // 的柜台按第二次（§6.1 坑 22/30 同族）
+                plots
+                    .iter()
+                    .map(|row| format!("{}:{}:{}", row.land.0, row.held as u8, row.sealed as u8))
+                    .collect::<Vec<_>>()
+                    .join(",")
             )
         }
         // 百货柜台与银行同一条理由：它是一个窗口，每一笔买卖都要重烤三位 ——
@@ -798,6 +827,7 @@ fn bank_modal(
     player: Entity,
     stamp: String,
     banking_hours: bool,
+    plots: &[PlotRow],
 ) -> Entity {
     let cash = books.balance(player);
     let bank = books.bank_of(player);
@@ -918,6 +948,20 @@ fn bank_modal(
                 ("还", 5_000, bank.loan >= 5_000 && cash >= 5_000),
                 ("还清", clear_debt, bank.loan > 0 && clear_debt >= bank.loan),
             );
+            p.spawn(separator());
+            p.spawn(label(
+                &font.0,
+                "你的地产（押出去不计息，赎回来加一成）",
+                size::SMALL,
+                col::KEY,
+            ));
+            if plots.is_empty() {
+                // 一句话而不是一片空白：这块面板的高度是固定的，空着读起来像坏了
+                p.spawn(label(&font.0, "名下没有地块", size::ROW, col::KEY));
+            }
+            for row in plots {
+                plot_row(p, font, row);
+            }
             button_row(p, |line| {
                 button(
                     line,
@@ -932,6 +976,111 @@ fn bank_modal(
             });
         },
     )
+}
+
+/// 柜台「你的地产」一行的全部读数（形状同 [`ShopRow`]，理由也同一条：`plot_row` 本来要
+/// 七八份参数，而其中五份本来就是「这一行长什么样」这一件事）。
+pub(crate) struct PlotRow {
+    pub land: LandId,
+    pub op: MortgageOp,
+    /// 地块名 + 等级（按钮旁边那句）
+    pub title: String,
+    /// 按钮上的字**带数额**：`押 750` / `赎 825`
+    pub button: String,
+    /// 灰按钮自带一句为什么，取自规则层那张表（同 [`ShopRow::blocked`]）
+    pub blocked: Option<&'static str>,
+    /// 下面两位不上屏，只进 [`modal_stamp`]：它们变了这一行就得重烤
+    pub held: bool,
+    pub sealed: bool,
+}
+
+/// 把「这个人名下的地块」翻成一排按钮。
+///
+/// 判据一律走规则层那张 [`mortgage_op_allowed`]，而**读数走 [`read_facts`]** —— 面板不许
+/// 自己发明一套「能不能办」，也不许自己乘一遍 `mortgage_percent`（那样一来规则改一次、
+/// 面板就悄悄过期一次）。`at_counter` 在这里恒为 `true`：柜台既然开着，`NoCounter`
+/// 那一格在这一屏永远碰不到，而它在派发那一侧是真的会挡（见 `counter_of`）。
+fn plot_rows(books: &Books, player: Entity, open: bool) -> Vec<PlotRow> {
+    let def = &books.active.def;
+    counter_plots(books, player)
+        .into_iter()
+        .map(|(land, view)| {
+            let op = if view.mortgaged {
+                MortgageOp::Redeem
+            } else {
+                MortgageOp::Take
+            };
+            let (verb, money) = match op {
+                MortgageOp::Take => (
+                    "押",
+                    game_core::economy::mortgage_cashout(def, &view, &books.rules),
+                ),
+                MortgageOp::Redeem => ("赎", books.redeem_cost_of(land).unwrap_or(0)),
+            };
+            let facts = read_facts(books, player, land, true, open);
+            PlotRow {
+                land,
+                op,
+                title: format!(
+                    "{}  Lv{}",
+                    def.land(land.0).map_or("？", |l| l.name.as_str()),
+                    view.level
+                ),
+                button: format!("{verb} {money}"),
+                blocked: mortgage_op_allowed(op, &facts)
+                    .err()
+                    .map(MortgageDeny::label),
+                held: view.mortgaged,
+                sealed: matches!(view.status, Some(LandStatus::Sealed)),
+            }
+        })
+        .collect()
+}
+
+/// 柜台地产一行：「地块名 + 一颗带数额的按钮 + 灰掉时的那句话」。形状照 [`shop_row`]。
+fn plot_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &PlotRow) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        row_gap: Val::Px(layout::SHOP_ROW_GAP),
+        ..default()
+    })
+    .with_children(|line| {
+        line.spawn((
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            label(
+                &font.0,
+                &row.title,
+                size::ROW,
+                if row.blocked.is_some() {
+                    col::KEY
+                } else {
+                    col::BODY
+                },
+            ),
+        ));
+        button(
+            line,
+            &font.0,
+            ButtonSpec::new(
+                &row.button,
+                layout::SHOP_BUTTON,
+                super::PRIMARY,
+                UiAction::MortgageOp {
+                    land: row.land,
+                    op: row.op,
+                },
+            )
+            .disabled(row.blocked.is_some()),
+        );
+        if let Some(reason) = row.blocked {
+            line.spawn(label(&font.0, reason, size::ROW, col::JAILED));
+        }
+    });
 }
 
 /// 柜台一行的全部读数。买与卖共用同一个形状，所以共用同一个结构而不是两套参数表 ——
@@ -1187,6 +1336,63 @@ pub(crate) fn dev_open_shop(
     if pending.active().is_none() {
         pending.offer(player, Pending::Shop);
     }
+}
+
+/// 开发用：`NM_PLOTS=<n>` 把棋盘上前 n 块地划给当前回合玩家（Lv1、未抵押）。
+///
+/// 为什么需要它：银行柜台新长出的那一节「你的地产」要有地块才拍得到，而「名下有地」在
+/// 正经玩法里要靠踩中一块无主地再回答「买」—— 那一掷同样由骰子说了算（判据同 `NM_SHOP`：
+/// 每个界面都得有一条不靠鼠标的入口）。配 `NM_DECISION=bank` 一起用就是柜台那一屏。
+///
+/// **不走 [`Books::buy`]**：那条要扣现金、还要有 `Pending::Buy` 的报价在前，而这个旋钮只想
+/// 改归属。于是它也不发 `LandBought` —— 它是世界状态的前置，不是一笔交易，硬套交易入口
+/// 反倒会让「现金审计」凭空多出一笔没花出去的钱。
+///
+/// 与 `dev_open_shop` 同一条代价：`Local` 保证只划一次，同一进程里开第二局不会重新划。
+pub(crate) fn dev_grant_plots(
+    mut commands: Commands,
+    order: Option<Res<TurnOrder>>,
+    active: Option<Res<ActiveBoard>>,
+    faces: Query<&PlayerId>,
+    mut granted: Local<bool>,
+) {
+    if *granted {
+        return;
+    }
+    let want = match std::env::var("NM_PLOTS") {
+        Ok(spec) => match spec.trim().parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => {
+                warn!("NM_PLOTS={spec} 不是个数，应为 NM_PLOTS=2");
+                *granted = true;
+                return;
+            }
+        },
+        // 没设这个旋钮：什么都不做，也**不**置 `granted` —— 它是每帧查环境变量的开关，
+        // 与 `dev_open_shop` 一样只在设了的时候才有事
+        Err(_) => return,
+    };
+    let (Some(player), Some(active)) = (order.as_ref().and_then(|o| o.current()), active.as_ref())
+    else {
+        return;
+    };
+    let Ok(pid) = faces.get(player) else {
+        return;
+    };
+    *granted = true;
+    // 按 `LandId` 取前 n 块：`HashMap` 的迭代序不稳定，不排序的话每次跑划到的地会换
+    let mut plots: Vec<LandId> = active.lands.keys().copied().collect();
+    plots.sort_unstable_by_key(|id| id.0);
+    for land in plots.into_iter().take(want) {
+        let Some(entity) = active.lands.get(&land).copied() else {
+            continue;
+        };
+        // Lv1 = 「刚购入即 1 级」（`Books::buy` 同一条），留成空地拍出来的读数最干净
+        commands
+            .entity(entity)
+            .insert((Owner(Some(*pid)), BuildingLevel(1)));
+    }
+    info!("NM_PLOTS：把 {want} 块地划给玩家 {pid:?}（只为截图，未走交易入口）");
 }
 
 /// 卡面效果行。规则层只发凭据、不拼文案（`msg.rs` 的注释），字符串在这里生成。
