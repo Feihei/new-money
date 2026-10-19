@@ -23,7 +23,7 @@ use crate::landing::{
 use crate::msg::{
     CardDrawn, CardNotice, EffectOutcome, LandBought, PlayerJailed, PlayerTeleported,
 };
-use crate::player::{Heading, PlayerId, TokenPosition};
+use crate::player::{Heading, PlayerId, StaySentence, TokenPosition};
 use crate::rng::Rng;
 use crate::settle::Books;
 
@@ -200,6 +200,9 @@ pub struct CardSink<'w, 's> {
     /// 绕行方向。转向卡要**就地**翻它（见 [`apply_card`] 里那一支），所以是 `&mut` 查询
     /// 而不是 `Commands`。
     pub headings: Query<'w, 's, &'static mut Heading, With<PlayerId>>,
+    /// 停留计时。与 `headings` 同样是**就地**写（见 [`apply_card`] 的 `Stay` 那一支）：
+    /// 第二张停留卡要看得见第一张，而这里读出来的数还要原样报进凭据。
+    pub stays: Query<'w, 's, &'static mut StaySentence>,
     pub jailed: MessageWriter<'w, PlayerJailed>,
     pub teleported: MessageWriter<'w, PlayerTeleported>,
     /// 买地成交的流水。购地卡走的是 `Books::buy` 那条正路，所以它必须和「踩到无主地买下来」
@@ -420,6 +423,33 @@ pub fn apply_card(
                 };
                 *heading = heading.flipped();
                 outcomes.push(EffectOutcome::Reversed { heading: *heading });
+            }
+            CardEffect::Stay { turns } => {
+                // 还是那条形状：先过护身（PLAN §三「免罪抵消坐牢/住院/停留/转向」）。
+                // 停留是**事**不是钱，所以它不挂 `Corrections`（P3a 的划分）
+                let affliction = Affliction::new(AfflictDomain::Stay, victim);
+                if absorb(&mut sink.insulations, &mut sink.commands, &affliction) {
+                    outcomes.push(EffectOutcome::Blocked {
+                        domain: affliction.domain,
+                    });
+                    continue;
+                }
+                // 就地写而不是 `Commands`：同一个窗口打两张，第二条要读得到第一条的剩余值。
+                // **取较大**而不是相加或覆盖：给一个已经停留 3 回合的人再打一张 2，
+                // 覆盖等于替他减刑 —— 惩罚卡不该有让人早走的副作用
+                let left = match sink.stays.get_mut(victim) {
+                    Ok(mut held) => {
+                        held.turns_left = held.turns_left.max(*turns);
+                        held.turns_left
+                    }
+                    Err(_) => {
+                        sink.commands
+                            .entity(victim)
+                            .insert(StaySentence { turns_left: *turns });
+                        *turns
+                    }
+                };
+                outcomes.push(EffectOutcome::Stayed { turns: left });
             }
         }
     }

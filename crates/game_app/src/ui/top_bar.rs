@@ -14,8 +14,8 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankVisited, CardPlayed, ChargeWaived, GameOver, GameRules,
     GameSession, JailSkipped, MarketClock, MortgageDone, MortgageOp, Paused, PendingDecision,
-    PlayerBankrupt, PlayerName, PointsChanged, ShopOpDone, StockTraded, StockVisited, TradeSide,
-    TurnOrder, TurnPhase,
+    PlayerBankrupt, PlayerName, PointsChanged, ShopOpDone, StayLifted, StaySkipped, StockTraded,
+    StockVisited, TradeSide, TurnOrder, TurnPhase,
 };
 
 use super::finance::comma;
@@ -355,6 +355,12 @@ fn phase_name(phase: TurnPhase) -> String {
 #[derive(SystemParam)]
 pub(crate) struct Notices<'w, 's> {
     jail_skip: MessageReader<'w, 's, JailSkipped>,
+    /// 停留被跳过（P3d④c）。排在服刑之后：同时挂着两张计时的人，这一帧两条都会写，
+    /// 而留下停留那句更对 —— 服刑是旧事，「被停留卡按住」才是刚刚发生的那件
+    stay_skip: MessageReader<'w, 's, StaySkipped>,
+    /// 停留期满。它与上一条不会同一帧同时出现（一个还在扣格、一个刚扣完），
+    /// 但排在 `stay_skip` 之后：这一行说的是「从本回合起能动」，是那条流水的终点
+    stay_lifted: MessageReader<'w, 's, StayLifted>,
     bankrupt: MessageReader<'w, 's, PlayerBankrupt>,
     bank: MessageReader<'w, 's, BankVisited>,
     bank_ops: MessageReader<'w, 's, BankOpDone>,
@@ -392,6 +398,21 @@ pub(crate) fn hint_from_events(
             "{} 在监狱中（剩 {} 回合），跳过本回合",
             name(&names, m.player),
             m.turns_left
+        ));
+    }
+    // 停留与服刑共用「跳过本回合」这句话，但**不共用一条流水**：人在场上、地照收租金
+    // 是另一件事（`StaySkipped` 的注释）。HUD 那段有持久的剩余回合数，这里只播这一次
+    for m in notices.stay_skip.read() {
+        line = Some(format!(
+            "{} 原地停留（剩 {} 回合），跳过本回合",
+            name(&names, m.player),
+            m.turns_left
+        ));
+    }
+    for m in notices.stay_lifted.read() {
+        line = Some(format!(
+            "{} 停留期满，本回合起照常行动",
+            name(&names, m.player)
         ));
     }
     for m in notices.bankrupt.read() {

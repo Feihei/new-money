@@ -47,9 +47,9 @@ pub(crate) struct HandStamp(pub String);
 /// 样例卡。按 id 找而不是按数组位置：改数据顺序不该让这个旋钮发出别的卡。
 ///
 /// 每种出牌形状各一张：给自己（免罪）、存着待用（免费）、给对手（陷害）、给一条街
-/// （涨价 / 查封）、给一块无主地（购地）、给一个人含自己（转向）。
+/// （涨价 / 查封）、给一块无主地（购地）、给一个人含自己（转向、停留）。
 /// 少一种，那个形状的按钮排就永远拍不到 —— 而「拍不到」在验收里读起来和「没做」一样。
-const SAMPLE_CARDS: [&str; 7] = [
+const SAMPLE_CARDS: [&str; 8] = [
     "item_frame",
     "item_insulate",
     "item_hike",
@@ -57,6 +57,7 @@ const SAMPLE_CARDS: [&str; 7] = [
     "item_free",
     "item_grab",
     "item_turn",
+    "item_stay",
 ];
 
 /// 开发用：给当前回合玩家发 [`SAMPLE_CARDS`] —— 一张要选对手、一张给自己，两种形状都要拍到。

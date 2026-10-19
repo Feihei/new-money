@@ -1440,5 +1440,7 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
         EffectOutcome::Purchased { price, .. } => format!("买下这块地，付 ${price}"),
         // 说的是翻完之后朝哪边走，不是「翻了一次」：玩家下一手要用的就是这个数
         EffectOutcome::Reversed { heading } => format!("掉头，改为{}绕行", heading.label()),
+        // 要说「原地」而不是「不能动」：他还在自己踩到的那一格上，地也照样收租
+        EffectOutcome::Stayed { turns } => format!("原地停留（{turns} 回合）"),
     }
 }

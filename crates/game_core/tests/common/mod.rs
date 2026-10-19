@@ -26,9 +26,10 @@ use game_core::prelude::{
     MortgageOp, MortgageRequested, Mortgaged, Owner, Pending, PendingDecision, PlayCardRequested,
     PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed, PlayerReleased, PlayerTeleported,
     PlotArea, Points, PointsChanged, RentDue, RequestRoll, Rng, Scope, Shelf, ShopOpDone,
-    ShopOpRequested, ShopStock, Source, StockId, StockPriceChanged, StockTradeRequested,
-    StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded,
-    TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet, deal_to,
+    ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId,
+    StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
+    Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered,
+    WalkStarted, Wallet, deal_to,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -140,6 +141,9 @@ struct FlowReaders<'w, 's> {
     turn_started: MessageReader<'w, 's, TurnStarted>,
     released: MessageReader<'w, 's, PlayerReleased>,
     jail_skipped: MessageReader<'w, 's, JailSkipped>,
+    // 停留的两条（P3d④c）。排在服刑之后：同帧两条各写各的，这里记录顺序就是断言要读的相对顺序
+    stay_skipped: MessageReader<'w, 's, StaySkipped>,
+    stay_lifted: MessageReader<'w, 's, StayLifted>,
     dice_rolled: MessageReader<'w, 's, DiceRolled>,
     walk_started: MessageReader<'w, 's, WalkStarted>,
     tile_stepped: MessageReader<'w, 's, TileStepped>,
@@ -227,6 +231,16 @@ fn collect_flow(mut log: ResMut<Observed>, mut r: FlowReaders, players: Query<&P
             who(&players, m.player),
             m.turns_left
         ));
+    }
+    for m in r.stay_skipped.read() {
+        log.0.push(format!(
+            "StaySkip({},剩{})",
+            who(&players, m.player),
+            m.turns_left
+        ));
+    }
+    for m in r.stay_lifted.read() {
+        log.0.push(format!("StayLift({})", who(&players, m.player)));
     }
     for m in r.dice_rolled.read() {
         log.0.push(format!(
@@ -1156,6 +1170,15 @@ pub fn shield_of(app: &App, player: Entity) -> Option<Option<u32>> {
         .entity(player)
         .get::<Insulation>()
         .map(|i| i.charges)
+}
+
+/// 某人现在的停留剩余回合（`None` = 没挂着停留卡）。
+/// 读组件而不是读流水，是因为「扣到 1 的那一回合当场可行动」这条规则要看的正是**组件还在不在**。
+pub fn stay_of(app: &App, player: Entity) -> Option<u32> {
+    app.world()
+        .entity(player)
+        .get::<StaySentence>()
+        .map(|s| s.turns_left)
 }
 
 /// 场上牌堆的种类名（按名字排序）。用来钉住「第三副池不是一副可抽的牌」——

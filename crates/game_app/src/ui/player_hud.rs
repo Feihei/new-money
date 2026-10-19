@@ -12,7 +12,7 @@
 use bevy::prelude::*;
 use game_core::prelude::{
     Bankrupt, Heading, JailSentence, LandId, Owner, PlayerColor, PlayerId, PlayerName, Points,
-    TurnOrder, Wallet,
+    StaySentence, TurnOrder, Wallet,
 };
 
 use super::theme::{col, layout, size};
@@ -185,7 +185,7 @@ pub(crate) fn spawn_player_hud(
     }
 }
 
-/// 一名玩家在 HUD 上需要的全部状态。起别名是因为这个七元组写进 `Query<...>` 会撞
+/// 一名玩家在 HUD 上需要的全部状态。起别名是因为这个八元组写进 `Query<...>` 会撞
 /// clippy 的 `type_complexity`，而拆成两个查询又要多遍历一遍实体。
 ///
 /// `Heading` 是**必挂**的那一格（`spawn_players` 给的），不用 `Option`：「没有这个组件」
@@ -196,6 +196,9 @@ type HudPlayer<'w> = (
     &'w Wallet,
     &'w Points,
     Option<&'w JailSentence>,
+    // 停留卡挂上的计时（P3d④c）。与服刑并排而不是合并：这两个标记在屏幕上说的是两件
+    // 不同的事 —— 服刑的人在死胡同格里，停留的人就站在自己踩到的那一格上
+    Option<&'w StaySentence>,
     Option<&'w Bankrupt>,
     &'w Heading,
 );
@@ -228,7 +231,8 @@ pub(crate) fn refresh_player_hud(
     }
 
     for (mut card, mut bg, mut border, mut node) in &mut cards {
-        let Ok((pid, name, wallet, points, jailed, bankrupt, heading)) = players.get(card.player)
+        let Ok((pid, name, wallet, points, jailed, stayed, bankrupt, heading)) =
+            players.get(card.player)
         else {
             continue;
         };
@@ -236,11 +240,15 @@ pub(crate) fn refresh_player_hud(
             .iter()
             .find(|(id, _)| *id == *pid)
             .map_or(0, |(_, count)| *count);
-        // 文案与配色照 `player_hud.gd:191-199`；破产优先于服刑（同时成立时人已经出局）
-        let (mut status, status_color) = match (bankrupt, jailed) {
-            (Some(_), _) => ("[破产]".to_string(), col::BANKRUPT),
-            (None, Some(_)) => ("[监狱]".to_string(), col::JAILED),
-            (None, None) => (String::new(), col::BODY),
+        // 文案与配色照 `player_hud.gd:191-199`；破产优先于服刑（同时成立时人已经出局）。
+        // 服刑又优先于停留：两张计时同时挂着的时候，屏幕上只写一个标记，而那个格子放不下两个词 ——
+        // 没写出来的那张**不会被吞掉**，它自己有一份独立的计时（`begin_turn_system` 两条各扣各的），
+        // 要数剩几回合去看 dump 那一栏
+        let (mut status, status_color) = match (bankrupt, jailed, stayed) {
+            (Some(_), ..) => ("[破产]".to_string(), col::BANKRUPT),
+            (_, Some(_), _) => ("[监狱]".to_string(), col::JAILED),
+            (_, _, Some(_)) => ("[停留]".to_string(), col::MUTED),
+            (None, None, None) => (String::new(), col::BODY),
         };
         // 方向与处境共用右侧那一段，但它**不是**处境：正向是常态、什么都不写，
         // 只有逆向才占一个字 —— 一个永远亮着的标记等于没有标记

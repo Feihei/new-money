@@ -92,6 +92,25 @@ pub struct JailSkipped {
     pub turns_left: u32,
 }
 
+/// 仍在原地停留（停留卡，P3d④c），本回合跳过。`turns_left` 同样是**已扣掉本回合之后**的
+/// 剩余值 —— 与 [`JailSkipped`] 同一个口径，两条流水读起来才是一套语法。
+///
+/// 为什么单开一条而不是让 `JailSkipped` 带个 `reason`：服刑的人被送进死胡同格、
+/// （P4 起）丧失收租权，停留的人**还在场上**、地还收得到租。屏幕上那两句话不是一句话，
+/// 而合并之后要靠调用方再查一次「他是哪种」才说得出口 —— 那正是这条消息该带的答案。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaySkipped {
+    pub player: Entity,
+    pub turns_left: u32,
+}
+
+/// 停留期满，下一回合起可正常行动。**不带格号**：他从没离开过那一格
+/// （与 [`PlayerReleased`] 的差别正在这里 —— 出狱要说「从哪格继续沿环前进」）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StayLifted {
+    pub player: Entity,
+}
+
 /// 对局结束。`winner` 为 `None` 表示无人存活。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameOver {
@@ -438,6 +457,14 @@ pub enum EffectOutcome {
     /// 不是「翻了一次」这个动作 —— 面板要说的是「他现在朝哪边走」，那才是玩家下一手要用的数。
     Reversed {
         heading: crate::player::Heading,
+    },
+    /// 挂上「原地停留 N 回合」（停留卡，P3d④c）。与 [`Self::Jailed`] 同一个形状：
+    /// 说的是**接下来**几个回合他不能动，而不是「已经跳过了一个」—— 第一次跳过发生在
+    /// 下一次回合开始，由 [`StaySkipped`] 播报，两条之间可以隔着别人的回合。
+    /// `turns` 是**叠完之后**的剩余回合数（同 [`Self::Shielded`] 的 `charges`）：
+    /// 身上已有 3 的人再吃一张 2，这里报的是 3，不是 2。
+    Stayed {
+        turns: u32,
     },
 }
 

@@ -74,6 +74,19 @@ pub struct JailSentence {
     pub turns_left: u32,
 }
 
+/// 存在即「原地停留」中（停留卡，P3d④c）。递减与服刑同一条口径：每次回合开始扣一格，
+/// 扣到 1 的那一回合**当场可行动**，所以「停留 3 回合」= 跳过 2 个回合。
+///
+/// **为什么不并进 [`JailSentence`]、也不等 P4 的 `Detention`**：服刑的人被送进死胡同
+/// 格、且（P4 起）丧失收租权；停留的人**还在场上**，棋子停在他踩到的那一格，名下的地
+/// 照样收租。这两件事在规则上只差「他在不在牌桌上」这一点，而差别一旦写进同一个组件，
+/// 就要靠 `place` 字段的分支去还原 —— P4 的 `Detention{Jail|Hospital|Away}` 收的是
+/// 「被送离场」那一族，停留不属于它（PLAN §四 P4 那行的边界）。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaySentence {
+    pub turns_left: u32,
+}
+
 /// 绕行方向（转向卡，P3d④b）。
 ///
 /// **它是玩家身上的一个位，不是棋盘的第二份拓扑**：ADR-001 行为规则 3 说主环是单向环，

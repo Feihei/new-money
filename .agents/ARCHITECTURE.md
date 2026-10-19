@@ -128,7 +128,7 @@ new-money-bevy/
 | 主环道路格 | N（prototype 12，正式 40） | **不建实体**（B2a 修正，见下）：`TileIndex`/`TileKind`/`GridPos` 全部经 `BoardDef` 查询取得 |
 | 分支死胡同格 | 每分支若干 | `BranchTile{junction:TileIndex, order:u8, kind}` `GridPos` —— 对应 `board_branch.gd:11` "从靠近接入点 → 末端"有序链 |
 | 路旁土地 | 若干 | `LandId(u32)` `GridPos` `LandSize(u8=1\|2)` `LandDef`(Arc：group/land_type/price/rent[6]/upgrade_cost) `OwnerAddr(Option<PlayerId>)` `BuildingLevel(u8)` `Mortgaged{proceeds:i64}`（**每块地都挂着，`proceeds>0` 即押着** —— P3d③ 之前它是「存在即抵押」的单位标记；改成带本金的值有两个理由：赎回要按「当初到手那笔 + 手续费」算，而标记存不下那个数；且 `Commands` 的延迟写会让同一帧内两条押同一块地的请求都读到「还没押」，钱付两遍） |
-| 玩家 | 2–4 | `PlayerId(u32)` `PlayerName` `PlayerColor` `Wallet{cash:i64}` `TokenPosition{tile:TileIndex, off_board:Option<GridPos>}` `JailSentence{turns_left}` `Heading`（`Forward \| Backward`，P3d④b 转向卡翻的就是这一位 —— **环只有一份**，方向是玩家的状态，见 ADR-001 行为规则 3）`StockHoldings(HashMap<StockId,u32>)` `BankBalance{deposit,loan:i64}` `Controller`（`Human \| Ai{difficulty}`）`Bankrupt`（marker，取代 `status=="bankrupt"` 判断） |
+| 玩家 | 2–4 | `PlayerId(u32)` `PlayerName` `PlayerColor` `Wallet{cash:i64}` `TokenPosition{tile:TileIndex, off_board:Option<GridPos>}` `JailSentence{turns_left}` `StaySentence{turns_left}`（P3d④c 停留卡，**与服刑是两条独立计时**：同时挂着时一回合只跳一次、各减一格。不合成一个「处境」组件的理由见 `player.rs` 那段 —— 服刑的人被挪进死胡同格且 P4 起丧失收租权，停留的人还在自己踩到的那一格上、地照收租）`Heading`（`Forward \| Backward`，P3d④b 转向卡翻的就是这一位 —— **环只有一份**，方向是玩家的状态，见 ADR-001 行为规则 3）`StockHoldings(HashMap<StockId,u32>)` `BankBalance{deposit,loan:i64}` `Controller`（`Human \| Ai{difficulty}`）`Bankrupt`（marker，取代 `status=="bankrupt"` 判断） |
 | 棋子（视觉） | 每玩家 1 | `TokenVisual{player:PlayerId}` `Transform` `WalkQueue{path,step_clock}` |
 | 卡牌堆 | 2（机会/命运） | `Deck{kind, pile:Vec<CardId>, discard:Vec<CardId>}`，卡定义走 `Assets<CardDef>` |
 | 股票 | 每只 1 | `StockId` `StockDef`(Arc：base/floor/ceiling/volatility/outstanding) `StockPrice{current:f64}` `PriceHistory(VecDeque<f64>，MAX 50)` |
@@ -196,7 +196,7 @@ new-money-bevy/
 | system | 条件 | 读 | 写 |
 |---|---|---|---|
 | `begin_game_system` | `OnEnter(Boot)`（B2a 暂挂 `Update` + `Option<Res<ActiveBoard>>` 自守门 —— 0.20 没有 `resource_missing` 运行条件） | `Assets<BoardDef>` `GameSetup` `GameRules` | spawn land/player 实体（道路格不建实体，见 §4.2）；`TurnOrder`；→`TurnStart` |
-| `begin_turn_system` | `OnEnter(TurnStart)` | `TurnOrder` `Query<(&JailSentence,&Bankrupt)>` | 破产→直接 `TurnEnd`；服刑→`JailProcessed`；正常→发 `TurnStarted`，→`WaitRoll` |
+| `begin_turn_system` | `OnEnter(TurnStart)` | `TurnOrder` `Query<(&JailSentence,&Bankrupt)>` | 破产→直接 `TurnEnd`；服刑／停留→**两条计时各扣一格、本回合只跳一次**（`JailSkipped`/`StaySkipped`，扣到只剩 1 的那一回合当场放人：`PlayerReleased`/`StayLifted`）；正常→发 `TurnStarted`，→`WaitRoll` |
 | `roll_dice_system` | `in_state(WaitRoll)` | `MessageReader<RequestRoll>` `Res<Rng>` | `DiceRolled`；算 `destination`；`TokenPosition`；`WalkQueue`；→`Walking` |
 | `walk_step_system` | `in_state(Walking)` | `Res<WalkClock>` `WalkQueue` `ActiveBoard` | `TileStepped`；步数耗尽→发 `PlayerArrived`，→`Landed` |
 | `resolve_landing_system` | `OnEnter(Landed)` | `TileKind` `LinkedLand` `Query<(&LandDef,&OwnerAddr,&BuildingLevel)>` `GameRules` | 分派：property→`BuyOffered`/`RentDue`+`DecisionChosen` 等待；stock→`StockTick`；bank→`InterestApplied`；chance/fate→抽卡并结算效果；road/start→直接 `TurnEnd` |

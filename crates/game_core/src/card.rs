@@ -115,6 +115,15 @@ pub enum CardEffect {
     /// 走免罪那条护身，因为这是一件**事**不是一笔钱），也因此与 `LandStatus`/`BuyLand` 不同：
     /// 没有 aim 它照样成立（打给自己），所以 `validate` 不给它绑 target。
     Reverse,
+    /// 让承受者原地停留 N 回合（停留卡，P3d④c）。**人还在场上**：棋子不动、不改方向、
+    /// 名下的地照样收租，只是那几回合的轮到他也被跳过（见 [`crate::player::StaySentence`]）。
+    ///
+    /// 与 [`Self::GoToJail`] 是两条效果而不是同一条带 `place` 参数的：入狱要把人送进
+    /// 死胡同格并（P4 起）夺走收租权，这两件事停留都不做。它们共享的只是「回合开始扣一格」
+    /// 那半条规则，而那半条写在 `begin_turn_system` 里，不该由卡面来合并。
+    Stay {
+        turns: u32,
+    },
 }
 
 const fn default_jail_turns() -> u32 {
@@ -243,6 +252,12 @@ impl CardSet {
                         // 照样成立），所以它不该被绑到任何 target 上。哪天它长出参数来
                         // （比如「转向 N 次」），编译会停在这一格
                     }
+                    CardEffect::Stay { turns } => {
+                        // 与 `GoToJail` 同一条：0 回合的停留是「什么都没发生」，而卡已经被打掉
+                        if *turns == 0 {
+                            errs.push(format!("卡牌 {} 的停留回合数为 0", c.id));
+                        }
+                    }
                 }
             }
         }
@@ -341,6 +356,7 @@ mod tests {
         assert!(has(|e| matches!(e, CardEffect::FreePass { .. })));
         assert!(has(|e| matches!(e, CardEffect::BuyLand)));
         assert!(has(|e| matches!(e, CardEffect::Reverse)));
+        assert!(has(|e| matches!(e, CardEffect::Stay { .. })));
     }
 
     /// 「卡上的效果」与「卡要落在什么头上」必须成对，否则数据能过加载、卡却永远打不出去。

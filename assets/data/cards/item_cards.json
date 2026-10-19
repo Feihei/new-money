@@ -59,5 +59,14 @@
     "cost_points": 25,
     "target": "anybody",
     "effects": [{ "action": "reverse" }]
+  },
+  {
+    "id": "item_stay",
+    "type": "item",
+    "title": "停留卡",
+    "desc": "让自己或任一对手原地停 3 回合 —— 人还在场上，地也照样收租，只是那几步不走了",
+    "cost_points": 30,
+    "target": "anybody",
+    "effects": [{ "action": "stay", "turns": 3 }]
   }
 ]
