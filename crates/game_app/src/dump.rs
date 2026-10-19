@@ -8,7 +8,7 @@
 //!   等于给「按钮点不到」那一族坑（ARCHITECTURE §6.1 坑 23/27）新增一个来源。
 //!
 //! 面板从 P2 起有「物价指数」与「修正登记处」两行，因为这两样正是那条管线唯一的输入。
-//! 「手牌」与 `Detention` 还没有（P3 / P4），到时候往 [`dump_panel`] 里各加一段就行。
+//! 「`Detention`」还没有（P4），到时候往 [`dump_panel`] 里再加一栏就行。
 
 use std::sync::Arc;
 
@@ -16,9 +16,10 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
-    ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, Corrections, CouponBoxes,
-    GameRules, GameSeed, GameSession, JailSentence, LandId, Landing, MarketClock, Mortgaged, Owner,
-    Paused, PendingDecision, PlayerId, PlayerName, Points, TurnOrder, TurnPhase, Wallet,
+    ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind, Corrections,
+    CouponBoxes, GameRules, GameSeed, GameSession, Hand, Insulation, JailSentence, LandId, Landing,
+    MarketClock, Mortgaged, Owner, Paused, PendingDecision, PlayerId, PlayerName, Points, Shelf,
+    TurnOrder, TurnPhase, Wallet,
 };
 
 use crate::asset_root;
@@ -98,6 +99,7 @@ pub fn install_if_requested(app: &mut App) {
 
 /// 面板上每个玩家要摊开的那一栏。命名出来是因为八元素的查询元组会撞
 /// clippy 的 `too_complex_types`，而那个 lint 给的「抽 `type`」正是对的处理。
+/// P3a 加了手牌与护身两栏之后更是要一直挂着这个别名。
 type PlayerRow = (
     Entity,
     &'static PlayerId,
@@ -107,6 +109,8 @@ type PlayerRow = (
     &'static BankBalance,
     Option<&'static JailSentence>,
     Option<&'static Bankrupt>,
+    Option<&'static Hand>,
+    Option<&'static Insulation>,
 );
 
 /// 面板要读的全部世界状态。收成一个参数包是这仓库的房规：需要知道的就是这么多，
@@ -126,6 +130,8 @@ pub struct DumpView<'w, 's> {
     atm: Res<'w, AtmAccess>,
     boxes: Res<'w, CouponBoxes>,
     corrections: Res<'w, Corrections>,
+    /// 手牌只有下标，可读的名字在货架上 —— 面板摊的是「手上是哪两张卡」，不是两个数
+    shelf: Shelf<'w>,
     players: Query<'w, 's, PlayerRow>,
     plots: Query<
         'w,
@@ -247,22 +253,54 @@ fn format_players(view: &DumpView) -> Vec<String> {
     let mut rows: Vec<(u32, String)> = view
         .players
         .iter()
-        .map(|(entity, id, name, wallet, points, bank, jail, bankrupt)| {
-            let flag = if bankrupt.is_some() {
-                "破产".to_string()
-            } else if let Some(sentence) = jail {
-                format!("服刑剩{}回合", sentence.turns_left)
-            } else {
-                "-".to_string()
-            };
-            (
-                id.0,
-                format!(
-                    "P{:<2} {:<6} 现金 {:>7} 点券 {:>4} 存 {:>6} 贷 {:>6} {:<12} {:?}",
-                    id.0, name.0, wallet.cash, points.0, bank.deposit, bank.loan, flag, entity
-                ),
-            )
-        })
+        .map(
+            |(entity, id, name, wallet, points, bank, jail, bankrupt, hand, shield)| {
+                let flag = if bankrupt.is_some() {
+                    "破产".to_string()
+                } else if let Some(sentence) = jail {
+                    format!("服刑剩{}回合", sentence.turns_left)
+                } else {
+                    "-".to_string()
+                };
+                // 手牌打中文名：查「这张卡为什么没生效」时，下标还得再翻一次数据文件
+                let cards = hand.map_or("-".to_string(), |h| {
+                    if h.is_empty() {
+                        return "-".to_string();
+                    }
+                    h.cards
+                        .iter()
+                        .map(|c| {
+                            view.shelf
+                                .get(CardKind::Item, *c)
+                                .map_or_else(|| format!("<缺{}>", c.0), |d| d.title.clone())
+                        })
+                        .collect::<Vec<_>>()
+                        .join("·")
+                });
+                // 护身是「打过免罪卡之后」唯一留下的状态。查陷害为什么没生效，
+                // 看的就是这一栏 —— 它在手牌面板上只有一行小字，容易被当成装饰
+                let guard = shield.map_or("-".to_string(), |s| match s.remaining() {
+                    None => "免疫".to_string(),
+                    Some(n) => n.to_string(),
+                });
+                (
+                    id.0,
+                    format!(
+                        "P{:<2} {:<6} 现金 {:>7} 点券 {:>4} 存 {:>6} 贷 {:>6} {:<12} 牌 {:<12} 护 {:<4} {:?}",
+                        id.0,
+                        name.0,
+                        wallet.cash,
+                        points.0,
+                        bank.deposit,
+                        bank.loan,
+                        flag,
+                        cards,
+                        guard,
+                        entity
+                    ),
+                )
+            },
+        )
         .collect();
     rows.sort();
     rows.into_iter().map(|(_, row)| row).collect()

@@ -1,0 +1,465 @@
+//! 手牌浮层（P3b）：拿在手里的卡，与「打出去」那几颗按钮。
+//!
+//! 与 ATM/证券同一类（见 [`super::finance`] 的模块头）：**不阻断回合**、内容跟着世界状态
+//! 刷新、窗口由判据给。出牌与下单共用同一条窗口（`WaitRoll` 且没被模态占住），UI 这半边
+//! 是 [`super::can_play`]，规则层那半边是 `game_core::hand::PlayWindow::opener`。
+//!
+//! 每张卡都带效果文案与目标种类 —— 只有卡名读不出规则。打出去之后的结果走顶栏那条事件
+//! 流水（`top_bar::hint_from_events` 读 `CardPlayed`），面板自己不留痕：面板随手牌重建，
+//! 把一次性结果烤进去，下一次重建就没了。
+
+use bevy::ecs::system::SystemParam;
+use bevy::prelude::*;
+use game_core::prelude::{
+    Bankrupt, CardAim, CardDef, CardGained, CardId, CardKind, CardTarget, GameRules, Hand,
+    Insulation, Paused, PendingDecision, PlayerId, PlayerName, Shelf, TurnOrder, TurnPhase,
+    deal_to,
+};
+
+use super::theme::{col, layout, size};
+use super::{
+    BoardUi, ButtonSpec, PRIMARY, SECONDARY, UiAction, border_color, button, can_play, label,
+};
+use crate::render::DevFont;
+
+/// 手牌浮层开着吗。顶栏那颗按钮的唯一记忆。
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HandPanelOpen(pub bool);
+
+impl HandPanelOpen {
+    /// `NM_HAND=1`：开面板，并由 [`dev_deal_sample`] 发两张样例卡。
+    /// 道具卡的正常来源是百货公司（P3d），而**现在一张卡都没地方买** —— 没有这个旋钮，
+    /// 这块面板在截图里永远是空的，「每个界面都得有一条不靠鼠标的入口」那条判据落不了地。
+    pub(crate) fn from_env() -> Self {
+        Self(std::env::var_os("NM_HAND").is_some())
+    }
+}
+
+#[derive(Component)]
+pub(crate) struct HandPanel;
+
+/// 面板根上的「上次写成什么样」。键挂实体（同 `finance::FinanceStamp`，§6.1 坑 22），
+/// 回主菜单时随实体一起消失，不会让下一局的第一次刷新误判成「没变化」。
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HandStamp(pub String);
+
+/// 样例卡。按 id 找而不是按数组位置：改数据顺序不该让这个旋钮发出别的卡。
+const SAMPLE_CARDS: [&str; 2] = ["item_frame", "item_insulate"];
+
+/// 开发用：给当前回合玩家发 [`SAMPLE_CARDS`] —— 一张要选对手、一张给自己，两种形状都要拍到。
+///
+/// 走 [`deal_to`] 而不是直改 `Hand`：上限与「被挤掉要发流水」两条规则本来就在它里面，
+/// 绕过它发牌就是把 P3d 的百货账目测了个寂寞。`Local` 保证只发一次，否则每帧发一轮牌。
+pub(crate) fn dev_deal_sample(
+    order: Option<Res<TurnOrder>>,
+    mut hands: Query<&mut Hand, With<PlayerId>>,
+    shelf: Shelf<'_>,
+    rules: Res<GameRules>,
+    mut gained: MessageWriter<CardGained>,
+    mut dealt: Local<bool>,
+) {
+    if *dealt {
+        return;
+    }
+    let Some(player) = order.as_ref().and_then(|o| o.current()) else {
+        return;
+    };
+    let Ok(mut hand) = hands.get_mut(player) else {
+        return;
+    };
+    for id in SAMPLE_CARDS {
+        let Some(index) = shelf
+            .items()
+            .iter()
+            .position(|c| c.id == id)
+            .map(|at| CardId(at as u32))
+        else {
+            warn!("NM_HAND 要发的 {id} 不在货架上");
+            continue;
+        };
+        deal_to(
+            &mut hand,
+            rules.hand_limit,
+            index,
+            player,
+            &shelf,
+            &mut gained,
+        );
+    }
+    *dealt = true;
+}
+
+/// 「一张卡在该长什么样子」要读的那几样：货架、手牌、护身、别人还在不在。
+#[derive(SystemParam)]
+pub(crate) struct HandView<'w, 's> {
+    open: Res<'w, HandPanelOpen>,
+    paused: Res<'w, Paused>,
+    pending: Res<'w, PendingDecision>,
+    phase: Res<'w, State<TurnPhase>>,
+    order: Option<Res<'w, TurnOrder>>,
+    shelf: Shelf<'w>,
+    hands: Query<'w, 's, &'static Hand, With<PlayerId>>,
+    shields: Query<'w, 's, &'static Insulation>,
+    faces: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static PlayerId,
+            &'static PlayerName,
+            Option<&'static Bankrupt>,
+        ),
+    >,
+}
+
+/// 一颗「用这张卡」的按钮。`aim` 是烤进按钮的目标 —— 那颗按钮本身就是一整个意图，
+/// 规则层因此不必挂一个「选目标」的待决事项（同 ATM 那颗「存 1,000」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlayButton {
+    pub text: String,
+    pub aim: Option<CardAim>,
+    /// 按不动时要说的话。**灰按钮必须自带一句为什么**，否则「按不动」与「坏了」在玩家
+    /// 眼里是同一件事（§6.1 坑 27 的 UI 版）。
+    pub blocked: Option<&'static str>,
+}
+
+/// 这张卡该长出哪几颗按钮。`opponents` 是「还活着的别人」（不含出牌人自己）。
+///
+/// 写成对 `CardTarget` 的穷尽匹配、不留 `_`：P3c 给地块卡开闸时，这里必须当场决定
+/// 「选地块」在浮层上长什么样，而不是等截图时才发现有颗哑弹。
+pub(crate) fn play_buttons(def: &CardDef, opponents: &[(Entity, String)]) -> Vec<PlayButton> {
+    match def.target {
+        CardTarget::SelfOnly => vec![PlayButton {
+            text: "用".into(),
+            aim: None,
+            blocked: None,
+        }],
+        CardTarget::Player if opponents.is_empty() => {
+            // 其他人都离场了。这时候按下去规则层会静默拒绝（`aim_is_legal`），
+            // 而玩家看得见的应该是一句话，不是一颗死按钮
+            vec![PlayButton {
+                text: "用".into(),
+                aim: None,
+                blocked: Some("场上没有别的人了"),
+            }]
+        }
+        CardTarget::Player => opponents
+            .iter()
+            .map(|(target, name)| PlayButton {
+                text: format!("→ {name}"),
+                aim: Some(CardAim::Player(*target)),
+                blocked: None,
+            })
+            .collect(),
+        // 地块卡的承受者是「这块地的业主」，那条读法要到 P3c 的地块状态容器才成立。
+        // 今天真出现这种卡就是数据跑在实现前面了，宁可灰着说清楚
+        CardTarget::Land => vec![PlayButton {
+            text: "用".into(),
+            aim: None,
+            blocked: Some("要选地块，现在还选不了"),
+        }],
+    }
+}
+
+/// 目标种类的人话。数据里写的是 `target: "player"`，屏幕上要读得出「这是对谁用的」。
+fn aim_text(def: &CardDef) -> &'static str {
+    match def.target {
+        CardTarget::SelfOnly => "对自己",
+        CardTarget::Player => "对一名对手",
+        CardTarget::Land => "对一块地",
+    }
+}
+
+/// 护身那一行。没挂护身就不写这一句；`Some(0)` 也不写 —— 规则层在用完那一层就把组件
+/// 摘了，这里再兜一次，免得面板说出「免罪护身 0 层」这种自相矛盾的话。
+fn shield_text(shield: Option<&Insulation>) -> Option<String> {
+    match shield?.remaining() {
+        None => Some("护身：免疫".into()),
+        Some(0) => None,
+        Some(n) => Some(format!("护身 {n} 层")),
+    }
+}
+
+/// 手牌浮层：每张卡三行（卡名+种类 / 效果 / 按钮），末尾一个关闭。
+pub(crate) fn sync_hand_panel(
+    mut commands: Commands,
+    font: Res<DevFont>,
+    view: HandView<'_, '_>,
+    shown: Query<(Entity, &HandPanel, &HandStamp)>,
+) {
+    if !view.open.0 {
+        for (entity, _, _) in &shown {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+    let player = view.order.as_ref().and_then(|o| o.current());
+    let playable = player.is_some_and(|p| {
+        can_play(*view.phase.get(), &view.paused, &view.pending) && same_actor(p, &view.pending)
+    });
+    // 迭代顺序是生成顺序，而断言与截图不该依赖它：按名字排（同证券按 id 排）
+    let mut opponents: Vec<(Entity, String)> = view
+        .faces
+        .iter()
+        .filter(|(e, _, _, bankrupt)| Some(*e) != player && bankrupt.is_none())
+        .map(|(e, _, name, _)| (e, name.0.clone()))
+        .collect();
+    opponents.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let hand: Vec<CardId> = player
+        .and_then(|p| view.hands.get(p).ok())
+        .map(|h| h.cards.iter().copied().collect())
+        .unwrap_or_default();
+    let shield = shield_text(player.and_then(|p| view.shields.get(p).ok()));
+    // 签名要覆盖面板上每一个由判据决定的可见位（§6.1 坑 30：少一位就是一次静默过期）
+    let stamp = format!(
+        "{}|{playable}|{}|{}|{}",
+        player.map_or_else(|| "-".into(), |p| format!("{p:?}")),
+        opponents
+            .iter()
+            .map(|(_, name)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        hand.iter()
+            .map(|c| c.0.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        shield.clone().unwrap_or_default(),
+    );
+    if shown.iter().next().is_some_and(|(_, _, s)| s.0 == stamp) {
+        return;
+    }
+    for (entity, _, _) in shown.iter() {
+        commands.entity(entity).despawn();
+    }
+    // 下标与卡定义配成对再建面板：`None` 的那些是「数据里没有这张卡」，
+    // 它要在屏幕上留名，而不是悄悄少一行 —— 少一行是唯一线索，而那读不出为什么
+    let rows: Vec<(CardId, Option<&CardDef>)> = hand
+        .iter()
+        .map(|id| (*id, view.shelf.get(CardKind::Item, *id)))
+        .collect();
+
+    let mut root = commands.spawn((
+        BoardUi,
+        HandPanel,
+        HandStamp(stamp),
+        // 根节点参与命中测试的话，整块面板会把背后的点格点击吃掉（同顶栏那一坑）
+        Pickable::IGNORE,
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Px(layout::HAND_PANEL[1]),
+            bottom: Val::Px(layout::HAND_PANEL[2]),
+            width: Val::Px(layout::HAND_PANEL[0]),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(layout::HAND_ROW_GAP),
+            padding: UiRect::axes(Val::Px(16.0), Val::Px(14.0)),
+            border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
+            border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
+            ..default()
+        },
+        BackgroundColor(col::PANEL),
+        border_color(col::BORDER_HAND),
+        ZIndex(4),
+    ));
+    root.with_children(|p| {
+        p.spawn(label(
+            &font.0,
+            format!("手牌 {}", rows.len()),
+            size::NAME,
+            col::TITLE_GOLD,
+        ));
+        // 窗口判据写在标题下面那一行：牌按不动时，玩家得先看见「为什么现在不能出」
+        let mut header = if playable {
+            "掷骰前可出一张".to_string()
+        } else {
+            "只在掷骰前可出牌".to_string()
+        };
+        if let Some(line) = &shield {
+            header.push_str(" · ");
+            header.push_str(line);
+        }
+        p.spawn(label(
+            &font.0,
+            header,
+            size::ROW,
+            if playable { col::MUTED } else { col::BANKRUPT },
+        ));
+        if rows.is_empty() {
+            p.spawn(label(&font.0, "手里没有卡", size::BODY, col::KEY));
+        }
+        for (card, def) in &rows {
+            let Some(def) = def else {
+                p.spawn(label(
+                    &font.0,
+                    format!("数据错误：货架上没有第 {} 张", card.0),
+                    size::ROW,
+                    col::BANKRUPT,
+                ));
+                continue;
+            };
+            let buttons = play_buttons(def, &opponents);
+            // 三行分开：合成一行的话，两张卡名加两颗按钮在 1024 宽的屏上就顶到边了
+            let mut title = p.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(8.0),
+                ..default()
+            });
+            title.with_children(|line| {
+                line.spawn((
+                    Node {
+                        flex_grow: 1.0,
+                        ..default()
+                    },
+                    label(&font.0, def.title.clone(), size::NAME, col::HINT),
+                ));
+                line.spawn(label(&font.0, aim_text(def), size::ROW, col::KEY));
+            });
+            p.spawn(label(&font.0, def.desc.clone(), size::ROW, col::MUTED));
+            let mut actions = p.spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(8.0),
+                align_items: AlignItems::Center,
+                ..default()
+            });
+            actions.with_children(|line| {
+                for pb in &buttons {
+                    button(
+                        line,
+                        &font.0,
+                        ButtonSpec::new(
+                            &pb.text,
+                            layout::CARD_BUTTON,
+                            PRIMARY,
+                            UiAction::PlayCard {
+                                card: *card,
+                                aim: pb.aim,
+                            },
+                        )
+                        .disabled(!playable || pb.blocked.is_some()),
+                    );
+                }
+                // 灰掉的话，那句话就写在按钮旁边 —— 面板上只有一处解释会读漏
+                if let Some(reason) = buttons.iter().find_map(|pb| pb.blocked) {
+                    line.spawn(label(&font.0, reason, size::ROW, col::JAILED));
+                }
+            });
+        }
+        // 分隔线不是装饰：最后一张卡的「用」与「关闭」都是 96×32 的绿/灰按钮，
+        // 挨在一起时「关闭」会被读成那张卡的一部分
+        p.spawn(super::separator());
+        button(
+            p,
+            &font.0,
+            ButtonSpec::new(
+                "关闭",
+                layout::PANEL_CLOSE_BUTTON,
+                SECONDARY,
+                UiAction::ToggleHand,
+            ),
+        );
+    });
+}
+
+/// 挂着模态时，只有那位被占住的人能出牌。与 `finance::same_actor` 同一条理由：
+/// `can_play` 已经要求没有待决事项，这一句只是把那个前提说清楚。
+fn same_actor(current: Entity, pending: &PendingDecision) -> bool {
+    pending.active().is_none_or(|(player, _)| player == current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn def(target: CardTarget) -> CardDef {
+        CardDef {
+            id: "item_test".into(),
+            kind: CardKind::Item,
+            title: "测试卡".into(),
+            desc: "测试".into(),
+            cost_points: Some(20),
+            target,
+            effects: vec![],
+        }
+    }
+
+    fn foe(n: u32, name: &str) -> (Entity, String) {
+        (
+            Entity::from_raw_u32(n).expect("索引不该撞上保留值"),
+            name.to_string(),
+        )
+    }
+
+    #[test]
+    fn a_self_only_card_grows_exactly_one_button_and_no_target() {
+        let buttons = play_buttons(
+            &def(CardTarget::SelfOnly),
+            &[foe(2, "孙小美"), foe(3, "阿土伯")],
+        );
+        assert_eq!(buttons.len(), 1, "给自己的卡不该长出「对谁」这一排按钮");
+        assert_eq!(buttons[0].aim, None);
+        assert_eq!(buttons[0].blocked, None, "没有理由让它灰着");
+    }
+
+    #[test]
+    fn a_framing_card_grows_one_button_per_opponent_carrying_that_target() {
+        let foes = [foe(2, "孙小美"), foe(3, "阿土伯")];
+        let buttons = play_buttons(&def(CardTarget::Player), &foes);
+        assert_eq!(buttons.len(), 2, "两个对手就该有两颗可选的按钮");
+        // 目标烤在按钮里：按下去就是一个完整意图，规则层不必再挂「选目标」的待决
+        assert_eq!(buttons[0].aim, Some(CardAim::Player(foes[0].0)));
+        assert_eq!(buttons[1].aim, Some(CardAim::Player(foes[1].0)));
+        assert_eq!(buttons[0].text, "→ 孙小美", "按钮要说得出打的是谁");
+        assert!(buttons.iter().all(|b| b.blocked.is_none()));
+    }
+
+    #[test]
+    fn a_player_card_with_nobody_left_is_greyed_with_a_reason() {
+        // 单人不残局：其他人都破产离场了。按下去规则层会静默拒绝，
+        // 而玩家看见的必须是一句话，不是一颗死按钮（坑 27 的 UI 版）
+        let buttons = play_buttons(&def(CardTarget::Player), &[]);
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].blocked, Some("场上没有别的人了"));
+        assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
+    }
+
+    #[test]
+    fn a_land_card_is_greyed_until_the_owner_can_be_asked() {
+        // P3c 之前问不出「这块地归谁」。宁可灰着说清楚，也不猜一个承受者 ——
+        // 猜出来的那个业主会在流水里变成一次莫须有的入狱
+        let buttons = play_buttons(&def(CardTarget::Land), &[foe(2, "孙小美")]);
+        assert_eq!(buttons[0].blocked, Some("要选地块，现在还选不了"));
+    }
+
+    #[test]
+    fn the_shield_line_names_layers_and_never_shows_zero() {
+        assert_eq!(shield_text(None), None, "没挂护身就不写这一句");
+        assert_eq!(
+            shield_text(Some(&Insulation { charges: Some(2) })),
+            Some("护身 2 层".into())
+        );
+        assert_eq!(
+            shield_text(Some(&Insulation { charges: Some(0) })),
+            None,
+            "用完的那一层规则层已经摘了组件，面板不许说「护身 0 层」"
+        );
+        assert_eq!(
+            shield_text(Some(&Insulation { charges: None })),
+            Some("护身：免疫".into()),
+            "不限次那一类（P6 神明）要写成「免疫」，不是「∞」也不是一个大数"
+        );
+    }
+
+    #[test]
+    fn every_sample_card_actually_exists_on_the_shelf() {
+        // `NM_HAND` 是按 id 找卡的。改数据时把某张删掉，这个旋钮就会静默拍不到东西 ——
+        // 而「截图里面板是空的」读起来像面板坏了，不像数据少了张卡
+        let text = include_str!("../../../../assets/data/cards/item_cards.json");
+        let set = game_core::prelude::CardSet::from_json(text).expect("道具牌应能解析");
+        for id in SAMPLE_CARDS {
+            assert!(
+                set.0.iter().any(|c| c.id == id),
+                "item_cards.json 里少了样例卡 {id}，NM_HAND 会拍不到东西"
+            );
+        }
+    }
+}

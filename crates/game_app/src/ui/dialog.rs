@@ -889,7 +889,7 @@ fn outcome_line(outcomes: &[EffectOutcome]) -> String {
     format!("效果：{}", parts.join("；"))
 }
 
-fn describe(outcome: &EffectOutcome) -> String {
+pub(crate) fn describe(outcome: &EffectOutcome) -> String {
     match outcome {
         EffectOutcome::Gained(amount) => format!("获得 ${amount}"),
         EffectOutcome::Lost(amount) => format!("支付 ${amount}"),

@@ -12,9 +12,9 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    AtmAccess, BankOpDone, BankVisited, GameOver, GameRules, GameSession, JailSkipped, MarketClock,
-    Paused, PendingDecision, PlayerBankrupt, PlayerName, PointsChanged, StockTraded, StockVisited,
-    TurnOrder, TurnPhase,
+    AtmAccess, BankOpDone, BankVisited, CardPlayed, GameOver, GameRules, GameSession, JailSkipped,
+    MarketClock, Paused, PendingDecision, PlayerBankrupt, PlayerName, PointsChanged, StockTraded,
+    StockVisited, TurnOrder, TurnPhase,
 };
 
 use super::finance::comma;
@@ -72,7 +72,18 @@ pub(crate) fn spawn_top_bar(mut commands: Commands, font: Res<DevFont>) {
             hint_font,
             hint_color,
         ))
-        .with_child((PhaseText, phase, phase_font, phase_color))
+        .with_child((
+            PhaseText,
+            // 不许收缩：顶栏六颗按钮 + 一句长提示在一行 1024 里是挤的，而挤出来的
+            // 代价不该由阶段名付 —— 「等待掷\n骰」换行看着像排版坏了，不像屏宽不够
+            Node {
+                flex_shrink: 0.0,
+                ..default()
+            },
+            phase,
+            phase_font,
+            phase_color,
+        ))
         .with_children(|bar| {
             // 掷骰按钮按「常态」spawn，可用态全交给 `refresh_top_bar` 判：
             // `Palette` 因此恒等于主色，解禁时 `bg = palette.normal` 才是对的颜色
@@ -101,6 +112,19 @@ pub(crate) fn spawn_top_bar(mut commands: Commands, font: Res<DevFont>) {
                     layout::FINANCE_BUTTON,
                     SECONDARY,
                     UiAction::ToggleStock,
+                ),
+            );
+            // 手牌随时可看（同证券：「能不能看」与「能不能出牌」是两件事，分开灰）。
+            // 手里没牌时面板会明写「手里没有卡」，所以入口不必等牌到手才亮 ——
+            // 一个从没亮过的按钮，玩家不会知道它有这块面板
+            button(
+                bar,
+                &font.0,
+                ButtonSpec::new(
+                    "手牌",
+                    layout::FINANCE_BUTTON,
+                    SECONDARY,
+                    UiAction::ToggleHand,
                 ),
             );
             // Godot 的暂停只有 ESC 一条路（`pause_menu.gd:19-25`），这里补一个按钮：
@@ -146,7 +170,7 @@ pub(crate) struct TurnView<'w, 's> {
 /// 一颗按钮此刻该不该亮。三颗按钮三种判据，都从这里出，
 /// 于是「看着能点、按下去没反应」只可能是这一处写错，而不是散在三个构造点。
 ///
-/// 范围由 `TopBar` 圈定（见 `refresh_top_bar`），所以这里的输入只有顶栏那几颗。
+/// 范围由 `TopBar` 圈定（见 `refresh_top_bar`），所以这里的输入只有顶栏那六颗。
 /// 新加一颗**顶栏**按钮时必须在这里补一条判据 —— 漏了不会编译失败，只会永远亮着，
 /// 症状与坑 31 反过来：灰该灰的时候不灰。浮层里的按钮不走这条路，别往这儿加。
 fn button_allowed(action: &UiAction, turn: &TurnView) -> bool {
@@ -162,6 +186,8 @@ fn button_allowed(action: &UiAction, turn: &TurnView) -> bool {
         }
         // 证券：随时能看行情，下单的限制写在面板里那八颗按钮上
         UiAction::ToggleStock => !turn.paused.0,
+        // 手牌：同一条 —— 能不能看由暂停决定，能不能出牌写在面板里那行字上
+        UiAction::ToggleHand => !turn.paused.0,
         _ => true,
     }
 }
@@ -208,7 +234,7 @@ fn paint_label(paint: &mut TopBarPaint<'_, '_>, button: Entity, disabled: bool) 
 /// 就再也没人刷过。判据本身是幂等的（只在 `Disabled` 与判据不一致时才动手），逐帧跑也
 /// 不影响悬停换色。
 ///
-/// **只管顶栏名下那几颗**（P3b 真鼠标冒烟翻出来的账，§6.1 坑 31）。早先这里查的是
+/// **只管顶栏名下那六颗**（P3b 真鼠标冒烟翻出来的账，§6.1 坑 31）。早先这里查的是
 /// 「全工程任何带 `UiAction` 的按钮」，而 `button_allowed` 对不认识的动作一律放行 ——
 /// 于是每块浮层里 spawn 期就该灰着的按钮，下一帧被顶栏剥掉 `Disabled`、标签刷成白字：
 /// 灰底白字正是坑 26 说过的「灰了但读不出灰」，而面板重建时这些实体会被 despawn，
@@ -334,6 +360,9 @@ pub(crate) struct Notices<'w, 's> {
     stock: MessageReader<'w, 's, StockVisited>,
     traded: MessageReader<'w, 's, StockTraded>,
     points: MessageReader<'w, 's, PointsChanged>,
+    /// 出牌的结果。手牌面板随手牌重建，把一次性结果烤进去下一次就没了 ——
+    /// 持久的读数只有这一行（与点券那一条同一个道理）
+    played: MessageReader<'w, 's, CardPlayed>,
     over: MessageReader<'w, 's, GameOver>,
 }
 
@@ -392,6 +421,37 @@ pub(crate) fn hint_from_events(
             m.delta,
             m.balance
         ));
+    }
+    // 出牌的结果必须在这儿说清楚，尤其要说「有没有生效」：一张陷害卡打在带护身的人头上
+    // 是什么都没发生的，而手牌面板下一次重建就把那张卡的重置成了常态 —— 没有这一行，
+    // 玩家只会看见「按了没反应」
+    for m in notices.played.read() {
+        let effect = m
+            .card
+            .outcomes
+            .iter()
+            .map(super::dialog::describe)
+            .collect::<Vec<_>>()
+            .join("，");
+        let effect_text = if effect.is_empty() {
+            String::new()
+        } else {
+            format!(" — {effect}")
+        };
+        line = Some(if m.player == m.victim {
+            format!(
+                "{} 使用了「{}」{effect_text}",
+                name(&names, m.player),
+                m.card.title
+            )
+        } else {
+            format!(
+                "{} 对 {} 使用了「{}」{effect_text}",
+                name(&names, m.player),
+                name(&names, m.victim),
+                m.card.title
+            )
+        });
     }
     for m in notices.over.read() {
         line = Some(match m.winner.and_then(|w| names.get(w).ok()) {

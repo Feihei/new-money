@@ -108,6 +108,9 @@ fn check_assets(server: Res<AssetServer>, data: Res<DataHandles>) {
     expect_ready(&server, &data.board, "棋盘");
     expect_ready(&server, &data.chance, "机会牌");
     expect_ready(&server, &data.fate, "命运牌");
+    // 道具牌也要查：装配要四份资产齐（`world::begin_game_system` 那个元组），
+    // 少一份就是卡在 `Boot` 上不动 —— 而 Bevy 对失败资产只打一条日志然后永远等下去
+    expect_ready(&server, &data.items, "道具牌");
     expect_ready(&server, &data.stocks, "股票");
 }
 
