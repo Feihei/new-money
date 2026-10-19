@@ -14,6 +14,7 @@ use game_core::CoreGamePlugin;
 use game_core::prelude::{DataHandles, GameSeed, TurnPhase};
 
 mod autopilot;
+mod dev;
 mod dump;
 mod render;
 mod scene;
@@ -56,6 +57,8 @@ fn main() {
     .add_plugins(autopilot::AutopilotPlugin);
     // 调试面板排在最后：它只读别人的状态，而且默认不装（见 `dump` 模块头）
     dump::install_if_requested(&mut app);
+    // 开发注入排在它之后：截图时要读到的那一栏已经装好了
+    dev::install_if_requested(&mut app);
 
     insert_boot_resources(app.world_mut());
 

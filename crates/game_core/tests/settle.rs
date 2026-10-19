@@ -11,8 +11,9 @@ use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::economy::dividend_per_share;
 use game_core::prelude::{
-    BankBalance, Bankrupt, Books, CardEffect, CardKind, DataHandles, GameRules, GameSeed,
-    GameSession, GameSetup, JailSentence, StockId, TileIndex, TileKind, TradeSide, TurnPhase,
+    BankBalance, Bankrupt, Books, CardEffect, CardKind, DataHandles, Detention, DetentionPlace,
+    GameRules, GameSeed, GameSession, GameSetup, StockId, TileIndex, TileKind, TradeSide,
+    TurnPhase,
 };
 
 // prototype 的格子对照（`assets/data/boards/prototype.json`）：
@@ -600,40 +601,42 @@ fn a_fine_you_cannot_pay_bankrupts_you_for_real() {
 }
 
 #[test]
-fn go_to_jail_card_parks_the_token_at_the_junction_and_skips_two_turns() {
+fn a_detain_card_parks_the_token_at_the_junction_and_skips_two_turns() {
     let (mut app, p0) = ready_on(0, 3, DecisionPolicy::DeclineAll); // 命运格
     stack_card(&mut app, CardKind::Fate, 0); // fate_001 直接入狱 3 回合
     land(&mut app);
 
     let led = ledger(&app);
     assert!(
-        led.contains(&"Jailed(P0@2)".to_string()),
+        led.contains(&"Detain(P0@监狱,格2)".to_string()),
         "监狱分支挂在 2 号格，逻辑位置该停在接入点而不是死胡同：{led:?}"
     );
-    assert_eq!(tile_of(&app, p0), 2, "出狱后要从接入点继续沿环前进");
+    assert_eq!(tile_of(&app, p0), 2, "回来时要从接入点继续沿环前进");
     assert_eq!(
-        app.world()
-            .entity(p0)
-            .get::<JailSentence>()
-            .expect("应有服刑组件")
-            .turns_left,
-        3
+        detention_of(&app, p0),
+        Some(Detention {
+            place: DetentionPlace::Jail,
+            turns_left: 3
+        }),
+        "拘留组件要带着「他在哪儿」—— 那是这三个去处唯一被存下来的差别"
     );
 
-    // 3 回合刑期 = 跳过 2 个回合，第 3 次轮到他时当场出狱（B2b 定的递减规则）。
+    // 3 回合刑期 = 跳过 2 个回合，第 3 次轮到他时当场回来（B2b 定的递减规则）。
     // 两人轮流，所以要走到第 7 格才见到 P0 的第三次回合开始。
     play_turns(&mut app, 7);
     let ev = events(&app);
     assert_eq!(
-        ev.iter().filter(|e| e.starts_with("JailSkip(P0,")).count(),
+        ev.iter()
+            .filter(|e| e.starts_with("DetainSkip(P0@监狱,"))
+            .count(),
         2,
         "应恰好跳过两格：{ev:?}"
     );
     assert!(
-        ev.iter().any(|e| e.starts_with("Released(P0@2")),
-        "第三格出狱：{ev:?}"
+        ev.iter().any(|e| e.starts_with("Lifted(P0@监狱,格2")),
+        "第三格该放出狱凭据，而且要说得出他从哪儿回来：{ev:?}"
     );
-    assert!(app.world().entity(p0).get::<JailSentence>().is_none());
+    assert_eq!(detention_of(&app, p0), None);
 }
 
 #[test]

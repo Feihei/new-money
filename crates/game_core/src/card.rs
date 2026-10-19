@@ -61,11 +61,17 @@ pub enum CardEffect {
     DeductCash {
         amount: i64,
     },
-    /// 关进监狱 N 天。**承受者是这张卡的目标**（[`CardTarget`]），不是抽卡的人 ——
-    /// 所以命运牌的「直接入狱」（target 缺省 = 自己）与陷害卡的「送对手入狱」
-    /// 是同一条效果，不必为陷害单开一个变体。可被 [`crate::afflict::Insulation`] 抵消。
-    GoToJail {
-        #[serde(default = "default_jail_turns")]
+    /// 把承受者送进某一处「不在牌桌上」的地方 N 天（P4）。**承受者是这张卡的目标**
+    /// （[`CardTarget`]），不是抽卡的人 —— 所以命运牌的「直接入狱」（target 缺省 = 自己）
+    /// 与陷害卡的「送对手入狱」是同一条效果，不必为陷害单开一个变体。
+    /// 可被 [`crate::afflict::Insulation`] 抵消。
+    ///
+    /// `place` 是**必填**的：坐牢、住院、出国在三条数据上就是三个数，而「不给 place 默认成
+    /// 监狱」会让「掉水沟」这类卡静默变成坐牢 —— 那正是最难查的一类错（文案说住院、
+    /// 模型把人送进监狱）。三种去处共用这一条效果的理由见 [`crate::player::DetentionPlace`]。
+    Detain {
+        place: crate::player::DetentionPlace,
+        #[serde(default = "default_detention_turns")]
         turns: u32,
     },
     /// 按格名瞬移。格名是数据与棋盘的隐式契约，`validate` 只能查非空，
@@ -118,15 +124,15 @@ pub enum CardEffect {
     /// 让承受者原地停留 N 回合（停留卡，P3d④c）。**人还在场上**：棋子不动、不改方向、
     /// 名下的地照样收租，只是那几回合的轮到他也被跳过（见 [`crate::player::StaySentence`]）。
     ///
-    /// 与 [`Self::GoToJail`] 是两条效果而不是同一条带 `place` 参数的：入狱要把人送进
-    /// 死胡同格并（P4 起）夺走收租权，这两件事停留都不做。它们共享的只是「回合开始扣一格」
+    /// 与 [`Self::Detain`] 是两条效果而不是同一条带个 bool 的：入狱要把人送进
+    /// 死胡同格并（P4② 起）夺走收租权，这两件事停留都不做。它们共享的只是「回合开始扣一格」
     /// 那半条规则，而那半条写在 `begin_turn_system` 里，不该由卡面来合并。
     Stay {
         turns: u32,
     },
 }
 
-const fn default_jail_turns() -> u32 {
+const fn default_detention_turns() -> u32 {
     3
 }
 
@@ -200,7 +206,7 @@ impl CardSet {
                             errs.push(format!("卡牌 {} 的现金效果数值非法: {amount}", c.id));
                         }
                     }
-                    CardEffect::GoToJail { turns } => {
+                    CardEffect::Detain { turns, .. } => {
                         if *turns == 0 {
                             errs.push(format!("卡牌 {} 的关押回合数为 0", c.id));
                         }
@@ -318,7 +324,7 @@ mod tests {
             frame
                 .effects
                 .iter()
-                .any(|e| matches!(e, CardEffect::GoToJail { turns } if *turns > 0)),
+                .any(|e| matches!(e, CardEffect::Detain { turns, .. } if *turns > 0)),
             "{} 的效果不是关人",
             frame.id
         );
@@ -347,7 +353,26 @@ mod tests {
         let has = |pred: fn(&CardEffect) -> bool| all.iter().any(pred);
         assert!(has(|e| matches!(e, CardEffect::AddCash { .. })));
         assert!(has(|e| matches!(e, CardEffect::DeductCash { .. })));
-        assert!(has(|e| matches!(e, CardEffect::GoToJail { turns: 3 })));
+        assert!(has(|e| matches!(
+            e,
+            CardEffect::Detain {
+                place: crate::player::DetentionPlace::Jail,
+                turns: 3
+            }
+        )));
+        // 三个去处各要有真生产者。只落「监狱」而把另两个留给「以后再说」，那个枚举就是
+        // 两格死代码 —— 而「坐牢/住院/出国是同一件事的三种名字」这条设计意图也就无从验证
+        for place in [
+            crate::player::DetentionPlace::Jail,
+            crate::player::DetentionPlace::Hospital,
+            crate::player::DetentionPlace::Away,
+        ] {
+            assert!(
+                all.iter()
+                    .any(|e| matches!(e, CardEffect::Detain { place: p, .. } if *p == place)),
+                "没有任何一张卡会把人送去{place:?} —— 那一格是死的"
+            );
+        }
         assert!(has(
             |e| matches!(e, CardEffect::MoveTo { tile_name } if tile_name == "起点")
         ));

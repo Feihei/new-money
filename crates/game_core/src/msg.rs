@@ -15,6 +15,7 @@ use crate::card::CardKind;
 use crate::deck::CardId;
 use crate::hand::CardAim;
 use crate::land::LandId;
+use crate::player::DetentionPlace;
 use crate::stock::StockId;
 
 /// 某位玩家的回合开始了。阶段推进的唯一入口是 `OnEnter(TurnPhase::TurnStart)`，
@@ -77,26 +78,29 @@ pub struct TurnEnded {
     pub player: Entity,
 }
 
-/// 服刑期满自动出狱。逻辑位置一直是监狱对应的**接入点**（`player_data.gd:62-68` 的语义），
-/// 所以这里带的是「从哪格继续沿环前进」，不是死胡同格。
+/// 拘留期满，回到牌桌上。`place` 说的是他从哪儿回来（出狱/出院/回国是三句话、一条凭据），
+/// `junction` 是逻辑位置继续沿环前进的接入点 —— 逻辑位置一直是接入点而不是死胡同格
+/// （`player_data.gd:62-68` 的语义）。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlayerReleased {
+pub struct DetentionLifted {
     pub player: Entity,
+    pub place: DetentionPlace,
     pub junction: TileIndex,
 }
 
-/// 仍在服刑，本回合跳过。`turns_left` 是已经扣掉本回合之后的剩余值。
+/// 仍在被拘留中，本回合跳过。`turns_left` 是已经扣掉本回合之后的剩余值。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JailSkipped {
+pub struct DetentionSkipped {
     pub player: Entity,
+    pub place: DetentionPlace,
     pub turns_left: u32,
 }
 
 /// 仍在原地停留（停留卡，P3d④c），本回合跳过。`turns_left` 同样是**已扣掉本回合之后**的
-/// 剩余值 —— 与 [`JailSkipped`] 同一个口径，两条流水读起来才是一套语法。
+/// 剩余值 —— 与 [`DetentionSkipped`] 同一个口径，两条流水读起来才是一套语法。
 ///
-/// 为什么单开一条而不是让 `JailSkipped` 带个 `reason`：服刑的人被送进死胡同格、
-/// （P4 起）丧失收租权，停留的人**还在场上**、地还收得到租。屏幕上那两句话不是一句话，
+/// 为什么单开一条而不是让 `DetentionSkipped` 带个 `reason`：被拘留的人被送进死胡同格、
+/// （P4② 起）丧失收租权，停留的人**还在场上**、地还收得到租。屏幕上那两句话不是一句话，
 /// 而合并之后要靠调用方再查一次「他是哪种」才说得出口 —— 那正是这条消息该带的答案。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StaySkipped {
@@ -105,7 +109,7 @@ pub struct StaySkipped {
 }
 
 /// 停留期满，下一回合起可正常行动。**不带格号**：他从没离开过那一格
-/// （与 [`PlayerReleased`] 的差别正在这里 —— 出狱要说「从哪格继续沿环前进」）。
+/// （与 [`DetentionLifted`] 的差别正在这里 —— 回来说的是「从哪格继续沿环前进」）。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StayLifted {
     pub player: Entity,
@@ -126,12 +130,14 @@ pub struct PlayerTeleported {
     pub tile: TileIndex,
 }
 
-/// 被关进拘留格（监狱/医院）。`junction` 是逻辑位置继续沿环前进的接入点，
+/// 被送进拘留类状态（监狱/医院/国外）。`junction` 是逻辑位置继续沿环前进的接入点，
 /// `end` 是死胡同格的网格坐标 —— 只给表现层把棋子停过去用，`None` 表示这张棋盘
-/// 没有死胡同格，棋子就停在接入点（`card_effects.gd:50-55` 的 `emit(-1,-1)` 语义）。
+/// 没有那条分支（或那个地方压根不在地图上，如 [`DetentionPlace::Away`]），
+/// 棋子就停在接入点（`card_effects.gd:50-55` 的 `emit(-1,-1)` 语义）。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlayerJailed {
+pub struct PlayerDetained {
     pub player: Entity,
+    pub place: DetentionPlace,
     pub junction: TileIndex,
     pub end: Option<GridPos>,
 }
@@ -411,7 +417,8 @@ pub enum EffectOutcome {
     CouldNotPay {
         needed: i64,
     },
-    Jailed {
+    Detained {
+        place: DetentionPlace,
         turns: u32,
         junction: TileIndex,
     },
@@ -424,7 +431,7 @@ pub enum EffectOutcome {
     UnknownTile {
         name: String,
     },
-    /// 一件厄运被护身吃掉了（免罪卡生效）。与 `Jailed` 互斥 —— 抵消了就没有入狱这回事，
+    /// 一件厄运被护身吃掉了（免罪卡生效）。与 `Detained` 互斥 —— 抵消了就没有入狱这回事，
     /// 而流水里必须留下「被抵消」这一条，否则玩家只看见「什么都没发生」。
     Blocked {
         domain: AfflictDomain,
@@ -458,7 +465,7 @@ pub enum EffectOutcome {
     Reversed {
         heading: crate::player::Heading,
     },
-    /// 挂上「原地停留 N 回合」（停留卡，P3d④c）。与 [`Self::Jailed`] 同一个形状：
+    /// 挂上「原地停留 N 回合」（停留卡，P3d④c）。与 [`Self::Detained`] 同一个形状：
     /// 说的是**接下来**几个回合他不能动，而不是「已经跳过了一个」—— 第一次跳过发生在
     /// 下一次回合开始，由 [`StaySkipped`] 播报，两条之间可以隔着别人的回合。
     /// `turns` 是**叠完之后**的剩余回合数（同 [`Self::Shielded`] 的 `charges`）：

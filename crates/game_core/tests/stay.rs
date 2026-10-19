@@ -2,22 +2,22 @@
 //!
 //! 这条卡落在 `begin_turn_system` 那一格里，所以它最容易写错的三种可能都不在卡面上：
 //!
-//! - 它不该被合成进 `JailSentence`：服刑要把人送进死胡同格，停留的人**还在自己踩到的
-//!   那一格上**，棋子不必位移、出狱凭据也不该发（`PlayerReleased`）；
+//! - 它不该被合成进 `Detention`：被拘留的人要被送进死胡同格，停留的人**还在自己踩到的
+//!   那一格上**，棋子不必位移、回来的凭据（`DetentionLifted`）也不该发；
 //! - 两张计时同时挂着时，一回合只跳一次、两个计数**各减一**（不是互相延长、也不是各跳一回）；
-//! - 「判 3 = 跳 2」这条口径必须与服刑同一条，否则卡面那句「停 3 回合」在两种处境下
+//! - 「判 3 = 跳 2」这条口径必须与拘留同一条，否则卡面那句「停 3 回合」在两种处境下
 //!   是两种长度，玩家没法判断。
 //!
-//! 还有一条是它与 P4 的边界：今天服刑与停留**都照样收租**（4 代只有服刑那半有剥夺，
-//! 而那半还没出生）。`a_stayed_owner_still_collects_rent...` 钉的是「不许顺手把停留也
-//! 剥夺掉」—— P4 给 `Detention` 加收租判据时，那条只能扩到拘留那一族。
+//! 还有一条是它与 P4 的边界：拘留与停留只差「他在不在牌桌上」，而差别落在**收租**上
+//! （P4② 给 `Detention` 加了那条判据）。`a_stayed_owner_still_collects_rent...` 钉的就是
+//! 「那条判据不许顺手扩到 `StaySentence`」—— 人还在场上的人，地还得收。
 
 mod common;
 
 use bevy::app::App;
 use bevy::ecs::entity::Entity;
 use common::*;
-use game_core::prelude::{CardAim, Heading, JailSentence, StaySentence, TurnPhase};
+use game_core::prelude::{CardAim, Detention, DetentionPlace, Heading, StaySentence, TurnPhase};
 
 /// 这位此刻朝哪边走。缺组件就 panic：`Heading` 是必挂的那一格（`spawn_players`）。
 fn heading_of(app: &App, player: Entity) -> Heading {
@@ -112,7 +112,7 @@ fn judged_three_turns_he_is_skipped_twice_and_walks_again_on_the_third() {
     );
     assert_eq!(stay_of(&app, p1), None, "期满之后组件必须消失");
     assert!(
-        !events(&app).iter().any(|e| e.starts_with("Released(P1@")),
+        !events(&app).iter().any(|e| e.starts_with("Lifted(P1@")),
         "他从没进过死胡同格，不该有一条出狱凭据：{:?}",
         events(&app)
     );
@@ -208,15 +208,24 @@ fn a_stayed_owner_still_collects_rent_because_he_is_still_at_the_table() {
 fn a_stay_and_a_jail_on_the_same_head_count_down_separately_and_skip_once() {
     // 同时挂着两张计时：P1 那一格是「服 2 + 停 3」。第一格两条各减一且只跳一次，
     // 第二格服刑已经扣到 1（不再占用）而停留还在占用 —— 关键是那一格**不该提前放出狱凭据**，
-    // 他还在被停留按住，此时发 `PlayerReleased` 等于说「他可以走了」
+    // 他还在被停留按住，此时发 `DetentionLifted` 等于说「他可以走了」
     let (mut app, p0, p1) = two_of_them(4, 3);
-    insert(&mut app, p1, JailSentence { turns_left: 2 });
+    insert(
+        &mut app,
+        p1,
+        Detention {
+            place: DetentionPlace::Jail,
+            turns_left: 2,
+        },
+    );
     hold_there(&mut app, p0, p1);
     play_turns(&mut app, 6);
 
     let ev = events(&app);
     assert_eq!(
-        ev.iter().filter(|e| e.starts_with("JailSkip(P1,")).count(),
+        ev.iter()
+            .filter(|e| e.starts_with("DetainSkip(P1@监狱,"))
+            .count(),
         1,
         "服刑那一格只占用一回合，之后就让位给停留：{ev:?}"
     );
@@ -229,7 +238,7 @@ fn a_stay_and_a_jail_on_the_same_head_count_down_separately_and_skip_once() {
     // TurnStarted —— 也就是同一个回合开始同时扣了两格，而不是各开一个回合各扣一格
     let jail_at = ev
         .iter()
-        .position(|e| e == "JailSkip(P1,剩1)")
+        .position(|e| e == "DetainSkip(P1@监狱,剩1)")
         .expect("该有一条服刑跳过");
     assert_eq!(
         ev.get(jail_at + 1).map(String::as_str),
@@ -248,7 +257,7 @@ fn a_stay_and_a_jail_on_the_same_head_count_down_separately_and_skip_once() {
     );
     let released_at = ev
         .iter()
-        .position(|e| e.starts_with("Released(P1@"))
+        .position(|e| e.starts_with("Lifted(P1@监狱"))
         .expect("服刑期满要有一条出狱凭据");
     let last_skip_at = ev
         .iter()

@@ -11,7 +11,7 @@ mod common;
 use bevy::app::App;
 use bevy::prelude::*;
 use common::*;
-use game_core::prelude::{CardSet, DataHandles, GameSession, JailSentence, TileKind};
+use game_core::prelude::{CardSet, DataHandles, Detention, GameSession, TileKind};
 
 /// 1 号格被改造成命运格（`retile` 改的是 resource 里那份快照，不必动 JSON）。
 const FATE: u32 = 1;
@@ -39,9 +39,9 @@ fn step_on_fate(times: usize) -> Vec<String> {
     retile(&mut app, FATE, TileKind::Fate);
     let mut drawn = Vec::new();
     for _ in 0..times {
-        // 命运第一张就是「直接入狱」，而服刑的人回合被跳过 —— 不清掉它就永远踩不到第二次。
+        // 命运第一张就是「直接入狱」，而被拘留的人回合被跳过 —— 不清掉它就永远踩不到第二次。
         // 这里清它是为了把「发牌顺序」单独问出来；「跳过」那件事由 `tests/turn.rs` 管
-        app.world_mut().entity_mut(p0).remove::<JailSentence>();
+        app.world_mut().entity_mut(p0).remove::<Detention>();
         rewind_dice(&mut app);
         make_current(&mut app, p0);
         place(&mut app, p0, FATE - 1);

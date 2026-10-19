@@ -13,17 +13,15 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::afflict::{AfflictDomain, Affliction, Insulation};
-use crate::board::{BranchKind, GridPos, TileIndex};
+use crate::board::TileIndex;
 use crate::card::{CardDef, CardEffect, CardKind, CardSet};
 use crate::charge::{Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Scope, Source};
 use crate::data::DataHandles;
-use crate::landing::{
-    Landed, Landing, LandingDomain, Pending, PendingDecision, jail_player, teleport,
-};
+use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision, detain, teleport};
 use crate::msg::{
-    CardDrawn, CardNotice, EffectOutcome, LandBought, PlayerJailed, PlayerTeleported,
+    CardDrawn, CardNotice, EffectOutcome, LandBought, PlayerDetained, PlayerTeleported,
 };
-use crate::player::{Heading, PlayerId, StaySentence, TokenPosition};
+use crate::player::{Detention, Heading, PlayerId, StaySentence, TokenPosition};
 use crate::rng::Rng;
 use crate::settle::Books;
 
@@ -200,10 +198,13 @@ pub struct CardSink<'w, 's> {
     /// 绕行方向。转向卡要**就地**翻它（见 [`apply_card`] 里那一支），所以是 `&mut` 查询
     /// 而不是 `Commands`。
     pub headings: Query<'w, 's, &'static mut Heading, With<PlayerId>>,
+    /// 拘留计时。与 `headings` 同样是**就地**写（见 [`crate::landing::detain`]）：
+    /// 同一帧两张拘留卡，第二条要看得见第一条，否则会各搬一次棋子、各发一份凭据。
+    pub detentions: Query<'w, 's, &'static mut Detention, With<PlayerId>>,
     /// 停留计时。与 `headings` 同样是**就地**写（见 [`apply_card`] 的 `Stay` 那一支）：
     /// 第二张停留卡要看得见第一张，而这里读出来的数还要原样报进凭据。
     pub stays: Query<'w, 's, &'static mut StaySentence>,
-    pub jailed: MessageWriter<'w, PlayerJailed>,
+    pub detained: MessageWriter<'w, PlayerDetained>,
     pub teleported: MessageWriter<'w, PlayerTeleported>,
     /// 买地成交的流水。购地卡走的是 `Books::buy` 那条正路，所以它必须和「踩到无主地买下来」
     /// 发同一条凭据 —— 归属变了这件事只有一种说法，而顶栏与 dump 读的就是这一条。
@@ -260,7 +261,7 @@ pub fn apply_card(
                     }
                 }
             }
-            CardEffect::GoToJail { turns } => {
+            CardEffect::Detain { place, turns } => {
                 let affliction = Affliction::new(AfflictDomain::Detention, victim);
                 if absorb(&mut sink.insulations, &mut sink.commands, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
@@ -268,27 +269,35 @@ pub fn apply_card(
                     });
                     continue;
                 }
-                let board = &sink.books.active.def;
-                let Some(junction) = board.branch_junction(BranchKind::Jail) else {
-                    debug!("这张棋盘没有监狱分支，入狱卡落空");
-                    continue;
-                };
-                let junction = TileIndex(junction.id);
-                let end = board.branch_end(BranchKind::Jail).map(GridPos::of);
-                jail_player(
+                // 接入点与死胡同格由 `detain` 一处算（三个去处共用）。它查不到那条分支时
+                // 什么都不改并返回 `None` —— 与「数据写了个棋盘上没有的格名」同一条纪律：
+                // 不猜一个格子，也不回退到起点。返回的那条拘留**可能是原来更久的那一张**，
+                // 所以凭据一律用它给的值，而不是卡面上那个数
+                let Some((held, junction, end)) = detain(
                     &mut sink.commands,
                     &mut sink.positions,
+                    &mut sink.detentions,
+                    &sink.books.active.def,
                     victim,
-                    junction,
+                    *place,
                     *turns,
-                );
-                sink.jailed.write(PlayerJailed {
+                ) else {
+                    debug!(
+                        "这张棋盘没有「{}」那条分支，把 {} 送去那里这条路落空",
+                        place.label(),
+                        def.id
+                    );
+                    continue;
+                };
+                sink.detained.write(PlayerDetained {
                     player: victim,
+                    place: held.place,
                     junction,
                     end,
                 });
-                outcomes.push(EffectOutcome::Jailed {
-                    turns: *turns,
+                outcomes.push(EffectOutcome::Detained {
+                    place: held.place,
+                    turns: held.turns_left,
                     junction,
                 });
             }

@@ -66,7 +66,7 @@ pub mod prelude {
     pub use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
     pub use crate::landing::{
         Landed, Landing, LandingDomain, Pending, PendingDecision, classify_landing_system,
-        close_landing_system, decision_system, domain_of, jail_player, teleport,
+        close_landing_system, decision_system, detain, domain_of, teleport,
     };
     pub use crate::loader::JsonAssetLoader;
     pub use crate::market::{
@@ -79,18 +79,18 @@ pub mod prelude {
     };
     pub use crate::msg::{
         BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn, CardGained,
-        CardNotice, CardPlayed, CashChanged, ChargeWaived, Decision, DecisionChosen, DiceRolled,
-        EffectOutcome, GameOver, JailSkipped, LandBought, LandUpgraded, MortgageDone, MortgageOp,
-        MortgageRequested, PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerJailed,
-        PlayerReleased, PlayerTeleported, PointsChanged, RentDue, RequestRoll, ShopOpDone,
-        ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged, StockTradeRequested,
-        StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered,
-        WalkStarted,
+        CardNotice, CardPlayed, CashChanged, ChargeWaived, Decision, DecisionChosen,
+        DetentionLifted, DetentionSkipped, DiceRolled, EffectOutcome, GameOver, LandBought,
+        LandUpgraded, MortgageDone, MortgageOp, MortgageRequested, PlayCardRequested,
+        PlayerArrived, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, RentDue,
+        RequestRoll, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged,
+        StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
+        TurnStarted, UpgradeOffered, WalkStarted,
     };
     pub use crate::player::{
-        BankBalance, Bankrupt, GameSetup, Heading, JailSentence, PLAYER_COLORS, PlayerColor,
-        PlayerId, PlayerName, PlayerSetup, Points, START_TILE, StaySentence, TokenPosition,
-        WalkQueue, Wallet,
+        BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Heading, PLAYER_COLORS,
+        PlayerColor, PlayerId, PlayerName, PlayerSetup, Points, START_TILE, StaySentence,
+        TokenPosition, WalkQueue, Wallet,
     };
     pub use crate::plot::{PlotArea, area_of, is_in_area};
     pub use crate::property::settle_property_landing;
@@ -111,16 +111,16 @@ use bank::apply_month_end_interest_system;
 use prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankOpRequested, BankVisited, BoardDef, BuyOffered,
     CardDrawn, CardGained, CardPlayed, CardSet, CashChanged, ChargeWaived, Corrections,
-    CouponBoxes, DecisionChosen, DiceRolled, GameOver, GameRules, GameSeed, GameSetup, JailSkipped,
-    JsonAssetLoader, LandBought, LandUpgraded, Landing, MarketClock, MortgageDone,
-    MortgageRequested, Paused, PendingDecision, PlayCardRequested, PlayerArrived, PlayerBankrupt,
-    PlayerJailed, PlayerReleased, PlayerTeleported, PointsChanged, RentDue, RequestRoll,
-    ShopOpDone, ShopOpRequested, ShopStock, StayLifted, StaySkipped, StockPriceChanged, StockSet,
-    StockTradeRequested, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted,
-    UpgradeOffered, WalkClock, WalkStarted, advance_walk_clock_system, bank_op_system,
-    begin_game_system, decision_system, expire_land_status_system, grant_atm_access_system,
-    market_tick_on_turn_end_system, mortgage_op_system, play_card_system, shop_op_system,
-    trade_request_system, walk_step_system,
+    CouponBoxes, DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled, GameOver,
+    GameRules, GameSeed, GameSetup, JsonAssetLoader, LandBought, LandUpgraded, Landing,
+    MarketClock, MortgageDone, MortgageRequested, Paused, PendingDecision, PlayCardRequested,
+    PlayerArrived, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, RentDue,
+    RequestRoll, ShopOpDone, ShopOpRequested, ShopStock, StayLifted, StaySkipped,
+    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
+    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkStarted,
+    advance_walk_clock_system, bank_op_system, begin_game_system, decision_system,
+    expire_land_status_system, grant_atm_access_system, market_tick_on_turn_end_system,
+    mortgage_op_system, play_card_system, shop_op_system, trade_request_system, walk_step_system,
 };
 use turn::{
     begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system,
@@ -174,10 +174,10 @@ impl Plugin for CoreGamePlugin {
             .add_message::<TileStepped>()
             .add_message::<PlayerArrived>()
             .add_message::<TurnEnded>()
-            .add_message::<PlayerReleased>()
-            .add_message::<PlayerJailed>()
+            .add_message::<DetentionLifted>()
+            .add_message::<PlayerDetained>()
             .add_message::<PlayerTeleported>()
-            .add_message::<JailSkipped>()
+            .add_message::<DetentionSkipped>()
             // 停留卡的两条（P3d④c）。`begin_turn_system` 的 `TurnWriters` 现在带着它们的
             // writer —— 漏注册不是少一行文案，而是那个 SystemParam 建不出来、
             // **回合机整个不跑**（同一个坑见上面那条注）

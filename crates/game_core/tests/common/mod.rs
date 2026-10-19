@@ -20,16 +20,16 @@ use game_core::prelude::{
     ActiveBoard, Adjustment, AtmAccess, BankBalance, BankOp, BankOpDone, BankOpRequested,
     BankVisited, Books, BuildingLevel, BuyOffered, CardAim, CardDrawn, CardGained, CardId,
     CardKind, CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived, Correction, Corrections,
-    CouponBoxes, DamageTally, DataHandles, Decision, DecisionChosen, Deck, DiceRolled, GameOver,
-    GameRules, GameSeed, GameSession, GameSetup, Hand, Insulation, JailSkipped, LandBought,
-    LandDamage, LandId, LandStatus, LandUpgraded, LandView, Market, MarketClock, MortgageDone,
-    MortgageOp, MortgageRequested, Mortgaged, Owner, Pending, PendingDecision, PlayCardRequested,
-    PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed, PlayerReleased, PlayerTeleported,
-    PlotArea, Points, PointsChanged, RentDue, RequestRoll, Rng, Scope, Shelf, ShopOpDone,
-    ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId,
-    StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
-    Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered,
-    WalkStarted, Wallet, deal_to,
+    CouponBoxes, DamageTally, DataHandles, Decision, DecisionChosen, Deck, Detention,
+    DetentionLifted, DetentionSkipped, DiceRolled, GameOver, GameRules, GameSeed, GameSession,
+    GameSetup, Hand, Insulation, LandBought, LandDamage, LandId, LandStatus, LandUpgraded,
+    LandView, Market, MarketClock, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Owner,
+    Pending, PendingDecision, PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerDetained,
+    PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, RentDue, RequestRoll, Rng, Scope,
+    Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped,
+    StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex,
+    TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted,
+    UpgradeOffered, WalkStarted, Wallet, deal_to,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -139,8 +139,8 @@ pub struct PointsAudit(pub Vec<(Entity, i64, u32)>);
 #[derive(SystemParam)]
 struct FlowReaders<'w, 's> {
     turn_started: MessageReader<'w, 's, TurnStarted>,
-    released: MessageReader<'w, 's, PlayerReleased>,
-    jail_skipped: MessageReader<'w, 's, JailSkipped>,
+    lifted: MessageReader<'w, 's, DetentionLifted>,
+    detention_skipped: MessageReader<'w, 's, DetentionSkipped>,
     // 停留的两条（P3d④c）。排在服刑之后：同帧两条各写各的，这里记录顺序就是断言要读的相对顺序
     stay_skipped: MessageReader<'w, 's, StaySkipped>,
     stay_lifted: MessageReader<'w, 's, StayLifted>,
@@ -164,7 +164,7 @@ struct BookReaders<'w, 's> {
     /// 所以「钱一分没动而卡没了」这件事只有这一条流水能证明。
     waived: MessageReader<'w, 's, ChargeWaived>,
     bankrupts: MessageReader<'w, 's, PlayerBankrupt>,
-    jailed: MessageReader<'w, 's, PlayerJailed>,
+    detained: MessageReader<'w, 's, PlayerDetained>,
     teleported: MessageReader<'w, 's, PlayerTeleported>,
     cards: MessageReader<'w, 's, CardDrawn>,
     played: MessageReader<'w, 's, CardPlayed>,
@@ -218,17 +218,19 @@ fn collect_flow(mut log: ResMut<Observed>, mut r: FlowReaders, players: Query<&P
         log.0
             .push(format!("TurnStarted({})", who(&players, m.player)));
     }
-    for m in r.released.read() {
+    for m in r.lifted.read() {
         log.0.push(format!(
-            "Released({}@{})",
+            "Lifted({}@{},格{})",
             who(&players, m.player),
+            m.place.label(),
             m.junction.0
         ));
     }
-    for m in r.jail_skipped.read() {
+    for m in r.detention_skipped.read() {
         log.0.push(format!(
-            "JailSkip({},剩{})",
+            "DetainSkip({}@{},剩{})",
             who(&players, m.player),
+            m.place.label(),
             m.turns_left
         ));
     }
@@ -346,10 +348,11 @@ fn collect_books(
             m.unpaid
         ));
     }
-    for m in r.jailed.read() {
+    for m in r.detained.read() {
         log.0.push(format!(
-            "Jailed({}@{})",
+            "Detain({}@{},格{})",
             who(&players, m.player),
+            m.place.label(),
             m.junction.0
         ));
     }
@@ -1170,6 +1173,12 @@ pub fn shield_of(app: &App, player: Entity) -> Option<Option<u32>> {
         .entity(player)
         .get::<Insulation>()
         .map(|i| i.charges)
+}
+
+/// 某人现在被拘留在哪儿、还剩几回合（`None` = 人在场上）。
+/// 给的是整个组件而不是回合数：P4 的用例断言的正是「他在哪儿」这一半。
+pub fn detention_of(app: &App, player: Entity) -> Option<Detention> {
+    app.world().entity(player).get::<Detention>().copied()
 }
 
 /// 某人现在的停留剩余回合（`None` = 没挂着停留卡）。

@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use common::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
-    ActiveBoard, Bankrupt, DataHandles, GameRules, GameSetup, JailSentence, LandId, Owner,
+    ActiveBoard, Bankrupt, DataHandles, Detention, GameRules, GameSetup, LandId, Owner,
     PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, START_TILE, TokenPosition,
     Wallet,
 };
@@ -36,7 +36,7 @@ fn land_rows(app: &mut App) -> Vec<(u32, bool)> {
 
 fn status_markers(app: &mut App) -> usize {
     let w = app.world_mut();
-    let mut jq = w.query::<&JailSentence>();
+    let mut jq = w.query::<&Detention>();
     let mut bq = w.query::<&Bankrupt>();
     jq.iter(w).count() + bq.iter(w).count()
 }
@@ -68,7 +68,7 @@ fn world_boots_from_real_assets() {
         lands.len(),
         "ActiveBoard 索引与实体数量不符"
     );
-    assert_eq!(status_markers(&mut app), 0, "开局不该有服刑/破产标记");
+    assert_eq!(status_markers(&mut app), 0, "开局不该有拘留/破产标记");
 }
 
 #[test]

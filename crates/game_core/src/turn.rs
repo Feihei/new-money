@@ -12,11 +12,11 @@ use crate::bank::AtmAccess;
 use crate::economy;
 use crate::market::Market;
 use crate::msg::{
-    DiceRolled, GameOver, JailSkipped, PlayerReleased, RequestRoll, StayLifted, StaySkipped,
+    DetentionLifted, DetentionSkipped, DiceRolled, GameOver, RequestRoll, StayLifted, StaySkipped,
     TurnEnded, TurnStarted, WalkStarted,
 };
 use crate::player::{
-    Bankrupt, Heading, JailSentence, PlayerId, StaySentence, TokenPosition, WalkQueue,
+    Bankrupt, Detention, Heading, PlayerId, StaySentence, TokenPosition, WalkQueue,
 };
 use crate::rng::Rng;
 use crate::settle::Books;
@@ -126,8 +126,8 @@ pub fn not_paused(paused: Res<Paused>) -> bool {
 #[derive(SystemParam)]
 pub struct TurnWriters<'w> {
     turn_started: MessageWriter<'w, TurnStarted>,
-    released: MessageWriter<'w, PlayerReleased>,
-    skipped: MessageWriter<'w, JailSkipped>,
+    released: MessageWriter<'w, DetentionLifted>,
+    skipped: MessageWriter<'w, DetentionSkipped>,
     stayed: MessageWriter<'w, StaySkipped>,
     lifted: MessageWriter<'w, StayLifted>,
     over: MessageWriter<'w, GameOver>,
@@ -147,15 +147,17 @@ pub struct RollInput<'w, 's> {
 /// 就是它们的合取，分开读就会出现「他在被停留按住的那一格里被宣布出狱」。
 #[derive(SystemParam)]
 pub struct Sentences<'w, 's> {
-    jailed: Query<'w, 's, Option<&'static JailSentence>, With<PlayerId>>,
+    detained: Query<'w, 's, Option<&'static Detention>, With<PlayerId>>,
     staying: Query<'w, 's, Option<&'static StaySentence>, With<PlayerId>>,
 }
 
 impl<'w, 's> Sentences<'w, 's> {
-    /// `(服刑剩余, 停留剩余)`，读的是**本回合开始那一刻**的格数。
-    fn left(&self, player: Entity) -> (Option<u32>, Option<u32>) {
+    /// `(被拘留那格, 停留剩余回合)`，读的是**本回合开始那一刻**的值。
+    /// 拘留那一格给的是整个组件而不是回合数 —— 跳过与回来那两条凭据都要说得出**他在哪儿**，
+    /// 而那是这条流水唯一携带它的地方。
+    fn held(&self, player: Entity) -> (Option<Detention>, Option<u32>) {
         (
-            self.jailed.get(player).ok().flatten().map(|s| s.turns_left),
+            self.detained.get(player).ok().flatten().copied(),
             self.staying
                 .get(player)
                 .ok()
@@ -165,14 +167,14 @@ impl<'w, 's> Sentences<'w, 's> {
     }
 }
 
-/// 回合开始的唯一入口：跳过破产者 → 处理服刑与停留 → 否则等掷骰。
+/// 回合开始的唯一入口：跳过破产者 → 处理拘留与停留 → 否则等掷骰。
 ///
-/// 服刑的递减规则与 `player_data.gd:72-80` 一致：`turns_left` 每次回合开始减一，
-/// 扣到只剩 1 的那一回合**当场出狱并可掷骰**（即判 3 回合 = 跳过 2 个回合）。
+/// 拘留的递减规则与 `player_data.gd:72-80` 一致：`turns_left` 每次回合开始减一，
+/// 扣到只剩 1 的那一回合**当场回来并可掷骰**（即判 3 回合 = 跳过 2 个回合）。
 /// 停留（P3d④c 的停留卡）走同一条口径，但两者**各自计时、一回合只跳一次**：
-/// 同时挂着服刑 2 与停留 2 的人这一回合被跳过一次、两个计数各减一，而不是被扣两格、
+/// 同时挂着拘留 2 与停留 2 的人这一回合被跳过一次、两个计数各减一，而不是被扣两格、
 /// 也不是两件事互相延长。为什么不合成一个组件：见 [`StaySentence`] 那段 ——
-/// 服刑的人被送进死胡同格，停留的人还在自己踩到的那一格上。
+/// 被拘留的人被送进死胡同格，停留的人还在自己踩到的那一格上。
 pub fn begin_turn_system(
     mut commands: Commands,
     mut order: ResMut<TurnOrder>,
@@ -207,21 +209,23 @@ pub fn begin_turn_system(
     };
 
     // 回合开始即扣一格，所以 turns_left==1 表示「最后一格服完，本回合可行动」
-    let (jail_left, stay_left) = sentences.left(player);
+    let (held, stay_left) = sentences.held(player);
     // `filter(>1)` 之后剩下的就是「本回合还要被占用」的那个新值
-    let jail_next = jail_left.filter(|l| *l > 1).map(|l| l - 1);
+    let jail_next = held.filter(|d| d.turns_left > 1).map(|d| Detention {
+        place: d.place,
+        turns_left: d.turns_left - 1,
+    });
     let stay_next = stay_left.filter(|l| *l > 1).map(|l| l - 1);
 
     if jail_next.is_some() || stay_next.is_some() {
         // 先让 UI 显示「谁的回合被跳了」，再发那两条凭据（`turn_manager.gd:188-189` 的顺序）
         writers.turn_started.write(TurnStarted { player });
-        if let Some(left) = jail_next {
-            commands
-                .entity(player)
-                .insert(JailSentence { turns_left: left });
-            writers.skipped.write(JailSkipped {
+        if let Some(next) = jail_next {
+            commands.entity(player).insert(next);
+            writers.skipped.write(DetentionSkipped {
                 player,
-                turns_left: left,
+                place: next.place,
+                turns_left: next.turns_left,
             });
         }
         if let Some(left) = stay_next {
@@ -238,11 +242,12 @@ pub fn begin_turn_system(
     }
 
     // 走到这里 = 本回合没人被占用：把「最后一格」服完的那两位放出来。
-    // 停留这一支没有「从哪格继续走」要说 —— 他从没离开过那一格（见 `PlayerReleased`）
-    if jail_left == Some(1) {
-        commands.entity(player).remove::<JailSentence>();
-        writers.released.write(PlayerReleased {
+    // 停留这一支没有「从哪格继续走」要说 —— 他从没离开过那一格（见 `DetentionLifted`）
+    if let Some(back) = held.filter(|d| d.turns_left == 1) {
+        commands.entity(player).remove::<Detention>();
+        writers.released.write(DetentionLifted {
             player,
+            place: back.place,
             junction: pos.tile,
         });
     }

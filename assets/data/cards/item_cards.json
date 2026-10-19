@@ -6,7 +6,7 @@
     "desc": "指定一名对手，把他关进监狱 5 天",
     "cost_points": 30,
     "target": "player",
-    "effects": [{ "action": "go_to_jail", "turns": 5 }]
+    "effects": [{ "action": "detain", "place": "jail", "turns": 5 }]
   },
   {
     "id": "item_insulate",

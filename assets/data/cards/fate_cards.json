@@ -4,7 +4,7 @@
 		"type": "fate",
 		"title": "命运",
 		"desc": "直接入狱！",
-		"effects": [{"action": "go_to_jail", "turns": 3}]
+		"effects": [{"action": "detain", "place": "jail", "turns": 3}]
 	},
 	{
 		"id": "fate_002",
@@ -43,5 +43,19 @@
 		"title": "命运",
 		"desc": "物业税 $3000",
 		"effects": [{"action": "deduct_cash", "amount": 3000}]
+	},
+	{
+		"id": "fate_007",
+		"type": "fate",
+		"title": "命运",
+		"desc": "掉进水沟，住院 3 天",
+		"effects": [{"action": "detain", "place": "hospital", "turns": 3}]
+	},
+	{
+		"id": "fate_008",
+		"type": "fate",
+		"title": "命运",
+		"desc": "出国旅游，3 回合不在场上",
+		"effects": [{"action": "detain", "place": "away", "turns": 3}]
 	}
 ]

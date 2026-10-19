@@ -17,8 +17,8 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind, Corrections,
-    CouponBoxes, Deck, DeckOrder, GameRules, GameSeed, GameSession, Hand, Heading, Insulation,
-    JailSentence, LandId, LandStatus, Landing, MarketClock, Mortgaged, Owner, Paused,
+    CouponBoxes, Deck, DeckOrder, Detention, GameRules, GameSeed, GameSession, Hand, Heading,
+    Insulation, LandId, LandStatus, Landing, MarketClock, Mortgaged, Owner, Paused,
     PendingDecision, PlayerId, PlayerName, Points, Shelf, ShopStock, StaySentence, Timed,
     TurnOrder, TurnPhase, Wallet,
 };
@@ -108,8 +108,8 @@ type PlayerRow = (
     &'static Wallet,
     &'static Points,
     &'static BankBalance,
-    Option<&'static JailSentence>,
-    // 停留卡的计时（P3d④c）。与服刑各占一格而不是合成一个「处境」：面板要能同时
+    Option<&'static Detention>,
+    // 停留卡的计时（P3d④c）。与拘留各占一格而不是合成一个「处境」：面板要能同时
     // 读出两张计时各自剩几回合，合成一个字段就只剩一个数了
     Option<&'static StaySentence>,
     Option<&'static Bankrupt>,
@@ -336,15 +336,16 @@ fn format_players(view: &DumpView) -> Vec<String> {
         .players
         .iter()
         .map(
-            |(entity, id, name, wallet, points, bank, jail, stay, bankrupt, hand, shield, heading)| {
-                // 处境这一栏可以同时写两件事：服刑与停留各有自己的计时（`begin_turn_system`
-                // 两条各扣各的），面板只写「更重的那一个」就会让人以为早的那张卡没挂上
+            |(entity, id, name, wallet, points, bank, held, stay, bankrupt, hand, shield, heading)| {
+                // 处境这一栏可以同时写两件事：拘留与停留各有自己的计时（`begin_turn_system`
+                // 两条各扣各的），面板只写「更重的那一个」就会让人以为早的那张卡没挂上。
+                // 拘留那一格带着他在哪儿 —— 三个去处在规则上是一族，在读数上是三句话
                 let mut flag: Vec<String> = Vec::new();
                 if bankrupt.is_some() {
                     flag.push("破产".to_string());
                 } else {
-                    if let Some(sentence) = jail {
-                        flag.push(format!("服刑剩{}回合", sentence.turns_left));
+                    if let Some(d) = held {
+                        flag.push(format!("{}剩{}回合", d.place.label(), d.turns_left));
                     }
                     if let Some(sentence) = stay {
                         flag.push(format!("停留剩{}回合", sentence.turns_left));

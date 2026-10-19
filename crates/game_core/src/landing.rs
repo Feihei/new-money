@@ -25,11 +25,11 @@
 
 use bevy::prelude::*;
 
-use crate::board::{TileIndex, TileKind};
+use crate::board::{BoardDef, GridPos, TileIndex, TileKind};
 use crate::card::CardKind;
 use crate::land::LandId;
 use crate::msg::{Decision, DecisionChosen, LandBought, LandUpgraded};
-use crate::player::{JailSentence, PlayerId, TokenPosition};
+use crate::player::{Detention, DetentionPlace, PlayerId, TokenPosition};
 use crate::settle::Books;
 use crate::turn::{TurnOrder, TurnPhase};
 use crate::world::ActiveBoard;
@@ -262,24 +262,66 @@ pub fn decision_system(
     next.set(TurnPhase::TurnEnd);
 }
 
-/// 把玩家挂进「服刑」状态：逻辑位置停在**接入点**（出狱后从这格继续沿环前进），
-/// 死胡同格只作为视觉停车位发给表现层（`player_data.gd:62-68` 的语义）。
+/// 把人送进某一处「不在牌桌上」的状态（P4）。返回的是**他此刻真正被扣住的那一条**
+/// 拘留（可能是原来那张更久的）+ 接入点 + 死胡同格，调用方拿这三样去发凭据。
 ///
-/// `JailSentence` 走 `Commands`（下一条 system 才生效，回合还早），位置改是即时的：
-/// 本帧后面的 system 看到的就该是新格号。
-pub fn jail_player(
+/// 三个去处共用这一句，差别全在 [`DetentionPlace`] 那两条映射上：
+/// - `Jail` / `Hospital` → 该条分支的接入点格 + 那条死胡同格的网格坐标；
+/// - `Away`（出国、被绑架、住旅馆）→ **棋盘上没有那个地方**，所以他留在自己此刻所在
+///   的那格，那格就是回来时继续走的地方（与「这张棋盘没有分支格」共用同一条退路）。
+///
+/// 查不到接入点（这张棋盘没有那条分支）时返回 `None` 且**什么都不改** —— 不猜一个格子、
+/// 也不回退到起点（`card_effects.gd:76-81` 修过的坑）。
+///
+/// **更久的那一张赢**：已经要被关 3 天的人再吃一张 2 天，他该待原来那个地方满 3 天。
+/// 写成覆盖就等于替人减刑 —— 与 P3d④c 停留卡同一条理由，所以那条规则在这里也成立，
+/// 而「等长时后来者赢」是这条规则剩下唯一的任意格，由一条用例钉住。
+///
+/// 两条写都尽量**就地**（`Query<&mut>`），`Commands` 只用于「他身上本来没有这个组件」那一格：
+/// 同一帧两张拘留卡若都走延迟写，第二条读不到第一条，就会各搬一次棋子、各发一份凭据。
+pub fn detain(
     commands: &mut Commands,
     positions: &mut Query<&mut TokenPosition, With<PlayerId>>,
+    held: &mut Query<&mut Detention, With<PlayerId>>,
+    def: &BoardDef,
     player: Entity,
-    junction: TileIndex,
+    place: DetentionPlace,
     turns: u32,
-) {
-    if let Ok(mut pos) = positions.get_mut(player) {
-        pos.tile = junction;
+) -> Option<(Detention, TileIndex, Option<GridPos>)> {
+    if let Ok(existing) = held.get_mut(player)
+        && existing.turns_left > turns
+    {
+        let kept = *existing;
+        // 他没换地方，所以接入点还是他现在站着的那格
+        let junction = positions.get(player).ok()?.tile;
+        let end = kept
+            .place
+            .branch()
+            .and_then(|kind| def.branch_end(kind))
+            .map(GridPos::of);
+        return Some((kept, junction, end));
     }
-    commands
-        .entity(player)
-        .insert(JailSentence { turns_left: turns });
+    let mut pos = positions.get_mut(player).ok()?;
+    let junction = match place.branch() {
+        Some(kind) => TileIndex(def.branch_junction(kind)?.id),
+        None => pos.tile,
+    };
+    let end = place
+        .branch()
+        .and_then(|kind| def.branch_end(kind))
+        .map(GridPos::of);
+    pos.tile = junction;
+    let sentence = Detention {
+        place,
+        turns_left: turns,
+    };
+    match held.get_mut(player) {
+        Ok(mut existing) => *existing = sentence,
+        Err(_) => {
+            commands.entity(player).insert(sentence);
+        }
+    }
+    Some((sentence, junction, end))
 }
 
 /// 瞬移：只改逻辑位置，位移动画是表现层的事。

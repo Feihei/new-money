@@ -14,7 +14,7 @@ mod common;
 use bevy::prelude::*;
 use common::*;
 use game_core::prelude::{
-    Bankrupt, CardAim, CardId, GameRules, GameSeed, GameSetup, Insulation, JailSentence, Pending,
+    Bankrupt, CardAim, CardId, GameRules, GameSeed, GameSetup, Insulation, Pending,
     PendingDecision, TurnPhase,
 };
 
@@ -30,12 +30,9 @@ fn two_players_before_the_roll() -> (App, Entity, Entity) {
     (app, p0, p1)
 }
 
-/// 还在服刑就返回剩余回合数。
+/// 还在被拘留就返回剩余回合数。
 fn turns_left(app: &App, player: Entity) -> Option<u32> {
-    app.world()
-        .entity(player)
-        .get::<JailSentence>()
-        .map(|j| j.turns_left)
+    detention_of(app, player).map(|d| d.turns_left)
 }
 
 #[test]
@@ -71,7 +68,7 @@ fn playing_a_framing_card_locks_the_target_up_and_empties_the_slot() {
         "出牌要留流水：{log:?}"
     );
     assert!(
-        log.iter().any(|l| l.starts_with("Jailed(P1@")),
+        log.iter().any(|l| l.starts_with("Detain(P1@")),
         "承受者那边也要有流水：{log:?}"
     );
     assert_eq!(
@@ -113,7 +110,7 @@ fn an_insulated_victim_shrugs_off_the_frame_and_both_sides_keep_their_trail() {
         "A 那边要看得见这次被挡了：{log:?}"
     );
     assert!(
-        !log.iter().any(|l| l.starts_with("Jailed(")),
+        !log.iter().any(|l| l.starts_with("Detain(")),
         "抵消掉的那次不该留下入狱流水：{log:?}"
     );
 }

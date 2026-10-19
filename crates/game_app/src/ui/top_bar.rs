@@ -12,10 +12,10 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, AtmAccess, BankOpDone, BankVisited, CardPlayed, ChargeWaived, GameOver, GameRules,
-    GameSession, JailSkipped, MarketClock, MortgageDone, MortgageOp, Paused, PendingDecision,
-    PlayerBankrupt, PlayerName, PointsChanged, ShopOpDone, StayLifted, StaySkipped, StockTraded,
-    StockVisited, TradeSide, TurnOrder, TurnPhase,
+    ActiveBoard, AtmAccess, BankOpDone, BankVisited, CardPlayed, ChargeWaived, DetentionLifted,
+    DetentionSkipped, GameOver, GameRules, GameSession, MarketClock, MortgageDone, MortgageOp,
+    Paused, PendingDecision, PlayerBankrupt, PlayerName, PointsChanged, ShopOpDone, StayLifted,
+    StaySkipped, StockTraded, StockVisited, TradeSide, TurnOrder, TurnPhase,
 };
 
 use super::finance::comma;
@@ -354,9 +354,12 @@ fn phase_name(phase: TurnPhase) -> String {
 /// 没有模态可看的那几条事件，写进提示行。
 #[derive(SystemParam)]
 pub(crate) struct Notices<'w, 's> {
-    jail_skip: MessageReader<'w, 's, JailSkipped>,
-    /// 停留被跳过（P3d④c）。排在服刑之后：同时挂着两张计时的人，这一帧两条都会写，
-    /// 而留下停留那句更对 —— 服刑是旧事，「被停留卡按住」才是刚刚发生的那件
+    detention_skip: MessageReader<'w, 's, DetentionSkipped>,
+    /// 人回来了（P4①）。三个去处是三句话，但在模型里是同一条凭据，所以这里只多一个动词：
+    /// 「出狱」「出院」「回国」由 `DetentionPlace::back_verb` 给
+    detention_back: MessageReader<'w, 's, DetentionLifted>,
+    /// 停留被跳过（P3d④c）。排在拘留之后：同时挂着两张计时的人，这一帧两条都会写，
+    /// 而留下停留那句更对 —— 拘留是旧事，「被停留卡按住」才是刚刚发生的那件
     stay_skip: MessageReader<'w, 's, StaySkipped>,
     /// 停留期满。它与上一条不会同一帧同时出现（一个还在扣格、一个刚扣完），
     /// 但排在 `stay_skip` 之后：这一行说的是「从本回合起能动」，是那条流水的终点
@@ -393,15 +396,23 @@ pub(crate) fn hint_from_events(
     // 一帧里可能同时有多条（例如破产紧跟在回合结束旁白之后）：按流水顺序取最后一条，
     // 与 Godot 那些信号处理函数逐个覆盖 `hint_label.text` 的结果一致
     let mut line: Option<String> = None;
-    for m in notices.jail_skip.read() {
+    for m in notices.detention_skip.read() {
         line = Some(format!(
-            "{} 在监狱中（剩 {} 回合），跳过本回合",
+            "{} 在{}中（剩 {} 回合），跳过本回合",
             name(&names, m.player),
+            m.place.label(),
             m.turns_left
         ));
     }
-    // 停留与服刑共用「跳过本回合」这句话，但**不共用一条流水**：人在场上、地照收租金
-    // 是另一件事（`StaySkipped` 的注释）。HUD 那段有持久的剩余回合数，这里只播这一次
+    for m in notices.detention_back.read() {
+        line = Some(format!(
+            "{} {}了，本回合照常行动",
+            name(&names, m.player),
+            m.place.back_verb()
+        ));
+    }
+    // 停留与拘留共用「跳过本回合」这句话，但**不共用一条流水**：人在不在场上是两件事
+    // （`StaySkipped` 的注释）。HUD 那段有持久的剩余回合数，这里只播这一次
     for m in notices.stay_skip.read() {
         line = Some(format!(
             "{} 原地停留（剩 {} 回合），跳过本回合",

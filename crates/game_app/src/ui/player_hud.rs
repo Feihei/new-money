@@ -11,7 +11,7 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    Bankrupt, Heading, JailSentence, LandId, Owner, PlayerColor, PlayerId, PlayerName, Points,
+    Bankrupt, Detention, Heading, LandId, Owner, PlayerColor, PlayerId, PlayerName, Points,
     StaySentence, TurnOrder, Wallet,
 };
 
@@ -195,9 +195,9 @@ type HudPlayer<'w> = (
     &'w PlayerName,
     &'w Wallet,
     &'w Points,
-    Option<&'w JailSentence>,
-    // 停留卡挂上的计时（P3d④c）。与服刑并排而不是合并：这两个标记在屏幕上说的是两件
-    // 不同的事 —— 服刑的人在死胡同格里，停留的人就站在自己踩到的那一格上
+    Option<&'w Detention>,
+    // 停留卡挂上的计时（P3d④c）。与拘留并排而不是合并：这两个标记在屏幕上说的是两件
+    // 不同的事 —— 被拘留的人在死胡同格里，停留的人就站在自己踩到的那一格上
     Option<&'w StaySentence>,
     Option<&'w Bankrupt>,
     &'w Heading,
@@ -231,7 +231,7 @@ pub(crate) fn refresh_player_hud(
     }
 
     for (mut card, mut bg, mut border, mut node) in &mut cards {
-        let Ok((pid, name, wallet, points, jailed, stayed, bankrupt, heading)) =
+        let Ok((pid, name, wallet, points, detained, stayed, bankrupt, heading)) =
             players.get(card.player)
         else {
             continue;
@@ -240,13 +240,12 @@ pub(crate) fn refresh_player_hud(
             .iter()
             .find(|(id, _)| *id == *pid)
             .map_or(0, |(_, count)| *count);
-        // 文案与配色照 `player_hud.gd:191-199`；破产优先于服刑（同时成立时人已经出局）。
-        // 服刑又优先于停留：两张计时同时挂着的时候，屏幕上只写一个标记，而那个格子放不下两个词 ——
-        // 没写出来的那张**不会被吞掉**，它自己有一份独立的计时（`begin_turn_system` 两条各扣各的），
-        // 要数剩几回合去看 dump 那一栏
-        let (mut status, status_color) = match (bankrupt, jailed, stayed) {
+        // 文案与配色照 `player_hud.gd:191-199`；破产优先于拘留（同时成立时人已经出局）。
+        // 三个去处共用一种颜色：它们在规则上是同一族（`col::JAILED` 如今是「不在场」的颜色），
+        // 而「他在哪儿」由 `place.label()` 那一个词说清 —— 用三种颜色就是把三件事当三套状态
+        let (mut status, status_color) = match (bankrupt, detained, stayed) {
             (Some(_), ..) => ("[破产]".to_string(), col::BANKRUPT),
-            (_, Some(_), _) => ("[监狱]".to_string(), col::JAILED),
+            (_, Some(d), _) => (format!("[{}]", d.place.label()), col::JAILED),
             (_, _, Some(_)) => ("[停留]".to_string(), col::MUTED),
             (None, None, None) => (String::new(), col::BODY),
         };

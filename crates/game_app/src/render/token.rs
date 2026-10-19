@@ -8,7 +8,7 @@ use std::f32::consts::PI;
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
-    ActiveBoard, BoardDef, GameRules, PlayerColor, PlayerId, PlayerJailed, PlayerReleased,
+    ActiveBoard, BoardDef, DetentionLifted, GameRules, PlayerColor, PlayerDetained, PlayerId,
     PlayerTeleported, TileIndex, TileStepped, TokenPosition,
 };
 
@@ -85,8 +85,8 @@ fn tile_world(b: &BoardDef, tile: TileIndex) -> Option<Vec3> {
 #[derive(SystemParam)]
 pub(crate) struct MovementNews<'w, 's> {
     steps: MessageReader<'w, 's, TileStepped>,
-    jailed: MessageReader<'w, 's, PlayerJailed>,
-    released: MessageReader<'w, 's, PlayerReleased>,
+    detained: MessageReader<'w, 's, PlayerDetained>,
+    released: MessageReader<'w, 's, DetentionLifted>,
     teleported: MessageReader<'w, 's, PlayerTeleported>,
 }
 
@@ -110,9 +110,10 @@ pub(crate) fn animate_tokens(
             retarget(&mut tokens, s.player, at, hop);
         }
     }
-    for j in news.jailed.read() {
+    for j in news.detained.read() {
         // `end` 是死胡同格的网格坐标（没有 `TileIndex`），只给表现层停车用；
-        // 没有死胡同格的棋盘就停在接入点上（`card_effects.gd:50-55` 的 (-1,-1) 语义）
+        // `None` 有两种：这张棋盘没有那条分支，或那个地方压根不在地图上（出国）——
+        // 两种都停在接入点上（`card_effects.gd:50-55` 的 (-1,-1) 语义）
         let at = match j.end {
             Some(g) => Some(b.world_pos(g.col, g.row)),
             None => b.tile_world_pos(j.junction.0 as i64),

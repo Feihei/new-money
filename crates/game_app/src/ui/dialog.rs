@@ -1409,7 +1409,9 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
         EffectOutcome::Gained(amount) => format!("获得 ${amount}"),
         EffectOutcome::Lost(amount) => format!("支付 ${amount}"),
         EffectOutcome::CouldNotPay { needed } => format!("现金不足，欠 ${needed}"),
-        EffectOutcome::Jailed { turns, .. } => format!("被关进监狱（{turns} 回合）"),
+        EffectOutcome::Detained { place, turns, .. } => {
+            format!("被关进{}（{turns} 回合）", place.label())
+        }
         EffectOutcome::Teleported { name, .. } => format!("移动到「{name}」"),
         // 数据写了个棋盘上不存在的格名：如实报出来，别退成一句漂亮话把数据错误藏起来
         EffectOutcome::UnknownTile { name } => format!("数据错误：找不到「{name}」"),

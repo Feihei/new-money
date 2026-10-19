@@ -1,6 +1,7 @@
 //! 玩家实体：运行时状态是组件，开局配置是 `GameSetup`。
 
 use bevy::prelude::*;
+use serde::Deserialize;
 
 use crate::board::TileIndex;
 use crate::rules::GameRules;
@@ -68,19 +69,74 @@ pub struct TokenPosition {
     pub tile: TileIndex,
 }
 
-/// 存在即服刑（取代 Godot 的 `status == "jailed"` 字符串比较，缺陷 #8）。
+/// 被送离场的那一族，三种去处共用一个状态（P4）。
+///
+/// **为什么是一个枚举而不是三个组件**：4 代把它们叫作坐牢、住院、被绑架/出国旅游，
+/// 后面还有旅馆住宿与航空出国（P10）、外星人绑架（P11）—— 六七个名字，一件事：
+/// 「人不在牌桌上 N 个回合，棋子停在某个死胡同格，回不来就跳过回合」。各建一个状态
+/// 就要在每一处结算里写一遍 `if 坐牢 || 住院 || 出国`，而那些分支的差别只有文案与
+/// 死胡同格是哪一个。差别收成数据，规则就只有一处。
+///
+/// 与 [`StaySentence`] 的区别是这条线的边界：**停留的人还在场上**（棋子不动、地照收租），
+/// 被拘留的人不在。所以两张计时各自独立，谁也不许顺手把对方的规则扩过来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetentionPlace {
+    /// 监狱（`BranchKind::Jail` 那条死胡同）
+    Jail,
+    /// 医院（`BranchKind::Hospital`）
+    Hospital,
+    /// 不在棋盘上：被绑架、出国旅游、住旅馆、坐飞机。**没有死胡同格**，
+    /// 所以棋子只能停在接入点上（与「棋盘没有分支格」走的是同一条退路）
+    Away,
+}
+
+impl DetentionPlace {
+    /// 这条棋盘上对应哪条死胡同分支。`None` = 那个地方压根不在地图上。
+    pub const fn branch(self) -> Option<crate::board::BranchKind> {
+        use crate::board::BranchKind as B;
+        match self {
+            Self::Jail => Some(B::Jail),
+            Self::Hospital => Some(B::Hospital),
+            Self::Away => None,
+        }
+    }
+
+    /// 人话：他在哪儿。顶栏、HUD、dump 三处要说同一句话，所以映射只写一次。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Jail => "监狱",
+            Self::Hospital => "医院",
+            Self::Away => "国外",
+        }
+    }
+
+    /// 回来那一下的动词。「出狱」「出院」「回国」是三句话，但在模型里是同一条凭据
+    /// （`DetentionLifted`）—— 所以变的只有这一个词。
+    pub const fn back_verb(self) -> &'static str {
+        match self {
+            Self::Jail => "出狱",
+            Self::Hospital => "出院",
+            Self::Away => "回国",
+        }
+    }
+}
+
+/// 存在即被拘留中（P4，取代 B2b 起的 `JailSentence`）。递减口径见 `begin_turn_system`：
+/// 每次回合开始扣一格，扣到只剩 1 的那一回合**当场可行动**，所以「判 3 天」= 跳过 2 个回合。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JailSentence {
+pub struct Detention {
+    pub place: DetentionPlace,
     pub turns_left: u32,
 }
 
 /// 存在即「原地停留」中（停留卡，P3d④c）。递减与服刑同一条口径：每次回合开始扣一格，
 /// 扣到 1 的那一回合**当场可行动**，所以「停留 3 回合」= 跳过 2 个回合。
 ///
-/// **为什么不并进 [`JailSentence`]、也不等 P4 的 `Detention`**：服刑的人被送进死胡同
-/// 格、且（P4 起）丧失收租权；停留的人**还在场上**，棋子停在他踩到的那一格，名下的地
+/// **为什么不并进 [`Detention`]**：被拘留的人被送进死胡同
+/// 格、且（P4② 起）丧失收租权；停留的人**还在场上**，棋子停在他踩到的那一格，名下的地
 /// 照样收租。这两件事在规则上只差「他在不在牌桌上」这一点，而差别一旦写进同一个组件，
-/// 就要靠 `place` 字段的分支去还原 —— P4 的 `Detention{Jail|Hospital|Away}` 收的是
+/// 就要靠 `place` 字段的分支去还原 —— [`Detention`] 收的是
 /// 「被送离场」那一族，停留不属于它（PLAN §四 P4 那行的边界）。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StaySentence {
