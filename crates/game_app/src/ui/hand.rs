@@ -11,9 +11,9 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    Bankrupt, CardAim, CardDef, CardGained, CardId, CardKind, CardTarget, GameRules, Hand,
-    Insulation, Paused, PendingDecision, PlayerId, PlayerName, Shelf, TurnOrder, TurnPhase,
-    deal_to,
+    ActiveBoard, Bankrupt, CardAim, CardDef, CardGained, CardId, CardKind, CardTarget, GameRules,
+    Hand, Insulation, LandId, Owner, Paused, PendingDecision, PlayerId, PlayerName, Shelf,
+    TurnOrder, TurnPhase, deal_to,
 };
 
 use super::theme::{col, layout, size};
@@ -44,7 +44,10 @@ pub(crate) struct HandPanel;
 pub(crate) struct HandStamp(pub String);
 
 /// 样例卡。按 id 找而不是按数组位置：改数据顺序不该让这个旋钮发出别的卡。
-const SAMPLE_CARDS: [&str; 2] = ["item_frame", "item_insulate"];
+///
+/// 四种形状各一张：给自己（免罪）、给对手（陷害）、给一块地（涨价）、给一条街（查封）。
+/// 少一种，那个形状的按钮排就永远拍不到 —— 而「拍不到」在验收里读起来和「没做」一样。
+const SAMPLE_CARDS: [&str; 4] = ["item_frame", "item_insulate", "item_hike", "item_seal"];
 
 /// 开发用：给当前回合玩家发 [`SAMPLE_CARDS`] —— 一张要选对手、一张给自己，两种形状都要拍到。
 ///
@@ -89,7 +92,7 @@ pub(crate) fn dev_deal_sample(
     *dealt = true;
 }
 
-/// 「一张卡在该长什么样子」要读的那几样：货架、手牌、护身、别人还在不在。
+/// 「一张卡在该长什么样子」要读的那几样：货架、手牌、护身、别人还在不在、哪些地有主。
 #[derive(SystemParam)]
 pub(crate) struct HandView<'w, 's> {
     open: Res<'w, HandPanelOpen>,
@@ -98,8 +101,12 @@ pub(crate) struct HandView<'w, 's> {
     phase: Res<'w, State<TurnPhase>>,
     order: Option<Res<'w, TurnOrder>>,
     shelf: Shelf<'w>,
+    /// 地块类卡的候选要按棋盘定义出名字，而棋盘是**可选**资源：菜单态没有它，
+    /// 这块面板那时也不该在（`UiSet::Live` 的门挡着），拿不到时按「没有地」画
+    board: Option<Res<'w, ActiveBoard>>,
     hands: Query<'w, 's, &'static Hand, With<PlayerId>>,
     shields: Query<'w, 's, &'static Insulation>,
+    plots: Query<'w, 's, (&'static LandId, &'static Owner)>,
     faces: Query<
         'w,
         's,
@@ -123,11 +130,24 @@ pub(crate) struct PlayButton {
     pub blocked: Option<&'static str>,
 }
 
-/// 这张卡该长出哪几颗按钮。`opponents` 是「还活着的别人」（不含出牌人自己）。
+/// 地块类卡的一颗候选按钮。`label` 由 [`sync_hand_panel`] 拼好（「谁的 + 地名」要读名字与
+/// 归属，那两样只在那里有），`play_buttons` 只管形状不管世界。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LandPick {
+    pub label: String,
+    pub land: LandId,
+}
+
+/// 这张卡该长出哪几颗按钮。`opponents` 是「还活着的别人」（不含出牌人自己），
+/// `lands` 是「此刻真有人持有的地块」（无主地不在里面 —— 规则层也不认，同一句判据）。
 ///
-/// 写成对 `CardTarget` 的穷尽匹配、不留 `_`：P3c 给地块卡开闸时，这里必须当场决定
-/// 「选地块」在浮层上长什么样，而不是等截图时才发现有颗哑弹。
-pub(crate) fn play_buttons(def: &CardDef, opponents: &[(Entity, String)]) -> Vec<PlayButton> {
+/// 写成对 `CardTarget` 的穷尽匹配、不留 `_`：新增一种目标时必须当场决定它长什么样，
+/// 而不是等截图时才发现有颗哑弹。
+pub(crate) fn play_buttons(
+    def: &CardDef,
+    opponents: &[(Entity, String)],
+    lands: &[LandPick],
+) -> Vec<PlayButton> {
     match def.target {
         CardTarget::SelfOnly => vec![PlayButton {
             text: "用".into(),
@@ -151,13 +171,19 @@ pub(crate) fn play_buttons(def: &CardDef, opponents: &[(Entity, String)]) -> Vec
                 blocked: None,
             })
             .collect(),
-        // 地块卡的承受者是「这块地的业主」，那条读法要到 P3c 的地块状态容器才成立。
-        // 今天真出现这种卡就是数据跑在实现前面了，宁可灰着说清楚
-        CardTarget::Land => vec![PlayButton {
+        CardTarget::Land if lands.is_empty() => vec![PlayButton {
             text: "用".into(),
             aim: None,
-            blocked: Some("要选地块，现在还选不了"),
+            blocked: Some("还没有人有地"),
         }],
+        CardTarget::Land => lands
+            .iter()
+            .map(|pick| PlayButton {
+                text: format!("→ {}", pick.label),
+                aim: Some(CardAim::Land(pick.land)),
+                blocked: None,
+            })
+            .collect(),
     }
 }
 
@@ -206,14 +232,47 @@ pub(crate) fn sync_hand_panel(
         .collect();
     opponents.sort_by(|a, b| a.1.cmp(&b.1));
 
+    // 地块类卡的候选 = 此刻真有人持有的那些地（无主地不进列表，规则层也不认它 ——
+    // 同一句判据两处用，见 `game_core::hand::aim_is_legal`）。
+    // label 里带上业主，而且自己的地写「我的」：涨价是往自己街上加钱、查封是往别人
+    // 街上贴条子，这两件事按错一个方向就是完全相反的意图，玩家一眼就得看出来。
+    let mut lands: Vec<LandPick> = Vec::new();
+    let mine = player
+        .and_then(|p| view.faces.get(p).ok())
+        .map(|(_, pid, _, _)| *pid);
+    if let Some(board) = view.board.as_deref() {
+        for (id, owner) in view.plots.iter() {
+            let Some(owner) = owner.0 else { continue };
+            let Some(def) = board.def.land(id.0) else {
+                continue;
+            };
+            let who = view
+                .faces
+                .iter()
+                .find(|(_, pid, _, _)| **pid == owner)
+                .map(|(_, _, name, _)| name.0.clone());
+            // 业主查不到 = 数据里的归属指向一个不在场的人，宁可不列也不编一个名字
+            let Some(who) = who else { continue };
+            let label = if mine == Some(owner) {
+                format!("我的{}", def.name)
+            } else {
+                format!("{who}的{}", def.name)
+            };
+            lands.push(LandPick { label, land: *id });
+        }
+    }
+    lands.sort_by(|a, b| a.label.cmp(&b.label));
+
     let hand: Vec<CardId> = player
         .and_then(|p| view.hands.get(p).ok())
         .map(|h| h.cards.iter().copied().collect())
         .unwrap_or_default();
     let shield = shield_text(player.and_then(|p| view.shields.get(p).ok()));
-    // 签名要覆盖面板上每一个由判据决定的可见位（§6.1 坑 30：少一位就是一次静默过期）
+    // 签名要覆盖面板上每一个由判据决定的可见位（§6.1 坑 30：少一位就是一次静默过期）。
+    // `lands` 那一位是 P3c 加上的：地块卡的按钮排跟着「谁买了哪块地」变，
+    // 少了它，玩家刚买下的那块地不会出现在按钮排里，而下一次别的原因重建面板时才冒出来
     let stamp = format!(
-        "{}|{playable}|{}|{}|{}",
+        "{}|{playable}|{}|{}|{}|{}",
         player.map_or_else(|| "-".into(), |p| format!("{p:?}")),
         opponents
             .iter()
@@ -225,6 +284,11 @@ pub(crate) fn sync_hand_panel(
             .collect::<Vec<_>>()
             .join(","),
         shield.clone().unwrap_or_default(),
+        lands
+            .iter()
+            .map(|p| p.label.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
     );
     if shown.iter().next().is_some_and(|(_, _, s)| s.0 == stamp) {
         return;
@@ -297,7 +361,7 @@ pub(crate) fn sync_hand_panel(
                 ));
                 continue;
             };
-            let buttons = play_buttons(def, &opponents);
+            let buttons = play_buttons(def, &opponents, &lands);
             // 三行分开：合成一行的话，两张卡名加两颗按钮在 1024 宽的屏上就顶到边了
             let mut title = p.spawn(Node {
                 flex_direction: FlexDirection::Row,
@@ -317,24 +381,38 @@ pub(crate) fn sync_hand_panel(
             p.spawn(label(&font.0, def.desc.clone(), size::ROW, col::MUTED));
             let mut actions = p.spawn(Node {
                 flex_direction: FlexDirection::Row,
+                // 允许换行：地块卡在一盘后期能长出七八颗按钮（每块有主的地一颗），
+                // 不换行就会顶穿面板右边界，而那颗被切掉的按钮读起来像「没有这个功能」
+                flex_wrap: FlexWrap::Wrap,
                 column_gap: Val::Px(8.0),
+                row_gap: Val::Px(6.0),
                 align_items: AlignItems::Center,
                 ..default()
             });
+            // 地块那颗按钮上要写「谁的 + 地名」，比「用」与「→ 名字」长一截：
+            // 单独给它一个宽度与字号，而不是把三种形状挤进同一个 96 像素
+            let (box_size, box_font) = if def.target == CardTarget::Land {
+                (layout::LAND_BUTTON, size::ROW)
+            } else {
+                (layout::CARD_BUTTON, size::BODY)
+            };
             actions.with_children(|line| {
                 for pb in &buttons {
                     button(
                         line,
                         &font.0,
-                        ButtonSpec::new(
-                            &pb.text,
-                            layout::CARD_BUTTON,
-                            PRIMARY,
-                            UiAction::PlayCard {
-                                card: *card,
-                                aim: pb.aim,
-                            },
-                        )
+                        ButtonSpec {
+                            font: box_font,
+                            ..ButtonSpec::new(
+                                &pb.text,
+                                box_size,
+                                PRIMARY,
+                                UiAction::PlayCard {
+                                    card: *card,
+                                    aim: pb.aim,
+                                },
+                            )
+                        }
                         .disabled(!playable || pb.blocked.is_some()),
                     );
                 }
@@ -389,11 +467,22 @@ mod tests {
         )
     }
 
+    fn pick(label: &str, land: u32) -> LandPick {
+        LandPick {
+            label: label.to_string(),
+            land: LandId(land),
+        }
+    }
+
+    /// 空的地块候选：开局那一回合还没有人买地。
+    const NO_PLOTS: &[LandPick] = &[];
+
     #[test]
     fn a_self_only_card_grows_exactly_one_button_and_no_target() {
         let buttons = play_buttons(
             &def(CardTarget::SelfOnly),
             &[foe(2, "孙小美"), foe(3, "阿土伯")],
+            &[pick("我的南京路", 0)],
         );
         assert_eq!(buttons.len(), 1, "给自己的卡不该长出「对谁」这一排按钮");
         assert_eq!(buttons[0].aim, None);
@@ -403,7 +492,7 @@ mod tests {
     #[test]
     fn a_framing_card_grows_one_button_per_opponent_carrying_that_target() {
         let foes = [foe(2, "孙小美"), foe(3, "阿土伯")];
-        let buttons = play_buttons(&def(CardTarget::Player), &foes);
+        let buttons = play_buttons(&def(CardTarget::Player), &foes, NO_PLOTS);
         assert_eq!(buttons.len(), 2, "两个对手就该有两颗可选的按钮");
         // 目标烤在按钮里：按下去就是一个完整意图，规则层不必再挂「选目标」的待决
         assert_eq!(buttons[0].aim, Some(CardAim::Player(foes[0].0)));
@@ -416,18 +505,34 @@ mod tests {
     fn a_player_card_with_nobody_left_is_greyed_with_a_reason() {
         // 单人不残局：其他人都破产离场了。按下去规则层会静默拒绝，
         // 而玩家看见的必须是一句话，不是一颗死按钮（坑 27 的 UI 版）
-        let buttons = play_buttons(&def(CardTarget::Player), &[]);
+        let buttons = play_buttons(&def(CardTarget::Player), &[], NO_PLOTS);
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("场上没有别的人了"));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
     }
 
     #[test]
-    fn a_land_card_is_greyed_until_the_owner_can_be_asked() {
-        // P3c 之前问不出「这块地归谁」。宁可灰着说清楚，也不猜一个承受者 ——
-        // 猜出来的那个业主会在流水里变成一次莫须有的入狱
-        let buttons = play_buttons(&def(CardTarget::Land), &[foe(2, "孙小美")]);
-        assert_eq!(buttons[0].blocked, Some("要选地块，现在还选不了"));
+    fn a_land_card_grows_one_button_per_owned_plot_and_ignores_the_player_list() {
+        // 地块卡数的是地，不是人：候选排里混进「→ 孙小美」会让人以为能直接封人
+        let picks = [pick("我的南京路", 0), pick("孙小美的徐家汇", 3)];
+        let buttons = play_buttons(&def(CardTarget::Land), &[foe(2, "孙小美")], &picks);
+        assert_eq!(buttons.len(), 2, "两块有主的地就该有两颗按钮");
+        assert_eq!(
+            buttons[0].text, "→ 我的南京路",
+            "label 要原样上按钮，玩家靠它分辨自己与别人"
+        );
+        assert_eq!(buttons[0].aim, Some(CardAim::Land(LandId(0))));
+        assert_eq!(buttons[1].aim, Some(CardAim::Land(LandId(3))));
+        assert!(buttons.iter().all(|b| b.blocked.is_none()));
+    }
+
+    #[test]
+    fn a_land_card_with_nothing_owned_is_greyed_with_a_reason() {
+        // 开局第一回合谁都没买地。这时打地块卡是空转，而空转该读成一句话
+        let buttons = play_buttons(&def(CardTarget::Land), &[], NO_PLOTS);
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].blocked, Some("还没有人有地"));
+        assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
     }
 
     #[test]

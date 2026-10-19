@@ -12,7 +12,7 @@ mod common;
 
 use bevy::app::App;
 use common::*;
-use game_core::prelude::{DamageArea, DamageTally, LandDamage, LandId};
+use game_core::prelude::{DamageTally, LandDamage, LandId, PlotArea};
 
 fn board_ready() -> App {
     let mut app = boot_default();
@@ -29,7 +29,7 @@ fn a_monster_card_levels_the_building_but_keeps_the_deed() {
         &mut app,
         LandId(0),
         LandDamage::Clear { seize: false },
-        DamageArea::One,
+        PlotArea::One,
     );
     assert_eq!(tally, DamageTally { hit: 1, seized: 0 });
     assert_eq!(
@@ -48,7 +48,7 @@ fn forced_seizure_takes_the_deed_and_the_mortgage_with_it() {
         &mut app,
         LandId(0),
         LandDamage::Clear { seize: true },
-        DamageArea::One,
+        PlotArea::One,
     );
     assert_eq!((tally.hit, tally.seized), (1, 1));
     assert_eq!(
@@ -68,7 +68,7 @@ fn tearing_down_a_building_does_not_write_off_the_debt() {
         &mut app,
         LandId(0),
         LandDamage::Degrade { levels: 1 },
-        DamageArea::One,
+        PlotArea::One,
     );
     assert_eq!(
         plot_state(&mut app, 0),
@@ -89,7 +89,7 @@ fn a_missile_dents_the_neighbourhood_and_nothing_else() {
         &mut app,
         LandId(0),
         LandDamage::Degrade { levels: 1 },
-        DamageArea::Box { side: 3 },
+        PlotArea::Box { side: 3 },
     );
     assert_eq!(tally.hit, 2, "0 的 3×3 只罩得住紧挨着的 1：{tally:?}");
     assert_eq!(plot_state(&mut app, 0), (Some(0), 1, false));
@@ -117,7 +117,7 @@ fn street_follows_the_group_not_the_geometry() {
         &mut app,
         LandId(4),
         LandDamage::Clear { seize: false },
-        DamageArea::Street,
+        PlotArea::Street,
     );
     assert_eq!(tally.hit, 2, "「整路段夷为平地」= 同路段两块：{tally:?}");
     assert_eq!(plot_state(&mut app, 4), (Some(0), 0, false));
@@ -134,7 +134,7 @@ fn street_follows_the_group_not_the_geometry() {
         &mut app,
         LandId(4),
         LandDamage::Clear { seize: false },
-        DamageArea::Box { side: 3 },
+        PlotArea::Box { side: 3 },
     );
     assert_eq!(near.hit, 1, "4 与 5 不同段但也不相邻");
     assert_eq!(plot_state(&mut app, 5).1, 5, "3×3 不该碰孤零零的那一块");
@@ -151,7 +151,7 @@ fn a_nuke_clears_the_whole_board_and_every_deed() {
         &mut app,
         LandId(0),
         LandDamage::Clear { seize: true },
-        DamageArea::Whole,
+        PlotArea::Whole,
     );
     assert_eq!(tally, DamageTally { hit: 6, seized: 6 });
     for land in 0..6 {
@@ -172,7 +172,7 @@ fn an_empty_lot_still_counts_as_hit() {
         &mut app,
         LandId(3),
         LandDamage::Clear { seize: false },
-        DamageArea::One,
+        PlotArea::One,
     );
     assert_eq!(tally, DamageTally { hit: 1, seized: 0 });
 }
@@ -185,7 +185,7 @@ fn a_land_that_is_not_on_the_board_damages_nothing() {
         &mut app,
         LandId(99),
         LandDamage::Clear { seize: true },
-        DamageArea::Whole,
+        PlotArea::Whole,
     );
     assert_eq!(tally, DamageTally::default(), "中心地块不存在就该一拳打空");
     assert_eq!(plot_state(&mut app, 0), (Some(1), 3, false));
@@ -201,7 +201,7 @@ fn a_levelled_lot_still_charges_the_empty_ground_rent() {
         &mut app,
         LandId(0),
         LandDamage::Clear { seize: false },
-        DamageArea::One,
+        PlotArea::One,
     );
 
     play_turns(&mut app, 1);
@@ -224,7 +224,7 @@ fn a_seized_lot_opens_no_monopoly_for_whoever_owns_the_rest() {
         &mut app,
         LandId(1),
         LandDamage::Clear { seize: true },
-        DamageArea::One,
+        PlotArea::One,
     );
 
     play_turns(&mut app, 1);

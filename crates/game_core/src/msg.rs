@@ -356,6 +356,14 @@ pub enum EffectOutcome {
     Shielded {
         charges: u32,
     },
+    /// 给一片地块盖上了限时状态（涨价 / 查封，P3c）。`lands` 是被盖到的块数 ——
+    /// 要说清块数，因为「整街」在缺路段键的盘上可能只有一块，玩家有权知道自己
+    /// 到底封了什么。
+    Stamped {
+        status: crate::status::LandStatus,
+        lands: u32,
+        days: u32,
+    },
 }
 
 // ===== 决策 =====

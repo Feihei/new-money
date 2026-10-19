@@ -26,10 +26,12 @@ pub mod loader;
 pub mod market;
 pub mod msg;
 pub mod player;
+pub mod plot;
 pub mod property;
 pub mod rng;
 pub mod rules;
 pub mod settle;
+pub mod status;
 pub mod stock;
 pub mod turn;
 pub mod walk;
@@ -50,7 +52,7 @@ pub mod prelude {
         charge_domain_of, scales_with_price, stage, transferable,
     };
     pub use crate::coupon::{CouponBoxes, settle_coupon_landing};
-    pub use crate::damage::{DamageArea, DamageTally, LandDamage};
+    pub use crate::damage::{DamageTally, LandDamage};
     pub use crate::data::{
         BOARD_PATH, CHANCE_PATH, DataHandles, FATE_PATH, ITEMS_PATH, STOCKS_PATH,
     };
@@ -79,10 +81,12 @@ pub mod prelude {
         BankBalance, Bankrupt, GameSetup, JailSentence, PLAYER_COLORS, PlayerColor, PlayerId,
         PlayerName, PlayerSetup, Points, START_TILE, TokenPosition, WalkQueue, Wallet,
     };
+    pub use crate::plot::{PlotArea, area_of, is_in_area};
     pub use crate::property::settle_property_landing;
     pub use crate::rng::{DIE_FACES, GameSeed, Rng};
     pub use crate::rules::GameRules;
     pub use crate::settle::{Books, InsufficientFunds};
+    pub use crate::status::{LandStatus, Timed, expire_land_status_system};
     pub use crate::stock::{PriceHistory, StockDef, StockHoldings, StockId, StockPrice, StockSet};
     pub use crate::turn::{GameSession, Paused, TurnOrder, TurnPhase, not_paused};
     pub use crate::walk::{WalkClock, advance_walk_clock_system, walk_step_system};
@@ -99,8 +103,8 @@ use prelude::{
     PlayerTeleported, PointsChanged, RentDue, RequestRoll, StockPriceChanged, StockSet,
     StockTradeRequested, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted,
     UpgradeOffered, WalkClock, WalkStarted, advance_walk_clock_system, bank_op_system,
-    begin_game_system, decision_system, grant_atm_access_system, market_tick_on_turn_end_system,
-    play_card_system, trade_request_system, walk_step_system,
+    begin_game_system, decision_system, expire_land_status_system, grant_atm_access_system,
+    market_tick_on_turn_end_system, play_card_system, trade_request_system, walk_step_system,
 };
 use turn::{
     begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system,
@@ -258,7 +262,14 @@ impl Plugin for CoreGamePlugin {
             .add_systems(
                 OnEnter(TurnPhase::TurnEnd),
                 (
-                    (end_turn_system, market_tick_on_turn_end_system),
+                    (
+                        end_turn_system,
+                        market_tick_on_turn_end_system,
+                        // 限时状态（涨价 / 查封）与日历同一个节拍过一天：「5 天」必须是
+                        // 五天，不能是「五个行情 tick 加半个回合」。动的组件与上面两条
+                        // 都不相交，所以放进这组并行元组里，谁先跑都不改结果
+                        expire_land_status_system,
+                    ),
                     apply_month_end_interest_system,
                     update_price_index_system,
                 )

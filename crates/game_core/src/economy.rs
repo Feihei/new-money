@@ -19,6 +19,7 @@ use crate::land::LandId;
 use crate::player::PlayerId;
 use crate::rng::Rng;
 use crate::rules::GameRules;
+use crate::status::LandStatus;
 use crate::stock::StockDef;
 
 /// 土地运行时状态的只读快照。由结算层从组件收集（地块数量 ≤ 正式版 40，无需省）。
@@ -29,6 +30,9 @@ pub struct LandView {
     pub owner: Option<PlayerId>,
     pub level: u8,
     pub mortgaged: bool,
+    /// 限时状态（涨价 / 查封，P3c）。`None` = 没挂着。租金与加盖判定都读它，
+    /// 所以它必须在快照里 —— 判定函数不去查世界，才能做到「报价与成交同一个数」。
+    pub status: Option<LandStatus>,
 }
 
 impl LandView {
@@ -38,6 +42,7 @@ impl LandView {
         owner: Option<PlayerId>,
         level: u8,
         mortgaged: bool,
+        status: Option<LandStatus>,
     ) -> Self {
         Self {
             id,
@@ -45,6 +50,7 @@ impl LandView {
             owner,
             level,
             mortgaged,
+            status,
         }
     }
 }
@@ -79,6 +85,11 @@ pub fn calculate_rent(def: &BoardDef, land: &LandView, all: &[LandView], rules: 
     if land.mortgaged {
         return 0;
     }
+    // 查封：法院贴着条子，这一趟谁都不收钱。放在租金表之前短路，是因为「零」不是
+    // 从某个数乘出来的 —— 涨价与查封同时挂在一块地上这件事，单槽位已经让它不可能发生
+    if land.status == Some(LandStatus::Sealed) {
+        return 0;
+    }
     let Some(defn) = def.land(land.id.0) else {
         return 0;
     };
@@ -89,10 +100,17 @@ pub fn calculate_rent(def: &BoardDef, land: &LandView, all: &[LandView], rules: 
         .group
         .as_deref()
         .is_some_and(|g| owns_full_group(all, owner, g));
-    if monopoly {
+    let rent = if monopoly {
         base * rules.monopoly_rent_multiplier
     } else {
         base
+    };
+    // 涨价乘在垄断之后：4 代读出来是「这条街的过路费翻倍」，而街价本身已经含垄断加成。
+    // 反过来先加倍再垄断是同一个数（都是乘），但顺序写清楚，将来加「涨价不叠加垄断」
+    // 这种规则时只有一处要改
+    match land.status {
+        Some(LandStatus::PriceHike) => rent * rules.hike_rent_multiplier,
+        Some(LandStatus::Sealed) | None => rent,
     }
 }
 
@@ -148,6 +166,11 @@ pub fn can_upgrade(
         return false;
     }
     if land.mortgaged || land.level >= rules.max_building_level {
+        return false;
+    }
+    // 查封中的地块连加盖都不许 —— 条子贴在那儿，你不能往法院封着的地上再盖一层。
+    // 涨价不挡加盖：那张卡动的是「别人付多少」，不是这块地能不能施工。
+    if land.status == Some(LandStatus::Sealed) {
         return false;
     }
     let Some(group) = land.group.as_deref() else {
@@ -391,16 +414,27 @@ mod tests {
 
     /// 全场快照的唯一构造入口：`(地块, 归属, 等级, 抵押)` 覆盖若干地块，其余无主空地。
     /// 被考察的那块必须也从这里取，否则「focal 说 P0 持有、快照说 P1 持有」会各说各话。
+    ///
+    /// 限时状态一律 `None`：既有那二十来条表驱动用例没有一条关心涨价/查封，为它们各补一个
+    /// 位置会把改动面铺满。要状态的用例走 [`stamped`]。
     fn world(def: &BoardDef, rows: &[(u32, Option<PlayerId>, u8, bool)]) -> Vec<LandView> {
         def.lands
             .iter()
             .map(|l| match rows.iter().find(|r| r.0 == l.id) {
                 Some((_, owner, level, mortgaged)) => {
-                    LandView::new(def, LandId(l.id), *owner, *level, *mortgaged)
+                    LandView::new(def, LandId(l.id), *owner, *level, *mortgaged, None)
                 }
-                None => LandView::new(def, LandId(l.id), None, 0, false),
+                None => LandView::new(def, LandId(l.id), None, 0, false, None),
             })
             .collect()
+    }
+
+    /// 在一份现成的快照上给某块地盖限时状态。
+    fn stamped(mut all: Vec<LandView>, id: u32, status: Option<LandStatus>) -> Vec<LandView> {
+        if let Some(view) = all.iter_mut().find(|v| v.id.0 == id) {
+            view.status = status;
+        }
+        all
     }
 
     /// 从快照里取某块地（顺带保证 `world()` 的顺序就是 `def.lands` 的顺序）
@@ -506,6 +540,76 @@ mod tests {
             calculate_rent(&def, &land, &all, &r),
             60,
             "组内有他人 → 不翻倍"
+        );
+    }
+
+    #[test]
+    fn a_hiked_street_doubles_and_a_sealed_one_collects_nothing() {
+        let def = board();
+        let r = rules();
+        // 整组在手（垄断 60×2=120）之上再涨价。乘在垄断之后是 `calculate_rent` 里写死的
+        // 顺序，这条把它钉住：两个倍数若共用一个数，这里先红
+        let all = stamped(
+            world(&def, &[(0, p(0), 1, false), (1, p(0), 1, false)]),
+            0,
+            Some(LandStatus::PriceHike),
+        );
+        assert_eq!(
+            calculate_rent(&def, &at(&all, 0), &all, &r),
+            120 * r.hike_rent_multiplier,
+            "涨价乘在垄断加成之后"
+        );
+        assert_eq!(
+            calculate_rent(&def, &at(&all, 1), &all, &r),
+            120,
+            "涨价是按块盖的，没盖到的那块照旧"
+        );
+
+        // 查封：零，而且是在查租金表之前短路 —— 于是「查封 × 涨价」这种该由单槽位挡掉的
+        // 组合在这里读不出第三种数（真出现时它是零，不是「翻过倍再归零」的中间态）
+        let all = stamped(
+            world(&def, &[(0, p(0), 1, false), (1, p(0), 1, false)]),
+            0,
+            Some(LandStatus::Sealed),
+        );
+        assert_eq!(
+            calculate_rent(&def, &at(&all, 0), &all, &r),
+            0,
+            "法院贴着条子的这一趟谁都不收钱"
+        );
+    }
+
+    #[test]
+    fn a_sealed_plot_cannot_be_built_on_while_a_hiked_one_can() {
+        let def = board();
+        let r = rules();
+        let me = PlayerId(0);
+        let rows = [(0, p(0), 1, false), (1, p(0), 1, false)];
+
+        let sealed = stamped(world(&def, &rows), 0, Some(LandStatus::Sealed));
+        assert!(
+            !can_upgrade(
+                &at(&sealed, 0),
+                me,
+                &sealed,
+                cost(&def, &at(&sealed, 0)),
+                99_999,
+                &r
+            ),
+            "查封中的地块不许加盖"
+        );
+
+        let hiked = stamped(world(&def, &rows), 0, Some(LandStatus::PriceHike));
+        assert!(
+            can_upgrade(
+                &at(&hiked, 0),
+                me,
+                &hiked,
+                cost(&def, &at(&hiked, 0)),
+                99_999,
+                &r
+            ),
+            "涨价动的是「别人付多少」，不该挡住业主自己加盖"
         );
     }
 

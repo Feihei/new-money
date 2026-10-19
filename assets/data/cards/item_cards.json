@@ -15,5 +15,23 @@
     "desc": "抵消接下来落到自己头上的一次厄运",
     "cost_points": 20,
     "effects": [{ "action": "insulate", "charges": 1 }]
+  },
+  {
+    "id": "item_hike",
+    "type": "item",
+    "title": "涨价卡",
+    "desc": "指定一条街，五天内过路费加倍",
+    "cost_points": 40,
+    "target": "land",
+    "effects": [{ "action": "land_status", "status": "price_hike", "days": 5, "area": "street" }]
+  },
+  {
+    "id": "item_seal",
+    "type": "item",
+    "title": "查封卡",
+    "desc": "指定一条街，五天内不收租、也不能加盖（抵掉那条街上的涨价）",
+    "cost_points": 35,
+    "target": "land",
+    "effects": [{ "action": "land_status", "status": "sealed", "days": 5, "area": "street" }]
   }
 ]

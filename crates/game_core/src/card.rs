@@ -58,6 +58,17 @@ pub enum CardEffect {
     Insulate {
         charges: u32,
     },
+    /// 给一片地块盖上限时状态（涨价卡 / 查封卡，P3c）。
+    ///
+    /// 三个字段缺一不可：`status` 是盖哪一种，`area` 是盖多大一片（4 代这两张都是「整街」，
+    /// 但单块与整街是两个不同的数，写成一个变体就得为后者再开一个变体），`days` 是活几天。
+    /// 承受者是**这块地的业主**（[`crate::hand::victim_of`]），不是选它的人 —— 所以
+    /// 「查封对手整条街」与「涨价自己的街」共用同一条实现，差别只在数据。
+    LandStatus {
+        status: crate::status::LandStatus,
+        days: u32,
+        area: crate::plot::PlotArea,
+    },
 }
 
 const fn default_jail_turns() -> u32 {
@@ -147,6 +158,19 @@ impl CardSet {
                     CardEffect::Insulate { charges } => {
                         if *charges == 0 {
                             errs.push(format!("卡牌 {} 的抵消次数是 0（打它做什么）", c.id));
+                        }
+                    }
+                    CardEffect::LandStatus { days, .. } => {
+                        // 0 天的状态会在面板上挂满一整天再消失（「剩 0 天」），而它的本意是
+                        // 「什么也没发生」。数据里写 0 就是写错了，加载期拦下
+                        if *days == 0 {
+                            errs.push(format!("卡牌 {} 的地块状态天数是 0", c.id));
+                        }
+                        // 这种效果必须靠目标才知道盖哪儿：锚点来自出牌请求，不在卡面上。
+                        // 写成 `target: self_only` 的机会牌会一路走到 `apply_card` 才落空，
+                        // 那时候它已经是一张「买了没用的卡」了 —— 在加载期就拦
+                        if c.target != CardTarget::Land {
+                            errs.push(format!("卡牌 {} 要盖地块状态，但 target 不是 land", c.id));
                         }
                     }
                 }

@@ -908,5 +908,11 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
             format!("一次{what}被免罪抵消")
         }
         EffectOutcome::Shielded { charges } => format!("护身 {charges} 次"),
+        // 块数要说：「整街」在缺路段键的盘上可能只盖到一块，玩家有权知道自己办成了多大一片
+        EffectOutcome::Stamped {
+            status,
+            lands,
+            days,
+        } => format!("{} {lands} 块地 {days} 天", status.label()),
     }
 }

@@ -19,6 +19,10 @@ pub struct GameRules {
     pub max_building_level: u8,
     /// 垄断同色组后的租金倍数（`property_system.gd:75-77` 的 `base_rent *= 2`）。
     pub monopoly_rent_multiplier: i64,
+    /// 涨价卡期间的租金倍数（PLAN §三「抵消对」那行的「整街 5 天加倍」）。
+    /// 与 [`monopoly_rent_multiplier`] 分开两个数：它们是两个规则，会各自被改
+    /// （将来「涨价不叠加垄断」这种话一说出口，共用一个数就得先拆开）。
+    pub hike_rent_multiplier: i64,
     /// 存款利率（**每月**），月末那一天发。P2④ 之前它是「每回合 3%」并且挂在踩银行格上，
     /// 一天一回合的口径下等于日复利 3%（一个月 12 天就涨四成），那不是我想要的银行。
     pub deposit_rate: f32,
@@ -59,6 +63,7 @@ impl Default for GameRules {
             walk_step_interval: 0.18,
             max_building_level: 6,
             monopoly_rent_multiplier: 2,
+            hike_rent_multiplier: 2,
             deposit_rate: 0.10,
             loan_rate: 0.15,
             max_loan_ratio: 2.0,

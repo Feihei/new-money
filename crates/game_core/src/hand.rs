@@ -29,7 +29,6 @@ use crate::msg::{CardGained, CardNotice, CardPlayed, PlayCardRequested};
 use crate::player::PlayerId;
 use crate::settle::Books;
 use crate::turn::{TurnOrder, TurnPhase};
-use crate::world::ActiveBoard;
 
 /// 手里拿着的卡，按获得顺序排（`front` 是最早拿到、也最先被挤掉的那张）。
 ///
@@ -87,13 +86,27 @@ pub enum CardAim {
 
 /// 这张卡实际打到谁头上。`SelfOnly` 的卡把出牌人自己填进去。
 ///
-/// `None` = 打不出去。地块类今天没有消费者（要等 P3c 的地块状态容器才能问「这块地归谁」），
-/// 所以宁可拒发也不猜一个承受者 —— 猜出来的那个「业主」会在流水里变成一次莫须有的入狱。
-fn victim_of(def: &CardDef, aim: Option<CardAim>, player: Entity) -> Option<Entity> {
+/// 地块类填的是**这块地的业主**（P3c）：涨价与查封都是往别人钱袋上做事，流水里要说的是
+/// 「谁的地被办了」。查不到业主（无主、或那块地压根不在棋盘上）就返回 `None` —— 宁可拒发
+/// 也不猜一个承受者，猜出来的那个「业主」会在流水里变成一次莫须有的查封。
+///
+/// `land_owner` 由调用方查好再传进来（`Books::owner_of`），而不是在这里收一个 `Books`：
+/// 这张表要能在单测里逐格断言，而 `Books` 是 SystemParam、造不出来给单元测试。
+/// 「读世界」留在 system 里，「谁是谁」留在这里 —— 两边各自可测。
+fn victim_of(
+    def: &CardDef,
+    aim: Option<CardAim>,
+    player: Entity,
+    land_owner: Option<Entity>,
+) -> Option<Entity> {
     match (def.target, aim) {
         (CardTarget::SelfOnly, _) => Some(player),
         (CardTarget::Player, Some(CardAim::Player(target))) => Some(target),
-        (CardTarget::Land, _) | (CardTarget::Player, _) => None,
+        (CardTarget::Land, Some(CardAim::Land(_))) => land_owner,
+        (CardTarget::Land, None)
+        | (CardTarget::Land, Some(CardAim::Player(_)))
+        | (CardTarget::Player, None)
+        | (CardTarget::Player, Some(CardAim::Land(_))) => None,
     }
 }
 
@@ -102,13 +115,7 @@ fn victim_of(def: &CardDef, aim: Option<CardAim>, player: Entity) -> Option<Enti
 ///
 /// 写成 `target × aim` 的九格全表、不留 `_`：新增一种 `CardTarget` 或一种 `CardAim`
 /// 时必须当场决定它和其余每种目标能不能配对（同 `landing::domain_of` 那条纪律）。
-fn aim_is_legal(
-    def: &CardDef,
-    aim: Option<CardAim>,
-    player: Entity,
-    books: &Books,
-    active: &ActiveBoard,
-) -> bool {
+fn aim_is_legal(def: &CardDef, aim: Option<CardAim>, player: Entity, books: &Books) -> bool {
     match (def.target, aim) {
         // 给自己的卡不该带目标：面板上根本没有那颗按钮，带上来的是错请求
         (CardTarget::SelfOnly, None) => true,
@@ -119,10 +126,9 @@ fn aim_is_legal(
             target != player && books.id_of(target).is_some() && !books.is_bankrupt(target)
         }
         (CardTarget::Player, None) | (CardTarget::Player, Some(CardAim::Land(_))) => false,
-        // 地块类：格子上得真有这块地，且真有人持有它（查封一块无主地没有意义）
-        (CardTarget::Land, Some(CardAim::Land(land))) => {
-            active.lands.contains_key(&land) && books.view(land).is_some()
-        }
+        // 地块类：格子上得真有这块地，且真有人持有它（查封一块无主地没有意义 ——
+        // 没有业主可办，而 UI 的候选列表用的就是这同一句判据）
+        (CardTarget::Land, Some(CardAim::Land(land))) => books.owner_of(land).is_some(),
         (CardTarget::Land, None) | (CardTarget::Land, Some(CardAim::Player(_))) => false,
     }
 }
@@ -178,11 +184,16 @@ pub fn play_card_system(
             debug!("出牌被拒：手里没有 {}", def.id);
             continue;
         }
-        if !aim_is_legal(def, request.aim, current, &sink.books, &sink.books.active) {
+        if !aim_is_legal(def, request.aim, current, &sink.books) {
             debug!("出牌被拒：{} 的目标不合法", def.id);
             continue;
         }
-        let Some(victim) = victim_of(def, request.aim, current) else {
+        // 「这块地归谁」是读世界，交给调用方查；表本身只管「谁承受」（见 `victim_of`）
+        let land_owner = match request.aim {
+            Some(CardAim::Land(land)) => sink.books.owner_of(land),
+            Some(CardAim::Player(_)) | None => None,
+        };
+        let Some(victim) = victim_of(def, request.aim, current, land_owner) else {
             debug!("出牌被拒：{} 找不到承受者", def.id);
             continue;
         };
@@ -190,7 +201,7 @@ pub fn play_card_system(
         if let Ok(mut hand) = hands.get_mut(current) {
             hand.spend(request.card);
         }
-        let outcomes = apply_card(&mut sink, victim, def);
+        let outcomes = apply_card(&mut sink, victim, def, request.aim);
         played.write(CardPlayed {
             player: current,
             victim,
@@ -307,10 +318,13 @@ mod tests {
             effects: vec![],
         };
         let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
-        assert_eq!(victim_of(&def, None, me), Some(me));
+        assert_eq!(victim_of(&def, None, me, None), Some(me));
         // 带了目标反而是错的（面板不该给免罪卡画一排对手按钮），但承受者仍是我自己
         let other = Entity::from_raw_u32(6).expect("索引不该撞上保留值");
-        assert_eq!(victim_of(&def, Some(CardAim::Player(other)), me), Some(me));
+        assert_eq!(
+            victim_of(&def, Some(CardAim::Player(other)), me, None),
+            Some(me)
+        );
     }
 
     #[test]
@@ -326,26 +340,44 @@ mod tests {
         };
         let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
         assert_eq!(
-            victim_of(&def, None, me),
+            victim_of(&def, None, me, None),
             None,
             "没选对手的陷害卡不该悄悄打在自己头上"
         );
     }
 
-    #[test]
-    fn a_land_card_cannot_find_its_victim_yet() {
-        // P3c 之前没有「地块的业主」这条读法。写在这里是为了让它红得有名字，
-        // 而不是变成一次莫须有的入狱
-        let def = CardDef {
-            id: "item_price".into(),
+    /// 地块卡的承受者 = 这块地的业主（P3c 补上的那一格）。
+    fn land_def() -> CardDef {
+        CardDef {
+            id: "item_hike".into(),
             kind: CardKind::Item,
             title: "涨价卡".into(),
             desc: String::new(),
             cost_points: Some(40),
             target: CardTarget::Land,
             effects: vec![],
-        };
+        }
+    }
+
+    #[test]
+    fn a_land_card_lands_on_the_owner_of_the_aimed_plot() {
         let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
-        assert_eq!(victim_of(&def, Some(CardAim::Land(LandId(0))), me), None);
+        let owner = Entity::from_raw_u32(7).expect("索引不该撞上保留值");
+        assert_eq!(
+            victim_of(&land_def(), Some(CardAim::Land(LandId(0))), me, Some(owner)),
+            Some(owner),
+            "流水里要说的是「谁的地被涨价了」，不是按按钮的那个人"
+        );
+    }
+
+    #[test]
+    fn an_unowned_plot_has_nobody_to_punish() {
+        // 无主地查不出业主 → `None` → 出牌被拒。猜一个承受者的话，那个「业主」会在
+        // 流水里摊上一次莫须有的查封（这正是 P3a 把这格留空时写下的理由）
+        let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
+        assert_eq!(
+            victim_of(&land_def(), Some(CardAim::Land(LandId(0))), me, None),
+            None
+        );
     }
 }

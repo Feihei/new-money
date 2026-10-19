@@ -17,9 +17,9 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind, Corrections,
-    CouponBoxes, GameRules, GameSeed, GameSession, Hand, Insulation, JailSentence, LandId, Landing,
-    MarketClock, Mortgaged, Owner, Paused, PendingDecision, PlayerId, PlayerName, Points, Shelf,
-    TurnOrder, TurnPhase, Wallet,
+    CouponBoxes, GameRules, GameSeed, GameSession, Hand, Insulation, JailSentence, LandId,
+    LandStatus, Landing, MarketClock, Mortgaged, Owner, Paused, PendingDecision, PlayerId,
+    PlayerName, Points, Shelf, Timed, TurnOrder, TurnPhase, Wallet,
 };
 
 use crate::asset_root;
@@ -113,6 +113,16 @@ type PlayerRow = (
     Option<&'static Insulation>,
 );
 
+/// 面板上每块地要摊开的那一栏。P3c 加进限时状态之后，就地凑齐了 clippy 的
+/// `too_complex_types` 阈值，处理方式与 [`PlayerRow`] 同一条：给它名字，不加 `#[allow]`。
+type PlotRow = (
+    &'static LandId,
+    &'static Owner,
+    &'static BuildingLevel,
+    Option<&'static Mortgaged>,
+    Option<&'static Timed<LandStatus>>,
+);
+
 /// 面板要读的全部世界状态。收成一个参数包是这仓库的房规：需要知道的就是这么多，
 /// 而 `#[allow(clippy::too_many_arguments)]` 会把这个信号吃掉。
 #[derive(SystemParam)]
@@ -133,16 +143,7 @@ pub struct DumpView<'w, 's> {
     /// 手牌只有下标，可读的名字在货架上 —— 面板摊的是「手上是哪两张卡」，不是两个数
     shelf: Shelf<'w>,
     players: Query<'w, 's, PlayerRow>,
-    plots: Query<
-        'w,
-        's,
-        (
-            &'static LandId,
-            &'static Owner,
-            &'static BuildingLevel,
-            Option<&'static Mortgaged>,
-        ),
-    >,
+    plots: Query<'w, 's, PlotRow>,
 }
 
 fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
@@ -311,19 +312,25 @@ fn format_lands(view: &DumpView) -> Vec<String> {
     let mut rows: Vec<(u32, String)> = view
         .plots
         .iter()
-        .map(|(id, owner, level, mortgaged)| {
+        .map(|(id, owner, level, mortgaged, status)| {
             let name = def
                 .and_then(|d| d.land(id.0))
                 .map_or("", |l| l.name.as_str());
             (
                 id.0,
                 format!(
-                    "L{:<2} {:<8} owner {:?} Lv{} {}",
+                    "L{:<2} {:<8} owner {:?} Lv{} {} {}",
                     id.0,
                     name,
                     owner.0.map(|p| p.0),
                     level.0,
-                    if mortgaged.is_some() { "抵押" } else { "" }
+                    if mortgaged.is_some() { "抵押" } else { "" },
+                    // 限时状态要说得出还剩几天：「涨价封住了这条街」和「明天就到期」在盘面上是两件事
+                    status.map_or_else(String::new, |t| format!(
+                        "{}剩{}天",
+                        t.kind.label(),
+                        t.days_left
+                    )),
                 ),
             )
         })

@@ -20,14 +20,14 @@ use game_core::prelude::{
     ActiveBoard, Adjustment, AtmAccess, BankBalance, BankOp, BankOpDone, BankOpRequested,
     BankVisited, Books, BuildingLevel, BuyOffered, CardAim, CardDrawn, CardGained, CardId,
     CardKind, CardPlayed, CardSet, CashChanged, ChargeKind, Correction, Corrections, CouponBoxes,
-    DamageArea, DamageTally, DataHandles, Decision, DecisionChosen, Deck, DiceRolled, GameOver,
-    GameRules, GameSeed, GameSession, GameSetup, Hand, Insulation, JailSkipped, LandBought,
-    LandDamage, LandId, LandUpgraded, Market, MarketClock, Mortgaged, Owner, Pending,
+    DamageTally, DataHandles, Decision, DecisionChosen, Deck, DiceRolled, GameOver, GameRules,
+    GameSeed, GameSession, GameSetup, Hand, Insulation, JailSkipped, LandBought, LandDamage,
+    LandId, LandStatus, LandUpgraded, Market, MarketClock, Mortgaged, Owner, Pending,
     PendingDecision, PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed,
-    PlayerReleased, PlayerTeleported, Points, PointsChanged, RentDue, RequestRoll, Rng, Scope,
-    Shelf, Source, StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
-    TileIndex, TileStepped, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted,
-    UpgradeOffered, WalkStarted, Wallet, deal_to,
+    PlayerReleased, PlayerTeleported, PlotArea, Points, PointsChanged, RentDue, RequestRoll, Rng,
+    Scope, Shelf, Source, StockId, StockPriceChanged, StockTradeRequested, StockTraded,
+    StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder,
+    TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet, deal_to,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -761,7 +761,7 @@ where
 
 /// 一次建筑损害请求（[`run_damage`] 的载体）。
 #[derive(Resource)]
-pub struct DamageReq(Option<(LandId, LandDamage, DamageArea)>);
+pub struct DamageReq(Option<(LandId, LandDamage, PlotArea)>);
 
 /// 跑完那一拳的产出，供测试断言。
 #[derive(Resource, Default)]
@@ -786,12 +786,7 @@ fn run_damage_system(
 /// 对真棋盘打一次损害，返回命中统计。prototype 的六个地块：
 /// 0 南京路(col2 row0, brown) / 1 汉口路(col3 row0, brown) / 2 外滩(col6 row2, **2×2**, orange) /
 /// 3 徐家汇(col4 row5, red) / 4 王府井(col2 row5, yellow) / 5 西单(col0 row2, yellow)。
-pub fn run_damage(
-    app: &mut App,
-    center: LandId,
-    depth: LandDamage,
-    area: DamageArea,
-) -> DamageTally {
+pub fn run_damage(app: &mut App, center: LandId, depth: LandDamage, area: PlotArea) -> DamageTally {
     app.insert_resource(DamageReq(Some((center, depth, area))));
     app.insert_resource(DamageOut::default());
     app.add_systems(Update, run_damage_system);
@@ -1148,4 +1143,24 @@ pub fn assert_points_audit(app: &mut App, start: u32) {
             "玩家 {player:?} 的点券流水余额 {balance} 与实际累计 {at} 不符"
         );
     }
+}
+
+/// 这块地现在挂着的限时状态（`(种类, 剩余天数)`）。`None` = 没挂。
+pub fn status_of(app: &mut App, land: u32) -> Option<(LandStatus, u32)> {
+    let w = app.world_mut();
+    let mut q = w.query::<(Entity, &LandId, &Timed<LandStatus>)>();
+    q.iter(w)
+        .find(|(_, id, _)| id.0 == land)
+        .map(|(_, _, timed)| (timed.kind, timed.days_left))
+}
+
+/// 这块地现在的租金。**走 `Books::rent_of`**，也就是踩上去要收的那同一个数 ——
+/// 在测试里重算一遍垄断/涨价的乘法，证的就不是游戏而是测试自己了。
+pub fn rent_of(app: &mut App, land: u32) -> i64 {
+    let out = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sink = out.clone();
+    run_op(app, move |books, _| {
+        *sink.lock().unwrap() = Some(books.rent_of(LandId(land)));
+    });
+    out.lock().unwrap().expect("跑了一帧就该有读数")
 }

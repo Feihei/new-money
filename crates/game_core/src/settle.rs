@@ -14,12 +14,14 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::charge::{self, Charge, ChargeKind, Corrections};
-use crate::damage::{self, DamageArea, DamageTally, LandDamage};
+use crate::damage::{self, DamageTally, LandDamage};
 use crate::economy::{self, LandView};
 use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
 use crate::msg::{CashChanged, PlayerBankrupt, PointsChanged};
 use crate::player::{BankBalance, Bankrupt, PlayerId, Points, Wallet};
+use crate::plot::{PlotArea, area_of};
 use crate::rules::GameRules;
+use crate::status::{LandStatus, Timed};
 use crate::stock::StockHoldings;
 use crate::turn::GameSession;
 use crate::world::ActiveBoard;
@@ -58,6 +60,10 @@ pub struct Books<'w, 's> {
             Option<&'static Mortgaged>,
         ),
     >,
+    /// 地块的限时状态（涨价 / 查封）。**单独一条查询而不是塞进 `plots`**：它是只读的
+    /// （写走 `stamp_status` + `Commands`），而 `plots` 带着两个 `mut`；混在一起会让
+    /// 「谁在改地块状态」这件事从类型上看不出来。
+    statuses: Query<'w, 's, Option<&'static Timed<LandStatus>>, With<LandId>>,
     cash: MessageWriter<'w, CashChanged>,
     points_changed: MessageWriter<'w, PointsChanged>,
     bankrupts: MessageWriter<'w, PlayerBankrupt>,
@@ -69,8 +75,18 @@ impl<'w, 's> Books<'w, 's> {
     pub fn views(&self) -> Vec<LandView> {
         self.plots
             .iter()
-            .map(|(_, id, owner, level, mortgaged)| {
-                LandView::new(&self.active.def, *id, owner.0, level.0, mortgaged.is_some())
+            .map(|(entity, id, owner, level, mortgaged)| {
+                // 状态查不到 = 这块地没挂限时状态。`single` 那类查询在实体缺席时才是错，
+                // 这里缺席是常态（绝大多数时候街上没有条子）
+                let status = self.statuses.get(entity).ok().flatten().map(|t| t.kind);
+                LandView::new(
+                    &self.active.def,
+                    *id,
+                    owner.0,
+                    level.0,
+                    mortgaged.is_some(),
+                    status,
+                )
             })
             .collect()
     }
@@ -79,17 +95,27 @@ impl<'w, 's> Books<'w, 's> {
     pub fn view(&self, land: LandId) -> Option<LandView> {
         let entity = *self.active.lands.get(&land)?;
         let (_, id, owner, level, mortgaged) = self.plots.get(entity).ok()?;
+        let status = self.statuses.get(entity).ok().flatten().map(|t| t.kind);
         Some(LandView::new(
             &self.active.def,
             *id,
             owner.0,
             level.0,
             mortgaged.is_some(),
+            status,
         ))
     }
 
     pub fn land_entity(&self, land: LandId) -> Option<Entity> {
         self.active.lands.get(&land).copied()
+    }
+
+    /// 这块地的业主是哪个实体。`None` = 无主，或棋盘里压根没有这块地。
+    ///
+    /// 地块类卡牌的承受者、手牌面板上那颗「→ 南京路」按钮旁边的名字，都读这一句。
+    /// 它把 `PlayerId`（组件里存的）翻成 `Entity`（消息与查询用的），中间那步就是 [`Self::holder`]。
+    pub fn owner_of(&self, land: LandId) -> Option<Entity> {
+        self.holder(self.view(land)?.owner?)
     }
 
     pub fn balance(&self, player: Entity) -> i64 {
@@ -338,10 +364,10 @@ impl<'w, 's> Books<'w, 's> {
         commands: &mut Commands,
         center: LandId,
         depth: LandDamage,
-        area: DamageArea,
+        area: PlotArea,
     ) -> DamageTally {
         let mut tally = DamageTally::default();
-        for land in damage::area_of(&self.active.def, center, area) {
+        for land in area_of(&self.active.def, center, area) {
             let Some(entity) = self.active.lands.get(&land).copied() else {
                 continue;
             };
@@ -363,6 +389,41 @@ impl<'w, 's> Books<'w, 's> {
             tally.hit, tally.seized
         );
         tally
+    }
+
+    /// 给一片地块盖上限时状态（P3c 的涨价 / 查封）。返回被盖到的块数。
+    ///
+    /// **单槽位、后来的赢**：同一块地上不会同时挂着「涨价」与「查封」——`insert` 直接覆盖
+    /// 上一枚 `Timed`，于是 PLAN §三 那对「抵消对」在数据结构上就是替换，不需要一张
+    /// 「谁压过谁」的优先级表（见 [`crate::status`] 模块头那条理由）。
+    ///
+    /// 面积解析与损害共用 [`crate::plot::area_of`]：涨价卡的「整街」与飞弹的「整路段」
+    /// 必须是同一条街，两处各算一遍迟早会分叉。
+    ///
+    /// 无主的地也照样盖（返回的块数含它们）：范围是范围，不为「没打着有主的地」缩小 ——
+    /// 与 [`Self::damage`] 同一条口径。今天能不能盖由出牌那一侧判（`aim_is_legal` 要求
+    /// 锚点那块地有业主），而不是由这里偷偷过滤。
+    pub fn stamp_status(
+        &self,
+        commands: &mut Commands,
+        center: LandId,
+        status: LandStatus,
+        area: PlotArea,
+        days: u32,
+    ) -> u32 {
+        let mut hit = 0;
+        for land in area_of(&self.active.def, center, area) {
+            let Some(entity) = self.active.lands.get(&land).copied() else {
+                continue;
+            };
+            commands.entity(entity).insert(Timed::new(status, days));
+            hit += 1;
+        }
+        info!(
+            "地块状态 {} × {area:?}（中心 {center:?}）：盖了 {hit} 块、{days} 天",
+            status.label()
+        );
+        hit
     }
 
     /// 回合计息：存款生息进余额、贷款计息进负债，都不经过现金

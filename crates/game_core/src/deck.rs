@@ -166,7 +166,12 @@ pub struct CardSink<'w, 's> {
 /// - **`move_to` 不连锁结算新格子**：Godot 端踩到「回到起点」也不会领过路费奖金，
 ///   这里照做。连锁会引入「卡牌把玩家送到卡牌格」这类环，属于设计而非移植。
 /// - **`go_to_jail` 先过护身**（P3a）：被抵消的那次不会留下半条入狱流水。
-pub fn apply_card(sink: &mut CardSink, victim: Entity, def: &CardDef) -> Vec<EffectOutcome> {
+pub fn apply_card(
+    sink: &mut CardSink,
+    victim: Entity,
+    def: &CardDef,
+    aim: Option<crate::hand::CardAim>,
+) -> Vec<EffectOutcome> {
     let mut outcomes = Vec::new();
     for effect in &def.effects {
         match effect {
@@ -275,6 +280,25 @@ pub fn apply_card(sink: &mut CardSink, victim: Entity, def: &CardDef) -> Vec<Eff
                     charges: stacked.unwrap_or(*charges),
                 });
             }
+            CardEffect::LandStatus { status, days, area } => {
+                // 锚点来自**请求里的目标**，不在卡面上：同一张「涨价卡」打在南京路还是
+                // 上园路是玩家按下去那一刻才定的。抽卡那条路（`settle_card_landing`）
+                // 永远没有 aim，所以数据若把这种效果写进机会/命运池，这里就是落空 ——
+                // `CardSet::validate` 已经在加载期拦了（要求 target = land），这一句
+                // debug 是第二道：坏数据不该静默改着游戏状态。
+                let Some(crate::hand::CardAim::Land(center)) = aim else {
+                    debug!("{} 要盖地块状态，但这次没有地块目标", def.id);
+                    continue;
+                };
+                let lands =
+                    sink.books
+                        .stamp_status(&mut sink.commands, center, *status, *area, *days);
+                outcomes.push(EffectOutcome::Stamped {
+                    status: *status,
+                    lands,
+                    days: *days,
+                });
+            }
         }
     }
     outcomes
@@ -345,7 +369,9 @@ pub fn settle_card_landing(
         return;
     };
 
-    let outcomes = apply_card(&mut sink, player, def);
+    // 抽到的卡没有目标可选（`aim: None`）：两副事件池的效果都是打在抽卡人自己身上的，
+    // 而带 `target` 的道具卡压根不在池里（`settle_card_landing` 对 `Item` 直接 return）
+    let outcomes = apply_card(&mut sink, player, def, None);
 
     drawn.write(CardDrawn {
         player,
