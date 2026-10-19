@@ -50,5 +50,14 @@
     "cost_points": 30,
     "target": "unowned_land",
     "effects": [{ "action": "buy_land" }]
+  },
+  {
+    "id": "item_turn",
+    "type": "item",
+    "title": "转向卡",
+    "desc": "让自己或任一对手掉头：还是绕这一圈，只是倒着走（再转一次就转回来）",
+    "cost_points": 25,
+    "target": "anybody",
+    "effects": [{ "action": "reverse" }]
   }
 ]

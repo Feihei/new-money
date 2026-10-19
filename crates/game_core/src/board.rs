@@ -194,14 +194,21 @@ impl BoardDef {
 
     /// 从 `from` 起走 `steps` 步途经的主环格（不含起点、含终点），按绕行方向。
     ///
-    /// ADR-001 行为规则 3/4：主环步进恒为 `i → (i+1)%N`，分支**绝不**作为常规前进选项 ——
+    /// ADR-001 行为规则 3/4：正向步进恒为 `i → (i+1)%N`，分支**绝不**作为常规前进选项 ——
     /// 途经挂分支的接入点也只记录主环下标，死胡同格（没有 `TileIndex`）结构上进不了结果。
-    /// `steps <= 0` 时为空（B2c 的掷骰恒 ≥1，负步数留给未来的转向卡）。
+    ///
+    /// `steps` 的**符号就是方向**（P3d④b 用掉了这里预留的那一格）：`Heading::sign()` 乘上
+    /// 骰子点数传进来，负数即倒着走（`i → (i-1+N)%N`，回绕规则与 `tile()` 同一套
+    /// `rem_euclid`）。路径长度恒等于 `|steps|`，方向不改变"走了几步"这件事。
+    /// `steps == 0` 时为空。
     pub fn walk_path(&self, from: i64, steps: i64) -> Vec<TileIndex> {
-        if steps <= 0 {
+        if steps == 0 {
             return Vec::new();
         }
-        (1..=steps).map(|k| self.wrapped(from + k)).collect()
+        let dir = steps.signum();
+        (1..=steps.abs())
+            .map(|k| self.wrapped(from + k * dir))
+            .collect()
     }
 
     /// 网格坐标 → 世界坐标（y=0）。ADR-001：坐标一律推导，不手填 x/z。
@@ -501,7 +508,28 @@ mod tests {
         assert_eq!(b.walk_path(11, 2), vec![TileIndex(12), TileIndex(0)]);
         assert_eq!(b.walk_path(0, 1), vec![TileIndex(1)]);
         assert!(b.walk_path(3, 0).is_empty(), "0 步不该有路径");
-        assert!(b.walk_path(3, -1).is_empty(), "负步数留给转向卡，当前为空");
+    }
+
+    /// 转向卡（P3d④b）用掉了 `walk_path` 预留的那一格负数：倒着走还是同一条环，
+    /// 回绕规则与正向共用同一个 `rem_euclid`。
+    #[test]
+    fn a_negative_step_count_walks_the_same_ring_backwards() {
+        let b = board();
+        assert_eq!(b.walk_path(3, -1), vec![TileIndex(2)]);
+        assert_eq!(
+            b.walk_path(5, -3),
+            vec![TileIndex(4), TileIndex(3), TileIndex(2)],
+            "倒着走是下标递减，不是把路径整个反过来念"
+        );
+        // 从 1 号倒着越过起点：0 → 12（环尾）→ 11。回绕在负方向上同样成立，
+        // 而这条路径正是「被转向卡送去百货公司」的那条路
+        assert_eq!(
+            b.walk_path(1, -3),
+            vec![TileIndex(0), TileIndex(12), TileIndex(11)]
+        );
+        // 方向不改变走了几步：正负三步都是三格，而倒着走满一圈回到出发那一格
+        assert_eq!(b.walk_path(2, -13).len(), 13);
+        assert_eq!(b.walk_path(2, -13).last(), Some(&TileIndex(2)));
     }
 
     #[test]

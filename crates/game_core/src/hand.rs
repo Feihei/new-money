@@ -103,7 +103,9 @@ fn victim_of(
 ) -> Option<Entity> {
     match (def.target, aim) {
         (CardTarget::SelfOnly, _) => Some(player),
-        (CardTarget::Player, Some(CardAim::Player(target))) => Some(target),
+        // `Player` 与 `Anybody` 在这一格是同一个问题（「打给谁」就是选中的那个人），
+        // 它们的区别全在 `aim_is_legal` 那一侧（允不允许选自己）—— 承受者表不该再判一次
+        (CardTarget::Player | CardTarget::Anybody, Some(CardAim::Player(target))) => Some(target),
         (CardTarget::Land, Some(CardAim::Land(_))) => land_owner,
         // 购地卡承受的也是出牌人自己：无主地没有业主可承受，而买下来之后地就归他 ——
         // 流水里那句「P0 → P1」在这里说的就是「他买下了这块地」，不是「他对谁做了事」
@@ -113,14 +115,16 @@ fn victim_of(
         | (CardTarget::UnownedLand, None)
         | (CardTarget::UnownedLand, Some(CardAim::Player(_)))
         | (CardTarget::Player, None)
-        | (CardTarget::Player, Some(CardAim::Land(_))) => None,
+        | (CardTarget::Player, Some(CardAim::Land(_)))
+        | (CardTarget::Anybody, None)
+        | (CardTarget::Anybody, Some(CardAim::Land(_))) => None,
     }
 }
 
 /// 目标合不合法。判据集中在这里，UI 的「该不该亮」与规则层的「认不认」共用同一句
 /// （同 `can_bank_op` 与 `bank_op_allowed` 的关系）。
 ///
-/// 写成 `target × aim` 的十二格全表、不留 `_`：新增一种 `CardTarget` 或一种 `CardAim`
+/// 写成 `target × aim` 的十五格全表、不留 `_`：新增一种 `CardTarget` 或一种 `CardAim`
 /// 时必须当场决定它和其余每种目标能不能配对（同 `landing::domain_of` 那条纪律）。
 fn aim_is_legal(def: &CardDef, aim: Option<CardAim>, player: Entity, books: &Books) -> bool {
     match (def.target, aim) {
@@ -133,6 +137,13 @@ fn aim_is_legal(def: &CardDef, aim: Option<CardAim>, player: Entity, books: &Boo
             target != player && books.id_of(target).is_some() && !books.is_bankrupt(target)
         }
         (CardTarget::Player, None) | (CardTarget::Player, Some(CardAim::Land(_))) => false,
+        // 「一个人，含自己」（转向 / 停留）。与上面那一格只差 `target != player` 这一句，
+        // 而那一句就是两张卡的区别所在 —— 所以它们各占一格，不并成一条带 bool 的判据。
+        // 离场的人照样挡：给一个破产退出回合的人掉头，是往不在牌桌上的人身上做事
+        (CardTarget::Anybody, Some(CardAim::Player(target))) => {
+            books.id_of(target).is_some() && !books.is_bankrupt(target)
+        }
+        (CardTarget::Anybody, None) | (CardTarget::Anybody, Some(CardAim::Land(_))) => false,
         // 地块类：格子上得真有这块地，且真有人持有它（查封一块无主地没有意义 ——
         // 没有业主可办，而 UI 的候选列表用的就是这同一句判据）
         (CardTarget::Land, Some(CardAim::Land(land))) => books.owner_of(land).is_some(),
@@ -403,6 +414,37 @@ mod tests {
 
     /// 购地卡与涨价卡指着同一种东西（一块地），承受者却相反：前者的买家是自己。
     /// 这两格在 `CardTarget` 上分成两格，就是为了让这张表不必去读 `effects` 才知道该问谁。
+    /// 转向卡与陷害卡都「选一个人」，区别只在允不允许把自己填进去 —— 而那一条差别
+    /// 整个住在 `aim_is_legal` 里，这张承受者表对两种人目标给出同一个答案：选中谁就是谁。
+    #[test]
+    fn an_anybody_card_takes_whomever_the_button_named() {
+        let turn = CardDef {
+            id: "item_turn".into(),
+            kind: CardKind::Item,
+            title: "转向卡".into(),
+            desc: String::new(),
+            cost_points: Some(25),
+            target: CardTarget::Anybody,
+            effects: vec![crate::card::CardEffect::Reverse],
+        };
+        let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
+        let foe = Entity::from_raw_u32(6).expect("索引不该撞上保留值");
+        assert_eq!(
+            victim_of(&turn, Some(CardAim::Player(me)), me, None),
+            Some(me),
+            "打给自己的转向卡，承受者就是自己 —— 这正是它不叫 `Player` 的那一格"
+        );
+        assert_eq!(
+            victim_of(&turn, Some(CardAim::Player(foe)), me, None),
+            Some(foe)
+        );
+        assert_eq!(
+            victim_of(&turn, None, me, None),
+            None,
+            "没选人是错请求：面板上那一排里永远有「自己」那颗，不可能选不出人"
+        );
+    }
+
     #[test]
     fn buying_an_unowned_plot_makes_the_buyer_the_victim() {
         let grab = CardDef {

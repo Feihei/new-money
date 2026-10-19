@@ -74,6 +74,51 @@ pub struct JailSentence {
     pub turns_left: u32,
 }
 
+/// 绕行方向（转向卡，P3d④b）。
+///
+/// **它是玩家身上的一个位，不是棋盘的第二份拓扑**：ADR-001 行为规则 3 说主环是单向环，
+/// 而转向卡的定义（`GLOSSARY-board.md`）是「仍沿同一环，只是反向」—— 所以环还是那一条
+/// `tiles[]`，变的只是步进取 `+1` 还是 `-1`。如果这里存的是「一条反向的格子表」，
+/// 就等于承认有两份真相（硬约束第 4 条）。
+///
+/// 缺省是 `Forward`，而开局每个玩家都挂着它（[`spawn_players`]）—— 查询一律按 `&Heading`
+/// 要它，别用 `Option`：「没有这个组件」与「正向」读出同一个方向，用 `Option` 只会把
+/// 漏挂组件这件事变成一条永远不响的静默降级。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Heading {
+    /// 沿 `tiles[]` 的下标递增方向走（正常绕行）。
+    #[default]
+    Forward,
+    /// 沿同一条环倒着走（`i → (i-1+N)%N`）。
+    Backward,
+}
+
+impl Heading {
+    /// 步进符号。`BoardDef::walk_path` 吃的是**带方向的步数**，所以骰子的点数在这里乘上它。
+    pub const fn sign(self) -> i64 {
+        match self {
+            Self::Forward => 1,
+            Self::Backward => -1,
+        }
+    }
+
+    /// 掉头。转向卡翻的就是这一位，而翻两次回到原样（不是「叠加两层」）。
+    pub const fn flipped(self) -> Self {
+        match self {
+            Self::Forward => Self::Backward,
+            Self::Backward => Self::Forward,
+        }
+    }
+
+    /// 人话。HUD 与 dump 里「他接下来往哪走」要说得出口。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Forward => "正向",
+            Self::Backward => "逆向",
+        }
+    }
+}
+
 /// 一次行走的进度，挂在玩家实体上；`path` 为空即「没在走」。
 ///
 /// 与 §4.6 原案（`WalkQueue{path, elapsed}`）的差异：耗时累计放在全局
@@ -167,6 +212,8 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
                     crate::hand::Hand::default(),
                     TokenPosition { tile: START_TILE },
                     WalkQueue::default(),
+                    // 开局恒正向：转向卡是玩家身上的事，不是棋盘的事（见 [`Heading`]）
+                    Heading::default(),
                     BankBalance::default(),
                     crate::stock::StockHoldings::default(),
                     Gameplay,

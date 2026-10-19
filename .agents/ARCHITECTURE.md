@@ -128,7 +128,7 @@ new-money-bevy/
 | 主环道路格 | N（prototype 12，正式 40） | **不建实体**（B2a 修正，见下）：`TileIndex`/`TileKind`/`GridPos` 全部经 `BoardDef` 查询取得 |
 | 分支死胡同格 | 每分支若干 | `BranchTile{junction:TileIndex, order:u8, kind}` `GridPos` —— 对应 `board_branch.gd:11` "从靠近接入点 → 末端"有序链 |
 | 路旁土地 | 若干 | `LandId(u32)` `GridPos` `LandSize(u8=1\|2)` `LandDef`(Arc：group/land_type/price/rent[6]/upgrade_cost) `OwnerAddr(Option<PlayerId>)` `BuildingLevel(u8)` `Mortgaged{proceeds:i64}`（**每块地都挂着，`proceeds>0` 即押着** —— P3d③ 之前它是「存在即抵押」的单位标记；改成带本金的值有两个理由：赎回要按「当初到手那笔 + 手续费」算，而标记存不下那个数；且 `Commands` 的延迟写会让同一帧内两条押同一块地的请求都读到「还没押」，钱付两遍） |
-| 玩家 | 2–4 | `PlayerId(u32)` `PlayerName` `PlayerColor` `Wallet{cash:i64}` `TokenPosition{tile:TileIndex, off_board:Option<GridPos>}` `JailSentence{turns_left}` `StockHoldings(HashMap<StockId,u32>)` `BankBalance{deposit,loan:i64}` `Controller`（`Human \| Ai{difficulty}`）`Bankrupt`（marker，取代 `status=="bankrupt"` 判断） |
+| 玩家 | 2–4 | `PlayerId(u32)` `PlayerName` `PlayerColor` `Wallet{cash:i64}` `TokenPosition{tile:TileIndex, off_board:Option<GridPos>}` `JailSentence{turns_left}` `Heading`（`Forward \| Backward`，P3d④b 转向卡翻的就是这一位 —— **环只有一份**，方向是玩家的状态，见 ADR-001 行为规则 3）`StockHoldings(HashMap<StockId,u32>)` `BankBalance{deposit,loan:i64}` `Controller`（`Human \| Ai{difficulty}`）`Bankrupt`（marker，取代 `status=="bankrupt"` 判断） |
 | 棋子（视觉） | 每玩家 1 | `TokenVisual{player:PlayerId}` `Transform` `WalkQueue{path,step_clock}` |
 | 卡牌堆 | 2（机会/命运） | `Deck{kind, pile:Vec<CardId>, discard:Vec<CardId>}`，卡定义走 `Assets<CardDef>` |
 | 股票 | 每只 1 | `StockId` `StockDef`(Arc：base/floor/ceiling/volatility/outstanding) `StockPrice{current:f64}` `PriceHistory(VecDeque<f64>，MAX 50)` |

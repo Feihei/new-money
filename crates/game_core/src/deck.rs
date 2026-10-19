@@ -23,8 +23,7 @@ use crate::landing::{
 use crate::msg::{
     CardDrawn, CardNotice, EffectOutcome, LandBought, PlayerJailed, PlayerTeleported,
 };
-use crate::player::PlayerId;
-use crate::player::TokenPosition;
+use crate::player::{Heading, PlayerId, TokenPosition};
 use crate::rng::Rng;
 use crate::settle::Books;
 
@@ -198,6 +197,9 @@ pub struct CardSink<'w, 's> {
     pub commands: Commands<'w, 's>,
     pub positions: Query<'w, 's, &'static mut TokenPosition, With<PlayerId>>,
     pub insulations: Query<'w, 's, &'static mut Insulation>,
+    /// 绕行方向。转向卡要**就地**翻它（见 [`apply_card`] 里那一支），所以是 `&mut` 查询
+    /// 而不是 `Commands`。
+    pub headings: Query<'w, 's, &'static mut Heading, With<PlayerId>>,
     pub jailed: MessageWriter<'w, PlayerJailed>,
     pub teleported: MessageWriter<'w, PlayerTeleported>,
     /// 买地成交的流水。购地卡走的是 `Books::buy` 那条正路，所以它必须和「踩到无主地买下来」
@@ -396,6 +398,28 @@ pub fn apply_card(
                     // 不是玩家能遇到的处境，所以报给日志而不是编一条永远看不见的凭据
                     None => warn!("{} 打出去了却没买下这块地：出牌判据与账本分叉了", def.id),
                 }
+            }
+            CardEffect::Reverse => {
+                // 与入狱同一条形状：它先过护身。被抵消的那次不该留下半个掉头 ——
+                // 「方向没变」与「方向变了又变回来」在流水上是两件事
+                let affliction = Affliction::new(AfflictDomain::Reversal, victim);
+                if absorb(&mut sink.insulations, &mut sink.commands, &affliction) {
+                    outcomes.push(EffectOutcome::Blocked {
+                        domain: affliction.domain,
+                    });
+                    continue;
+                }
+                // 就地翻，不走 `Commands`：同一帧两张转向卡**该**翻两次（翻两次=原样），
+                // 而延迟写会让第二条读不到第一条 —— 与 P3d③ 那个「同一帧押两遍钱」同一条坑
+                let Ok(mut heading) = sink.headings.get_mut(victim) else {
+                    warn!(
+                        "{} 要替 {victim:?} 掉头，可他身上没有 Heading 组件（spawn_players 漏挂了？）",
+                        def.id
+                    );
+                    continue;
+                };
+                *heading = heading.flipped();
+                outcomes.push(EffectOutcome::Reversed { heading: *heading });
             }
         }
     }

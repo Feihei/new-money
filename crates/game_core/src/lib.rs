@@ -87,8 +87,8 @@ pub mod prelude {
         TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkStarted,
     };
     pub use crate::player::{
-        BankBalance, Bankrupt, GameSetup, JailSentence, PLAYER_COLORS, PlayerColor, PlayerId,
-        PlayerName, PlayerSetup, Points, START_TILE, TokenPosition, WalkQueue, Wallet,
+        BankBalance, Bankrupt, GameSetup, Heading, JailSentence, PLAYER_COLORS, PlayerColor,
+        PlayerId, PlayerName, PlayerSetup, Points, START_TILE, TokenPosition, WalkQueue, Wallet,
     };
     pub use crate::plot::{PlotArea, area_of, is_in_area};
     pub use crate::property::settle_property_landing;

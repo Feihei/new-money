@@ -434,6 +434,11 @@ pub enum EffectOutcome {
         land: crate::land::LandId,
         price: i64,
     },
+    /// 这位的绕行方向被翻到了**这个值**（转向卡，P3d④b）。带的是翻完之后那一位，
+    /// 不是「翻了一次」这个动作 —— 面板要说的是「他现在朝哪边走」，那才是玩家下一手要用的数。
+    Reversed {
+        heading: crate::player::Heading,
+    },
 }
 
 /// 一条一次性修正**真的生效了**：`saved` 这笔账从这位身上免掉了，那张卡就此消失。

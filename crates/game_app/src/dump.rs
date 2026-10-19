@@ -17,9 +17,10 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind, Corrections,
-    CouponBoxes, Deck, DeckOrder, GameRules, GameSeed, GameSession, Hand, Insulation, JailSentence,
-    LandId, LandStatus, Landing, MarketClock, Mortgaged, Owner, Paused, PendingDecision, PlayerId,
-    PlayerName, Points, Shelf, ShopStock, Timed, TurnOrder, TurnPhase, Wallet,
+    CouponBoxes, Deck, DeckOrder, GameRules, GameSeed, GameSession, Hand, Heading, Insulation,
+    JailSentence, LandId, LandStatus, Landing, MarketClock, Mortgaged, Owner, Paused,
+    PendingDecision, PlayerId, PlayerName, Points, Shelf, ShopStock, Timed, TurnOrder, TurnPhase,
+    Wallet,
 };
 
 use crate::asset_root;
@@ -111,6 +112,7 @@ type PlayerRow = (
     Option<&'static Bankrupt>,
     Option<&'static Hand>,
     Option<&'static Insulation>,
+    &'static Heading,
 );
 
 /// 面板上每块地要摊开的那一栏。P3c 加进限时状态之后，就地凑齐了 clippy 的
@@ -331,14 +333,23 @@ fn format_players(view: &DumpView) -> Vec<String> {
         .players
         .iter()
         .map(
-            |(entity, id, name, wallet, points, bank, jail, bankrupt, hand, shield)| {
-                let flag = if bankrupt.is_some() {
+            |(entity, id, name, wallet, points, bank, jail, bankrupt, hand, shield, heading)| {
+                let mut flag = if bankrupt.is_some() {
                     "破产".to_string()
                 } else if let Some(sentence) = jail {
                     format!("服刑剩{}回合", sentence.turns_left)
                 } else {
                     "-".to_string()
                 };
+                // 方向与处境共用这一栏（正向什么都不写，一个永远亮着的标记等于没有）：
+                // 查「他这一回合为什么往回走」时，那一行得同时看得见处境与方向
+                if *heading == Heading::Backward {
+                    flag = if flag == "-" {
+                        "逆向".to_string()
+                    } else {
+                        format!("{flag} 逆向")
+                    };
+                }
                 // 手牌打中文名：查「这张卡为什么没生效」时，下标还得再翻一次数据文件
                 let cards = hand.map_or("-".to_string(), |h| {
                     if h.is_empty() {

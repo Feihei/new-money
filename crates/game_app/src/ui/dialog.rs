@@ -1438,5 +1438,7 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
         // 地块名字不在凭据里（`LandId` 只是个下标），而这一句是打在「刚按下去的那颗按钮」
         // 对应的卡面上 —— 玩家刚选的就是这块地，这里要说的是「付了多少」，那是唯一会变数的数
         EffectOutcome::Purchased { price, .. } => format!("买下这块地，付 ${price}"),
+        // 说的是翻完之后朝哪边走，不是「翻了一次」：玩家下一手要用的就是这个数
+        EffectOutcome::Reversed { heading } => format!("掉头，改为{}绕行", heading.label()),
     }
 }

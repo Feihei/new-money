@@ -15,7 +15,7 @@ use crate::msg::{
     DiceRolled, GameOver, JailSkipped, PlayerReleased, RequestRoll, TurnEnded, TurnStarted,
     WalkStarted,
 };
-use crate::player::{Bankrupt, JailSentence, PlayerId, TokenPosition, WalkQueue};
+use crate::player::{Bankrupt, Heading, JailSentence, PlayerId, TokenPosition, WalkQueue};
 use crate::rng::Rng;
 use crate::settle::Books;
 use crate::walk::WalkClock;
@@ -210,11 +210,15 @@ pub fn begin_turn_system(
 /// 逻辑位置（`TokenPosition`）在掷骰的一刻就落定到 `to`；此后 `Walking` 态只是把
 /// 这次移动按 `GameRules.walk_step_interval` 展开成逐格时间线（`TileStepped`），
 /// 表现层拿它做插值 —— 任何等待动画的 `await` 都不存在了。
+///
+/// 骰子的点数是**步数**，往哪边走是玩家身上的 [`Heading`]（P3d④b 的转向卡）。两者相乘
+/// 喂给 `walk_path`，所以 `DiceRolled.steps` 与 `WalkStarted.steps` 里那个数永远是骰面本身 ——
+/// 「掷出 3 点」与「倒着走 3 步」是两件事，流水里不该把它混成一个带符号的位移。
 pub fn roll_dice_system(
     mut input: RollInput,
     mut rng: ResMut<Rng>,
     mut clock: ResMut<WalkClock>,
-    mut walkers: Query<(&mut TokenPosition, &mut WalkQueue), With<PlayerId>>,
+    mut walkers: Query<(&mut TokenPosition, &mut WalkQueue, &Heading), With<PlayerId>>,
     mut rolled: MessageWriter<DiceRolled>,
     mut started: MessageWriter<WalkStarted>,
     mut next: ResMut<NextState<TurnPhase>>,
@@ -230,13 +234,16 @@ pub fn roll_dice_system(
     if !asked {
         return;
     }
-    let Ok((mut pos, mut queue)) = walkers.get_mut(current) else {
+    let Ok((mut pos, mut queue, heading)) = walkers.get_mut(current) else {
         return;
     };
 
     let from = pos.tile;
     let steps = rng.roll_die();
-    let path = input.active.def.walk_path(from.0 as i64, steps as i64);
+    let path = input
+        .active
+        .def
+        .walk_path(from.0 as i64, steps as i64 * heading.sign());
     let to = path.last().copied().unwrap_or(from);
     pos.tile = to;
     *queue = WalkQueue {

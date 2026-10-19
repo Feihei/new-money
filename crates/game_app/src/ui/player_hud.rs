@@ -11,8 +11,8 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    Bankrupt, JailSentence, LandId, Owner, PlayerColor, PlayerId, PlayerName, Points, TurnOrder,
-    Wallet,
+    Bankrupt, Heading, JailSentence, LandId, Owner, PlayerColor, PlayerId, PlayerName, Points,
+    TurnOrder, Wallet,
 };
 
 use super::theme::{col, layout, size};
@@ -185,8 +185,11 @@ pub(crate) fn spawn_player_hud(
     }
 }
 
-/// 一名玩家在 HUD 上需要的全部状态。起别名是因为这个五元组写进 `Query<...>` 会撞
+/// 一名玩家在 HUD 上需要的全部状态。起别名是因为这个七元组写进 `Query<...>` 会撞
 /// clippy 的 `type_complexity`，而拆成两个查询又要多遍历一遍实体。
+///
+/// `Heading` 是**必挂**的那一格（`spawn_players` 给的），不用 `Option`：「没有这个组件」
+/// 与「正向」会读出同一个方向，用 `Option` 只会把漏挂组件变成一条永远不响的静默降级。
 type HudPlayer<'w> = (
     &'w PlayerId,
     &'w PlayerName,
@@ -194,6 +197,7 @@ type HudPlayer<'w> = (
     &'w Points,
     Option<&'w JailSentence>,
     Option<&'w Bankrupt>,
+    &'w Heading,
 );
 
 /// 每帧从世界状态重算五段文案，只在真的变了才写文本（反复赋同一个字符串会让排版重来）。
@@ -224,7 +228,8 @@ pub(crate) fn refresh_player_hud(
     }
 
     for (mut card, mut bg, mut border, mut node) in &mut cards {
-        let Ok((pid, name, wallet, points, jailed, bankrupt)) = players.get(card.player) else {
+        let Ok((pid, name, wallet, points, jailed, bankrupt, heading)) = players.get(card.player)
+        else {
             continue;
         };
         let props = owned
@@ -232,11 +237,20 @@ pub(crate) fn refresh_player_hud(
             .find(|(id, _)| *id == *pid)
             .map_or(0, |(_, count)| *count);
         // 文案与配色照 `player_hud.gd:191-199`；破产优先于服刑（同时成立时人已经出局）
-        let (status, status_color) = match (bankrupt, jailed) {
-            (Some(_), _) => ("[破产]", col::BANKRUPT),
-            (None, Some(_)) => ("[监狱]", col::JAILED),
-            (None, None) => ("", col::BODY),
+        let (mut status, status_color) = match (bankrupt, jailed) {
+            (Some(_), _) => ("[破产]".to_string(), col::BANKRUPT),
+            (None, Some(_)) => ("[监狱]".to_string(), col::JAILED),
+            (None, None) => (String::new(), col::BODY),
         };
+        // 方向与处境共用右侧那一段，但它**不是**处境：正向是常态、什么都不写，
+        // 只有逆向才占一个字 —— 一个永远亮着的标记等于没有标记
+        if *heading == Heading::Backward {
+            status = if status.is_empty() {
+                "逆向".to_string()
+            } else {
+                format!("{status} 逆向")
+            };
+        }
         let cash = format!("${}", wallet.cash);
         let points = format!("点券:{}", points.0);
 
@@ -247,7 +261,7 @@ pub(crate) fn refresh_player_hud(
             write(&mut texts, card.cash, &cash);
             write(&mut texts, card.points, &points);
             write(&mut texts, card.props, &format!("地产:{props}"));
-            write(&mut texts, card.status, status);
+            write(&mut texts, card.status, &status);
             if let Ok(mut color) = colors.get_mut(card.status) {
                 color.0 = status_color;
             }

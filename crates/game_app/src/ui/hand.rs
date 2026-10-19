@@ -47,15 +47,16 @@ pub(crate) struct HandStamp(pub String);
 /// 样例卡。按 id 找而不是按数组位置：改数据顺序不该让这个旋钮发出别的卡。
 ///
 /// 每种出牌形状各一张：给自己（免罪）、存着待用（免费）、给对手（陷害）、给一条街
-/// （涨价 / 查封）、给一块无主地（购地）。少一种，那个形状的按钮排就永远拍不到 ——
-/// 而「拍不到」在验收里读起来和「没做」一样。
-const SAMPLE_CARDS: [&str; 6] = [
+/// （涨价 / 查封）、给一块无主地（购地）、给一个人含自己（转向）。
+/// 少一种，那个形状的按钮排就永远拍不到 —— 而「拍不到」在验收里读起来和「没做」一样。
+const SAMPLE_CARDS: [&str; 7] = [
     "item_frame",
     "item_insulate",
     "item_hike",
     "item_seal",
     "item_free",
     "item_grab",
+    "item_turn",
 ];
 
 /// 开发用：给当前回合玩家发 [`SAMPLE_CARDS`] —— 一张要选对手、一张给自己，两种形状都要拍到。
@@ -157,6 +158,7 @@ pub(crate) struct LandPick {
 }
 
 /// 这张卡该长出哪几颗按钮。`opponents` 是「还活着的别人」（不含出牌人自己），
+/// `anyone` 是「还活着的人，含自己」（转向 / 停留这两张点的是人，不挑敌我），
 /// `lands` 是「此刻真有人持有的地块」（无主地不在里面 —— 规则层也不认，同一句判据），
 /// `parcels` 是「此刻**买得下来**的无主地」（买不起的不在里面，同一句判据的另一半）。
 ///
@@ -165,6 +167,7 @@ pub(crate) struct LandPick {
 pub(crate) fn play_buttons(
     def: &CardDef,
     opponents: &[(Entity, String)],
+    anyone: &[(Entity, String)],
     lands: &[LandPick],
     parcels: &[LandPick],
 ) -> Vec<PlayButton> {
@@ -184,6 +187,21 @@ pub(crate) fn play_buttons(
             }]
         }
         CardTarget::Player => opponents
+            .iter()
+            .map(|(target, name)| PlayButton {
+                text: format!("→ {name}"),
+                aim: Some(CardAim::Player(*target)),
+                blocked: None,
+            })
+            .collect(),
+        // 「一个人，含自己」。这一排正常情况下至少有「自己」那颗，所以它没有灰按钮那一格；
+        // 但空排照样要写出一句话 —— 一排什么都不长的卡行，读起来跟坏了没区别
+        CardTarget::Anybody if anyone.is_empty() => vec![PlayButton {
+            text: "用".into(),
+            aim: None,
+            blocked: Some("现在没有可行动的人"),
+        }],
+        CardTarget::Anybody => anyone
             .iter()
             .map(|(target, name)| PlayButton {
                 text: format!("→ {name}"),
@@ -228,6 +246,7 @@ fn aim_text(def: &CardDef) -> &'static str {
     match def.target {
         CardTarget::SelfOnly => "对自己",
         CardTarget::Player => "对一名对手",
+        CardTarget::Anybody => "对一个人",
         CardTarget::Land => "对一块地",
         CardTarget::UnownedLand => "对一块无主地",
     }
@@ -268,6 +287,16 @@ pub(crate) fn sync_hand_panel(
         .map(|(e, _, name, _)| (e, name.0.clone()))
         .collect();
     opponents.sort_by(|a, b| a.1.cmp(&b.1));
+
+    // 「一个人，含自己」（转向 / 停留）。自己排最前面而不是混进按名字排的那一串：
+    // 这两张卡最常见的用法就是对自己用，而「→ 自己」读起来比「→ 阿土伯」少一次迟疑。
+    // 破产的人照样挡（`aim_is_legal` 同一句判据），但**自己**即便已破产也还在这一排里 ——
+    // 那种情况下根本没有出牌的窗口，这里不值得为它编一个假名字
+    let mut anyone: Vec<(Entity, String)> = Vec::new();
+    if let Some(me) = player {
+        anyone.push((me, "自己".into()));
+    }
+    anyone.extend(opponents.iter().cloned());
 
     // 地块类卡的候选 = 地块表里两类各一排：涨价/查封数「此刻真有人持有的地」，购地数
     // 「此刻买得下来的无主地」。两排都从账本数出来（`Books::views()` / `Books::buy_price`），
@@ -330,7 +359,9 @@ pub(crate) fn sync_hand_panel(
     // `lands` 那一位是 P3c 加上的：地块卡的按钮排跟着「谁买了哪块地」变，
     // 少了它，玩家刚买下的那块地不会出现在按钮排里，而下一次别的原因重建面板时才冒出来。
     // `parcels` 是同一件事的购地卡那一半，而且它比 `lands` 更脆：那一排连**现金**都读
-    // （花过一笔钱、物价跳一格，候选排就变了）
+    // （花过一笔钱、物价跳一格，候选排就变了）。
+    // `anyone`（转向/停留那一排）不另开一位：它就是「自己 + opponents」，
+    // 那两样已经分别是签名的第一段与第二段 —— 多写一位只会让签名有个没人读的字段
     let stamp = format!(
         "{}|{playable}|{}|{}|{}|{}|{}",
         player.map_or_else(|| "-".into(), |p| format!("{p:?}")),
@@ -426,7 +457,7 @@ pub(crate) fn sync_hand_panel(
                 ));
                 continue;
             };
-            let buttons = play_buttons(def, &opponents, &lands, &parcels);
+            let buttons = play_buttons(def, &opponents, &anyone, &lands, &parcels);
             // 三行分开：合成一行的话，两张卡名加两颗按钮在 1024 宽的屏上就顶到边了
             let mut title = p.spawn(Node {
                 flex_direction: FlexDirection::Row,
@@ -544,12 +575,15 @@ mod tests {
     const NO_PLOTS: &[LandPick] = &[];
     /// 空的无主地候选：一块现在买得下来的地都没有。
     const NO_PARCELS: &[LandPick] = &[];
+    /// 空的「人」候选。只有被测那张卡用不到它时才是空排 —— 面板上那一排永远至少有「自己」。
+    const NO_PEOPLE: &[(Entity, String)] = &[];
 
     #[test]
     fn a_self_only_card_grows_exactly_one_button_and_no_target() {
         let buttons = play_buttons(
             &def(CardTarget::SelfOnly),
             &[foe(2, "孙小美"), foe(3, "阿土伯")],
+            &[foe(5, "自己"), foe(2, "孙小美")],
             &[pick("我的南京路", 0)],
             &[pick("外滩北 $1500", 2)],
         );
@@ -561,7 +595,13 @@ mod tests {
     #[test]
     fn a_framing_card_grows_one_button_per_opponent_carrying_that_target() {
         let foes = [foe(2, "孙小美"), foe(3, "阿土伯")];
-        let buttons = play_buttons(&def(CardTarget::Player), &foes, NO_PLOTS, NO_PARCELS);
+        let buttons = play_buttons(
+            &def(CardTarget::Player),
+            &foes,
+            &[foe(5, "自己"), foe(2, "孙小美"), foe(3, "阿土伯")],
+            NO_PLOTS,
+            NO_PARCELS,
+        );
         assert_eq!(buttons.len(), 2, "两个对手就该有两颗可选的按钮");
         // 目标烤在按钮里：按下去就是一个完整意图，规则层不必再挂「选目标」的待决
         assert_eq!(buttons[0].aim, Some(CardAim::Player(foes[0].0)));
@@ -574,10 +614,53 @@ mod tests {
     fn a_player_card_with_nobody_left_is_greyed_with_a_reason() {
         // 单人不残局：其他人都破产离场了。按下去规则层会静默拒绝，
         // 而玩家看见的必须是一句话，不是一颗死按钮（坑 27 的 UI 版）
-        let buttons = play_buttons(&def(CardTarget::Player), &[], NO_PLOTS, NO_PARCELS);
+        let buttons = play_buttons(
+            &def(CardTarget::Player),
+            &[],
+            NO_PEOPLE,
+            NO_PLOTS,
+            NO_PARCELS,
+        );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("场上没有别的人了"));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
+    }
+
+    /// 转向卡点的是「一个人」，那一排里必须有「自己」那颗 —— 这一格存在的全部理由：
+    /// 陷害卡不许打给自己，而掉头与停下正是要能对自己用的两件事
+    #[test]
+    fn an_anybody_card_offers_the_caster_too_and_puts_self_first() {
+        let buttons = play_buttons(
+            &def(CardTarget::Anybody),
+            &[foe(2, "孙小美")],
+            &[foe(5, "自己"), foe(2, "孙小美")],
+            NO_PLOTS,
+            NO_PARCELS,
+        );
+        assert_eq!(buttons.len(), 2, "自己 + 一名对手 = 两颗按钮");
+        assert_eq!(
+            buttons[0].text, "→ 自己",
+            "自己排最前面：那是这两张卡最常见的用法"
+        );
+        assert_eq!(buttons[0].aim, Some(CardAim::Player(foe(5, "自己").0)));
+        assert_eq!(buttons[1].aim, Some(CardAim::Player(foe(2, "孙小美").0)));
+        assert!(buttons.iter().all(|b| b.blocked.is_none()));
+    }
+
+    #[test]
+    fn an_anybody_card_with_nobody_at_all_still_says_something() {
+        // 空排只在「没有当前回合玩家」那种退化状态下出现。这时给一排零按钮的卡行
+        // 读起来就是坏了，所以它得有一句话 —— 与 `Player` 那一格同一条纪律
+        let buttons = play_buttons(
+            &def(CardTarget::Anybody),
+            &[],
+            NO_PEOPLE,
+            NO_PLOTS,
+            NO_PARCELS,
+        );
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].blocked, Some("现在没有可行动的人"));
+        assert_eq!(buttons[0].aim, None);
     }
 
     #[test]
@@ -588,6 +671,7 @@ mod tests {
         let buttons = play_buttons(
             &def(CardTarget::Land),
             &[foe(2, "孙小美")],
+            NO_PEOPLE,
             &picks,
             &[pick("外滩北 $1500", 2)],
         );
@@ -604,7 +688,7 @@ mod tests {
     #[test]
     fn a_land_card_with_nothing_owned_is_greyed_with_a_reason() {
         // 开局第一回合谁都没买地。这时打地块卡是空转，而空转该读成一句话
-        let buttons = play_buttons(&def(CardTarget::Land), &[], NO_PLOTS, NO_PARCELS);
+        let buttons = play_buttons(&def(CardTarget::Land), &[], NO_PEOPLE, NO_PLOTS, NO_PARCELS);
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("还没有人有地"));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
@@ -618,6 +702,7 @@ mod tests {
         let buttons = play_buttons(
             &def(CardTarget::UnownedLand),
             &[foe(2, "孙小美")],
+            NO_PEOPLE,
             &[pick("我的南京路", 0)],
             &parcels,
         );
@@ -635,7 +720,13 @@ mod tests {
         // 那句是「买得起的无主地」而不是「没有无主地」：候选排是账本按现金筛过的，
         // 面板读得到「筛完是空」，读不到空在哪一头。地全有主时那句话照样成立，
         // 而「没有无主地」在钱不够的那一格就是句假话（同百货「这一趟没有货」那次改法）
-        let buttons = play_buttons(&def(CardTarget::UnownedLand), &[], NO_PLOTS, NO_PARCELS);
+        let buttons = play_buttons(
+            &def(CardTarget::UnownedLand),
+            &[],
+            NO_PEOPLE,
+            NO_PLOTS,
+            NO_PARCELS,
+        );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("没有买得起的无主地"));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");

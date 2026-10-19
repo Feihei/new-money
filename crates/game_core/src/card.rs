@@ -29,6 +29,17 @@ pub enum CardTarget {
     SelfOnly,
     /// 选一名对手（陷害、嫁祸）
     Player,
+    /// 选一个人，**含自己**（转向、停留，P3d④b/④c）。
+    ///
+    /// 为什么不并进 [`Self::Player`]：「不能陷害自己」是陷害卡的规则（自己送自己进监狱
+    /// 没有意义，而那条判据写在 `aim_is_legal` 里），而掉头与停在原地这两件事
+    /// **正是**要能对自己做 —— 4 代的这两张卡点谁都可以（`GLOSSARY-board.md` 那句
+    /// 「反转绕行方向 / 给他人转向」）。并成一格的话，下一张「可以打给自己」的卡
+    /// 就会去读 `effects` 才知道自己能不能被选。
+    ///
+    /// P13 魔法屋那 12 条法术按筛选条件点人（走路的人／存款最多／所有女生…），
+    /// 挑的也是这一格：那件事的主语永远是「一个人」，而不是「一个对手」。
+    Anybody,
     /// 选一块**有主**的地（涨价、查封、怪兽）
     Land,
     /// 选一块**无主**的地（购地卡，P3d④）。
@@ -95,6 +106,15 @@ pub enum CardEffect {
     /// P2 管线 —— 物价指数照乘、小福神「买地免费」那一类 `Cancel` 照免。这张卡买的不是折扣，
     /// 买的是**不用走到那一格**这件事。
     BuyLand,
+    /// 让承受者的绕行方向掉头（转向卡，P3d④b）。**没有字段**：翻的是玩家身上那一位
+    /// （[`crate::player::Heading`]），而「翻成什么」不是卡面能说的 —— 翻两次就是原样，
+    /// 所以这里既没有 `to` 也没有层数。
+    ///
+    /// 环还是那一条环，只是步进取 `+1` 还是 `-1`（ADR-001 行为规则 3 + `GLOSSARY-board.md`
+    /// 「仍沿同一环，只是反向」）。它抵消得了（[`crate::afflict::AfflictDomain::Reversal`]
+    /// 走免罪那条护身，因为这是一件**事**不是一笔钱），也因此与 `LandStatus`/`BuyLand` 不同：
+    /// 没有 aim 它照样成立（打给自己），所以 `validate` 不给它绑 target。
+    Reverse,
 }
 
 const fn default_jail_turns() -> u32 {
@@ -217,6 +237,12 @@ impl CardSet {
                             errs.push(format!("卡牌 {} 要买地，但 target 不是 unowned_land", c.id));
                         }
                     }
+                    CardEffect::Reverse => {
+                        // 这一格**没有**要校验的数，而它必须写在这里：`Reverse` 翻的是玩家身上
+                        // 那一位，没有字段、也没有「没有 aim 就静默失效」那条毛病（打给自己
+                        // 照样成立），所以它不该被绑到任何 target 上。哪天它长出参数来
+                        // （比如「转向 N 次」），编译会停在这一格
+                    }
                 }
             }
         }
@@ -314,6 +340,7 @@ mod tests {
         assert!(has(|e| matches!(e, CardEffect::LandStatus { .. }),));
         assert!(has(|e| matches!(e, CardEffect::FreePass { .. })));
         assert!(has(|e| matches!(e, CardEffect::BuyLand)));
+        assert!(has(|e| matches!(e, CardEffect::Reverse)));
     }
 
     /// 「卡上的效果」与「卡要落在什么头上」必须成对，否则数据能过加载、卡却永远打不出去。
@@ -346,6 +373,21 @@ mod tests {
         assert!(
             grab.validate(CardKind::Item).is_err(),
             "买无主地的卡指着有主的地，两条判据当场矛盾"
+        );
+
+        // 反例的反例：转向卡**不该**被绑住。它没有 aim 也成立（打给自己掉头），
+        // 所以把它写成 `self_only` 照样是一张合法的卡 —— 哪天有人给 `Reverse` 加一条
+        // target 检查，这条会先红，而那正是「为了整齐把一条真规则写窄了」的形状
+        let mut turn = CardSet::from_json(ITEMS).unwrap();
+        turn.0
+            .iter_mut()
+            .find(|c| c.effects.contains(&CardEffect::Reverse))
+            .expect("货架上该有转向卡")
+            .target = CardTarget::SelfOnly;
+        assert!(
+            turn.validate(CardKind::Item).is_ok(),
+            "转向卡被 target 绑住了：{:?}",
+            turn.validate(CardKind::Item).unwrap_err()
         );
     }
 
