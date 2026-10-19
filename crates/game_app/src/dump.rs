@@ -19,7 +19,7 @@ use game_core::prelude::{
     ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind, Corrections,
     CouponBoxes, Deck, DeckOrder, GameRules, GameSeed, GameSession, Hand, Insulation, JailSentence,
     LandId, LandStatus, Landing, MarketClock, Mortgaged, Owner, Paused, PendingDecision, PlayerId,
-    PlayerName, Points, Shelf, Timed, TurnOrder, TurnPhase, Wallet,
+    PlayerName, Points, Shelf, ShopStock, Timed, TurnOrder, TurnPhase, Wallet,
 };
 
 use crate::asset_root;
@@ -147,6 +147,9 @@ pub struct DumpView<'w, 's> {
     /// 两副牌各发到哪了。「为什么抽到这张」在定序那副牌上是能从行序算出来的，
     /// 前提是这个面板说得出它发到第几张
     decks: Query<'w, 's, &'static Deck>,
+    /// 百货这一趟的货架（P3d②）。查「我买了卡却没拿到」时要能看见这一格摆过哪几张、
+    /// 还剩哪几张 —— 那份事实只在这个资源里
+    stock: Res<'w, ShopStock>,
 }
 
 fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
@@ -165,6 +168,7 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             row(ui, "待决", format_pending(&view));
             row(ui, "资格", format_access(&view));
             row(ui, "牌堆", format_decks(&view));
+            row(ui, "货架", format_stock(&view));
             ui.separator();
             for line in format_corrections(&view) {
                 ui.monospace(line);
@@ -298,6 +302,26 @@ fn format_decks(view: &DumpView) -> String {
     }
     rows.into_iter()
         .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// 百货柜台这一趟摆的货：`免罪卡20 · 涨价卡40`（后面的数是点券价）。
+/// 空货架写「空」而不是省略这一行：还没进店、被买空、商品池是空的 —— 这三种在截图上
+/// 本来就该长得一样，而「这一行不见了」读起来像面板坏了。
+fn format_stock(view: &DumpView) -> String {
+    if view.stock.slots.is_empty() {
+        return "空（没进过店，或这一趟被买空了）".to_string();
+    }
+    view.stock
+        .slots
+        .iter()
+        .map(|card| {
+            view.shelf.get(CardKind::Item, *card).map_or_else(
+                || format!("<缺{}>", card.0),
+                |def| format!("{}{}", def.title, def.cost_points.unwrap_or(0)),
+            )
+        })
         .collect::<Vec<_>>()
         .join(" · ")
 }

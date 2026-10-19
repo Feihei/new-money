@@ -27,9 +27,10 @@ use crate::render::DevFont;
 pub(crate) struct HandPanelOpen(pub bool);
 
 impl HandPanelOpen {
-    /// `NM_HAND=1`：开面板，并由 [`dev_deal_sample`] 发两张样例卡。
-    /// 道具卡的正常来源是百货公司（P3d），而**现在一张卡都没地方买** —— 没有这个旋钮，
-    /// 这块面板在截图里永远是空的，「每个界面都得有一条不靠鼠标的入口」那条判据落不了地。
+    /// `NM_HAND=1`：开面板，并由 [`dev_deal_sample`] 发五种形状的样例卡。
+    /// 道具卡的正经来源是百货公司柜台（P3d②），而「踩到哪一格」「攒够点券没有」都不由
+    /// 截图脚本控制 —— 没有这个旋钮，这块面板在截图里永远是空的，
+    /// 「每个界面都得有一条不靠鼠标的入口」那条判据落不了地。
     pub(crate) fn from_env() -> Self {
         Self(std::env::var_os("NM_HAND").is_some())
     }

@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use game_core::prelude::{
     AtmAccess, BankOpDone, BankVisited, CardPlayed, ChargeWaived, GameOver, GameRules, GameSession,
     JailSkipped, MarketClock, Paused, PendingDecision, PlayerBankrupt, PlayerName, PointsChanged,
-    StockTraded, StockVisited, TurnOrder, TurnPhase,
+    ShopOpDone, StockTraded, StockVisited, TradeSide, TurnOrder, TurnPhase,
 };
 
 use super::finance::comma;
@@ -360,6 +360,9 @@ pub(crate) struct Notices<'w, 's> {
     stock: MessageReader<'w, 's, StockVisited>,
     traded: MessageReader<'w, 's, StockTraded>,
     points: MessageReader<'w, 's, PointsChanged>,
+    /// 百货成交（P3d②）。排在 `points` 之后：同一帧里那笔点券变动与这张成交凭据说的
+    /// 是同一件事，而带卡名的那条更能回答「我刚按下去发生了什么」
+    shop: MessageReader<'w, 's, ShopOpDone>,
     /// 出牌的结果。手牌面板随手牌重建，把一次性结果烤进去下一次就没了 ——
     /// 持久的读数只有这一行（与点券那一条同一个道理）
     played: MessageReader<'w, 's, CardPlayed>,
@@ -418,12 +421,39 @@ pub(crate) fn hint_from_events(
     // 点券到账：它不进现金流水、也没有模态可看，这一行是唯一的播报口。
     // 和其余事件流水一样会被下一次阶段旁白冲掉（只活两三帧），持久的读数在 HUD 那一段
     for m in notices.points.read() {
+        // 方向写在动词上而不是符号上：P3d② 起点券会**减少**（买卡），而「捡到 -30 点券」
+        // 读起来像租金表坏了
+        let (verb, amount) = if m.delta < 0 {
+            ("花掉", -m.delta)
+        } else {
+            ("捡到", m.delta)
+        };
         line = Some(format!(
-            "{} 捡到 {} 点券（共 {}）",
+            "{} {} {} 点券（共 {}）",
             name(&names, m.player),
-            m.delta,
+            verb,
+            amount,
             m.balance
         ));
+    }
+    // 百货成交：这一行要说得出「哪张卡」与「几点券」，因为柜台面板下一刻就重建了。
+    // 它排在点券那一条之后 —— 同一帧里两条说的是同一件事，而带卡名的这条更能回答
+    // 「我刚按下去发生了什么」，点券余数在 HUD 上一直看得见。
+    for m in notices.shop.read() {
+        line = Some(match m.side {
+            TradeSide::Buy => format!(
+                "{} 花 {} 点券买了「{}」",
+                name(&names, m.player),
+                m.points,
+                m.card.title
+            ),
+            TradeSide::Sell => format!(
+                "{} 把「{}」卖回百货，收回 {} 点券（9 折）",
+                name(&names, m.player),
+                m.card.title,
+                m.points
+            ),
+        });
     }
     // 免付要说「免掉了多少」而不是「付了 0」：前者是一次事件的凭据，后者读起来像租金表坏了
     for m in notices.waived.read() {

@@ -13,8 +13,10 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, AfflictDomain, BankOp, Books, CardDrawn, CardKind, CardNotice, Decision,
-    EffectOutcome, LandId, LandType, MarketClock, Pending, PendingDecision, PlayerName, TurnOrder,
+    ActiveBoard, AfflictDomain, BankOp, Books, CardDef, CardDrawn, CardId, CardKind, CardNotice,
+    Decision, EffectOutcome, Hand, LandId, LandType, MarketClock, Pending, PendingDecision,
+    PlayerId, PlayerName, Rng, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, buyback, restock,
+    shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -148,6 +150,12 @@ pub(crate) struct ModalView<'w, 's> {
     pending: Res<'w, PendingDecision>,
     memory: Res<'w, RecentCard>,
     clock: Res<'w, MarketClock>,
+    /// 百货柜台这一趟的货架（P3d②）。它是资源而不是世界状态：同一时刻只有柜台前那位看得见
+    stock: Res<'w, ShopStock>,
+    /// 卡面文案在货架上（`ShopStock` 里只有下标）
+    shelf: Shelf<'w>,
+    /// 卖回那一排要读手牌。只有柜台用得上，其余模态不看它
+    hands: Query<'w, 's, &'static Hand, With<PlayerId>>,
     open: Query<'w, 's, (Entity, &'static ModalRoot)>,
 }
 
@@ -166,8 +174,13 @@ pub(crate) fn sync_modal(
 ) {
     let want = view.pending.active();
     let banking_hours = is_open_day(&view.clock, &books.rules);
+    // 柜台前那位手里有哪几张（卖回那一排的内容，也进签名）
+    let held: Vec<CardId> = want
+        .and_then(|(player, _)| view.hands.get(player).ok())
+        .map(|hand| hand.cards.iter().copied().collect())
+        .unwrap_or_default();
     let stamp = want.map_or(String::new(), |(player, about)| {
-        modal_stamp(about, &books, player, banking_hours)
+        modal_stamp(about, &books, player, banking_hours, &view.stock, &held)
     });
     // 两边都是 `None` 时相等：没有待决事项、也没有模态，正是常态
     if view
@@ -196,28 +209,69 @@ pub(crate) fn sync_modal(
             Pending::BankTeller => {
                 bank_modal(&mut commands, &font, &books, player, stamp, banking_hours)
             }
+            Pending::Shop => shop_modal(
+                &mut commands,
+                &font,
+                &books,
+                &shop_rows(&books, &view.shelf, &view.stock, player, &held),
+                player,
+                stamp,
+            ),
         };
     }
 }
 
-/// 这一屏「该写成什么样」的签名。只有柜台需要，别的模态返回空串。
+/// 这一屏「该写成什么样」的签名。只有两种**窗口**需要，报价与收据返回空串。
 ///
-/// `banking_hours` 也在签名里：正常对局里回合停在 `WaitDecision` 上，日历动不了，
+/// `banking_hours` 也在柜台签名里：正常对局里回合停在 `WaitDecision` 上，日历动不了，
 /// 柜台开着的那几帧不可能跨到周末 —— 但 `NM_DAY` 与「读档回到某一天」都能让日子在
 /// 面板背后跳。签名少了它，面板就会停在按开门那天烤死的样子（灰按钮配「办完才继续」），
 /// 而这正是 §6.1 坑 22 那一族：**刷新判据漏了一个输入，且没有任何报错**。
-fn modal_stamp(about: Pending, books: &Books, player: Entity, banking_hours: bool) -> String {
-    let Pending::BankTeller = about else {
-        return String::new();
-    };
-    let bank = books.bank_of(player);
-    format!(
-        "{}|{}|{}|{}|{banking_hours}",
-        books.balance(player),
-        bank.deposit,
-        bank.loan,
-        loan_room(books, player)
-    )
+///
+/// 写成对 `Pending` 的穷尽匹配：新增一种待决事项时必须当场回答「它的屏幕上有什么是由
+/// 判据决定的」，漏了不会编译失败、只会静默过期。
+fn modal_stamp(
+    about: Pending,
+    books: &Books,
+    player: Entity,
+    banking_hours: bool,
+    stock: &ShopStock,
+    held: &[CardId],
+) -> String {
+    match about {
+        Pending::BankTeller => {
+            let bank = books.bank_of(player);
+            format!(
+                "{}|{}|{}|{}|{banking_hours}",
+                books.balance(player),
+                bank.deposit,
+                bank.loan,
+                loan_room(books, player)
+            )
+        }
+        // 百货柜台与银行同一条理由：它是一个窗口，每一笔买卖都要重烤三位 ——
+        // 点券余额、货架还剩哪几格、手里有哪几张。少任何一位，玩家就会对着一个
+        // 「已经买掉了、按钮还亮着」的面板按第二次。
+        Pending::Shop => format!(
+            "{}|{}|{}",
+            books.points_of(player),
+            stock
+                .slots
+                .iter()
+                .map(|c| c.0.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            held.iter()
+                .map(|c| c.0.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        // 报价与收据的内容弹出即定稿（买地面板上的「你的现金」是那一刻的现金，
+        // 而回合停在那几帧里谁也花不了钱）
+        Pending::Buy(_) | Pending::Upgrade(_) | Pending::RentNotice(_) | Pending::Card => {
+            String::new()
+        }
+    }
 }
 
 /// 名下未抵押地块的可贷上限（缺陷 #1 修的就是这个数在 Godot 里恒为 0）。
@@ -878,6 +932,261 @@ fn bank_modal(
             });
         },
     )
+}
+
+/// 柜台一行的全部读数。买与卖共用同一个形状，所以共用同一个结构而不是两套参数表 ——
+/// 这是这仓库的房规（同 `ButtonSpec`）：`shop_row` 本来要八份参数，而其中五份
+/// 本来就是「这一行长什么样」这一件事（§六 坑 8）。
+pub(crate) struct ShopRow {
+    pub card: CardId,
+    pub side: TradeSide,
+    pub title: String,
+    pub desc: String,
+    /// 按钮上的字**带数额**（`money_row` 同一条）：按下去要花多少、收回多少，
+    /// 是玩家在这一屏唯一要做的那个判断
+    pub button: String,
+    /// 灰按钮必须自带一句为什么（§6.1 坑 27 的 UI 版）。这句话直接取规则层那张表的
+    /// [`ShopDeny::label`] —— 「按不动的原因」与「被拒的原因」从此是同一句话。
+    pub blocked: Option<&'static str>,
+}
+
+/// 柜台的两排：货架在上、卖回在下（[`shop_rows`] 的产出）。
+pub(crate) struct ShopRows {
+    pub buys: Vec<ShopRow>,
+    pub sells: Vec<ShopRow>,
+}
+
+/// 把「这一趟的货架 + 这个人的手牌」翻成两排按钮。
+///
+/// 判据一律走规则层那张 [`shop_op_allowed`]，面板不许自己发明一套「能不能办」。
+/// `at_counter` 在这里恒为 `true` —— 柜台既然开着，`NoCounter` 那一格在这一屏永远碰不到，
+/// 而它在派发那一侧是真的会挡（见 `ui::mod` 的 `shop_customer`）。
+fn shop_rows(
+    books: &Books,
+    shelf: &Shelf<'_>,
+    stock: &ShopStock,
+    player: Entity,
+    held: &[CardId],
+) -> ShopRows {
+    let points = books.points_of(player);
+    let buys: Vec<ShopRow> = stock
+        .slots
+        .iter()
+        .map(|card| {
+            let def = shelf.get(CardKind::Item, *card);
+            let price = def.and_then(|d| d.cost_points);
+            ShopRow {
+                card: *card,
+                side: TradeSide::Buy,
+                title: card_title(def),
+                desc: def.map(|d| d.desc.clone()).unwrap_or_default(),
+                button: format!("买 {}", price.unwrap_or(0)),
+                blocked: shop_op_allowed(TradeSide::Buy, true, price, true, false, points)
+                    .err()
+                    .map(ShopDeny::label),
+            }
+        })
+        .collect();
+    // 卖回那一排按**不同的卡**聚合（两张一样的并成一行带 ×2）：两颗粒看起来完全相同的
+    // 按钮读起来像面板坏了，而它们办的是同一件事
+    let mut counts: Vec<(CardId, u32)> = Vec::new();
+    for card in held {
+        match counts.iter_mut().find(|(id, _)| id == card) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((*card, 1)),
+        }
+    }
+    let sells: Vec<ShopRow> = counts
+        .iter()
+        .map(|(card, n)| {
+            let def = shelf.get(CardKind::Item, *card);
+            let price = def.and_then(|d| d.cost_points);
+            let title = card_title(def);
+            ShopRow {
+                card: *card,
+                side: TradeSide::Sell,
+                title: if *n > 1 {
+                    format!("{title} ×{n}")
+                } else {
+                    title
+                },
+                desc: def.map(|d| d.desc.clone()).unwrap_or_default(),
+                button: format!(
+                    "卖 {}",
+                    buyback(price.unwrap_or(0), books.rules.shop_buyback)
+                ),
+                // 柜台开着、手里有（这一排的存在本身就是）→ 这里还可能红的只有「没有售价」那一格
+                blocked: shop_op_allowed(TradeSide::Sell, true, price, false, true, points)
+                    .err()
+                    .map(ShopDeny::label),
+            }
+        })
+        .collect();
+    ShopRows { buys, sells }
+}
+
+/// 卡名。查不到卡定义时**如实说数据错误**，而不是把这一行省掉 ——
+/// 「少一行」是唯一线索，而那读不出为什么（同手牌面板那一条）。
+fn card_title(def: Option<&CardDef>) -> String {
+    def.map(|d| d.title.clone())
+        .unwrap_or_else(|| "<数据里没有这张卡>".to_string())
+}
+
+/// 百货公司柜台（P3d②）：**踩到**百货格才开（路过什么都不给，见 `shop::shop_op_allowed`）。
+///
+/// 与银行柜台同一条形状：不是一次报价而是一个窗口，所以 [`modal_stamp`] 给它算了签名 ——
+/// 每一笔买卖之后点券、货架、手牌都要重烤。
+fn shop_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    books: &Books,
+    rows: &ShopRows,
+    player: Entity,
+    stamp: String,
+) -> Entity {
+    let points = books.points_of(player);
+
+    frame(
+        commands,
+        (player, Pending::Shop),
+        stamp,
+        layout::SHOP_PANEL,
+        col::BORDER_SHOP,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                "百货公司",
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                format!("点券 {points} — 买卡、卖回打 9 折，办完才继续"),
+                size::ROW,
+                col::MUTED,
+            ));
+            p.spawn(separator());
+            p.spawn(label(&font.0, "这一趟的货架", size::SMALL, col::KEY));
+            if rows.buys.is_empty() {
+                // 只说「没有货」不说「被谁买空的」：面板读得到货架空，读不到它为什么空 ——
+                // `NM_SHOP` 开第二局时这里也是空的，那句「被买空了」就是一句假话
+                p.spawn(label(
+                    &font.0,
+                    "这一趟没有货 —— 下次进店再摆",
+                    size::ROW,
+                    col::KEY,
+                ));
+            }
+            for row in &rows.buys {
+                shop_row(p, font, row);
+            }
+            p.spawn(separator());
+            p.spawn(label(&font.0, "卖回（打 9 折）", size::SMALL, col::KEY));
+            if rows.sells.is_empty() {
+                p.spawn(label(&font.0, "手里没有卡", size::ROW, col::KEY));
+            }
+            for row in &rows.sells {
+                shop_row(p, font, row);
+            }
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "离开",
+                        layout::MODAL_BUTTON,
+                        super::PRIMARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
+}
+
+/// 柜台的一行：「卡名 + 效果 + 一颗带数额的按钮 + 灰掉时的那句话」。
+fn shop_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &ShopRow) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        row_gap: Val::Px(layout::SHOP_ROW_GAP),
+        ..default()
+    })
+    .with_children(|line| {
+        line.spawn((
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            label(
+                &font.0,
+                format!("{}  {}", row.title, row.desc),
+                size::ROW,
+                if row.blocked.is_some() {
+                    col::KEY
+                } else {
+                    col::BODY
+                },
+            ),
+        ));
+        button(
+            line,
+            &font.0,
+            ButtonSpec::new(
+                &row.button,
+                layout::SHOP_BUTTON,
+                super::PRIMARY,
+                UiAction::ShopOp {
+                    side: row.side,
+                    card: row.card,
+                },
+            )
+            .disabled(row.blocked.is_some()),
+        );
+        // 灰掉的话那句话就写在按钮旁边 —— 面板上只有一处解释会读漏（同手牌浮层）
+        if let Some(reason) = row.blocked {
+            line.spawn(label(&font.0, reason, size::ROW, col::JAILED));
+        }
+    });
+}
+
+/// 开发用：`NM_SHOP=1` 挂出百货柜台，并把「进得了店」需要的两样备齐 —— 一次换货与一笔点券。
+/// 理由与 `NM_ATM`/`NM_HAND` 同一条：这块面板的正经入口是踩到那一格，而那一掷由骰子说了算，
+/// 截图脚本控制不了（判据：每个界面都得有一条不靠鼠标的入口）。
+///
+/// 与 [`force_decision`] 分成两条 system 是有意的：那条的契约是「只写 [`PendingDecision`]」，
+/// 而这里还要发点券与换货 —— 那是规则层的账，不该塞进那条开关的语义里。
+///
+/// 货架与点券由 `Local` 保证只补一次（同 `dev_deal_sample`），代价是同一个进程里开第二局
+/// 不会重新摆货 —— 它是截图旋钮，不是跑完一局的手段（要跑一局单开 `NM_AUTOROLL`，
+/// 而这一格会被自动玩家按「离开」走过）。
+pub(crate) fn dev_open_shop(
+    order: Option<Res<TurnOrder>>,
+    mut pending: ResMut<PendingDecision>,
+    mut books: Books,
+    shelf: Shelf<'_>,
+    mut stock: ResMut<ShopStock>,
+    mut rng: ResMut<Rng>,
+    mut stocked: Local<bool>,
+) {
+    let Some(player) = order.as_ref().and_then(|o| o.current()) else {
+        return;
+    };
+    if !*stocked {
+        // 100 点券：够买走货架上最贵的一张（`item_cards.json` 里 45 封顶），
+        // 又让「点券不够」那颗灰按钮在买过两三次之后拍得到
+        books.award_points(player, 100);
+        stock.slots = restock(
+            shelf.items().len(),
+            books.rules.shop_slots as usize,
+            &mut rng,
+        );
+        *stocked = true;
+    }
+    if pending.active().is_none() {
+        pending.offer(player, Pending::Shop);
+    }
 }
 
 /// 卡面效果行。规则层只发凭据、不拼文案（`msg.rs` 的注释），字符串在这里生成。

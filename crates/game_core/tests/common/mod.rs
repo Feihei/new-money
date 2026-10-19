@@ -25,9 +25,10 @@ use game_core::prelude::{
     LandDamage, LandId, LandStatus, LandUpgraded, Market, MarketClock, Mortgaged, Owner, Pending,
     PendingDecision, PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed,
     PlayerReleased, PlayerTeleported, PlotArea, Points, PointsChanged, RentDue, RequestRoll, Rng,
-    Scope, Shelf, Source, StockId, StockPriceChanged, StockTradeRequested, StockTraded,
-    StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder,
-    TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet, deal_to,
+    Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StockId, StockPriceChanged,
+    StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition,
+    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet,
+    deal_to,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -55,6 +56,11 @@ pub struct BankRequests(pub Vec<BankOpRequested>);
 /// 于是「掷骰前才受理」「手里没有这张卡」「目标不合法」三道门都被真走到。
 #[derive(Resource, Default)]
 pub struct Plays(pub Vec<PlayCardRequested>);
+
+/// 测试侧的「点百货柜台上的买/卖按钮」。同样走队列 → 真消息，于是柜台那道窗口判据
+/// （`Pending::Shop` 挂的是谁）被真走到，而不是被测试绕过。
+#[derive(Resource, Default)]
+pub struct ShopRequests(pub Vec<ShopOpRequested>);
 
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
@@ -92,7 +98,8 @@ fn auto_answer_system(
         (Pending::RentNotice(_) | Pending::Card, _) => Decision::Acknowledge,
         // 柜台只认「办完」。这里必须显式答一句，否则每一个踩到银行格的回合都会
         // 停在 `WaitDecision`，把所有长跑用例整片挂死 —— 编译器逼这一条写出来。
-        (Pending::BankTeller, _) => Decision::Acknowledge,
+        // 百货柜台同一条（P3d②）：13 格环上真有一格百货，长跑用例一定会踩到它。
+        (Pending::BankTeller | Pending::Shop, _) => Decision::Acknowledge,
         // `Hold` 在函数开头就返回了，这一支只为穷尽存在
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::Hold) => return,
     };
@@ -155,6 +162,9 @@ struct BookReaders<'w, 's> {
     gained: MessageReader<'w, 's, CardGained>,
     bank: MessageReader<'w, 's, BankVisited>,
     bank_ops: MessageReader<'w, 's, BankOpDone>,
+    /// 百货成交凭据（P3d②）。与 `gained` 分开记：买入那一次两件事各有一条流水，
+    /// 「花了多少点券」与「卡进没进手牌」不是同一个断言。
+    shop_ops: MessageReader<'w, 's, ShopOpDone>,
     stock_visit: MessageReader<'w, 's, StockVisited>,
     traded: MessageReader<'w, 's, StockTraded>,
     prices: MessageReader<'w, 's, StockPriceChanged>,
@@ -384,6 +394,15 @@ fn collect_books(
         log.0
             .push(format!("StockVisit({})", who(&players, m.player)));
     }
+    for m in r.shop_ops.read() {
+        log.0.push(format!(
+            "Shop({}{}{}·{}点券)",
+            who(&players, m.player),
+            side_verb(m.side),
+            m.card.id,
+            m.points
+        ));
+    }
     for m in r.traded.read() {
         log.0.push(format!(
             "Trade({}{}{}{}股@{:.2})",
@@ -412,18 +431,20 @@ fn collect_books(
     }
 }
 
-/// 四组「测试侧的点击」与四条对应的消息写出。装一个参数包而不是八个函数参数，
-/// 与生产代码同一条房规（§六 坑 8），而且这四对本来就是同一件事：把队列排空成消息。
+/// 五组「测试侧的点击」与五条对应的消息写出。装一个参数包而不是十个函数参数，
+/// 与生产代码同一条房规（§六 坑 8），而且这五对本来就是同一件事：把队列排空成消息。
 #[derive(SystemParam)]
 struct Pump<'w> {
     inputs: ResMut<'w, Inputs>,
     trades: ResMut<'w, Trades>,
     asks: ResMut<'w, BankRequests>,
     plays: ResMut<'w, Plays>,
+    shops: ResMut<'w, ShopRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
     op_writes: MessageWriter<'w, BankOpRequested>,
     card_writes: MessageWriter<'w, PlayCardRequested>,
+    shop_writes: MessageWriter<'w, ShopOpRequested>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
@@ -438,6 +459,9 @@ fn pump_inputs(mut pump: Pump<'_>) {
     }
     for c in pump.plays.0.drain(..) {
         pump.card_writes.write(c);
+    }
+    for s in pump.shops.0.drain(..) {
+        pump.shop_writes.write(s);
     }
 }
 
@@ -458,6 +482,7 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<Trades>()
         .init_resource::<BankRequests>()
         .init_resource::<Plays>()
+        .init_resource::<ShopRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -991,6 +1016,51 @@ pub fn hand_of(app: &App, player: Entity) -> Vec<CardId> {
         .get::<Hand>()
         .map(|h| h.cards.iter().copied().collect())
         .unwrap_or_default()
+}
+
+/// 替 `player` 按一次百货柜台上的买/卖按钮（`index` 是 `item_cards.json` 里的下标）。
+/// 同样走队列 → 真消息，于是「站在柜台前的那个人才办得成」这条窗口判据被真走到。
+pub fn shop_ask(app: &mut App, player: Entity, side: TradeSide, index: u32) {
+    app.world_mut()
+        .resource_mut::<ShopRequests>()
+        .0
+        .push(ShopOpRequested {
+            player,
+            side,
+            card: CardId(index),
+        });
+}
+
+/// 现在货架上摆着哪几张（按陈列顺序）。
+pub fn shelf_of(app: &App) -> Vec<CardId> {
+    app.world().resource::<ShopStock>().slots.clone()
+}
+
+/// 把货架压成指定的那几张。换货是抽签（`shop::restock`），而用例要断言的是「买这一张
+/// 花多少点券、卖回去收多少」—— 与 [`stack_card`] 同一条手法：控制不了随机源就别碰运气。
+pub fn set_shelf(app: &mut App, ids: &[u32]) {
+    let mut stock = app.world_mut().resource_mut::<ShopStock>();
+    stock.slots = ids.iter().map(|&at| CardId(at)).collect();
+}
+
+/// 把某位玩家的点券调到 `want`。与 [`set_cash`] 同一条理由：走 `Books` 而不是直改组件，
+/// 「每一笔点券变动都留下流水」那条审计才不会因为测试的手 while 假性失败。
+pub fn set_points(app: &mut App, player: Entity, want: u32) {
+    let now = points_of(app, player);
+    if want > now {
+        let delta = want - now;
+        run_op(app, move |books, _| {
+            books.award_points(player, delta);
+        });
+    } else if want < now {
+        let delta = now - want;
+        run_op(app, move |books, _| {
+            assert!(
+                books.spend_points(player, delta),
+                "点券调低被拒（余额 {now}，扣 {delta}）"
+            );
+        });
+    }
 }
 
 /// 一次发牌请求（[`deal`] 的载体）。

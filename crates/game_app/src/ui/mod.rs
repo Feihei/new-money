@@ -24,7 +24,8 @@ use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankOp, BankOpRequested, CardAim, CardId, Decision, DecisionChosen,
     GameRules, MarketClock, Paused, Pending, PendingDecision, PlayCardRequested, RequestRoll,
-    StockId, StockTradeRequested, TradeSide, TurnOrder, TurnPhase, bank_op_allowed,
+    ShopOpRequested, StockId, StockTradeRequested, TradeSide, TurnOrder, TurnPhase,
+    bank_op_allowed,
 };
 
 use theme::{col, layout, size};
@@ -91,12 +92,22 @@ impl Plugin for UiPlugin {
         if std::env::var_os("NM_ATM").is_some() {
             app.add_systems(Update, finance::dev_grant_atm);
         }
-        // `NM_HAND=1`：同上，但更必要 —— 道具卡今天**根本没有获取途径**（百货公司要到 P3d），
-        // 没有这条就拍不到一张有牌的手牌面板。只发一次，见 `hand::dev_deal_sample`。
+        // `NM_HAND=1`：开局即把手牌浮层打开并发五种形状的样例卡。道具卡的正经来源是百货
+        // 柜台（P3d②），而「踩到哪一格」与「点券够不够」都不由截图脚本控制 —— 这个旋钮
+        // 一次拍齐五种按钮排。只发一次，见 `hand::dev_deal_sample`。
         if std::env::var_os("NM_HAND").is_some() {
             app.add_systems(
                 Update,
                 hand::dev_deal_sample.run_if(resource_exists::<ActiveBoard>),
+            );
+        }
+        // `NM_SHOP=1`：百货柜台的非鼠标入口。这块面板的正经入口是**踩到那一格**，
+        // 而那一掷由骰子说了算；它还要货架与点券两样前提，所以比 `NM_DECISION` 多一段
+        // （见 `dialog::dev_open_shop`）。
+        if std::env::var_os("NM_SHOP").is_some() {
+            app.add_systems(
+                Update,
+                dialog::dev_open_shop.run_if(resource_exists::<ActiveBoard>),
             );
         }
         // `NM_DAY=<tick>`：把日历钉在第 n 天。P2④ 之后「今天休不休市」是面板上十二颗按钮
@@ -168,6 +179,13 @@ pub enum UiAction {
         card: CardId,
         aim: Option<CardAim>,
     },
+    /// 在百货柜台买或卖一张卡（P3d②）。按钮上写的数额只是给玩家看的（「买 30」），
+    /// 实际扣/付多少仍由 `shop::shop_op_system` 从卡面算 —— 与 [`UiAction::BankOp`] 同一条：
+    /// 请求带意图，账由规则层算。
+    ShopOp {
+        side: TradeSide,
+        card: CardId,
+    },
 }
 
 /// 存在即禁用：着色变灰，且点击不派发。对应 Godot 的 `button.disabled = true`。
@@ -227,6 +245,16 @@ pub(crate) fn can_play(phase: TurnPhase, paused: &Paused, pending: &PendingDecis
 pub(crate) fn counter_of(pending: &PendingDecision) -> Option<Entity> {
     match pending.active() {
         Some((player, Pending::BankTeller)) => Some(player),
+        _ => None,
+    }
+}
+
+/// 百货柜台此刻开着的话，是关于谁的（P3d②）。与 [`counter_of`] 分开两个函数而不是
+/// 合成一个「任何窗口」：两种窗口的**资格**不同 —— 银行还有一张路过就发的 ATM 卡，
+/// 百货只有踩上去那一刻。并成一个函数，第一条被放宽的就是那条不该放宽的。
+pub(crate) fn shop_customer(pending: &PendingDecision) -> Option<Entity> {
+    match pending.active() {
+        Some((player, Pending::Shop)) => Some(player),
         _ => None,
     }
 }
@@ -537,6 +565,7 @@ struct Sends<'w> {
     ops: MessageWriter<'w, BankOpRequested>,
     trades: MessageWriter<'w, StockTradeRequested>,
     cards: MessageWriter<'w, PlayCardRequested>,
+    shops: MessageWriter<'w, ShopOpRequested>,
     exit: MessageWriter<'w, AppExit>,
 }
 
@@ -653,6 +682,23 @@ fn dispatch_ui_actions(
                     player,
                     card: *card,
                     aim: *aim,
+                });
+            }
+            // 百货买卖：主语是**站在柜台前的那个人**，不是「当前回合玩家」也不是按钮里带的谁。
+            // 柜台既然开着，回合就停在 `WaitDecision`，所以这一支不必再问阶段；
+            // 而「这一笔办不办得动」（有没有货、点券够不够）由面板灰按钮 + 规则层那张表判，
+            // 这里只挡窗口 —— 与 `can_bank_op` 同一条分工。
+            UiAction::ShopOp { side, card } => {
+                if gate.paused.0 {
+                    continue;
+                }
+                let Some(player) = shop_customer(&gate.pending) else {
+                    continue;
+                };
+                sends.shops.write(ShopOpRequested {
+                    player,
+                    side: *side,
+                    card: *card,
                 });
             }
         }
@@ -784,6 +830,7 @@ mod tests {
         ops: Vec<(Entity, BankOp, i64)>,
         trades: Vec<(Entity, String, TradeSide, u32)>,
         plays: Vec<(Entity, CardId, Option<CardAim>)>,
+        shops: Vec<(Entity, TradeSide, CardId)>,
     }
 
     fn collect(
@@ -793,6 +840,7 @@ mod tests {
         mut ops: MessageReader<BankOpRequested>,
         mut trades: MessageReader<StockTradeRequested>,
         mut plays: MessageReader<PlayCardRequested>,
+        mut shops: MessageReader<ShopOpRequested>,
     ) {
         seen.rolls.extend(rolls.read().map(|r| r.player));
         seen.answers
@@ -806,11 +854,13 @@ mod tests {
         );
         seen.plays
             .extend(plays.read().map(|p| (p.player, p.card, p.aim)));
+        seen.shops
+            .extend(shops.read().map(|s| (s.player, s.side, s.card)));
     }
 
     /// 一套只装配到「能跑 UI 派发」的对局骨架：两名玩家、一颗掷骰按钮（文字是它的子节点）、
     /// 一颗决策按钮、一颗灰掉的按钮、一层没有动作的遮罩，外加详情卡、暂停、
-    /// B5b 的银行操作与股票买卖、P3b 的出牌，与三个浮层开关各一颗。
+    /// B5b 的银行操作与股票买卖、P3b 的出牌、P3d② 的百货买卖，与三个浮层开关各一颗。
     struct Harness {
         app: App,
         /// `TurnOrder` 的当前玩家
@@ -827,6 +877,8 @@ mod tests {
         buy: Entity,
         frame: Entity,
         insulate: Entity,
+        /// 百货柜台上的一颗「买」按钮（P3d②）
+        shop_buy: Entity,
         toggle_atm: Entity,
         toggle_stock: Entity,
         toggle_hand: Entity,
@@ -845,6 +897,7 @@ mod tests {
                 .add_message::<BankOpRequested>()
                 .add_message::<StockTradeRequested>()
                 .add_message::<PlayCardRequested>()
+                .add_message::<ShopOpRequested>()
                 .add_message::<AppExit>()
                 .init_resource::<Seen>()
                 .init_resource::<tile_info::SelectedTile>()
@@ -908,6 +961,14 @@ mod tests {
                     aim: None,
                 })
                 .id();
+            // 百货那颗「买 30」：主语不写在按钮里，由 `PendingDecision` 给（同 ATM）
+            let shop_buy = app
+                .world_mut()
+                .spawn(UiAction::ShopOp {
+                    side: TradeSide::Buy,
+                    card: CardId(0),
+                })
+                .id();
             let toggle_atm = app.world_mut().spawn(UiAction::ToggleAtm).id();
             let toggle_stock = app.world_mut().spawn(UiAction::ToggleStock).id();
             let toggle_hand = app.world_mut().spawn(UiAction::ToggleHand).id();
@@ -928,6 +989,7 @@ mod tests {
                 buy,
                 frame,
                 insulate,
+                shop_buy,
                 toggle_atm,
                 toggle_stock,
                 toggle_hand,
@@ -1203,6 +1265,51 @@ mod tests {
         assert!(h.seen().plays.is_empty(), "暂停时不该放行出牌");
     }
 
+    /// 百货的买卖只认「站在柜台前的那个人」：主语取自 `PendingDecision`，与 ATM 同形 ——
+    /// 柜台开着的人可能不是当前回合玩家（同帧交接那一瞬），所以按钮不带句柄更安全。
+    #[test]
+    fn a_shop_op_names_the_counter_customer_and_needs_a_counter() {
+        let mut h = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        h.click(h.shop_buy);
+        assert!(h.seen().shops.is_empty(), "没有柜台也派发了买卖请求");
+
+        let customer = h.player;
+        h.offer(customer, Pending::Shop);
+        h.click(h.shop_buy);
+        assert_eq!(
+            h.seen().shops,
+            vec![(customer, TradeSide::Buy, CardId(0))],
+            "柜台开着的那位才是这笔买卖的主语"
+        );
+
+        // 暂停挡住一切：柜台虽然还挂着，人先把游戏按停了就不该再花钱
+        let mut held = Harness::new(TurnPhase::WaitDecision, true, PendingDecision::default());
+        let shopper = held.player;
+        held.offer(shopper, Pending::Shop);
+        held.click(held.shop_buy);
+        assert!(held.seen().shops.is_empty(), "暂停时还派发了买卖请求");
+    }
+
+    /// 银行柜台与百货柜台是**两个**窗口，所以 `counter_of` 与 `shop_customer` 不能合成
+    /// 一个「任何窗口」：并起来的第一条被放宽的就是「站在银行里能买百货」这种不该存在的口子。
+    #[test]
+    fn the_two_counters_do_not_open_each_other() {
+        let mut h = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let banker = h.player;
+        h.set_atm(banker);
+        h.offer(banker, Pending::BankTeller);
+        h.click(h.shop_buy);
+        assert!(h.seen().shops.is_empty(), "在银行柜台里就能买百货？");
+
+        // 反过来同样：百货柜台开着时银行那八颗一律不亮（`can_bank_op` 的 `other_modal_up`）
+        let mut other = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let shopper = other.player;
+        other.set_atm(shopper);
+        other.offer(shopper, Pending::Shop);
+        other.click(other.deposit);
+        assert!(other.seen().ops.is_empty(), "百货柜台里还能办银行存款");
+    }
+
     /// 窗口判据与掷骰**同一条**，所以要一致到边界上每一个组合都一样 —— 这不是重复
     /// `can_roll` 的测试，而是钉住「出牌窗口 = 掷骰窗口」这个断言本身（P3c 给地块卡
     /// 开新时机时，会有一条不同的组合在这里红出来，那就是要重新拍板的时候）。
@@ -1267,6 +1374,9 @@ mod tests {
             .add_message::<BankOpRequested>()
             .add_message::<StockTradeRequested>()
             .add_message::<PlayCardRequested>()
+            // P3d②：派发多了百货那一个出口。漏一条不是「那个按钮不灵」而是
+            // `dispatch_ui_actions` **整条不跑**（参数校验失败，症状是所有按钮都死）
+            .add_message::<ShopOpRequested>()
             .add_message::<AppExit>()
             // hover_feedback 读的两条 picking 消息，真实应用由 picking 后端注册
             .add_message::<PointerOver>()

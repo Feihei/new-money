@@ -31,6 +31,7 @@ pub mod property;
 pub mod rng;
 pub mod rules;
 pub mod settle;
+pub mod shop;
 pub mod status;
 pub mod stock;
 pub mod turn;
@@ -60,7 +61,7 @@ pub mod prelude {
         CardId, Deck, DeckOrder, Shelf, apply_card, card_of, order_of, settle_card_landing,
     };
     pub use crate::economy::LandView;
-    pub use crate::hand::{CardAim, Hand, PlayWindow, deal_to, play_card_system};
+    pub use crate::hand::{CardAim, Hand, PlayWindow, card_notice, deal_to, play_card_system};
     pub use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
     pub use crate::landing::{
         Landed, Landing, LandingDomain, Pending, PendingDecision, classify_landing_system,
@@ -76,8 +77,9 @@ pub mod prelude {
         CardNotice, CardPlayed, CashChanged, ChargeWaived, Decision, DecisionChosen, DiceRolled,
         EffectOutcome, GameOver, JailSkipped, LandBought, LandUpgraded, PlayCardRequested,
         PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased, PlayerTeleported,
-        PointsChanged, RentDue, RequestRoll, StockPriceChanged, StockTradeRequested, StockTraded,
-        StockVisited, TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkStarted,
+        PointsChanged, RentDue, RequestRoll, ShopOpDone, ShopOpRequested, StockPriceChanged,
+        StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
+        TurnStarted, UpgradeOffered, WalkStarted,
     };
     pub use crate::player::{
         BankBalance, Bankrupt, GameSetup, JailSentence, PLAYER_COLORS, PlayerColor, PlayerId,
@@ -88,6 +90,9 @@ pub mod prelude {
     pub use crate::rng::{DIE_FACES, GameSeed, Rng};
     pub use crate::rules::GameRules;
     pub use crate::settle::{Books, InsufficientFunds};
+    pub use crate::shop::{
+        ShopDeny, ShopStock, buyback, restock, settle_shop_landing, shop_op_allowed, shop_op_system,
+    };
     pub use crate::status::{LandStatus, Timed, expire_land_status_system};
     pub use crate::stock::{PriceHistory, StockDef, StockHoldings, StockId, StockPrice, StockSet};
     pub use crate::turn::{GameSession, Paused, TurnOrder, TurnPhase, not_paused};
@@ -102,11 +107,12 @@ use prelude::{
     CouponBoxes, DecisionChosen, DiceRolled, GameOver, GameRules, GameSeed, GameSetup, JailSkipped,
     JsonAssetLoader, LandBought, LandUpgraded, Landing, MarketClock, Paused, PendingDecision,
     PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased,
-    PlayerTeleported, PointsChanged, RentDue, RequestRoll, StockPriceChanged, StockSet,
-    StockTradeRequested, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted,
-    UpgradeOffered, WalkClock, WalkStarted, advance_walk_clock_system, bank_op_system,
-    begin_game_system, decision_system, expire_land_status_system, grant_atm_access_system,
-    market_tick_on_turn_end_system, play_card_system, trade_request_system, walk_step_system,
+    PlayerTeleported, PointsChanged, RentDue, RequestRoll, ShopOpDone, ShopOpRequested, ShopStock,
+    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
+    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkStarted,
+    advance_walk_clock_system, bank_op_system, begin_game_system, decision_system,
+    expire_land_status_system, grant_atm_access_system, market_tick_on_turn_end_system,
+    play_card_system, shop_op_system, trade_request_system, walk_step_system,
 };
 use turn::{
     begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system,
@@ -151,6 +157,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<AtmAccess>()
             .init_resource::<CouponBoxes>()
             .init_resource::<Corrections>()
+            .init_resource::<ShopStock>()
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
             .add_message::<RequestRoll>()
@@ -190,6 +197,10 @@ impl Plugin for CoreGamePlugin {
             .add_message::<PlayCardRequested>()
             .add_message::<CardPlayed>()
             .add_message::<CardGained>()
+            // ===== 百货公司（P3d②）=====
+            // 漏一条就是 `Books` 那批参数整局不跑（症状见 ARCHITECTURE §六 的消息表注）
+            .add_message::<ShopOpRequested>()
+            .add_message::<ShopOpDone>()
             .init_state::<TurnPhase>()
             // 装配世界：初始态的 OnEnter 不会触发，所以用 in_state(Boot)
             .add_systems(
@@ -233,9 +244,18 @@ impl Plugin for CoreGamePlugin {
             .add_systems(Update, grant_atm_access_system)
             .add_systems(
                 Update,
-                bank_op_system
-                    .run_if(resource_exists::<ActiveBoard>)
-                    .run_if(not_paused),
+                (
+                    bank_op_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
+                    // 与银行同一条窗口（都带 `Books`，里面是 `&mut Points`），所以显式
+                    // `chain` 而不是并排放进一个元组：两条并行会直接撞成调度期借用冲突。
+                    // 谁先办都不改结果 —— 它们读的是同一个「此刻站在哪个柜台前」。
+                    shop_op_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
+                )
+                    .chain(),
             )
             // 时钟在 First 推进、Update 消费：同帧内先累计、后定步
             .add_systems(
@@ -244,7 +264,7 @@ impl Plugin for CoreGamePlugin {
                     .run_if(in_state(TurnPhase::Walking))
                     .run_if(not_paused),
             )
-            // 落格流水线：解释一次格子 → 五个域各自结算 → 由 pending 决定去哪一阶段。
+            // 落格流水线：解释一次格子 → 六个域各自结算 → 由 pending 决定去哪一阶段。
             // 顺序写成显式 chain：域的先后决定同帧消息的次序，靠隐式冲突排序说出来不算数。
             // 哪个格归哪个域，只在 `landing::domain_of` 那张穷尽表里说一次。
             .add_systems(
@@ -256,6 +276,7 @@ impl Plugin for CoreGamePlugin {
                     market::settle_market_landing,
                     deck::settle_card_landing,
                     coupon::settle_coupon_landing,
+                    shop::settle_shop_landing,
                     landing::close_landing_system,
                 )
                     .chain(),

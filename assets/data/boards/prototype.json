@@ -17,7 +17,8 @@
 	{ "id": 8,  "col": 3, "row": 4, "type": "chance",   "name": "机会",     "data": {} },
 	{ "id": 9,  "col": 2, "row": 4, "type": "property", "name": "王府井",   "land_id": 4, "data": {} },
 	{ "id": 10, "col": 1, "row": 3, "type": "coupon",   "name": "点券箱",   "data": { "coupon": 30 } },
-	{ "id": 11, "col": 1, "row": 2, "type": "property", "name": "西单",     "land_id": 5, "data": {} }
+	{ "id": 11, "col": 1, "row": 2, "type": "property", "name": "西单",     "land_id": 5, "data": {} },
+	{ "id": 12, "col": 0, "row": 1, "type": "shop",     "name": "百货公司", "data": {} }
   ],
   "lands": [
 	{ "id": 0, "col": 2, "row": 0, "size": 1, "name": "南京路",     "owner": null, "level": 0, "group": "brown",  "land_type": "residential", "price": 1500, "rent": [60,180,450,900,1500,2500],      "upgrade_cost": 800 },

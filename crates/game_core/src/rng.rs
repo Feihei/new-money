@@ -5,10 +5,14 @@
 //! 假种子函数（缺陷 #6）。这里整局共用一个种子，于是「同种子 → 同对局」变成一条
 //! 可以断言的性质 —— 回放与失败复现都从这里长出来。
 //!
-//! **同一个种子分成三条互不相干的子流**（骰子 / 牌堆 / 行情）：抽一张卡不该让下一手
+//! **同一个种子分成四条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货）：抽一张卡不该让下一手
 //! 骰点变样。若共用一条流，经济系统每多一次取随机数就会把 `turn_flow` 里
 //! 「对局骰点 == 独立掷出的骰点」那批回归网整片打翻，回放也对不齐；分流之后
 //! 每域的随机性各自稳定，加内容不互相扰动。
+//!
+//! 百货那条流是 P3d② 加的，理由与牌堆分流同一条：**「这一局进过几次店」不该改变下一张
+//! 机会牌是谁**。把它并进牌堆流也能跑，只是换货会悄悄挪动抽卡顺序，而那正是分流要挡掉的
+//! 那种耦合。
 
 use std::ops::RangeInclusive;
 
@@ -19,9 +23,10 @@ use rand_chacha::ChaCha8Rng;
 /// 单颗六面骰（`dice.gd:15`）。大富翁4 规则：无双骰、无双数额外回合。
 pub const DIE_FACES: u32 = 6;
 
-/// 子流的域标签：三条流要取到互不相关的密钥流，高位错开即可。
+/// 子流的域标签：四条流要取到互不相关的密钥流，高位错开即可。
 const CARDS_TAG: u64 = 0xCA4D_5EED_0000_0001;
 const MARKET_TAG: u64 = 0x0A0E_7700_0000_0002;
+const SHOP_TAG: u64 = 0x5B0F_5EED_0000_0003;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +47,7 @@ pub struct Rng {
     dice: ChaCha8Rng,
     cards: ChaCha8Rng,
     market: ChaCha8Rng,
+    shop: ChaCha8Rng,
 }
 
 impl Rng {
@@ -52,6 +58,7 @@ impl Rng {
             dice: ChaCha8Rng::seed_from_u64(seed),
             cards: ChaCha8Rng::seed_from_u64(seed ^ CARDS_TAG),
             market: ChaCha8Rng::seed_from_u64(seed ^ MARKET_TAG),
+            shop: ChaCha8Rng::seed_from_u64(seed ^ SHOP_TAG),
         }
     }
 
@@ -63,6 +70,12 @@ impl Rng {
     /// 闭区间取随机整数（牌堆流）：洗牌用的 `0..=i`、将来 AI 的随机化都走这条。
     pub fn pick(&mut self, span: RangeInclusive<u32>) -> u32 {
         self.cards.random_range(span)
+    }
+
+    /// 闭区间取随机整数（百货流）：每次进店的货架抽签（`shop::restock`）。
+    /// 与 [`Self::pick`] 分成两条是刻意的：买几次货不该改变下一张机会牌是谁。
+    pub fn pick_shop(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.shop.random_range(span)
     }
 
     /// 闭区间取随机浮点（行情流）：股价每 tick 的噪声（`stock_market.gd:73`）。
@@ -104,12 +117,13 @@ mod tests {
     }
 
     /// 分流的意义：别的域取多少随机数，都不该挪动骰子流。
-    /// 加了卡牌/行情之后，「对局第一手 == `Rng::new(seed).roll_die()`」这类断言仍然成立。
+    /// 加了卡牌/行情/百货之后，「对局第一手 == `Rng::new(seed).roll_die()`」这类断言仍然成立。
     #[test]
     fn other_streams_do_not_shift_the_dice() {
         let mut busy = Rng::new(99);
         for _ in 0..50 {
             busy.pick(0..=6);
+            busy.pick_shop(0..=6);
             busy.range_f32(-0.5..=0.5);
         }
         let mut fresh = Rng::new(99);
@@ -145,6 +159,46 @@ mod tests {
         let mut r = Rng::new(11);
         let via_cards: Vec<u32> = (0..30).map(|_| r.pick(1..=DIE_FACES)).collect();
         assert_ne!(via_cards, draws(11, 30), "牌堆流与骰子流取了同一个域");
+    }
+
+    /// P3d② 分第四条流的**全部理由**：进几趟店、换几次货架，都不该改变下一张机会牌是谁。
+    /// 这条一旦红了，说明有人把货架抽签并回了牌堆流 —— 症状是「买过货的那局，抽卡顺序变了」。
+    #[test]
+    fn a_shop_restock_does_not_shift_the_deck() {
+        let after_shopping = || {
+            let mut r = Rng::new(3);
+            for _ in 0..20 {
+                r.pick_shop(0..=4);
+            }
+            (0..10).map(|_| r.pick(0..=99)).collect::<Vec<_>>()
+        };
+        let untouched = || {
+            let mut r = Rng::new(3);
+            (0..10).map(|_| r.pick(0..=99)).collect::<Vec<_>>()
+        };
+        assert_eq!(after_shopping(), untouched(), "百货流污染了牌堆流");
+    }
+
+    #[test]
+    fn shop_stream_is_not_the_card_stream() {
+        let draw = |seed: u64, shop: bool| {
+            let mut r = Rng::new(seed);
+            (0..30)
+                .map(|_| {
+                    if shop {
+                        r.pick_shop(0..=99)
+                    } else {
+                        r.pick(0..=99)
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(
+            draw(11, true),
+            draw(11, false),
+            "百货流与牌堆流取了同一个域"
+        );
+        assert_eq!(draw(5, true), draw(5, true), "同种子必须复现同一条货架序列");
     }
 
     #[test]

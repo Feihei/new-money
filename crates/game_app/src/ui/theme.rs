@@ -26,6 +26,9 @@ pub mod col {
     pub const BORDER_STOCK: Color = Color::srgba(0.55, 0.80, 0.65, 0.85);
     /// P3b 新手牌。与 `TITLE_GOLD` 同族但压暗：一块随时开合的浮层不该比标题还抢眼
     pub const BORDER_HAND: Color = Color::srgba(0.80, 0.68, 0.35, 0.85);
+    /// P3d② 百货公司柜台。跟 `palette::tile(TileKind::Shop)` 那一档玫瑰同族：
+    /// 描边与地面的格子颜色对上，玩家才认得出这块面板是关于那一格的
+    pub const BORDER_SHOP: Color = Color::srgba(0.85, 0.55, 0.65, 0.85);
 
     // ===== 文字 =====
     pub const TITLE_GOLD: Color = Color::srgb(1.00, 0.85, 0.30);
@@ -168,4 +171,14 @@ pub mod layout {
     /// 一张卡三行（卡名 / 效果 / 按钮），行间距比金额按钮那行再紧一档：
     /// 15 张牌时整块面板还要留在屏内
     pub const HAND_ROW_GAP: f32 = 6.0;
+
+    // ===== P3d②：百货公司柜台 =====
+    /// 柜台模态：比银行柜台再宽一点 —— 每行是「卡名 + 效果 + 一颗带数额的按钮」三段，
+    /// 460 宽在 14 号字下容得下「涨价卡 整街租金翻倍 5 天」这一句而不换行。
+    /// 偏移比银行再高一点（行数可能更多，底部别压住 HUD）。
+    pub const SHOP_PANEL: [f32; 3] = [460.0, -230.0, -250.0];
+    /// 货架一行的买/卖按钮：比金额按钮小一档，因为一行只有它一颗
+    pub const SHOP_BUTTON: [f32; 2] = [110.0, 34.0];
+    /// 「买 / 卖」两排的标题行与行距
+    pub const SHOP_ROW_GAP: f32 = 6.0;
 }

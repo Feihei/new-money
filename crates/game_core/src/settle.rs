@@ -482,7 +482,7 @@ impl<'w, 's> Books<'w, 's> {
         self.banks.get(player).copied().unwrap_or_default()
     }
 
-    /// 点券的唯一入口（捡点券箱、将来的小游戏得分）。与现金分账：这里只发
+    /// 点券的唯一**收入**入口（捡点券箱、百货卖回、将来的小游戏得分）。与现金分账：这里只发
     /// [`PointsChanged`]，一次都不碰 `Wallet` —— 所以 B3 的现金审计看不见这笔账，
     /// 这正是「永不通兑」在代码里的形状（PLAN §一）。
     ///
@@ -497,6 +497,33 @@ impl<'w, 's> Books<'w, 's> {
             balance: points.0,
         });
         Some(points.0)
+    }
+
+    /// 某人现在有多少点券（百货面板给灰按钮找理由要读它）。查不到按 0 —— 没有点券组件的
+    /// 实体本来就买不了东西，这里不该为它开一条「未知」的分支。
+    pub fn points_of(&self, player: Entity) -> u32 {
+        self.points.get(player).map(|p| p.0).unwrap_or(0)
+    }
+
+    /// 点券的唯一支出入口（百货买卡、P12 保释 300）。与 [`Self::award_points`] 对称：
+    /// 只发 [`PointsChanged`]（`delta` 为负），一次都不碰 `Wallet`。
+    ///
+    /// 余额不足时**一分都不扣**并返回 `false` —— 与 [`Self::debit`] 同一条形状：撤销交易还是
+    /// 宣告破产由调用方显式选，账本不替它决定「扣一半」。
+    pub fn spend_points(&mut self, player: Entity, amount: u32) -> bool {
+        let Ok(mut points) = self.points.get_mut(player) else {
+            return false;
+        };
+        if points.0 < amount {
+            return false;
+        }
+        points.0 -= amount;
+        self.points_changed.write(PointsChanged {
+            player,
+            delta: -(amount as i64),
+            balance: points.0,
+        });
+        true
     }
 
     pub fn holdings_of(&self, player: Entity) -> Vec<(crate::stock::StockId, u32)> {

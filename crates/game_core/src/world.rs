@@ -16,6 +16,7 @@ use crate::market::MarketClock;
 use crate::player::{self, GameSetup};
 use crate::rng::{GameSeed, Rng};
 use crate::rules::GameRules;
+use crate::shop::ShopStock;
 use crate::stock::{PriceHistory, StockId, StockPrice, StockSet};
 use crate::turn::{GameSession, TurnOrder, TurnPhase};
 
@@ -154,6 +155,9 @@ pub fn begin_game_system(
     // 点券箱的「谁被取走过」是**这一局**的事实：上一局捡空的格子必须在新局重新长出来
     // （B5 验收那批跨局残留缺陷的同一族，见 ARCHITECTURE §6.1 坑 22/25）
     commands.insert_resource(CouponBoxes::default());
+    // 货架同理：上一局被买空的货位不属于这一局。它本来每次进店都重抽，所以漏掉这一条
+    // **不会每次都错** —— 只在「新局第一次踩百货之前」那几帧里，面板能读到上一局剩下的货
+    commands.insert_resource(ShopStock::default());
     next.set(TurnPhase::TurnStart);
 }
 

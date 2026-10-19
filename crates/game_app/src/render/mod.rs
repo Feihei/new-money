@@ -155,6 +155,9 @@ pub mod palette {
             // 点券箱没有 Godot 对照（`TYPE_COLORS` 里没这一格）， mint 是与青绿路面
             // （transport）、紫（stock）、黄（start/lottery）都不撞的那一档
             TileKind::Coupon => Color::srgb(0.35, 0.9, 0.75),
+            // 百货公司同样没有 Godot 对照。玫瑰一档：与 stock 的紫红差在蓝分量上，
+            // 与 chance 的橙差在绿分量上，两个都是「暖色但不同族」，扫一眼分得开
+            TileKind::Shop => Color::srgb(0.9, 0.55, 0.65),
         }
     }
 

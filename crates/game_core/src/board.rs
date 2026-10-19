@@ -26,6 +26,9 @@ pub enum TileKind {
     Transport,
     /// 点券箱：一次性拾取、按回合冷却刷新（`.agents/PLAN.md` §五，实现见 `coupon.rs`）。
     Coupon,
+    /// 百货公司：踩上去开柜台窗口，点券买卡 / 卖回打 9 折（PLAN §三「百货公司」行，
+    /// 实现见 `shop.rs`）。路过不给任何资格 —— 这一格的玩法就是「停下来逛」。
+    Shop,
 }
 
 impl TileKind {
@@ -464,7 +467,7 @@ mod tests {
     fn prototype_parses_and_validates() {
         let b = board();
         assert_eq!(b.board_name, "prototype");
-        assert_eq!(b.loop_len(), 12);
+        assert_eq!(b.loop_len(), 13);
         assert_eq!(b.lands.len(), 6);
         assert!(
             b.validate().is_ok(),
@@ -476,21 +479,26 @@ mod tests {
     #[test]
     fn ring_wraps_both_directions() {
         let b = board();
-        assert_eq!(b.destination(11, 1), 0);
-        assert_eq!(b.destination(0, -1), 11);
-        assert_eq!(b.destination(5, 12), 5);
-        assert_eq!(b.tile(-1).unwrap().id, 11);
-        assert_eq!(b.tile(12).unwrap().id, 0);
+        // 12 号（百货公司）是 P3d② 追加在环尾的一格：它不改任何既有格的编号，
+        // 只把「回绕」那一跳从 11→0 挪成 12→0。
+        assert_eq!(b.destination(11, 1), 12);
+        assert_eq!(b.destination(12, 1), 0, "环尾下一步该回到起点");
+        assert_eq!(b.destination(0, -1), 12);
+        assert_eq!(b.destination(5, 13), 5);
+        assert_eq!(b.tile(-1).unwrap().id, 12);
+        assert_eq!(b.tile(13).unwrap().id, 0);
         // wrapped() 与 tile() 必须同一套取模规则，否则棋子位置与看到的格子会错位
-        assert_eq!(b.wrapped(-1), TileIndex(11));
-        assert_eq!(b.wrapped(12), TileIndex(0));
+        assert_eq!(b.wrapped(-1), TileIndex(12));
+        assert_eq!(b.wrapped(13), TileIndex(0));
     }
 
     #[test]
     fn walk_path_wraps_past_the_start_tile() {
         let b = board();
-        // 从 11 号走 2 步：先踏过 0 号起点再落到 1 号 —— 「绕回起点经过」
-        assert_eq!(b.walk_path(11, 2), vec![TileIndex(0), TileIndex(1)]);
+        // 从 12 号走 2 步：先踏过 0 号起点再落到 1 号 —— 「绕回起点经过」
+        assert_eq!(b.walk_path(12, 2), vec![TileIndex(0), TileIndex(1)]);
+        // 从倒数第二格走 2 步：先经过百货格再踏过起点，回绕在第二步上
+        assert_eq!(b.walk_path(11, 2), vec![TileIndex(12), TileIndex(0)]);
         assert_eq!(b.walk_path(0, 1), vec![TileIndex(1)]);
         assert!(b.walk_path(3, 0).is_empty(), "0 步不该有路径");
         assert!(b.walk_path(3, -1).is_empty(), "负步数留给转向卡，当前为空");
@@ -508,8 +516,8 @@ mod tests {
             vec![TileIndex(2), TileIndex(3), TileIndex(4)]
         );
         assert_eq!(b.walk_path(2, 1), vec![TileIndex(3)]);
-        // 整整一圈也恰好 12 步：分支不是环的一部分
-        assert_eq!(b.walk_path(2, 12).len(), 12);
+        // 整整一圈也恰好 13 步：分支不是环的一部分
+        assert_eq!(b.walk_path(2, 13).len(), 13);
     }
 
     #[test]
@@ -529,14 +537,35 @@ mod tests {
     }
 
     #[test]
-    fn diagonal_segments_count_is_two() {
+    fn diagonal_segments_count_is_three() {
         // 设计意图（ADR-001）：斜向街道要能渲染成对角路面
         let b = board();
         let diag: Vec<u32> = (0..b.loop_len())
             .filter(|i| b.is_diagonal_step(*i as i64))
             .map(|i| b.tiles[i as usize].id)
             .collect();
-        assert_eq!(diag, vec![2, 9], "非对角段被误判: {diag:?}");
+        // 2→3（汉口路→命运）与 9→10（王府井→点券箱）是原盘就有的两段；
+        // 11→12 是 P3d② 追加百货格时新长的第三段 —— 那一格贴在左上角 (0,1)，
+        // 从西单 (1,2) 只能斜着过去。对角段只被「报告」不被禁止（validate 允许 Δ≤1），
+        // 所以这一串数的意义是：路面渲染与斜段特性仍然有真东西可画。
+        assert_eq!(diag, vec![2, 9, 11], "非对角段被误判: {diag:?}");
+    }
+
+    /// 百货公司在演示盘上真有一格，而且踩得到（P3d② 验收第一条）。
+    /// 与点券格同一条理由：机制阶段做出来的格子如果盘上没有载体，测试全绿也等于没演示过。
+    #[test]
+    fn prototype_carries_a_shop_the_player_can_step_on() {
+        let b = board();
+        let shops: Vec<u32> = b
+            .tiles
+            .iter()
+            .filter(|t| t.kind == TileKind::Shop)
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(shops, vec![12], "演示盘该恰好一格百货");
+        // 它关于一块地吗？不该 —— 百货是事件格，`validate` 也会替这条把关
+        assert_eq!(b.tiles[12].land_id, None);
+        assert_eq!(b.tiles[12].name, "百货公司");
     }
 
     #[test]

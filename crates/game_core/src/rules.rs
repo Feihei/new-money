@@ -54,6 +54,14 @@ pub struct GameRules {
     /// 满了不是「不让买」而是**挤掉最前面那张**，所以这条由 [`crate::hand::Hand::gain`] 读，
     /// 那里才看得见「被挤掉的是哪张」这条流水要写什么。
     pub hand_limit: u32,
+    /// 百货公司一次摆几个货位（PLAN §三「每次进入货架不同」）。
+    /// 不是「把整副货架摆出来」：货位少，「这一趟买哪一张」才是个选择，而 P5 的道具池一长大，
+    /// 全摆出来的面板就成了一页清单。抽签不放回，所以这三个货位互不重复。
+    pub shop_slots: u32,
+    /// 百货回收折扣的**分子**（PLAN §三「回收打 9 折」→ 90）。
+    /// 写成整数分子而不是 `0.9: f32`：点券是整数账，`cost × 90 / 100` 的向下取整是规则的一部分
+    /// （20 点券的卡卖回 18，不是 18.0 再想办法），用浮点乘就变成两次舍入。
+    pub shop_buyback: u32,
 }
 
 impl Default for GameRules {
@@ -75,6 +83,8 @@ impl Default for GameRules {
             max_price_history: 50,
             coupon_refresh_turns: 6,
             hand_limit: 15,
+            shop_slots: 3,
+            shop_buyback: 90,
         }
     }
 }

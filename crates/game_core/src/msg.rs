@@ -309,11 +309,39 @@ pub struct CardPlayed {
 
 /// 一张卡进了手牌。`pushed_out` 是被上限挤掉的那张（PLAN §三「满了替换最前面那张」）：
 /// 玩家买了卡却没拿到，唯一能自证的形状就是让他看见**哪张被挤掉了**。
+///
+/// 第一个生产者就是百货公司（P3d②）：`shop::shop_op_system` 买入那一笔走的是
+/// [`crate::hand::deal_to`]，上限与挤档规则本来就在它里面。
 #[derive(Message, Debug, Clone, PartialEq)]
 pub struct CardGained {
     pub player: Entity,
     pub card: CardNotice,
     pub pushed_out: Option<CardNotice>,
+}
+
+/// 请求在百货公司买或卖一张道具卡。`side` 借用股票那对 [`TradeSide`]：买卖方向是同一个概念，
+/// 再开一个 enum 就是第二份真相。
+///
+/// 与 [`BankOpRequested`] 同一条形状 —— 一笔交易一个请求，主语由 `PendingDecision` 定，
+/// 按钮不携带玩家句柄。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShopOpRequested {
+    pub player: Entity,
+    pub side: TradeSide,
+    pub card: CardId,
+}
+
+/// 已经办成的百货交易。`points` 是**实际**动过的点券：买入＝卡面价，卖出＝回收价（9 折）。
+/// 被拒的交易不发这条（同 [`BankOpDone`]）—— 面板该把办不动的那颗按钮亮成灰的。
+///
+/// 买入时这里还**没有**钱动过的现金流水：点券与现金两套账（PLAN §一），这条只走
+/// [`PointsChanged`]。卡进手牌那半由 [`CardGained`] 说，两件一起才是一次完整的成交。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct ShopOpDone {
+    pub player: Entity,
+    pub side: TradeSide,
+    pub card: CardNotice,
+    pub points: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]

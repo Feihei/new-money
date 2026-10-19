@@ -60,23 +60,24 @@ fn walking_wraps_past_the_start_tile() {
         seed_with_first_roll(2),
     );
     let p0 = boot_to_wait_roll(&mut app);
-    place(&mut app, p0, 11);
+    // 站在环尾那一格（12 百货公司，P3d② 追加在 11 西单之后）：走 2 步才会经过起点回绕
+    place(&mut app, p0, 12);
 
     play_turns(&mut app, 1);
 
     let ev = events(&app);
     assert!(
-        ev.contains(&"Roll(P0,2,11->1)".to_string())
-            && ev.contains(&"Walk(P0,2,11->1)".to_string()),
+        ev.contains(&"Roll(P0,2,12->1)".to_string())
+            && ev.contains(&"Walk(P0,2,12->1)".to_string()),
         "掷骰与行走意图都该带上回绕后的终点：{ev:?}"
     );
     assert_eq!(
         steps_of(&ev, "P0"),
         vec![0, 1],
-        "从 11 号走 2 步：先踏过 0 号起点，再落到 1 号 —— 「绕回起点经过」：{ev:?}"
+        "从 12 号走 2 步：先踏过 0 号起点，再落到 1 号 —— 「绕回起点经过」：{ev:?}"
     );
     assert!(
-        ev.contains(&"Arrive(P0,11->1)".to_string()),
+        ev.contains(&"Arrive(P0,12->1)".to_string()),
         "到站消息要带完整行程：{ev:?}"
     );
     assert_eq!(tile_of(&app, p0), 1);

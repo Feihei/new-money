@@ -7,12 +7,13 @@
 //!           ─→ bank      │
 //!           ─→ market    ├─→ close（有 pending 就等回答，没有就收摊）
 //!           ─→ card      │
-//!           ─→ coupon ───┘
+//!           ─→ coupon ───┤
+//!           ─→ shop ─────┘
 //! ```
 //!
 //! 三个刻意的结构约束：
 //! - **「踩到哪格是什么」只解释一次**（[`classify_landing_system`] → [`Landing`]），
-//!   **「这格归谁结算」也只映射一次**（[`domain_of`]）。五个域的 system 各读各的，
+//!   **「这格归谁结算」也只映射一次**（[`domain_of`]）。六个域的 system 各读各的，
 //!   不会出现五份「这格是不是地产」的理解。
 //! - **域的结算 system 不碰 `NextState`**：只有 [`close_landing_system`] 有权决定
 //!   下一步去哪，判据是「有没有人还挂着待决事项」。表现层永远推不动回合这条红线
@@ -60,6 +61,8 @@ pub enum LandingDomain {
     Card(CardKind),
     /// 点券箱一次性拾取（`coupon::settle_coupon_landing`）
     Coupon,
+    /// 百货公司柜台：点券买卡 / 卖回（`shop::settle_shop_landing`）。
+    Shop,
     /// 按设计就是什么都不做：路面只是路面，起点刻意不发薪水（PLAN §一）。
     Nothing,
     /// 玩法已在 PLAN 登记、但结算还没到位的格。踩上去 `warn!`，别当成「没有这个格」。
@@ -78,6 +81,7 @@ pub const fn domain_of(kind: TileKind) -> LandingDomain {
         TileKind::Chance => D::Card(CardKind::Chance),
         TileKind::Fate => D::Card(CardKind::Fate),
         TileKind::Coupon => D::Coupon,
+        TileKind::Shop => D::Shop,
         // 起点「什么都不发」是拍板过的规则（4 代没有过起点领薪水），不是没做完
         TileKind::Start | TileKind::Road => D::Nothing,
         // ↓ 待办清单。监狱/医院要等 P4 的 `Detention`、神明等 P6、乐透等 P8、
@@ -144,6 +148,13 @@ pub enum Pending {
     /// 与另外四种不同，它**不是一个报价**，而是一个窗口 —— 钱的操作走
     /// [`crate::msg::BankOpRequested`] 逐笔进来，本条待决事项只负责「回合先别结束」。
     BankTeller,
+    /// 踩到百货格，柜台开着：买一张、卖回一张（9 折）随便办，直到玩家按「离开」。
+    ///
+    /// 与 `BankTeller` 是**同一类**（一个窗口而不是一个报价，交易走
+    /// [`crate::msg::ShopOpRequested`] 逐笔进来），但不是同一条资格：银行路过就发 ATM 卡，
+    /// 百货没有「路过」这一档 —— 逛店必须停下来。所以两者各占一个变体而不是
+    /// `Pending::Counter { which }`：分开写，将来「柜台能办什么」那张表才不会被并错。
+    Shop,
 }
 
 /// 系统状态：现在正等谁的什么回答。
@@ -236,8 +247,10 @@ pub fn decision_system(
         // 柜台：只有「办完」算回答。四种钱的操作走 `BankOpRequested` 逐笔进来办，
         // 这里若也认 `Accept`，就成了一条消息既办业务又关窗口 —— 两个语义挤一个动作，
         // 而面板上根本没有「接受」这个按钮可对上。
-        (Pending::BankTeller, Decision::Acknowledge) => {}
-        (Pending::BankTeller, Decision::Accept | Decision::Decline) => return,
+        // 百货柜台同一条理由（`ShopOpRequested` 逐笔办买卖），所以并在一起：
+        // 两个窗口对 `Accept`/`Decline` 一律不认，谁新增第三种窗口都要来这一格表态。
+        (Pending::BankTeller | Pending::Shop, Decision::Acknowledge) => {}
+        (Pending::BankTeller | Pending::Shop, Decision::Accept | Decision::Decline) => return,
         // 收据与卡面没有「可拒绝」的选项：钱已经扣了、效果已经结算了。
         // 任何回答都算「我看完了」—— 严格拒绝只会把 UI 的一次疏忽变成挂死。
         (Pending::RentNotice(_) | Pending::Card, _) => {}
@@ -287,7 +300,7 @@ mod tests {
     /// 分派表的全部条目。这张清单与 `domain_of` 一一对着写：新增 `TileKind` 时
     /// `domain_of` 会先编译失败，所以这里唯一可能过期的是「加了格类型没加进清单」——
     /// 下面那条 `每格都有归宿` 的用例把两种过期分开钉住了。
-    const ALL_KINDS: [TileKind; 14] = [
+    const ALL_KINDS: [TileKind; 15] = [
         TileKind::Start,
         TileKind::Property,
         TileKind::Bank,
@@ -302,6 +315,7 @@ mod tests {
         TileKind::Road,
         TileKind::Transport,
         TileKind::Coupon,
+        TileKind::Shop,
     ];
 
     #[test]
@@ -314,6 +328,7 @@ mod tests {
             (TileKind::Chance, D::Card(CardKind::Chance)),
             (TileKind::Fate, D::Card(CardKind::Fate)),
             (TileKind::Coupon, D::Coupon),
+            (TileKind::Shop, D::Shop),
             // 拍板过「什么都不发」的两格：不是待办
             (TileKind::Start, D::Nothing),
             (TileKind::Road, D::Nothing),
@@ -385,6 +400,7 @@ mod tests {
             Pending::RentNotice(LandId(2)),
             Pending::Card,
             Pending::BankTeller,
+            Pending::Shop,
         ] {
             let mut pending = PendingDecision::default();
             pending.offer(e, about);

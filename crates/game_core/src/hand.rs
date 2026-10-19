@@ -236,14 +236,17 @@ pub fn deal_to(
     let pushed_out = hand.gain(card, limit);
     gained.write(CardGained {
         player,
-        card: notice_of(shelf, card),
-        pushed_out: pushed_out.map(|lost| notice_of(shelf, lost)),
+        card: card_notice(shelf, card),
+        pushed_out: pushed_out.map(|lost| card_notice(shelf, lost)),
     });
 }
 
 /// 下标 → 卡面凭据。查不到时给一条写明「数据里没有这张卡」的空卡面，而不是不发流水：
 /// 卡确实进过手牌，只是名字读不出来 —— 那种数据错误要在流水里看得见。
-fn notice_of(shelf: &Shelf<'_>, id: CardId) -> CardNotice {
+///
+/// `pub` 是给百货公司用的（`shop::shop_op_done` 卖出那笔也要写一条 `CardNotice`）：
+/// 「下标怎么翻成人话」这件事只该有一处实现，否则一处说「<缺卡 3>」、另一处说「未知卡」。
+pub fn card_notice(shelf: &Shelf<'_>, id: CardId) -> CardNotice {
     let found = shelf.get(CardKind::Item, id);
     CardNotice {
         kind: found.map_or(CardKind::Item, |c| c.kind),
