@@ -46,6 +46,10 @@ pub struct GameRules {
     /// 点券箱被取走后隔多少回合重新出现。格子上写了 `data.refresh` 就以格子为准，
     /// 这条只是缺省值（`4 代路上宝箱是一次性的`，「什么时候再长出来」是我们的参数）。
     pub coupon_refresh_turns: u32,
+    /// 手牌上限（PLAN §三「持有与上限」行：4 代是 30 种卡、同时最多 15 张）。
+    /// 满了不是「不让买」而是**挤掉最前面那张**，所以这条由 [`crate::hand::Hand::gain`] 读，
+    /// 那里才看得见「被挤掉的是哪张」这条流水要写什么。
+    pub hand_limit: u32,
 }
 
 impl Default for GameRules {
@@ -65,6 +69,7 @@ impl Default for GameRules {
             dividend_rate: 0.015,
             max_price_history: 50,
             coupon_refresh_turns: 6,
+            hand_limit: 15,
         }
     }
 }

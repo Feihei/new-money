@@ -163,6 +163,8 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
                     },
                     // 点券开局为 0（PLAN §三：来源只有点券格与小游戏格）
                     Points::default(),
+                    // 手牌开局为空：道具卡只能从百货公司买到（P3d），没有任何格子会发卡
+                    crate::hand::Hand::default(),
                     TokenPosition { tile: START_TILE },
                     WalkQueue::default(),
                     BankBalance::default(),

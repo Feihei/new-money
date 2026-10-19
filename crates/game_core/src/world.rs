@@ -92,10 +92,11 @@ pub fn begin_game_system(
     if active.is_some() {
         return;
     }
-    let (Some(def), Some(chance), Some(fate), Some(stocks)) = (
+    let (Some(def), Some(chance), Some(fate), Some(items), Some(stocks)) = (
         assets.boards.get(&assets.data.board).cloned(),
         assets.card_sets.get(&assets.data.chance),
         assets.card_sets.get(&assets.data.fate),
+        assets.card_sets.get(&assets.data.items),
         assets.stock_sets.get(&assets.data.stocks).cloned(),
     ) else {
         return;
@@ -104,6 +105,7 @@ pub fn begin_game_system(
         ("棋盘", def.validate()),
         ("机会牌", chance.validate(CardKind::Chance)),
         ("命运牌", fate.validate(CardKind::Fate)),
+        ("道具牌", items.validate(CardKind::Item)),
         ("股票", stocks.validate()),
     ] {
         if let Err(errs) = errs {
@@ -125,7 +127,7 @@ pub fn begin_game_system(
     }
 
     info!(
-        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）（起始现金 {}）",
+        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张（起始现金 {}）",
         def.board_name,
         def.loop_len(),
         lands.len(),
@@ -133,6 +135,7 @@ pub fn begin_game_system(
         stocks.0.len(),
         chance.0.len(),
         fate.0.len(),
+        items.0.len(),
         cfg.rules.start_cash
     );
 

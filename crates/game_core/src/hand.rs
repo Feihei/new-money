@@ -1,0 +1,351 @@
+//! 手牌（P3a）：拿在手里、由玩家**主动打出**的那批卡。
+//!
+//! 与两副事件池的分别是「谁决定什么时候生效」：机会/命运是踩到格子就被抽、当场结算
+//! （[`crate::deck::settle_card_landing`]），而道具卡在玩家手里可以一直躺着，等他想要
+//! 的那个时刻打出去。所以这个模块管三件事：
+//!
+//! - **容器** [`Hand`]：有序、有上限、满了**替换最前面那张**（PLAN §三「持有与上限」行）。
+//! - **入口** [`play_card_system`]：与证券下单同一条窗口（掷骰前、只有本人），走的是与
+//!   真实按钮同一个请求消息，不是直接改组件。
+//! - **承受者**：卡上的效果打在谁头上，由 `CardDef.target` 与请求里带的目标一起定 ——
+//!   「A 用陷害卡打 B」与「命运牌把 A 自己关进去」共用同一条效果实现
+//!   （[`crate::deck::apply_card`]），区别只是那个 `victim`。
+//!
+//! 上限为什么是「替换最前面」而不是「满了不让买」：4 代就是这么做的，而它比「不让买」
+//! 多一层玩法 —— 只剩一格时玩家可以**赌**下一张更有用，旧的那张自动出局。这条规则要读得
+//! 出来，所以 [`Hand::gain`] 把被挤掉的那张**返回**给调用方发流水，而不是内部悄悄丢弃
+//! （「我明明买了卡，卡不见了」是查不动的那类投诉）。
+
+use std::collections::VecDeque;
+
+use bevy::ecs::system::SystemParam;
+use bevy::prelude::*;
+
+use crate::card::{CardDef, CardKind, CardTarget};
+use crate::deck::{CardId, CardSink, Shelf, apply_card};
+use crate::land::LandId;
+use crate::landing::PendingDecision;
+use crate::msg::{CardGained, CardNotice, CardPlayed, PlayCardRequested};
+use crate::player::PlayerId;
+use crate::settle::Books;
+use crate::turn::{TurnOrder, TurnPhase};
+use crate::world::ActiveBoard;
+
+/// 手里拿着的卡，按获得顺序排（`front` 是最早拿到、也最先被挤掉的那张）。
+///
+/// 存 `CardId`（item 池的下标）而不是卡名字符串：与牌堆同一条理由 —— 卡定义是加载后
+/// 不变的静态数组，下标即身份。可以重复：买两张一样的陷害卡占两格手牌。
+#[derive(Component, Debug, Default, Clone, PartialEq, Eq)]
+pub struct Hand {
+    pub cards: VecDeque<CardId>,
+}
+
+impl Hand {
+    pub fn len(&self) -> usize {
+        self.cards.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cards.is_empty()
+    }
+
+    pub fn holds(&self, card: CardId) -> bool {
+        self.cards.contains(&card)
+    }
+
+    /// 进一张卡，返回被挤掉的最前面那张（`None` = 没挤掉任何人）。
+    ///
+    /// 上限由调用方给（`GameRules::hand_limit`）而不是写死在这里：规则常量只有一个真相
+    /// 来源（`rules.rs`），而这里要能被测试用 `limit = 1` 逼出边界。
+    pub fn gain(&mut self, card: CardId, limit: u32) -> Option<CardId> {
+        self.cards.push_back(card);
+        let cap = (limit.max(1)) as usize;
+        if self.cards.len() > cap {
+            return self.cards.pop_front();
+        }
+        None
+    }
+
+    /// 打出一张：移除**第一张**匹配的（同 id 有两张时打掉一格，不是清空）。
+    pub fn spend(&mut self, card: CardId) -> bool {
+        match self.cards.iter().position(|held| *held == card) {
+            Some(at) => {
+                self.cards.remove(at);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// 请求里带来的目标。`CardDef.target` 说这张卡**要**哪种目标，这里带的是**选了哪个**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardAim {
+    Player(Entity),
+    Land(LandId),
+}
+
+/// 这张卡实际打到谁头上。`SelfOnly` 的卡把出牌人自己填进去。
+///
+/// `None` = 打不出去。地块类今天没有消费者（要等 P3c 的地块状态容器才能问「这块地归谁」），
+/// 所以宁可拒发也不猜一个承受者 —— 猜出来的那个「业主」会在流水里变成一次莫须有的入狱。
+fn victim_of(def: &CardDef, aim: Option<CardAim>, player: Entity) -> Option<Entity> {
+    match (def.target, aim) {
+        (CardTarget::SelfOnly, _) => Some(player),
+        (CardTarget::Player, Some(CardAim::Player(target))) => Some(target),
+        (CardTarget::Land, _) | (CardTarget::Player, _) => None,
+    }
+}
+
+/// 目标合不合法。判据集中在这里，UI 的「该不该亮」与规则层的「认不认」共用同一句
+/// （同 `can_bank_op` 与 `bank_op_allowed` 的关系）。
+///
+/// 写成 `target × aim` 的九格全表、不留 `_`：新增一种 `CardTarget` 或一种 `CardAim`
+/// 时必须当场决定它和其余每种目标能不能配对（同 `landing::domain_of` 那条纪律）。
+fn aim_is_legal(
+    def: &CardDef,
+    aim: Option<CardAim>,
+    player: Entity,
+    books: &Books,
+    active: &ActiveBoard,
+) -> bool {
+    match (def.target, aim) {
+        // 给自己的卡不该带目标：面板上根本没有那颗按钮，带上来的是错请求
+        (CardTarget::SelfOnly, None) => true,
+        (CardTarget::SelfOnly, Some(CardAim::Player(_)))
+        | (CardTarget::SelfOnly, Some(CardAim::Land(_))) => false,
+        // 不能陷害自己（那是停留卡要做的事），也不能打一个已经离场的人
+        (CardTarget::Player, Some(CardAim::Player(target))) => {
+            target != player && books.id_of(target).is_some() && !books.is_bankrupt(target)
+        }
+        (CardTarget::Player, None) | (CardTarget::Player, Some(CardAim::Land(_))) => false,
+        // 地块类：格子上得真有这块地，且真有人持有它（查封一块无主地没有意义）
+        (CardTarget::Land, Some(CardAim::Land(land))) => {
+            active.lands.contains_key(&land) && books.view(land).is_some()
+        }
+        (CardTarget::Land, None) | (CardTarget::Land, Some(CardAim::Player(_))) => false,
+    }
+}
+
+/// 「现在能不能替谁出牌」的三份读数。打包成一个参数包是为了让出牌 system 留在
+/// clippy 的参数上限内，也因为这三份判据本来就是**一起成立或一起不成立**的：
+/// 阶段、轮转、待决事项，少看任何一份都会开出一条不该有的窗口。
+#[derive(SystemParam)]
+pub struct PlayWindow<'w> {
+    phase: Res<'w, State<TurnPhase>>,
+    order: Option<Res<'w, TurnOrder>>,
+    pending: Res<'w, PendingDecision>,
+}
+
+impl<'w> PlayWindow<'w> {
+    /// 此刻能出牌的人；`None` = 窗口关着。表现层用它决定按钮亮不亮，与规则层认不认
+    /// 是同一句判据（同 `bank_op_allowed` 与 `can_bank_op` 的关系）。
+    pub fn opener(&self) -> Option<Entity> {
+        if self.phase.get() != &TurnPhase::WaitRoll || self.pending.active().is_some() {
+            return None;
+        }
+        self.order.as_ref()?.current()
+    }
+}
+
+/// 出牌。三道门：窗口（掷骰前、本人、没被模态占住）、卡在手、目标合法。
+///
+/// 三种拒绝都**静默返回**（同 `bank_op_system`）：面板该把办不动的按钮亮成灰的，
+/// 而不是按下去没声音。
+pub fn play_card_system(
+    mut sink: CardSink,
+    mut requests: MessageReader<PlayCardRequested>,
+    mut hands: Query<&mut Hand, With<PlayerId>>,
+    window: PlayWindow<'_>,
+    shelf: Shelf<'_>,
+    mut played: MessageWriter<CardPlayed>,
+) {
+    let Some(current) = window.opener() else {
+        return;
+    };
+    for request in requests.read() {
+        // 主语只认当前回合玩家。ATM 那种「认人不认回合」是地理事实，而打出一张卡会改变
+        // 别人的回合 —— 在别人回合里替他决定「现在用不用免罪卡」不是便利，是越权
+        if request.player != current {
+            debug!("出牌被拒：{:?} 不是当前回合玩家", request.player);
+            continue;
+        }
+        let Some(def) = shelf.get(CardKind::Item, request.card) else {
+            debug!("出牌被拒：货架上没有 {:?}", request.card);
+            continue;
+        };
+        if !hand_holds(&hands, current, request.card) {
+            debug!("出牌被拒：手里没有 {}", def.id);
+            continue;
+        }
+        if !aim_is_legal(def, request.aim, current, &sink.books, &sink.books.active) {
+            debug!("出牌被拒：{} 的目标不合法", def.id);
+            continue;
+        }
+        let Some(victim) = victim_of(def, request.aim, current) else {
+            debug!("出牌被拒：{} 找不到承受者", def.id);
+            continue;
+        };
+        // 先扣卡再结算：效果执行到一半崩了，也不该留下一张还能再打一次的卡
+        if let Ok(mut hand) = hands.get_mut(current) {
+            hand.spend(request.card);
+        }
+        let outcomes = apply_card(&mut sink, victim, def);
+        played.write(CardPlayed {
+            player: current,
+            victim,
+            card: CardNotice {
+                id: def.id.clone(),
+                kind: def.kind,
+                title: def.title.clone(),
+                desc: def.desc.clone(),
+                outcomes,
+            },
+        });
+    }
+}
+
+/// `Query` 的只读借用不能与后面的 `get_mut` 同时活着，所以这里判完就放手。
+fn hand_holds(hands: &Query<&mut Hand, With<PlayerId>>, player: Entity, card: CardId) -> bool {
+    hands.get(player).is_ok_and(|hand| hand.holds(card))
+}
+
+/// 把一张卡发进某人手里（P3d 的百货公司与 P6 的神明送卡都走这一句）。
+///
+/// 单独一个函数而不是让调用方直接改 `Hand`：上限那条规则与「被挤掉要发流水」是一体的，
+/// 散到各处就会有一处忘了发。
+pub fn deal_to(
+    hand: &mut Hand,
+    limit: u32,
+    card: CardId,
+    player: Entity,
+    shelf: &Shelf<'_>,
+    gained: &mut MessageWriter<CardGained>,
+) {
+    let pushed_out = hand.gain(card, limit);
+    gained.write(CardGained {
+        player,
+        card: notice_of(shelf, card),
+        pushed_out: pushed_out.map(|lost| notice_of(shelf, lost)),
+    });
+}
+
+/// 下标 → 卡面凭据。查不到时给一条写明「数据里没有这张卡」的空卡面，而不是不发流水：
+/// 卡确实进过手牌，只是名字读不出来 —— 那种数据错误要在流水里看得见。
+fn notice_of(shelf: &Shelf<'_>, id: CardId) -> CardNotice {
+    let found = shelf.get(CardKind::Item, id);
+    CardNotice {
+        kind: found.map_or(CardKind::Item, |c| c.kind),
+        title: found.map(|c| c.title.clone()).unwrap_or_default(),
+        desc: found.map(|c| c.desc.clone()).unwrap_or_default(),
+        id: found
+            .map(|c| c.id.clone())
+            .unwrap_or_else(|| format!("<缺卡 {id:?}>")),
+        outcomes: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card(n: u32) -> CardId {
+        CardId(n)
+    }
+
+    #[test]
+    fn a_full_hand_pushes_out_the_oldest_not_the_newcomer() {
+        // PLAN §三「满了替换最前面那张」：先进来的先出局，玩家赌的是「后面那张更有用」
+        let mut hand = Hand::default();
+        assert_eq!(hand.gain(card(0), 2), None);
+        assert_eq!(hand.gain(card(1), 2), None);
+        assert_eq!(hand.gain(card(2), 2), Some(card(0)), "挤掉的是最早那张");
+        assert_eq!(hand.cards, VecDeque::from([card(1), card(2)]));
+        assert_eq!(hand.len(), 2, "上限不是「装得下再挤」，是恒等于上限");
+    }
+
+    #[test]
+    fn a_limit_of_one_still_holds_the_last_card() {
+        // 退化值也要成立：limit=1 时「买一张就丢一张」，而不是丢成空手
+        let mut hand = Hand::default();
+        hand.gain(card(7), 1);
+        assert_eq!(hand.gain(card(8), 1), Some(card(7)));
+        assert_eq!(hand.cards, VecDeque::from([card(8)]));
+        assert_eq!(
+            hand.gain(card(9), 0),
+            Some(card(8)),
+            "0 按 1 理解，不清空手牌"
+        );
+    }
+
+    #[test]
+    fn spending_takes_one_copy_not_every_copy() {
+        let mut hand = Hand::default();
+        for id in [3, 3, 4] {
+            hand.gain(card(id), 15);
+        }
+        assert!(hand.spend(card(3)));
+        assert_eq!(
+            hand.cards,
+            VecDeque::from([card(3), card(4)]),
+            "两张里打掉一张"
+        );
+        assert!(hand.spend(card(3)));
+        assert_eq!(hand.cards, VecDeque::from([card(4)]));
+        assert!(!hand.spend(card(3)), "没有第三张，spend 要说假");
+    }
+
+    #[test]
+    fn a_self_only_card_aims_at_its_player_and_takes_no_aim() {
+        let def = CardDef {
+            id: "item_insulate".into(),
+            kind: CardKind::Item,
+            title: "免罪卡".into(),
+            desc: String::new(),
+            cost_points: Some(20),
+            target: CardTarget::SelfOnly,
+            effects: vec![],
+        };
+        let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
+        assert_eq!(victim_of(&def, None, me), Some(me));
+        // 带了目标反而是错的（面板不该给免罪卡画一排对手按钮），但承受者仍是我自己
+        let other = Entity::from_raw_u32(6).expect("索引不该撞上保留值");
+        assert_eq!(victim_of(&def, Some(CardAim::Player(other)), me), Some(me));
+    }
+
+    #[test]
+    fn a_targetless_framing_card_has_no_victim() {
+        let def = CardDef {
+            id: "item_frame".into(),
+            kind: CardKind::Item,
+            title: "陷害卡".into(),
+            desc: String::new(),
+            cost_points: Some(30),
+            target: CardTarget::Player,
+            effects: vec![],
+        };
+        let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
+        assert_eq!(
+            victim_of(&def, None, me),
+            None,
+            "没选对手的陷害卡不该悄悄打在自己头上"
+        );
+    }
+
+    #[test]
+    fn a_land_card_cannot_find_its_victim_yet() {
+        // P3c 之前没有「地块的业主」这条读法。写在这里是为了让它红得有名字，
+        // 而不是变成一次莫须有的入狱
+        let def = CardDef {
+            id: "item_price".into(),
+            kind: CardKind::Item,
+            title: "涨价卡".into(),
+            desc: String::new(),
+            cost_points: Some(40),
+            target: CardTarget::Land,
+            effects: vec![],
+        };
+        let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
+        assert_eq!(victim_of(&def, Some(CardAim::Land(LandId(0))), me), None);
+    }
+}

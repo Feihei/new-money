@@ -13,8 +13,8 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, BankOp, Books, CardDrawn, CardKind, CardNotice, Decision, EffectOutcome, LandId,
-    LandType, MarketClock, Pending, PendingDecision, PlayerName, TurnOrder,
+    ActiveBoard, AfflictDomain, BankOp, Books, CardDrawn, CardKind, CardNotice, Decision,
+    EffectOutcome, LandId, LandType, MarketClock, Pending, PendingDecision, PlayerName, TurnOrder,
 };
 
 use super::finance::{comma, money_row};
@@ -643,6 +643,10 @@ fn card_modal(
     let (type_text, accent) = match card.kind {
         CardKind::Chance => ("机会", col::CHANCE),
         CardKind::Fate => ("命运", col::FATE),
+        // 道具卡不该出现在这个模态里：它是玩家主动打出的，反馈走手牌浮层与提示行。
+        // 这一支只为穷尽存在 —— 写成 `_ => unreachable!()` 会让「哪天有人把它挂成
+        // `Pending::Card`」变成一次对局中途的 panic，而这里只欠一个名字和一个颜色
+        CardKind::Item => ("道具", col::CHANCE),
     };
     let effect = outcome_line(&card.outcomes);
 
@@ -894,5 +898,15 @@ fn describe(outcome: &EffectOutcome) -> String {
         EffectOutcome::Teleported { name, .. } => format!("移动到「{name}」"),
         // 数据写了个棋盘上不存在的格名：如实报出来，别退成一句漂亮话把数据错误藏起来
         EffectOutcome::UnknownTile { name } => format!("数据错误：找不到「{name}」"),
+        EffectOutcome::Blocked { domain } => {
+            let what = match domain {
+                AfflictDomain::Detention => "拘留",
+                AfflictDomain::Stay => "停留",
+                AfflictDomain::Reversal => "转向",
+                AfflictDomain::Damage => "损害",
+            };
+            format!("一次{what}被免罪抵消")
+        }
+        EffectOutcome::Shielded { charges } => format!("护身 {charges} 次"),
     }
 }

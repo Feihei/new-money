@@ -9,8 +9,11 @@
 
 use bevy::prelude::*;
 
+use crate::afflict::AfflictDomain;
 use crate::board::{GridPos, TileIndex};
 use crate::card::CardKind;
+use crate::deck::CardId;
+use crate::hand::CardAim;
 use crate::land::LandId;
 use crate::stock::StockId;
 
@@ -285,6 +288,34 @@ pub struct CardDrawn {
     pub card: CardNotice,
 }
 
+/// 请求打出手里的一张卡。`aim` 只在 `CardDef.target` 要求时才有值 ——
+/// 目标编码在按钮里（同 ATM 那颗「存 1,000」），所以规则层不必再挂一个「选目标」的待决事项。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayCardRequested {
+    pub player: Entity,
+    pub card: CardId,
+    pub aim: Option<CardAim>,
+}
+
+/// 一张卡已经打出去。`player` 是出牌的人，`victim` 是效果落在谁头上 ——
+/// 两者分开是这张流水的全部价值：「A 用陷害卡打了 B」与「A 把自己关进去了」
+/// 在 UI 与回放里必须是两件事。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct CardPlayed {
+    pub player: Entity,
+    pub victim: Entity,
+    pub card: CardNotice,
+}
+
+/// 一张卡进了手牌。`pushed_out` 是被上限挤掉的那张（PLAN §三「满了替换最前面那张」）：
+/// 玩家买了卡却没拿到，唯一能自证的形状就是让他看见**哪张被挤掉了**。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct CardGained {
+    pub player: Entity,
+    pub card: CardNotice,
+    pub pushed_out: Option<CardNotice>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CardNotice {
     pub id: String,
@@ -294,7 +325,7 @@ pub struct CardNotice {
     pub outcomes: Vec<EffectOutcome>,
 }
 
-/// 单条卡牌效果的结算凭据（`card_effects.gd` 的四个 `match` 分支一一对应）。
+/// 单条卡牌效果的结算凭据（与 `CardEffect` 的分支一一对应，另加抵消/护身两条）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectOutcome {
     Gained(i64),
@@ -315,6 +346,15 @@ pub enum EffectOutcome {
     /// 已经修过这个坑），UI 该把它当成本局数据错误显示出来。
     UnknownTile {
         name: String,
+    },
+    /// 一件厄运被护身吃掉了（免罪卡生效）。与 `Jailed` 互斥 —— 抵消了就没有入狱这回事，
+    /// 而流水里必须留下「被抵消」这一条，否则玩家只看见「什么都没发生」。
+    Blocked {
+        domain: AfflictDomain,
+    },
+    /// 挂上了护身。`charges` 是**叠完之后剩余**的层数（两张免罪卡 = 2）。
+    Shielded {
+        charges: u32,
     },
 }
 

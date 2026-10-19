@@ -7,11 +7,30 @@ use bevy::asset::Asset;
 use bevy::reflect::TypePath;
 use serde::Deserialize;
 
+/// 三副池。前两副是**踩到格子就抽、当场结算**的事件池（PLAN §三「命运 32 条」），
+/// 第三副 `Item` 是**拿在手里、由玩家主动打出**的卡 —— 它没有对应的格子，
+/// 来源是百货公司（P3d），所以 `domain_of` 里永远不会出现 `Card(Item)`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CardKind {
     Chance,
     Fate,
+    Item,
+}
+
+/// 这张卡要落在谁/什么头上。写在数据里而不是代码里，是因为出牌浮层的按钮要把目标
+/// 编码进去（同 ATM 金额按钮的形状：一颗按钮 = 一个完整意图），而浮层不该去猜
+/// 「这张卡是给自己用还是给对手用」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CardTarget {
+    /// 打在自己身上（免罪、停留、转向）
+    #[default]
+    SelfOnly,
+    /// 选一名对手（陷害、嫁祸）
+    Player,
+    /// 选一块地（购地、涨价、查封、怪兽）
+    Land,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -23,6 +42,9 @@ pub enum CardEffect {
     DeductCash {
         amount: i64,
     },
+    /// 关进监狱 N 天。**承受者是这张卡的目标**（[`CardTarget`]），不是抽卡的人 ——
+    /// 所以命运牌的「直接入狱」（target 缺省 = 自己）与陷害卡的「送对手入狱」
+    /// 是同一条效果，不必为陷害单开一个变体。可被 [`crate::afflict::Insulation`] 抵消。
     GoToJail {
         #[serde(default = "default_jail_turns")]
         turns: u32,
@@ -31,6 +53,10 @@ pub enum CardEffect {
     /// 真正「存不存在」要等 B3 拿到 BoardDef 才能校验。
     MoveTo {
         tile_name: String,
+    },
+    /// 挂上「抵消 N 次厄运」的护身（免罪卡）。见 [`crate::afflict`]。
+    Insulate {
+        charges: u32,
     },
 }
 
@@ -45,6 +71,14 @@ pub struct CardDef {
     pub kind: CardKind,
     pub title: String,
     pub desc: String,
+    /// 百货公司的售价（点券）。`None` = 这张卡不出售（两副事件池全是 `None`，
+    /// 它们是被抽到的，不是被买的）。点券与现金永不通兑（PLAN §一），所以这条
+    /// 只可能由 `Points` 付。
+    #[serde(default)]
+    pub cost_points: Option<u32>,
+    /// 打出去要选谁/选哪块地。缺省 `SelfOnly`。
+    #[serde(default)]
+    pub target: CardTarget,
     #[serde(default)]
     pub effects: Vec<CardEffect>,
 }
@@ -88,6 +122,11 @@ impl CardSet {
             if c.effects.is_empty() {
                 errs.push(format!("卡牌 {} 没有任何效果", c.id));
             }
+            // 货架上的东西必须有价：没有价的 `Item` 卡要么白送要么永远买不到，
+            // 两种都是把数据错误藏进「点数账对不上」里（P3d 的百货正靠这一列定价）
+            if expect_kind == CardKind::Item && c.cost_points.unwrap_or(0) == 0 {
+                errs.push(format!("卡牌 {} 是货架商品却没有 cost_points", c.id));
+            }
             for e in &c.effects {
                 match e {
                     CardEffect::AddCash { amount } | CardEffect::DeductCash { amount } => {
@@ -105,6 +144,11 @@ impl CardSet {
                             errs.push(format!("卡牌 {} 的 move_to 缺 tile_name", c.id));
                         }
                     }
+                    CardEffect::Insulate { charges } => {
+                        if *charges == 0 {
+                            errs.push(format!("卡牌 {} 的抵消次数是 0（打它做什么）", c.id));
+                        }
+                    }
                 }
             }
         }
@@ -119,6 +163,7 @@ mod tests {
 
     const CHANCE: &str = include_str!("../../../assets/data/cards/chance_cards.json");
     const FATE: &str = include_str!("../../../assets/data/cards/fate_cards.json");
+    const ITEMS: &str = include_str!("../../../assets/data/cards/item_cards.json");
 
     #[test]
     fn both_pools_parse_and_validate() {
@@ -130,13 +175,63 @@ mod tests {
         assert!(fate.0.len() >= 5, "命运牌数偏少: {}", fate.0.len());
     }
 
+    /// 第三副池：拿在手里的卡。它有自己的不变式（必须有价），所以不能只靠上面那条
+    /// 顺带过一遍 —— 忘了给 `Item` 定价的卡会安静地变成「货架上买不到的商品」。
     #[test]
-    fn all_four_effect_kinds_are_covered() {
+    fn the_item_pool_validates_and_carries_prices() {
+        let items = CardSet::from_json(ITEMS).expect("道具牌应能解析");
+        assert!(items.validate(CardKind::Item).is_ok());
+        assert!(!items.0.is_empty(), "第一批可持有卡该有货");
+        for c in &items.0 {
+            assert!(c.cost_points.is_some(), "{} 没有点券售价", c.id);
+        }
+        // 混进事件池的 kind 由同一条 `validate` 拦住
+        assert!(items.validate(CardKind::Fate).is_err());
+        let mut free = items.clone();
+        free.0[0].cost_points = None;
+        assert!(
+            free.validate(CardKind::Item).is_err(),
+            "货架商品没有价应该报错"
+        );
+    }
+
+    /// 陷害卡与命运入狱共用同一条效果，区别只在 `target`。这条钉住那个形状：
+    /// 将来谁给「陷害」单开一个 `CardEffect` 变体，两边就会开始各修一半。
+    #[test]
+    fn framing_is_the_jail_effect_aimed_at_somebody_else() {
+        let items = CardSet::from_json(ITEMS).unwrap();
+        let frame = items
+            .0
+            .iter()
+            .find(|c| c.target == CardTarget::Player)
+            .expect("第一批卡里该有指定对手的卡");
+        assert!(
+            frame
+                .effects
+                .iter()
+                .any(|e| matches!(e, CardEffect::GoToJail { turns } if *turns > 0)),
+            "{} 的效果不是关人",
+            frame.id
+        );
+        let insulate = items
+            .0
+            .iter()
+            .find(|c| c.target == CardTarget::SelfOnly)
+            .expect("免罪卡是打给自己的");
+        assert!(matches!(
+            insulate.effects[0],
+            CardEffect::Insulate { charges: 1 }
+        ));
+    }
+
+    #[test]
+    fn every_effect_kind_is_exercised_by_the_data() {
         let all = CardSet::from_json(CHANCE)
             .unwrap()
             .0
             .into_iter()
             .chain(CardSet::from_json(FATE).unwrap().0)
+            .chain(CardSet::from_json(ITEMS).unwrap().0)
             .flat_map(|c| c.effects)
             .collect::<Vec<_>>();
 
@@ -147,6 +242,7 @@ mod tests {
         assert!(has(
             |e| matches!(e, CardEffect::MoveTo { tile_name } if tile_name == "起点")
         ));
+        assert!(has(|e| matches!(e, CardEffect::Insulate { .. })));
     }
 
     #[test]

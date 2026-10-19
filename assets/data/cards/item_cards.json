@@ -1,0 +1,19 @@
+[
+  {
+    "id": "item_frame",
+    "type": "item",
+    "title": "陷害卡",
+    "desc": "指定一名对手，把他关进监狱 5 天",
+    "cost_points": 30,
+    "target": "player",
+    "effects": [{ "action": "go_to_jail", "turns": 5 }]
+  },
+  {
+    "id": "item_insulate",
+    "type": "item",
+    "title": "免罪卡",
+    "desc": "抵消接下来落到自己头上的一次厄运",
+    "cost_points": 20,
+    "effects": [{ "action": "insulate", "charges": 1 }]
+  }
+]

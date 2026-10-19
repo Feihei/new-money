@@ -18,15 +18,16 @@ use bevy::prelude::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
     ActiveBoard, Adjustment, AtmAccess, BankBalance, BankOp, BankOpDone, BankOpRequested,
-    BankVisited, Books, BuildingLevel, BuyOffered, CardDrawn, CardId, CardKind, CashChanged,
-    ChargeKind, Correction, Corrections, CouponBoxes, DamageArea, DamageTally, DataHandles,
-    Decision, DecisionChosen, Deck, DiceRolled, GameOver, GameRules, GameSeed, GameSession,
-    GameSetup, JailSkipped, LandBought, LandDamage, LandId, LandUpgraded, Market, MarketClock,
-    Mortgaged, Owner, Pending, PendingDecision, PlayerArrived, PlayerBankrupt, PlayerId,
-    PlayerJailed, PlayerReleased, PlayerTeleported, Points, PointsChanged, RentDue, RequestRoll,
-    Rng, Scope, Source, StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
+    BankVisited, Books, BuildingLevel, BuyOffered, CardAim, CardDrawn, CardGained, CardId,
+    CardKind, CardPlayed, CardSet, CashChanged, ChargeKind, Correction, Corrections, CouponBoxes,
+    DamageArea, DamageTally, DataHandles, Decision, DecisionChosen, Deck, DiceRolled, GameOver,
+    GameRules, GameSeed, GameSession, GameSetup, Hand, Insulation, JailSkipped, LandBought,
+    LandDamage, LandId, LandUpgraded, Market, MarketClock, Mortgaged, Owner, Pending,
+    PendingDecision, PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerId, PlayerJailed,
+    PlayerReleased, PlayerTeleported, Points, PointsChanged, RentDue, RequestRoll, Rng, Scope,
+    Shelf, Source, StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
     TileIndex, TileStepped, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted,
-    UpgradeOffered, WalkStarted, Wallet,
+    UpgradeOffered, WalkStarted, Wallet, deal_to,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -49,6 +50,11 @@ pub struct Trades(pub Vec<StockTradeRequested>);
 /// 测试侧的「点柜台/ATM 的四个按钮」。
 #[derive(Resource, Default)]
 pub struct BankRequests(pub Vec<BankOpRequested>);
+
+/// 测试侧的「点手牌浮层上的一张卡」。与证券/银行同一条理由：走真消息，
+/// 于是「掷骰前才受理」「手里没有这张卡」「目标不合法」三道门都被真走到。
+#[derive(Resource, Default)]
+pub struct Plays(pub Vec<PlayCardRequested>);
 
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
@@ -142,6 +148,8 @@ struct BookReaders<'w, 's> {
     jailed: MessageReader<'w, 's, PlayerJailed>,
     teleported: MessageReader<'w, 's, PlayerTeleported>,
     cards: MessageReader<'w, 's, CardDrawn>,
+    played: MessageReader<'w, 's, CardPlayed>,
+    gained: MessageReader<'w, 's, CardGained>,
     bank: MessageReader<'w, 's, BankVisited>,
     bank_ops: MessageReader<'w, 's, BankOpDone>,
     stock_visit: MessageReader<'w, 's, StockVisited>,
@@ -313,6 +321,38 @@ fn collect_books(
         log.0
             .push(format!("Card({}:{})", who(&players, m.player), m.card.id));
     }
+    // 出牌流水把「谁打的」与「打在谁头上」都写出来 —— 这正是 `CardPlayed` 存在的意义，
+    // 断言「A 陷害 B 但被 B 的免罪抵消」要能同时看见这两半
+    for m in r.played.read() {
+        let blocked = m
+            .card
+            .outcomes
+            .iter()
+            .filter(|o| matches!(o, game_core::prelude::EffectOutcome::Blocked { .. }))
+            .count();
+        log.0.push(format!(
+            "Play({}->{}:{}{})",
+            who(&players, m.player),
+            who(&players, m.victim),
+            m.card.id,
+            if blocked > 0 {
+                format!("挡{blocked}")
+            } else {
+                String::new()
+            }
+        ));
+    }
+    for m in r.gained.read() {
+        log.0.push(format!(
+            "Gain({}:{}){}",
+            who(&players, m.player),
+            m.card.id,
+            match &m.pushed_out {
+                Some(lost) => format!("挤掉{}", lost.id),
+                None => String::new(),
+            }
+        ));
+    }
     for m in r.bank.read() {
         log.0.push(format!(
             "Bank({},存{}贷{})",
@@ -361,22 +401,32 @@ fn collect_books(
     }
 }
 
-fn pump_inputs(
-    mut inputs: ResMut<Inputs>,
-    mut trades: ResMut<Trades>,
-    mut asks: ResMut<BankRequests>,
-    mut rolls: MessageWriter<RequestRoll>,
-    mut trade_writes: MessageWriter<StockTradeRequested>,
-    mut op_writes: MessageWriter<BankOpRequested>,
-) {
-    for player in inputs.0.drain(..) {
-        rolls.write(RequestRoll { player });
+/// 四组「测试侧的点击」与四条对应的消息写出。装一个参数包而不是八个函数参数，
+/// 与生产代码同一条房规（§六 坑 8），而且这四对本来就是同一件事：把队列排空成消息。
+#[derive(SystemParam)]
+struct Pump<'w> {
+    inputs: ResMut<'w, Inputs>,
+    trades: ResMut<'w, Trades>,
+    asks: ResMut<'w, BankRequests>,
+    plays: ResMut<'w, Plays>,
+    rolls: MessageWriter<'w, RequestRoll>,
+    trade_writes: MessageWriter<'w, StockTradeRequested>,
+    op_writes: MessageWriter<'w, BankOpRequested>,
+    card_writes: MessageWriter<'w, PlayCardRequested>,
+}
+
+fn pump_inputs(mut pump: Pump<'_>) {
+    for player in pump.inputs.0.drain(..) {
+        pump.rolls.write(RequestRoll { player });
     }
-    for t in trades.0.drain(..) {
-        trade_writes.write(t);
+    for t in pump.trades.0.drain(..) {
+        pump.trade_writes.write(t);
     }
-    for a in asks.0.drain(..) {
-        op_writes.write(a);
+    for a in pump.asks.0.drain(..) {
+        pump.op_writes.write(a);
+    }
+    for c in pump.plays.0.drain(..) {
+        pump.card_writes.write(c);
     }
 }
 
@@ -396,6 +446,7 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<Inputs>()
         .init_resource::<Trades>()
         .init_resource::<BankRequests>()
+        .init_resource::<Plays>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -911,6 +962,107 @@ pub fn bank_ask(app: &mut App, player: Entity, op: BankOp, amount: i64) {
         .resource_mut::<BankRequests>()
         .0
         .push(BankOpRequested { player, op, amount });
+}
+
+/// 替 `player` 按一次手牌浮层上的卡（`index` 是 `item_cards.json` 里的下标）。
+/// 同样走队列 → 真消息，于是出牌那三道门（窗口、在手、目标）都被真走到。
+pub fn play_card(app: &mut App, player: Entity, index: u32, aim: Option<CardAim>) {
+    app.world_mut()
+        .resource_mut::<Plays>()
+        .0
+        .push(PlayCardRequested {
+            player,
+            card: CardId(index),
+            aim,
+        });
+}
+
+/// 手牌里的卡（按获得顺序）。`None` = 这个实体没有 `Hand` 组件。
+pub fn hand_of(app: &App, player: Entity) -> Vec<CardId> {
+    app.world()
+        .entity(player)
+        .get::<Hand>()
+        .map(|h| h.cards.iter().copied().collect())
+        .unwrap_or_default()
+}
+
+/// 一次发牌请求（[`deal`] 的载体）。
+#[derive(Resource)]
+pub struct DealReq(Option<(Entity, CardId)>);
+
+/// [`crate::hand::deal_to`] 要 `MessageWriter`，而 [`run_op`] 的闭包签名里没有它 ——
+/// 同 [`run_damage`]，为它改那条签名会把所有既有用例一起卷进来，所以单开一条一次 system。
+/// 走 `deal_to` 而不是直改 `Hand`：上限与「被挤掉要发流水」这条规则才是被测对象，
+/// 绕过它发牌就等于把 P3d 的百货账目测了个寂寞。
+fn run_deal_system(
+    mut req: ResMut<DealReq>,
+    mut hands: Query<&mut Hand, With<PlayerId>>,
+    rules: Res<GameRules>,
+    shelf: Shelf<'_>,
+    mut gained: MessageWriter<CardGained>,
+) {
+    let Some((player, card)) = req.0.take() else {
+        return;
+    };
+    let Ok(mut hand) = hands.get_mut(player) else {
+        return;
+    };
+    deal_to(
+        &mut hand,
+        rules.hand_limit,
+        card,
+        player,
+        &shelf,
+        &mut gained,
+    );
+}
+
+/// 把一张道具卡发进某人手里（`index` 是 `item_cards.json` 里的下标）。
+/// 百货公司要到 P3d 才有，用例先从这里发牌 —— 但发的是同一条公开入口。
+pub fn deal(app: &mut App, player: Entity, index: u32) {
+    app.insert_resource(DealReq(Some((player, CardId(index)))));
+    app.add_systems(Update, run_deal_system);
+    app.update();
+}
+
+/// 某人身上还剩几层护身（`None` = 没有护身；`Some(None)` = 不限次的神明那一类）。
+pub fn shield_of(app: &App, player: Entity) -> Option<Option<u32>> {
+    app.world()
+        .entity(player)
+        .get::<Insulation>()
+        .map(|i| i.charges)
+}
+
+/// 场上牌堆的种类名（按名字排序）。用来钉住「第三副池不是一副可抽的牌」——
+/// `CardKind` 没有 `Ord`，而这里要的是一个可比对的稳定形状。
+pub fn deck_kinds(app: &mut App) -> Vec<String> {
+    let w = app.world_mut();
+    let mut kinds = w
+        .query::<&Deck>()
+        .iter(w)
+        .map(|d| format!("{:?}", d.kind))
+        .collect::<Vec<_>>();
+    kinds.sort();
+    kinds
+}
+
+/// 有 `Hand` 组件的实体数。
+pub fn hand_owners(app: &mut App) -> usize {
+    let w = app.world_mut();
+    w.query_filtered::<&Hand, With<PlayerId>>().iter(w).count()
+}
+
+/// `item_cards.json` 里某个 id 的下标 —— 用例按名字拿卡，不靠数组位置（改数据顺序
+/// 不该让一批测试集体变红，而「第 0 张是陷害」这种断言本来就说不清是哪张）。
+pub fn item_index(app: &App, id: &str) -> CardId {
+    let sets = app.world().resource::<Assets<CardSet>>();
+    let handle = &app.world().resource::<DataHandles>().items;
+    let set = sets.get(handle).expect("道具牌没加载");
+    set.0
+        .iter()
+        .position(|c| c.id == id)
+        .map(|at| CardId(at as u32))
+        .unwrap_or_else(|| panic!("item_cards.json 里没有 {id}"))
 }
 
 /// 本回合谁有 ATM 资格（`None` = 没人路过银行格）。

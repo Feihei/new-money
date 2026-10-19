@@ -1,14 +1,15 @@
 //! 《暴富》规则层入口。
 //!
 //! 实体分四类（B3 起）：土地（`LandId`+`Owner`+`BuildingLevel`+可选 `Mortgaged`）、
-//! 玩家（`PlayerId`+`Wallet`+`Points`+`TokenPosition`+`BankBalance`+`StockHoldings`+可选
-//! `JailSentence`/`Bankrupt`）、股票（`StockId`+`StockPrice`+`PriceHistory`）、
+//! 玩家（`PlayerId`+`Wallet`+`Points`+`Hand`+`TokenPosition`+`BankBalance`+`StockHoldings`
+//! +可选 `JailSentence`/`Insulation`/`Bankrupt`）、股票（`StockId`+`StockPrice`+`PriceHistory`）、
 //! 牌堆（`Deck`，机会/命运各一）。道路格**不建实体**，相机/灯光/UI 在 `game_app`。
 
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use bevy::time::TimePlugin;
 
+pub mod afflict;
 pub mod bank;
 pub mod board;
 pub mod card;
@@ -18,6 +19,7 @@ pub mod damage;
 pub mod data;
 pub mod deck;
 pub mod economy;
+pub mod hand;
 pub mod land;
 pub mod landing;
 pub mod loader;
@@ -34,6 +36,7 @@ pub mod walk;
 pub mod world;
 
 pub mod prelude {
+    pub use crate::afflict::{AfflictDomain, Affliction, Insulation};
     pub use crate::bank::{
         AtmAccess, apply_month_end_interest_system, bank_op_allowed, bank_op_system,
         grant_atm_access_system, settle_bank_landing,
@@ -41,16 +44,19 @@ pub mod prelude {
     pub use crate::board::{
         BoardDef, BranchDef, BranchKind, GridPos, LandDef, LandType, TileDef, TileIndex, TileKind,
     };
-    pub use crate::card::{CardDef, CardEffect, CardKind, CardSet};
+    pub use crate::card::{CardDef, CardEffect, CardKind, CardSet, CardTarget};
     pub use crate::charge::{
         Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, Scope, Source,
         charge_domain_of, scales_with_price, stage, transferable,
     };
     pub use crate::coupon::{CouponBoxes, settle_coupon_landing};
     pub use crate::damage::{DamageArea, DamageTally, LandDamage};
-    pub use crate::data::{BOARD_PATH, CHANCE_PATH, DataHandles, FATE_PATH, STOCKS_PATH};
-    pub use crate::deck::{CardId, Deck, card_of, settle_card_landing};
+    pub use crate::data::{
+        BOARD_PATH, CHANCE_PATH, DataHandles, FATE_PATH, ITEMS_PATH, STOCKS_PATH,
+    };
+    pub use crate::deck::{CardId, Deck, Shelf, apply_card, card_of, settle_card_landing};
     pub use crate::economy::LandView;
+    pub use crate::hand::{CardAim, Hand, PlayWindow, deal_to, play_card_system};
     pub use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
     pub use crate::landing::{
         Landed, Landing, LandingDomain, Pending, PendingDecision, classify_landing_system,
@@ -62,12 +68,12 @@ pub mod prelude {
         trade_request_system,
     };
     pub use crate::msg::{
-        BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn, CardNotice,
-        CashChanged, Decision, DecisionChosen, DiceRolled, EffectOutcome, GameOver, JailSkipped,
-        LandBought, LandUpgraded, PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased,
-        PlayerTeleported, PointsChanged, RentDue, RequestRoll, StockPriceChanged,
-        StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
-        TurnStarted, UpgradeOffered, WalkStarted,
+        BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn, CardGained,
+        CardNotice, CardPlayed, CashChanged, Decision, DecisionChosen, DiceRolled, EffectOutcome,
+        GameOver, JailSkipped, LandBought, LandUpgraded, PlayCardRequested, PlayerArrived,
+        PlayerBankrupt, PlayerJailed, PlayerReleased, PlayerTeleported, PointsChanged, RentDue,
+        RequestRoll, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
+        TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkStarted,
     };
     pub use crate::player::{
         BankBalance, Bankrupt, GameSetup, JailSentence, PLAYER_COLORS, PlayerColor, PlayerId,
@@ -86,15 +92,15 @@ pub mod prelude {
 use bank::apply_month_end_interest_system;
 use prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankOpRequested, BankVisited, BoardDef, BuyOffered,
-    CardDrawn, CardSet, CashChanged, Corrections, CouponBoxes, DecisionChosen, DiceRolled,
-    GameOver, GameRules, GameSeed, GameSetup, JailSkipped, JsonAssetLoader, LandBought,
-    LandUpgraded, Landing, MarketClock, Paused, PendingDecision, PlayerArrived, PlayerBankrupt,
-    PlayerJailed, PlayerReleased, PlayerTeleported, PointsChanged, RentDue, RequestRoll,
-    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
-    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkStarted,
-    advance_walk_clock_system, bank_op_system, begin_game_system, decision_system,
-    grant_atm_access_system, market_tick_on_turn_end_system, trade_request_system,
-    walk_step_system,
+    CardDrawn, CardGained, CardPlayed, CardSet, CashChanged, Corrections, CouponBoxes,
+    DecisionChosen, DiceRolled, GameOver, GameRules, GameSeed, GameSetup, JailSkipped,
+    JsonAssetLoader, LandBought, LandUpgraded, Landing, MarketClock, Paused, PendingDecision,
+    PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerJailed, PlayerReleased,
+    PlayerTeleported, PointsChanged, RentDue, RequestRoll, StockPriceChanged, StockSet,
+    StockTradeRequested, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted,
+    UpgradeOffered, WalkClock, WalkStarted, advance_walk_clock_system, bank_op_system,
+    begin_game_system, decision_system, grant_atm_access_system, market_tick_on_turn_end_system,
+    play_card_system, trade_request_system, walk_step_system,
 };
 use turn::{
     begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system,
@@ -171,6 +177,10 @@ impl Plugin for CoreGamePlugin {
             // ===== 卡牌与决策（B3）=====
             .add_message::<CardDrawn>()
             .add_message::<DecisionChosen>()
+            // ===== 手牌（P3a）=====
+            .add_message::<PlayCardRequested>()
+            .add_message::<CardPlayed>()
+            .add_message::<CardGained>()
             .init_state::<TurnPhase>()
             // 装配世界：初始态的 OnEnter 不会触发，所以用 in_state(Boot)
             .add_systems(
@@ -194,6 +204,11 @@ impl Plugin for CoreGamePlugin {
                         .run_if(not_paused),
                     // 证券交易的窗口就是「还没掷骰」这一段，与掷骰同态、同闸门
                     trade_request_system
+                        .run_if(in_state(TurnPhase::WaitRoll))
+                        .run_if(not_paused),
+                    // 出牌与下单共用这一条窗口（见 `hand::play_card_system`）：
+                    // 「本回合要怎么走」在我还没走之前决定完
+                    play_card_system
                         .run_if(in_state(TurnPhase::WaitRoll))
                         .run_if(not_paused),
                 ),
