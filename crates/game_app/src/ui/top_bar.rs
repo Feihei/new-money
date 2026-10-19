@@ -30,6 +30,10 @@ pub(crate) struct HintText;
 #[derive(Component)]
 pub(crate) struct PhaseText;
 
+/// 顶栏根节点。`refresh_top_bar` 只刷它名下的按钮 —— 见那个系统的注释。
+#[derive(Component)]
+pub(crate) struct TopBar;
+
 /// 顶栏。装进 `UiSet::Boot`：与棋盘同批出生，回菜单时随 [`BoardUi`] 一起收走。
 pub(crate) fn spawn_top_bar(mut commands: Commands, font: Res<DevFont>) {
     let (hint, hint_font, hint_color) = label(&font.0, "准备中", size::BODY, col::HINT);
@@ -37,6 +41,7 @@ pub(crate) fn spawn_top_bar(mut commands: Commands, font: Res<DevFont>) {
     let bar = commands
         .spawn((
             BoardUi,
+            TopBar,
             // 顶栏横跨整屏宽，而命中测试只看「被报到的最深那个节点」：
             // 不挂 `Pickable::IGNORE`，它背后那一整条带上的地板就永远点不到
             Pickable::IGNORE,
@@ -140,6 +145,10 @@ pub(crate) struct TurnView<'w, 's> {
 
 /// 一颗按钮此刻该不该亮。三颗按钮三种判据，都从这里出，
 /// 于是「看着能点、按下去没反应」只可能是这一处写错，而不是散在三个构造点。
+///
+/// 范围由 `TopBar` 圈定（见 `refresh_top_bar`），所以这里的输入只有顶栏那几颗。
+/// 新加一颗**顶栏**按钮时必须在这里补一条判据 —— 漏了不会编译失败，只会永远亮着，
+/// 症状与坑 31 反过来：灰该灰的时候不灰。浮层里的按钮不走这条路，别往这儿加。
 fn button_allowed(action: &UiAction, turn: &TurnView) -> bool {
     let phase = *turn.phase.get();
     match action {
@@ -157,28 +166,33 @@ fn button_allowed(action: &UiAction, turn: &TurnView) -> bool {
     }
 }
 
+/// 重着色要动的那两样：按钮名下的子节点，与子节点上的文字颜色。
+///
+/// 收成参数包是房规（§六 坑 8）：参数一多该问「这些是不是同一件事的输入」，
+/// 而不是挂 `#[allow(clippy::too_many_arguments)]` 把那个信号吃掉。
+#[derive(SystemParam)]
+pub(crate) struct TopBarPaint<'w, 's> {
+    kids: Query<'w, 's, &'static Children>,
+    labels: Query<'w, 's, &'static mut TextColor>,
+}
+
 /// 改写按钮上那行字的颜色。
 ///
 /// `button()` 在 spawn 那一刻就把灰字配好了，但顶栏的可用态是**每帧算出来的**：
 /// ATM 卡到手/过期、暂停开合都发生在 spawn 之后。只换底色不换字色，禁用的按钮
 /// 仍然顶着一行白字 —— 而底色 `BTN_DISABLED` 与 `BTN_SECONDARY` 差得并不远，
 /// 玩家读不出「这颗按不动」。
-fn paint_label(
-    kids: &Query<&Children>,
-    labels: &mut Query<&mut TextColor>,
-    button: Entity,
-    disabled: bool,
-) {
+fn paint_label(paint: &mut TopBarPaint<'_, '_>, button: Entity, disabled: bool) {
     let want = if disabled {
         col::BTN_TEXT_DISABLED
     } else {
         Color::WHITE
     };
-    let Ok(children) = kids.get(button) else {
+    let Ok(children) = paint.kids.get(button) else {
         return;
     };
     for child in children {
-        if let Ok(mut text) = labels.get_mut(*child) {
+        if let Ok(mut text) = paint.labels.get_mut(*child) {
             text.0 = want;
         }
     }
@@ -193,8 +207,16 @@ fn paint_label(
 /// 停在错误的颜色上；而回主菜单再开一局时 `Local` 会带着上一局的判断活下来，新 spawn 的按钮
 /// 就再也没人刷过。判据本身是幂等的（只在 `Disabled` 与判据不一致时才动手），逐帧跑也
 /// 不影响悬停换色。
+///
+/// **只管顶栏名下那几颗**（P3b 真鼠标冒烟翻出来的账，§6.1 坑 31）。早先这里查的是
+/// 「全工程任何带 `UiAction` 的按钮」，而 `button_allowed` 对不认识的动作一律放行 ——
+/// 于是每块浮层里 spawn 期就该灰着的按钮，下一帧被顶栏剥掉 `Disabled`、标签刷成白字：
+/// 灰底白字正是坑 26 说过的「灰了但读不出灰」，而面板重建时这些实体会被 despawn，
+/// 排到帧末的 `remove::<Disabled>` 打在空实体上，日志里就是一串 `Entity despawned`。
+/// 浮层的灰不灰由各块自己的 sync 按自己的签名决定（`finance`、`hand` 都是），顶栏不该代劳。
 pub(crate) fn refresh_top_bar(
     turn: TurnView,
+    bars: Query<&Children, With<TopBar>>,
     mut buttons: Query<(
         Entity,
         &mut BackgroundColor,
@@ -202,27 +224,32 @@ pub(crate) fn refresh_top_bar(
         Option<&Disabled>,
         &UiAction,
     )>,
-    kids: Query<&Children>,
-    mut labels: Query<&mut TextColor>,
+    mut paint: TopBarPaint<'_, '_>,
     mut texts: Query<(&mut Text, Option<&HintText>, Option<&PhaseText>)>,
     mut commands: Commands,
     mut seen_phase: Local<Option<TurnPhase>>,
 ) {
     let now = *turn.phase.get();
-    for (entity, mut bg, palette, disabled, action) in buttons.iter_mut() {
-        let allowed = button_allowed(action, &turn);
-        match (allowed, disabled) {
-            (true, Some(_)) => {
-                commands.entity(entity).remove::<Disabled>();
-                bg.0 = palette.normal;
-                paint_label(&kids, &mut labels, entity, false);
+    for entry in bars.iter() {
+        for child in entry {
+            // 顶栏名下还有旁白与阶段名两行文本，它们没有按钮的那套组件 → 跳过
+            let Ok((entity, mut bg, palette, disabled, action)) = buttons.get_mut(*child) else {
+                continue;
+            };
+            let allowed = button_allowed(action, &turn);
+            match (allowed, disabled) {
+                (true, Some(_)) => {
+                    commands.entity(entity).remove::<Disabled>();
+                    bg.0 = palette.normal;
+                    paint_label(&mut paint, entity, false);
+                }
+                (false, None) => {
+                    commands.entity(entity).insert(Disabled);
+                    bg.0 = col::BTN_DISABLED;
+                    paint_label(&mut paint, entity, true);
+                }
+                _ => {}
             }
-            (false, None) => {
-                commands.entity(entity).insert(Disabled);
-                bg.0 = col::BTN_DISABLED;
-                paint_label(&kids, &mut labels, entity, true);
-            }
-            _ => {}
         }
     }
 
@@ -405,4 +432,99 @@ fn name(names: &Query<&PlayerName>, player: Entity) -> String {
         .get(player)
         .map(|n| n.0.clone())
         .unwrap_or_else(|_| "玩家".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::state::app::StatesPlugin;
+    use game_core::prelude::{PlayerId, StockId, TradeSide, TurnOrder};
+
+    /// 顶栏刷新只许动顶栏名下的按钮（§6.1 坑 31）。
+    ///
+    /// 这条判据是被真鼠标冒烟翻出来的：手牌浮层一重建，日志里就冒出
+    /// `remove<Disabled>` 打在已 despawn 实体上的报错，而暂停时该灰的卡面按钮灰不住。
+    /// 半个工程都不该由顶栏代劳 —— 所以断言两头：浮层那颗不许被碰，顶栏那颗该变还得变。
+    /// 浮层那颗用证券下单的动作（B5b 就有，比拿新阶段的动作当道具更经得起回头跑历史）。
+    #[test]
+    fn the_top_bar_refresh_only_touches_the_top_bar() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(StatesPlugin)
+            .init_state::<TurnPhase>()
+            .insert_resource(Paused(false))
+            .insert_resource(PendingDecision::default())
+            .insert_resource(GameSession {
+                turn_count: 0,
+                seed: 0,
+                price_index: 1.0,
+            })
+            .insert_resource(MarketClock::default())
+            .insert_resource(GameRules::default())
+            .insert_resource(AtmAccess::default())
+            .add_systems(Update, refresh_top_bar);
+
+        let player = app.world_mut().spawn(PlayerId(0)).id();
+        app.world_mut()
+            .insert_resource(TurnOrder::new(vec![player]));
+
+        let bar = app.world_mut().spawn(TopBar).id();
+        let atm = app
+            .world_mut()
+            .spawn((
+                ChildOf(bar),
+                UiAction::ToggleAtm,
+                BackgroundColor(SECONDARY.0),
+                Palette {
+                    normal: SECONDARY.0,
+                    hover: SECONDARY.1,
+                },
+            ))
+            .id();
+        // 浮层里的一颗：spawn 期就灰着（灰的理由由那块面板自己算），且不在顶栏名下
+        let panel_btn = app
+            .world_mut()
+            .spawn((
+                UiAction::Trade {
+                    stock: StockId("stock_001".to_string()),
+                    side: TradeSide::Buy,
+                    shares: 10,
+                },
+                BackgroundColor(col::BTN_DISABLED),
+                Palette {
+                    normal: col::BTN_DISABLED,
+                    hover: col::BTN_DISABLED,
+                },
+                Disabled,
+            ))
+            .id();
+
+        for _ in 0..3 {
+            app.update();
+        }
+        let world = app.world();
+        assert!(
+            world.get::<Disabled>(panel_btn).is_some(),
+            "顶栏把浮层按钮的 `Disabled` 剥了 —— 查询范围又放宽到全工程了？"
+        );
+        assert!(
+            world.get::<Disabled>(atm).is_some(),
+            "没发卡时顶栏的 ATM 该是灰的 —— 刷新本身没跑？"
+        );
+
+        // 反向半边：卡到手，顶栏那颗必须亮起来（否则上面两条断言只是「什么都没做」）
+        app.world_mut().resource_mut::<AtmAccess>().0 = Some(player);
+        for _ in 0..3 {
+            app.update();
+        }
+        let world = app.world();
+        assert!(
+            world.get::<Disabled>(atm).is_none(),
+            "ATM 卡到手后顶栏按钮仍然灰着"
+        );
+        assert!(
+            world.get::<Disabled>(panel_btn).is_some(),
+            "浮层按钮又被顶栏动了"
+        );
+    }
 }
