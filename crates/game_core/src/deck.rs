@@ -445,8 +445,10 @@ pub fn apply_card(
                     continue;
                 }
                 // 就地写而不是 `Commands`：同一个窗口打两张，第二条要读得到第一条的剩余值。
-                // **取较大**而不是相加或覆盖：给一个已经停留 3 回合的人再打一张 2，
-                // 覆盖等于替他减刑 —— 惩罚卡不该有让人早走的副作用
+                // **取较大**而不是相加或覆盖：给一个已经停留 2 回合的人再打一张 1，
+                // 覆盖等于替他减刑 —— 惩罚卡不该有让人早走的副作用。
+                // 字面口径（P4④）：写 1 就停 1 回合，不再有「判 3 = 跳 2」那半条 ——
+                // 计数由玩家按「停留」时扣（`take_stay_system`），这里只写状态
                 let left = match sink.stays.get_mut(victim) {
                     Ok(mut held) => {
                         held.turns_left = held.turns_left.max(*turns);

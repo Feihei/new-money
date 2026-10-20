@@ -34,6 +34,16 @@ pub struct RequestRoll {
     pub player: Entity,
 }
 
+/// 请求「停留」：把这一回合用在原地不动上（停留卡，P4④）。
+///
+/// 与 [`RequestRoll`] 是同一层的两个意图，不是 UI 独有的一颗按钮 —— 被停留按住的
+/// AI 与 P12 的恶人也要发这一条，否则那个 `StaySentence` 没人消耗，回合会死锁。
+/// 只有当前回合玩家、且身上确实挂着停留计时时才被受理；受理之后这一回合结束。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestStay {
+    pub player: Entity,
+}
+
 /// 骰子结果。`from`/`to` 一起带上，省掉监听方再去查一次移动前的位置。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiceRolled {
@@ -96,8 +106,12 @@ pub struct DetentionSkipped {
     pub turns_left: u32,
 }
 
-/// 仍在原地停留（停留卡，P3d④c），本回合跳过。`turns_left` 同样是**已扣掉本回合之后**的
-/// 剩余值 —— 与 [`DetentionSkipped`] 同一个口径，两条流水读起来才是一套语法。
+/// 仍在原地停留（停留卡，P3d④c / P4④），本回合被玩家主动拿来「停」。`turns_left` 是
+/// **已经扣掉本回合之后**的剩余值。
+///
+/// P4④ 起停留不再自动跳回合：身上有计时的人进入 `WaitRoll` 时，掷骰按钮翻成「停留」，
+/// 点一下（或 AI 发 [`RequestStay`]）才结束这一回合。所以这条消息说的是「他刚按了」，
+/// 不是「回合机替他跳了」—— 与 [`DetentionSkipped`] 的区别正在这里。
 ///
 /// 为什么单开一条而不是让 `DetentionSkipped` 带个 `reason`：被拘留的人被送进死胡同格、
 /// （P4② 起）丧失收租权，停留的人**还在场上**、地还收得到租。屏幕上那两句话不是一句话，
@@ -110,6 +124,9 @@ pub struct StaySkipped {
 
 /// 停留期满，下一回合起可正常行动。**不带格号**：他从没离开过那一格
 /// （与 [`DetentionLifted`] 的差别正在这里 —— 回来说的是「从哪格继续沿环前进」）。
+///
+/// P4④ 起它由「最后那一格被按掉」触发：`turns_left == 1` 的人按下「停留」时，
+/// 组件摘掉、这条发出来，所以它说的是「用完了」，不是「自动期满」。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StayLifted {
     pub player: Entity,
@@ -122,6 +139,31 @@ pub struct GameOver {
 }
 
 // ===== 移动（B3 补齐的两条：入狱与瞬移都是卡牌效果的后果）=====
+
+/// 请求保释：花点券把关在眼前这处的人放出来（P4③）。
+///
+/// **不是**自救：被困的人棋子停在死胡同尽头格，不会沿环经过接入点，结构上就发不出这条。
+/// 主语必须是此刻「站在那条分支接入点上、被挂了保释窗口」的人（判据在
+/// [`crate::bail::bail_op_allowed`]，不在按钮的 `disabled` 上）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BailRequested {
+    pub player: Entity,
+    pub target: Entity,
+}
+
+/// 已经放出来了：`by` 花 `points` 点券把 `player` 从 `place` 保释出来，
+/// `junction` 是他接下来继续沿环前进的接入点。
+///
+/// 与 [`DetentionLifted`] 分开：那条说的是「期满」，这条说的是「有人替他付了账」。
+/// 渲染层两条都要听（棋子从死胡同格挪回接入点），顶栏写的却是两句话。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerBailed {
+    pub player: Entity,
+    pub by: Entity,
+    pub place: DetentionPlace,
+    pub points: u32,
+    pub junction: TileIndex,
+}
 
 /// 被卡牌瞬移到指定主环格。逻辑位置由 core 改写，`render` 只做位移动画。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,11 +507,12 @@ pub enum EffectOutcome {
     Reversed {
         heading: crate::player::Heading,
     },
-    /// 挂上「原地停留 N 回合」（停留卡，P3d④c）。与 [`Self::Detained`] 同一个形状：
-    /// 说的是**接下来**几个回合他不能动，而不是「已经跳过了一个」—— 第一次跳过发生在
-    /// 下一次回合开始，由 [`StaySkipped`] 播报，两条之间可以隔着别人的回合。
+    /// 挂上「原地停留 N 回合」（停留卡）。与 [`Self::Detained`] 同一个形状：
+    /// 说的是**接下来**他要自己停几个回合，而不是「已经跳过了」—— 第一次停发生在他
+    /// 下一次进入 `WaitRoll` 并按下「停留」的时候，由 [`StaySkipped`] 播报，
+    /// 两条之间可以隔着别人的回合。
     /// `turns` 是**叠完之后**的剩余回合数（同 [`Self::Shielded`] 的 `charges`）：
-    /// 身上已有 3 的人再吃一张 2，这里报的是 3，不是 2。
+    /// 身上已有 2 的人再吃一张 1，这里报的是 2，不是 1。
     Stayed {
         turns: u32,
     },

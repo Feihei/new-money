@@ -89,9 +89,11 @@ fn auto_answer(
     // 第一个踩到银行格（或百货格）的回合就永久停在 `WaitDecision` —— 而且不报错，只是不动了。
     let action = match about {
         Pending::Buy(_) | Pending::Upgrade(_) => Decision::Accept,
-        Pending::RentNotice(_) | Pending::Card | Pending::BankTeller | Pending::Shop => {
-            Decision::Acknowledge
-        }
+        Pending::RentNotice(_)
+        | Pending::Card
+        | Pending::BankTeller
+        | Pending::Shop
+        | Pending::Bail(_) => Decision::Acknowledge,
     };
     answers.write(DecisionChosen { player, action });
 }

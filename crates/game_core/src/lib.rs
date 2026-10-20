@@ -10,6 +10,7 @@ use bevy::state::app::StatesPlugin;
 use bevy::time::TimePlugin;
 
 pub mod afflict;
+pub mod bail;
 pub mod bank;
 pub mod board;
 pub mod card;
@@ -41,6 +42,10 @@ pub mod world;
 
 pub mod prelude {
     pub use crate::afflict::{AfflictDomain, Affliction, Insulation};
+    pub use crate::bail::{
+        BailDeny, BailFacts, bail_op_allowed, bail_op_system, branch_place,
+        settle_bail_landing_system, someone_held,
+    };
     pub use crate::bank::{
         AtmAccess, apply_month_end_interest_system, bank_op_allowed, bank_op_system,
         grant_atm_access_system, settle_bank_landing,
@@ -78,14 +83,14 @@ pub mod prelude {
         read_facts,
     };
     pub use crate::msg::{
-        BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn, CardGained,
-        CardNotice, CardPlayed, CashChanged, ChargeWaived, Decision, DecisionChosen,
+        BailRequested, BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn,
+        CardGained, CardNotice, CardPlayed, CashChanged, ChargeWaived, Decision, DecisionChosen,
         DetentionLifted, DetentionSkipped, DiceRolled, EffectOutcome, GameOver, LandBought,
         LandUpgraded, MortgageDone, MortgageOp, MortgageRequested, PlayCardRequested,
-        PlayerArrived, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, RentDue,
-        RequestRoll, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged,
-        StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
-        TurnStarted, UpgradeOffered, WalkStarted,
+        PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported,
+        PointsChanged, RentDue, RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, StayLifted,
+        StaySkipped, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
+        TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkStarted,
     };
     pub use crate::player::{
         BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Heading, PLAYER_COLORS,
@@ -109,22 +114,22 @@ pub mod prelude {
 
 use bank::apply_month_end_interest_system;
 use prelude::{
-    ActiveBoard, AtmAccess, BankOpDone, BankOpRequested, BankVisited, BoardDef, BuyOffered,
-    CardDrawn, CardGained, CardPlayed, CardSet, CashChanged, ChargeWaived, Corrections,
+    ActiveBoard, AtmAccess, BailRequested, BankOpDone, BankOpRequested, BankVisited, BoardDef,
+    BuyOffered, CardDrawn, CardGained, CardPlayed, CardSet, CashChanged, ChargeWaived, Corrections,
     CouponBoxes, DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled, GameOver,
     GameRules, GameSeed, GameSetup, JsonAssetLoader, LandBought, LandUpgraded, Landing,
     MarketClock, MortgageDone, MortgageRequested, Paused, PendingDecision, PlayCardRequested,
-    PlayerArrived, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, RentDue,
-    RequestRoll, ShopOpDone, ShopOpRequested, ShopStock, StayLifted, StaySkipped,
-    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
-    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkStarted,
-    advance_walk_clock_system, bank_op_system, begin_game_system, decision_system,
+    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged,
+    RentDue, RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, ShopStock, StayLifted,
+    StaySkipped, StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited,
+    TileStepped, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkStarted,
+    advance_walk_clock_system, bail_op_system, bank_op_system, begin_game_system, decision_system,
     expire_land_status_system, grant_atm_access_system, market_tick_on_turn_end_system,
     mortgage_op_system, play_card_system, shop_op_system, trade_request_system, walk_step_system,
 };
 use turn::{
     begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system,
-    update_price_index_system,
+    take_stay_system, update_price_index_system,
 };
 use world::CoreSet;
 
@@ -169,6 +174,7 @@ impl Plugin for CoreGamePlugin {
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
             .add_message::<RequestRoll>()
+            .add_message::<RequestStay>()
             .add_message::<DiceRolled>()
             .add_message::<WalkStarted>()
             .add_message::<TileStepped>()
@@ -214,6 +220,9 @@ impl Plugin for CoreGamePlugin {
             // 漏一条就是 `Books` 那批参数整局不跑（症状见 ARCHITECTURE §六 的消息表注）
             .add_message::<ShopOpRequested>()
             .add_message::<ShopOpDone>()
+            // ===== 保释（P4③）=====
+            .add_message::<BailRequested>()
+            .add_message::<PlayerBailed>()
             // ===== 抵押与赎回（P3d③）=====
             .add_message::<MortgageRequested>()
             .add_message::<MortgageDone>()
@@ -230,6 +239,10 @@ impl Plugin for CoreGamePlugin {
                 Update,
                 (
                     roll_dice_system
+                        .run_if(in_state(TurnPhase::WaitRoll))
+                        .run_if(not_paused),
+                    // 停留（P4④）：与掷骰同一个窗口、同一条资格，只认当前回合玩家
+                    take_stay_system
                         .run_if(in_state(TurnPhase::WaitRoll))
                         .run_if(not_paused),
                     walk_step_system
@@ -276,6 +289,11 @@ impl Plugin for CoreGamePlugin {
                     mortgage_op_system
                         .run_if(resource_exists::<ActiveBoard>)
                         .run_if(not_paused),
+                    // 保释与银行/百货/抵押同一条窗口形状（都带 `Books` 里的 `&mut Points`），
+                    // 所以一起 `chain`：谁先办都不改结果，只是不能并行借同一份账本
+                    bail_op_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
                 )
                     .chain(),
             )
@@ -299,6 +317,9 @@ impl Plugin for CoreGamePlugin {
                     deck::settle_card_landing,
                     coupon::settle_coupon_landing,
                     shop::settle_shop_landing,
+                    // 拘留场所接入点：踩上去开保释窗口（P4③）。排在最后一块结算之后 ——
+                    // 演示盘的接入点同时是地产格，先办完买地/付租再问要不要放人
+                    bail::settle_bail_landing_system,
                     landing::close_landing_system,
                 )
                     .chain(),

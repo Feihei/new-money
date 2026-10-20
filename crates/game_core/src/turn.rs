@@ -12,8 +12,8 @@ use crate::bank::AtmAccess;
 use crate::economy;
 use crate::market::Market;
 use crate::msg::{
-    DetentionLifted, DetentionSkipped, DiceRolled, GameOver, RequestRoll, StayLifted, StaySkipped,
-    TurnEnded, TurnStarted, WalkStarted,
+    DetentionLifted, DetentionSkipped, DiceRolled, GameOver, RequestRoll, RequestStay, StayLifted,
+    StaySkipped, TurnEnded, TurnStarted, WalkStarted,
 };
 use crate::player::{
     Bankrupt, Detention, Heading, PlayerId, StaySentence, TokenPosition, WalkQueue,
@@ -128,8 +128,6 @@ pub struct TurnWriters<'w> {
     turn_started: MessageWriter<'w, TurnStarted>,
     released: MessageWriter<'w, DetentionLifted>,
     skipped: MessageWriter<'w, DetentionSkipped>,
-    stayed: MessageWriter<'w, StaySkipped>,
-    lifted: MessageWriter<'w, StayLifted>,
     over: MessageWriter<'w, GameOver>,
 }
 
@@ -142,44 +140,21 @@ pub struct RollInput<'w, 's> {
     active: Res<'w, ActiveBoard>,
 }
 
-/// 两位「占用他这一回合」的计时。打包成一个参数包一半是为了躲开 clippy 的参数上限，
-/// 一半是因为这两格必须**一起读**：「一回合只跳一次、两个计数各减一」这条规则说的
-/// 就是它们的合取，分开读就会出现「他在被停留按住的那一格里被宣布出狱」。
-#[derive(SystemParam)]
-pub struct Sentences<'w, 's> {
-    detained: Query<'w, 's, Option<&'static Detention>, With<PlayerId>>,
-    staying: Query<'w, 's, Option<&'static StaySentence>, With<PlayerId>>,
-}
-
-impl<'w, 's> Sentences<'w, 's> {
-    /// `(被拘留那格, 停留剩余回合)`，读的是**本回合开始那一刻**的值。
-    /// 拘留那一格给的是整个组件而不是回合数 —— 跳过与回来那两条凭据都要说得出**他在哪儿**，
-    /// 而那是这条流水唯一携带它的地方。
-    fn held(&self, player: Entity) -> (Option<Detention>, Option<u32>) {
-        (
-            self.detained.get(player).ok().flatten().copied(),
-            self.staying
-                .get(player)
-                .ok()
-                .flatten()
-                .map(|s| s.turns_left),
-        )
-    }
-}
-
-/// 回合开始的唯一入口：跳过破产者 → 处理拘留与停留 → 否则等掷骰。
+/// 回合开始的唯一入口：跳过破产者 → 处理拘留 → 否则等掷骰。
 ///
 /// 拘留的递减规则与 `player_data.gd:72-80` 一致：`turns_left` 每次回合开始减一，
 /// 扣到只剩 1 的那一回合**当场回来并可掷骰**（即判 3 回合 = 跳过 2 个回合）。
-/// 停留（P3d④c 的停留卡）走同一条口径，但两者**各自计时、一回合只跳一次**：
-/// 同时挂着拘留 2 与停留 2 的人这一回合被跳过一次、两个计数各减一，而不是被扣两格、
-/// 也不是两件事互相延长。为什么不合成一个组件：见 [`StaySentence`] 那段 ——
-/// 被拘留的人被送进死胡同格，停留的人还在自己踩到的那一格上。
+///
+/// **停留（P4④ 起）不在这里扣**：身上有 `StaySentence` 的人照常进入 `WaitRoll`，只是
+/// 掷骰按钮翻成「停留」，点一下才结束这一回合（`take_stay_system`）。两条计时因此
+/// 各走各的入口，也不再需要「一回合只跳一次」那条合取 —— 被拘留的人根本进不了 `WaitRoll`。
+/// 为什么不合成一个组件：见 [`StaySentence`] 那段 —— 被拘留的人被送进死胡同格，
+/// 停留的人还在自己踩到的那一格上。
 pub fn begin_turn_system(
     mut commands: Commands,
     mut order: ResMut<TurnOrder>,
     players: Query<(Entity, Option<&Bankrupt>, &TokenPosition), With<PlayerId>>,
-    sentences: Sentences<'_, '_>,
+    held: Query<&Detention, With<PlayerId>>,
     mut atm: ResMut<AtmAccess>,
     mut writers: TurnWriters,
     mut next: ResMut<NextState<TurnPhase>>,
@@ -209,40 +184,26 @@ pub fn begin_turn_system(
     };
 
     // 回合开始即扣一格，所以 turns_left==1 表示「最后一格服完，本回合可行动」
-    let (held, stay_left) = sentences.held(player);
-    // `filter(>1)` 之后剩下的就是「本回合还要被占用」的那个新值
+    let held = held.get(player).ok().copied();
     let jail_next = held.filter(|d| d.turns_left > 1).map(|d| Detention {
         place: d.place,
         turns_left: d.turns_left - 1,
     });
-    let stay_next = stay_left.filter(|l| *l > 1).map(|l| l - 1);
 
-    if jail_next.is_some() || stay_next.is_some() {
-        // 先让 UI 显示「谁的回合被跳了」，再发那两条凭据（`turn_manager.gd:188-189` 的顺序）
+    if let Some(next_held) = jail_next {
+        // 先让 UI 显示「谁的回合被跳了」，再发那条凭据（`turn_manager.gd:188-189` 的顺序）
         writers.turn_started.write(TurnStarted { player });
-        if let Some(next) = jail_next {
-            commands.entity(player).insert(next);
-            writers.skipped.write(DetentionSkipped {
-                player,
-                place: next.place,
-                turns_left: next.turns_left,
-            });
-        }
-        if let Some(left) = stay_next {
-            commands
-                .entity(player)
-                .insert(StaySentence { turns_left: left });
-            writers.stayed.write(StaySkipped {
-                player,
-                turns_left: left,
-            });
-        }
+        commands.entity(player).insert(next_held);
+        writers.skipped.write(DetentionSkipped {
+            player,
+            place: next_held.place,
+            turns_left: next_held.turns_left,
+        });
         next.set(TurnPhase::TurnEnd);
         return;
     }
 
-    // 走到这里 = 本回合没人被占用：把「最后一格」服完的那两位放出来。
-    // 停留这一支没有「从哪格继续走」要说 —— 他从没离开过那一格（见 `DetentionLifted`）
+    // 走到这里 = 本回合没人被占用：把「最后一格」服完的放出来。
     if let Some(back) = held.filter(|d| d.turns_left == 1) {
         commands.entity(player).remove::<Detention>();
         writers.released.write(DetentionLifted {
@@ -251,12 +212,50 @@ pub fn begin_turn_system(
             junction: pos.tile,
         });
     }
-    if stay_left == Some(1) {
-        commands.entity(player).remove::<StaySentence>();
-        writers.lifted.write(StayLifted { player });
-    }
     writers.turn_started.write(TurnStarted { player });
     next.set(TurnPhase::WaitRoll);
+}
+
+/// 把这一回合用在「原地停留」上（P4④）。与 [`roll_dice_system`] 同一个窗口、同一条资格：
+/// 只认当前回合玩家，且他身上必须真的挂着停留计时。
+///
+/// 计数是**字面**的：卡面写 1 就停 1 个回合，扣到 0 那一格把组件摘掉并发
+/// [`StayLifted`]；还剩几格则发 [`StaySkipped`]。不再有「判 3 = 跳 2」那半条 ——
+/// 那是拘留的口径（拘留数的是天），两者单位不同，不该共用一把尺。
+pub fn take_stay_system(
+    mut commands: Commands,
+    order: Res<TurnOrder>,
+    mut requests: MessageReader<RequestStay>,
+    mut staying: Query<&mut StaySentence, With<PlayerId>>,
+    mut skipped: MessageWriter<StaySkipped>,
+    mut lifted: MessageWriter<StayLifted>,
+    mut next: ResMut<NextState<TurnPhase>>,
+) {
+    let Some(current) = order.current() else {
+        return;
+    };
+    // 全部读完再判断：`any()` 会短路，没读完的请求下一帧又被读出来 → 一回合停两次
+    let mut asked = false;
+    for r in requests.read() {
+        asked |= r.player == current;
+    }
+    if !asked {
+        return;
+    }
+    let Ok(mut sentence) = staying.get_mut(current) else {
+        return;
+    };
+    if sentence.turns_left > 1 {
+        sentence.turns_left -= 1;
+        skipped.write(StaySkipped {
+            player: current,
+            turns_left: sentence.turns_left,
+        });
+    } else {
+        commands.entity(current).remove::<StaySentence>();
+        lifted.write(StayLifted { player: current });
+    }
+    next.set(TurnPhase::TurnEnd);
 }
 
 /// 掷骰并定下本次移动。只在 `WaitRoll` 里跑，且只认「当前回合玩家」的请求 ——
@@ -274,7 +273,15 @@ pub fn roll_dice_system(
     mut input: RollInput,
     mut rng: ResMut<Rng>,
     mut clock: ResMut<WalkClock>,
-    mut walkers: Query<(&mut TokenPosition, &mut WalkQueue, &Heading), With<PlayerId>>,
+    mut walkers: Query<
+        (
+            &mut TokenPosition,
+            &mut WalkQueue,
+            &Heading,
+            Option<&StaySentence>,
+        ),
+        With<PlayerId>,
+    >,
     mut rolled: MessageWriter<DiceRolled>,
     mut started: MessageWriter<WalkStarted>,
     mut next: ResMut<NextState<TurnPhase>>,
@@ -290,9 +297,14 @@ pub fn roll_dice_system(
     if !asked {
         return;
     }
-    let Ok((mut pos, mut queue, heading)) = walkers.get_mut(current) else {
+    let Ok((mut pos, mut queue, heading, stay)) = walkers.get_mut(current) else {
         return;
     };
+    // 被停留按住的人这一回合不能掷骰 —— 他唯一的出口是按「停留」（`RequestStay`）。
+    // 判据放在规则层而不是只翻 UI 那颗按钮：AI 与 P12 的恶人没有那颗按钮。
+    if stay.is_some() {
+        return;
+    }
 
     let from = pos.tile;
     let steps = rng.roll_die();

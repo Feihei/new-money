@@ -8,8 +8,8 @@ use std::f32::consts::PI;
 
 use bevy::{ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
-    ActiveBoard, BoardDef, DetentionLifted, GameRules, PlayerColor, PlayerDetained, PlayerId,
-    PlayerTeleported, TileIndex, TileStepped, TokenPosition,
+    ActiveBoard, BoardDef, DetentionLifted, GameRules, PlayerBailed, PlayerColor, PlayerDetained,
+    PlayerId, PlayerTeleported, TileIndex, TileStepped, TokenPosition,
 };
 
 use super::{Rendered, dim, flat};
@@ -87,6 +87,8 @@ pub(crate) struct MovementNews<'w, 's> {
     steps: MessageReader<'w, 's, TileStepped>,
     detained: MessageReader<'w, 's, PlayerDetained>,
     released: MessageReader<'w, 's, DetentionLifted>,
+    /// 保释出来（P4③）：与期满同一条视觉——棋子从死胡同格挪回接入点
+    bailed: MessageReader<'w, 's, PlayerBailed>,
     teleported: MessageReader<'w, 's, PlayerTeleported>,
 }
 
@@ -123,6 +125,11 @@ pub(crate) fn animate_tokens(
         }
     }
     for r in news.released.read() {
+        if let Some(at) = b.tile_world_pos(r.junction.0 as i64) {
+            retarget(&mut tokens, r.player, at, dim::PARK_SECS);
+        }
+    }
+    for r in news.bailed.read() {
         if let Some(at) = b.tile_world_pos(r.junction.0 as i64) {
             retarget(&mut tokens, r.player, at, dim::PARK_SECS);
         }

@@ -78,6 +78,11 @@ pub struct GameRules {
     /// 额度），若赎回又分文不加，「缺钱就抵押、宽裕就赎回」成了一台免费的现金泵，
     /// 而它每转一圈都在给下一回合的租金定价（`total_assets` 读的就是这些地块）。
     pub redeem_percent: u32,
+    /// 保释一次要花的点券（P4③）。**不动现金**：别的玩家走到拘留场所的接入点，
+    /// 花这笔钱把里面的人放出来；与 P12 保释四大恶人（300）同一条判据、同一个界面。
+    ///
+    /// 30 是 10-20 拍板时给的单子（监狱与医院同价）—— 4 代原文查不到，所以这是设计值。
+    pub bail_points: u32,
 }
 
 impl Default for GameRules {
@@ -103,6 +108,7 @@ impl Default for GameRules {
             shop_buyback: 90,
             mortgage_percent: 50,
             redeem_percent: 110,
+            bail_points: 30,
         }
     }
 }

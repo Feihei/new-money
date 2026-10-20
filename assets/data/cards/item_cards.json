@@ -56,7 +56,7 @@
     "type": "item",
     "title": "转向卡",
     "desc": "让自己或任一对手掉头：还是绕这一圈，只是倒着走（再转一次就转回来）",
-    "cost_points": 25,
+    "cost_points": 20,
     "target": "anybody",
     "effects": [{ "action": "reverse" }]
   },
@@ -64,9 +64,9 @@
     "id": "item_stay",
     "type": "item",
     "title": "停留卡",
-    "desc": "让自己或任一对手原地停 3 回合 —— 人还在场上，地也照样收租，只是那几步不走了",
-    "cost_points": 30,
+    "desc": "让自己或任一对手原地停留 1 回合 —— 轮到他时掷骰按钮会翻成「停留」，点下去这一回合就不走了（人还在场上，地照样收租）",
+    "cost_points": 20,
     "target": "anybody",
-    "effects": [{ "action": "stay", "turns": 3 }]
+    "effects": [{ "action": "stay", "turns": 1 }]
   }
 ]

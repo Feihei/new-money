@@ -32,12 +32,9 @@ pub enum TileKind {
 }
 
 impl TileKind {
-    /// 会把玩家关起来的格子类型（对应 Godot 端 `TileType.is_detention_tile`）。
-    ///
-    /// 现在没有调用方：P4 的 `Detention` 模型才是它的主语，届时由那里决定读它还是换形态。
-    pub fn is_detention(self) -> bool {
-        matches!(self, Self::Jail | Self::Hospital)
-    }
+    // 这里刻意**没有** `is_detention()`：格子类型不决定「人会不会被关进去」——
+    // 天数只来自卡面，踩到哪一格都不抓人（10-20 拍板，P4④）。那类谓词留着只会
+    // 让后来人以为规则在格子上。
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -80,13 +77,12 @@ impl GridPos {
     }
 }
 
-/// 格子附加数据。拘留格用 `turns`/`fine`，点券格用 `coupon`/`refresh`，其余格为 `{}`。
+/// 格子附加数据。点券格用 `coupon`/`refresh`，其余格为 `{}`。
+///
+/// 拘留格**不带天数与罚金**：天数只来自卡面（P4④ 拍板），`turns`/`fine` 那份
+/// Godot 残留数据已删 —— 留着就是第二份真相。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub struct TileData {
-    #[serde(default)]
-    pub turns: Option<u32>,
-    #[serde(default)]
-    pub fine: Option<i64>,
     /// 点券格的面额。三档 10/30/50 **由数据决定、不随机抽**（`validate` 要求正面额）：
     /// 随机抽会让三档的期望值全部相同，「这一段路值得走」的梯度当场失效（PLAN §五）。
     #[serde(default)]
@@ -616,11 +612,17 @@ mod tests {
         let b = board();
         assert_eq!(b.branch_junction(BranchKind::Jail).unwrap().id, 2);
         assert_eq!(b.branch_end(BranchKind::Jail).unwrap().name, "监狱");
-        assert_eq!(b.branch_end(BranchKind::Jail).unwrap().data.turns, Some(3));
+        assert_eq!(b.branch_junction(BranchKind::Hospital).unwrap().id, 7);
         assert_eq!(b.branch_end(BranchKind::Hospital).unwrap().name, "医院");
+        // 拘留天数与罚金**不在格子上**（P4④）：天数只来自卡面，保释不动现金。
+        // 这条断言反过来钉住「谁把字段加回来谁就红」
         assert_eq!(
-            b.branch_end(BranchKind::Hospital).unwrap().data.fine,
-            Some(300)
+            b.branch_end(BranchKind::Jail).unwrap().data,
+            TileData::default()
+        );
+        assert_eq!(
+            b.branch_end(BranchKind::Hospital).unwrap().data,
+            TileData::default()
         );
     }
 

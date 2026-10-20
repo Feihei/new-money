@@ -63,6 +63,9 @@ pub enum LandingDomain {
     Coupon,
     /// 百货公司柜台：点券买卡 / 卖回（`shop::settle_shop_landing`）。
     Shop,
+    /// 拘留场所的接入点：踩上去可以花点券保释关在里面的人（P4③，`bail::settle_bail_landing`）。
+    /// 带的是**这个入口管哪一处** —— 监狱门口放不出医院里的人。
+    Bail(DetentionPlace),
     /// 按设计就是什么都不做：路面只是路面，起点刻意不发薪水（PLAN §一）。
     Nothing,
     /// 玩法已在 PLAN 登记、但结算还没到位的格。踩上去 `warn!`，别当成「没有这个格」。
@@ -82,16 +85,17 @@ pub const fn domain_of(kind: TileKind) -> LandingDomain {
         TileKind::Fate => D::Card(CardKind::Fate),
         TileKind::Coupon => D::Coupon,
         TileKind::Shop => D::Shop,
+        // 拘留场所的**接入点**（P4③）：踩上去是保释入口，不是被抓 ——
+        // 「没有任何踩到某格就被关的规则」是 10-20 拍板的另一半
+        TileKind::Jail => D::Bail(DetentionPlace::Jail),
+        TileKind::Hospital => D::Bail(DetentionPlace::Hospital),
         // 起点「什么都不发」是拍板过的规则（4 代没有过起点领薪水），不是没做完
         TileKind::Start | TileKind::Road => D::Nothing,
-        // ↓ 待办清单。监狱/医院要等 P4 的 `Detention`、神明等 P6、乐透等 P8、
-        //   中立与交通根本没有对应玩法（PLAN §三）。踩上去不再静默。
-        TileKind::Jail
-        | TileKind::Hospital
-        | TileKind::Lottery
-        | TileKind::GodDeity
-        | TileKind::Neutral
-        | TileKind::Transport => D::Unimplemented(kind),
+        // ↓ 待办清单。神明等 P6、乐透等 P8、中立与交通根本没有对应玩法（PLAN §三）。
+        //   踩上去不再静默。
+        TileKind::Lottery | TileKind::GodDeity | TileKind::Neutral | TileKind::Transport => {
+            D::Unimplemented(kind)
+        }
     }
 }
 
@@ -155,6 +159,12 @@ pub enum Pending {
     /// 百货没有「路过」这一档 —— 逛店必须停下来。所以两者各占一个变体而不是
     /// `Pending::Counter { which }`：分开写，将来「柜台能办什么」那张表才不会被并错。
     Shop,
+    /// 踩到拘留场所的接入点：可以花点券保释关在里面的人（P4③）。
+    ///
+    /// 与 `BankTeller`/`Shop` 一样是**窗口**（保释请求走 [`crate::msg::BailRequested`] 逐笔
+    /// 进来，一次可以放不止一个人），所以对 `Accept`/`Decline` 不认，只认「离开」。
+    /// 与 P3a「出牌不挂 Pending」相反：这里规则层确实要停下来问「要不要保」。
+    Bail(DetentionPlace),
 }
 
 /// 系统状态：现在正等谁的什么回答。
@@ -194,6 +204,14 @@ pub fn close_landing_system(pending: Res<PendingDecision>, mut next: ResMut<Next
     });
 }
 
+/// `decision_system` 除了账本之外要读的那一份「这一帧落在哪」。
+/// 打成参数包是因为 clippy 的参数上限（§六 坑 8 的同一处理）：这不是「需要知道很多事」，
+/// 是「同一个问题的两半」—— 被回答的报价与它落的那一格。
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct DecisionView<'w> {
+    landing: Res<'w, Landing>,
+}
+
 /// 执行玩家的回答。只在 `WaitDecision` 里跑，且只认「被挂着的那位」的回答。
 ///
 /// Godot 的六个方法（`confirm_buy`/`cancel_buy`/`confirm_upgrade`/`cancel_upgrade`/
@@ -202,6 +220,7 @@ pub fn close_landing_system(pending: Res<PendingDecision>, mut next: ResMut<Next
 pub fn decision_system(
     mut books: Books,
     mut pending: ResMut<PendingDecision>,
+    view: DecisionView<'_>,
     mut answers: MessageReader<DecisionChosen>,
     mut bought: MessageWriter<LandBought>,
     mut upgraded: MessageWriter<LandUpgraded>,
@@ -247,15 +266,34 @@ pub fn decision_system(
         // 柜台：只有「办完」算回答。四种钱的操作走 `BankOpRequested` 逐笔进来办，
         // 这里若也认 `Accept`，就成了一条消息既办业务又关窗口 —— 两个语义挤一个动作，
         // 而面板上根本没有「接受」这个按钮可对上。
-        // 百货柜台同一条理由（`ShopOpRequested` 逐笔办买卖），所以并在一起：
-        // 两个窗口对 `Accept`/`Decline` 一律不认，谁新增第三种窗口都要来这一格表态。
-        (Pending::BankTeller | Pending::Shop, Decision::Acknowledge) => {}
-        (Pending::BankTeller | Pending::Shop, Decision::Accept | Decision::Decline) => return,
+        // 百货柜台与保释窗口同一条理由（`ShopOpRequested`/`BailRequested` 逐笔办），
+        // 所以并在一起：三个窗口对 `Accept`/`Decline` 一律不认，谁新增第三种窗口都要来这一格表态。
+        (Pending::BankTeller | Pending::Shop | Pending::Bail(_), Decision::Acknowledge) => {}
+        (
+            Pending::BankTeller | Pending::Shop | Pending::Bail(_),
+            Decision::Accept | Decision::Decline,
+        ) => return,
         // 收据与卡面没有「可拒绝」的选项：钱已经扣了、效果已经结算了。
         // 任何回答都算「我看完了」—— 严格拒绝只会把 UI 的一次疏忽变成挂死。
         (Pending::RentNotice(_) | Pending::Card, _) => {}
         // 报价上答「已阅」= 没答，继续等（Godot 的 `_pending_decision != "buy"` 同义）
         (Pending::Buy(_) | Pending::Upgrade(_), Decision::Acknowledge) => return,
+    }
+
+    // 刚答完一个报价/窗口：如果这一格正是监狱或医院那条分支的**接入点**，且那里真关着人，
+    // 就把保释窗口摆出来（P4③）。演示盘的接入点是地产格（汉口路／徐家汇），所以「走到
+    // 监狱门口」表现为先买地/付租，再决定要不要放人 —— 与 4 代在图上走到那格是同一件事。
+    // 保释窗口自己关掉时（`about` 已是 `Bail`）不再回头再问一次，否则会绕成死循环。
+    if !matches!(about, Pending::Bail(_))
+        && let Some(place) = view
+            .landing
+            .0
+            .filter(|l| l.player == asked)
+            .and_then(|l| crate::bail::branch_place(&books.active.def, l.tile))
+        && crate::bail::someone_held(&books, place)
+    {
+        pending.offer(asked, Pending::Bail(place));
+        return;
     }
 
     pending.clear();
@@ -371,13 +409,14 @@ mod tests {
             (TileKind::Fate, D::Card(CardKind::Fate)),
             (TileKind::Coupon, D::Coupon),
             (TileKind::Shop, D::Shop),
+            // P4③：拘留场所的接入点 = 保释入口（没人可保时安静收摊）
+            (TileKind::Jail, D::Bail(DetentionPlace::Jail)),
+            (TileKind::Hospital, D::Bail(DetentionPlace::Hospital)),
             // 拍板过「什么都不发」的两格：不是待办
             (TileKind::Start, D::Nothing),
             (TileKind::Road, D::Nothing),
-            // 待办六格各自点名；将来某格实现了就从这一组挪走，
+            // 待办四格各自点名；将来某格实现了就从这一组挪走，
             // 于是「悄悄少了一个待办」也会在这里显形
-            (TileKind::Jail, D::Unimplemented(TileKind::Jail)),
-            (TileKind::Hospital, D::Unimplemented(TileKind::Hospital)),
             (TileKind::Lottery, D::Unimplemented(TileKind::Lottery)),
             (TileKind::GodDeity, D::Unimplemented(TileKind::GodDeity)),
             (TileKind::Neutral, D::Unimplemented(TileKind::Neutral)),
@@ -409,8 +448,6 @@ mod tests {
         assert_eq!(
             todos,
             vec![
-                &TileKind::Jail,
-                &TileKind::Hospital,
                 &TileKind::Lottery,
                 &TileKind::GodDeity,
                 &TileKind::Neutral,
@@ -443,6 +480,7 @@ mod tests {
             Pending::Card,
             Pending::BankTeller,
             Pending::Shop,
+            Pending::Bail(DetentionPlace::Jail),
         ] {
             let mut pending = PendingDecision::default();
             pending.offer(e, about);

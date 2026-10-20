@@ -22,10 +22,10 @@ pub mod top_bar;
 
 use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
-    ActiveBoard, AtmAccess, BankOp, BankOpRequested, CardAim, CardId, Decision, DecisionChosen,
-    GameRules, LandId, MarketClock, MortgageOp, MortgageRequested, Paused, Pending,
-    PendingDecision, PlayCardRequested, RequestRoll, ShopOpRequested, StockId, StockTradeRequested,
-    TradeSide, TurnOrder, TurnPhase, bank_op_allowed,
+    ActiveBoard, AtmAccess, BailRequested, BankOp, BankOpRequested, CardAim, CardId, Decision,
+    DecisionChosen, GameRules, LandId, MarketClock, MortgageOp, MortgageRequested, Paused, Pending,
+    PendingDecision, PlayCardRequested, RequestRoll, RequestStay, ShopOpRequested, StaySentence,
+    StockId, StockTradeRequested, TradeSide, TurnOrder, TurnPhase, bank_op_allowed,
 };
 
 use theme::{col, layout, size};
@@ -201,6 +201,11 @@ pub enum UiAction {
     MortgageOp {
         land: LandId,
         op: MortgageOp,
+    },
+    /// 在拘留所门口保释一个人（P4③）。按钮上写的是「保释 阿土伯」，主语仍是
+    /// 「此刻站在窗口前的那个人」—— 与银行/百货那两颗同一条形状。
+    Bail {
+        target: Entity,
     },
 }
 
@@ -552,7 +557,7 @@ pub fn overlay(z: i32) -> (Node, BackgroundColor, ZIndex) {
 /// 派发要读的世界状态。三个参数包是房规换来的：这个 system 需要知道的确实不少
 /// （点到了什么、能不能做、要往哪发），但参数超过七个不挂 `#[allow]` 而是收拢（§六 坑 8）。
 #[derive(SystemParam)]
-struct Gate<'w> {
+struct Gate<'w, 's> {
     pending: Res<'w, PendingDecision>,
     order: Option<Res<'w, TurnOrder>>,
     phase: Res<'w, State<TurnPhase>>,
@@ -562,6 +567,9 @@ struct Gate<'w> {
     /// 周末休市要挡在派发这一层：面板的灰色只是提示，按下去仍然会走到这里
     clock: Res<'w, MarketClock>,
     rules: Res<'w, GameRules>,
+    /// 身上挂着停留计时的人那一颗「掷骰」是「停留」（P4④）。派发读它，不是为了替规则
+    /// 层判资格 —— 那边 `roll_dice_system` 仍会拒掉被按住的掷骰，这里只决定发哪个意图。
+    stays: Query<'w, 's, &'static StaySentence>,
 }
 
 /// 命中测试给出的实体那一侧：动作、禁用标记、父链。
@@ -577,12 +585,14 @@ struct Widgets<'w, 's> {
 #[derive(SystemParam)]
 struct Sends<'w> {
     rolls: MessageWriter<'w, RequestRoll>,
+    stays: MessageWriter<'w, RequestStay>,
     answers: MessageWriter<'w, DecisionChosen>,
     ops: MessageWriter<'w, BankOpRequested>,
     trades: MessageWriter<'w, StockTradeRequested>,
     cards: MessageWriter<'w, PlayCardRequested>,
     shops: MessageWriter<'w, ShopOpRequested>,
     mortgages: MessageWriter<'w, MortgageRequested>,
+    bails: MessageWriter<'w, BailRequested>,
     exit: MessageWriter<'w, AppExit>,
 }
 
@@ -603,7 +613,7 @@ struct UiState<'w> {
 /// 规则层还会再判一次（认主语、认窗口），所以这里放行错了也只是白点一下。
 fn dispatch_ui_actions(
     mut clicks: MessageReader<PointerClick>,
-    gate: Gate,
+    gate: Gate<'_, '_>,
     widgets: Widgets,
     mut next_scene: ResMut<NextState<crate::scene::Scene>>,
     mut sends: Sends,
@@ -630,13 +640,19 @@ fn dispatch_ui_actions(
             UiAction::Quit => {
                 sends.exit.write(AppExit::Success);
             }
-            // 掷骰：等轮到人、没暂停、且没有待决事项（判据与顶栏着色同源）
+            // 掷骰：等轮到人、没暂停、且没有待决事项（判据与顶栏着色同源）。
+            // 被停留按住的人（P4④）发的是同一个意图位的「停留」—— 规则层的
+            // `roll_dice_system` 会拒掉他的掷骰，所以这里不把两个意图混成一个请求。
             UiAction::Roll => {
                 if !can_roll(*gate.phase.get(), &gate.paused, &gate.pending) {
                     continue;
                 }
                 if let Some(player) = gate.order.as_ref().and_then(|o| o.current()) {
-                    sends.rolls.write(RequestRoll { player });
+                    if gate.stays.get(player).is_ok() {
+                        sends.stays.write(RequestStay { player });
+                    } else {
+                        sends.rolls.write(RequestRoll { player });
+                    }
                 }
             }
             // 回答待决事项：主语取自 `PendingDecision`，不是「当前玩家」——
@@ -735,6 +751,20 @@ fn dispatch_ui_actions(
                     land: *land,
                 });
             }
+            // 保释：主语是保释窗口挂着的那位（P4③）。「那个人关不关在这里」「点券够不够」
+            // 都由规则层的 `bail_op_allowed` 判；这里只认窗口在不在、按的是谁。
+            UiAction::Bail { target } => {
+                if gate.paused.0 {
+                    continue;
+                }
+                let Some((player, Pending::Bail(_))) = gate.pending.active() else {
+                    continue;
+                };
+                sends.bails.write(BailRequested {
+                    player,
+                    target: *target,
+                });
+            }
         }
     }
 }
@@ -801,7 +831,7 @@ mod tests {
     };
     use bevy::state::app::StatesPlugin;
     use bevy::window::WindowRef;
-    use game_core::prelude::{Decision, LandId, Pending, PlayerId, TurnOrder};
+    use game_core::prelude::{Decision, LandId, Pending, PlayerId, StaySentence, TurnOrder};
     use std::time::Duration;
 
     /// 造一条落在 `entity` 上的左键点击。这些字段平时由 picking 后端填，
@@ -860,6 +890,7 @@ mod tests {
     #[derive(Resource, Default)]
     struct Seen {
         rolls: Vec<Entity>,
+        stays: Vec<Entity>,
         answers: Vec<(Entity, Decision)>,
         ops: Vec<(Entity, BankOp, i64)>,
         trades: Vec<(Entity, String, TradeSide, u32)>,
@@ -874,6 +905,7 @@ mod tests {
     #[derive(SystemParam)]
     struct Readers<'w, 's> {
         rolls: MessageReader<'w, 's, RequestRoll>,
+        stays: MessageReader<'w, 's, RequestStay>,
         answers: MessageReader<'w, 's, DecisionChosen>,
         ops: MessageReader<'w, 's, BankOpRequested>,
         trades: MessageReader<'w, 's, StockTradeRequested>,
@@ -884,6 +916,7 @@ mod tests {
 
     fn collect(mut seen: ResMut<Seen>, mut r: Readers<'_, '_>) {
         seen.rolls.extend(r.rolls.read().map(|x| x.player));
+        seen.stays.extend(r.stays.read().map(|x| x.player));
         seen.answers
             .extend(r.answers.read().map(|a| (a.player, a.action)));
         seen.ops
@@ -938,12 +971,14 @@ mod tests {
                 .init_state::<crate::scene::Scene>()
                 .add_message::<PointerClick>()
                 .add_message::<RequestRoll>()
+                .add_message::<RequestStay>()
                 .add_message::<DecisionChosen>()
                 .add_message::<BankOpRequested>()
                 .add_message::<StockTradeRequested>()
                 .add_message::<PlayCardRequested>()
                 .add_message::<ShopOpRequested>()
                 .add_message::<MortgageRequested>()
+                .add_message::<BailRequested>()
                 .add_message::<AppExit>()
                 .init_resource::<Seen>()
                 .init_resource::<tile_info::SelectedTile>()
@@ -1108,6 +1143,21 @@ mod tests {
         let mut h = Harness::new(TurnPhase::WaitRoll, true, PendingDecision::default());
         h.click(h.roll_label);
         assert!(h.seen().rolls.is_empty(), "暂停时不该放行掷骰");
+    }
+
+    #[test]
+    fn a_staying_player_sends_the_stay_intent_from_the_same_button() {
+        // P4④：按钮还是那一颗，判据是「当前这位身上有没有停留计时」。
+        // 规则层也会拒掉被停留者的掷骰，但派发侧必须发对意图 —— 否则 AI/恶人那边的
+        // `RequestStay` 就没有人类这条入口对应
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        h.app
+            .world_mut()
+            .entity_mut(h.player)
+            .insert(StaySentence { turns_left: 1 });
+        h.click(h.roll_label);
+        assert!(h.seen().rolls.is_empty(), "被按住的人不该发掷骰");
+        assert_eq!(h.seen().stays, vec![h.player]);
     }
 
     #[test]
@@ -1464,6 +1514,7 @@ mod tests {
             .init_resource::<GameRules>()
             .add_message::<PointerClick>()
             .add_message::<RequestRoll>()
+            .add_message::<RequestStay>()
             .add_message::<DecisionChosen>()
             .add_message::<BankOpRequested>()
             .add_message::<StockTradeRequested>()
@@ -1475,6 +1526,9 @@ mod tests {
             // 顶栏提示行读的 —— 少任何一条，崩的都是「一片按钮没反应」而不是这一个
             .add_message::<MortgageRequested>()
             .add_message::<game_core::prelude::MortgageDone>()
+            // P4③ 的两个出口：请求由派发写、成交由顶栏提示行读
+            .add_message::<BailRequested>()
+            .add_message::<game_core::prelude::PlayerBailed>()
             .add_message::<AppExit>()
             // hover_feedback 读的两条 picking 消息，真实应用由 picking 后端注册
             .add_message::<PointerOver>()

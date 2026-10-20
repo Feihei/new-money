@@ -18,7 +18,7 @@ use crate::damage::{self, DamageTally, LandDamage};
 use crate::economy::{self, LandView};
 use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
 use crate::msg::{CashChanged, ChargeWaived, PlayerBankrupt, PointsChanged};
-use crate::player::{BankBalance, Bankrupt, Detention, PlayerId, Points, Wallet};
+use crate::player::{BankBalance, Bankrupt, Detention, DetentionPlace, PlayerId, Points, Wallet};
 use crate::plot::{PlotArea, area_of};
 use crate::rules::GameRules;
 use crate::status::{LandStatus, Timed};
@@ -122,6 +122,24 @@ impl<'w, 's> Books<'w, 's> {
             .iter()
             .filter(|(entity, _, _)| self.detained.get(*entity).is_ok())
             .map(|(_, id, _)| *id)
+            .collect()
+    }
+
+    /// 被关在 `place` 的人（实体 + 计时），按 `faces` 的顺序。
+    ///
+    /// 保释窗口要一排候选，而面板手上只有 `&Books`：这里把「谁是实体」与「他被关在哪」
+    /// 两半合起来给一次，UI 就不必再开一条读 `Detention` 的查询（那会与账本里的
+    /// `&mut Detention` 在参数建立期撞成借用冲突 —— 与 P4② 那条同一个坑）。
+    pub fn held(&self, place: DetentionPlace) -> Vec<(Entity, Detention)> {
+        self.faces
+            .iter()
+            .filter_map(|(entity, _, _)| {
+                self.detained
+                    .get(entity)
+                    .ok()
+                    .filter(|d| d.place == place)
+                    .map(|d| (entity, *d))
+            })
             .collect()
     }
 

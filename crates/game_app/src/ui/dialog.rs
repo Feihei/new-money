@@ -13,11 +13,11 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, AfflictDomain, BankOp, Books, BuildingLevel, CardDef, CardDrawn, CardId, CardKind,
-    CardNotice, Decision, EffectOutcome, Hand, LandId, LandStatus, LandType, MarketClock,
-    MortgageDeny, MortgageOp, Owner, Pending, PendingDecision, PlayerId, PlayerName, Rng, Shelf,
-    ShopDeny, ShopStock, TradeSide, TurnOrder, buyback, counter_plots, mortgage_op_allowed,
-    read_facts, restock, shop_op_allowed,
+    ActiveBoard, AfflictDomain, BailDeny, BailFacts, BankOp, Books, BuildingLevel, CardDef,
+    CardDrawn, CardId, CardKind, CardNotice, Decision, DetentionPlace, EffectOutcome, Hand, LandId,
+    LandStatus, LandType, MarketClock, MortgageDeny, MortgageOp, Owner, Pending, PendingDecision,
+    PlayerId, PlayerName, Rng, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed,
+    buyback, counter_plots, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -185,15 +185,23 @@ pub(crate) fn sync_modal(
         Some((player, Pending::BankTeller)) => plot_rows(&books, player, banking_hours),
         _ => Vec::new(),
     };
+    // 保释窗口的一排候选：只有保释窗口才算（P4③）
+    let bails: Vec<BailRow> = match want {
+        Some((player, Pending::Bail(place))) => bail_rows(&books, &names, player, place),
+        _ => Vec::new(),
+    };
     let stamp = want.map_or(String::new(), |(player, about)| {
         modal_stamp(
             about,
             &books,
             player,
             banking_hours,
-            &view.stock,
-            &held,
-            &plots,
+            ModalExtra {
+                stock: &view.stock,
+                held: &held,
+                plots: &plots,
+                bails: &bails,
+            },
         )
     });
     // 两边都是 `None` 时相等：没有待决事项、也没有模态，正是常态
@@ -237,6 +245,9 @@ pub(crate) fn sync_modal(
                 player,
                 stamp,
             ),
+            Pending::Bail(place) => {
+                bail_modal(&mut commands, &font, &books, player, place, &bails, stamp)
+            }
         };
     }
 }
@@ -250,14 +261,21 @@ pub(crate) fn sync_modal(
 ///
 /// 写成对 `Pending` 的穷尽匹配：新增一种待决事项时必须当场回答「它的屏幕上有什么是由
 /// 判据决定的」，漏了不会编译失败、只会静默过期。
+/// 签名要读的「这一屏的附加内容」。收成一个结构是房规（§六 坑 8）：
+/// 四位数据本来就是同一件事 —— 这一屏上由判据决定的可见内容。
+struct ModalExtra<'a> {
+    stock: &'a ShopStock,
+    held: &'a [CardId],
+    plots: &'a [PlotRow],
+    bails: &'a [BailRow],
+}
+
 fn modal_stamp(
     about: Pending,
     books: &Books,
     player: Entity,
     banking_hours: bool,
-    stock: &ShopStock,
-    held: &[CardId],
-    plots: &[PlotRow],
+    extra: ModalExtra<'_>,
 ) -> String {
     match about {
         Pending::BankTeller => {
@@ -271,7 +289,8 @@ fn modal_stamp(
                 // 地产那一节的每一行都是「由判据决定」的可见东西：押没押、封没封、
                 // 赎回要多少。少进签名一位，玩家就会对着一个「已经押掉了、按钮还亮着」
                 // 的柜台按第二次（§6.1 坑 22/30 同族）
-                plots
+                extra
+                    .plots
                     .iter()
                     .map(|row| format!("{}:{}:{}", row.land.0, row.held as u8, row.sealed as u8))
                     .collect::<Vec<_>>()
@@ -284,16 +303,30 @@ fn modal_stamp(
         Pending::Shop => format!(
             "{}|{}|{}",
             books.points_of(player),
-            stock
+            extra
+                .stock
                 .slots
                 .iter()
                 .map(|c| c.0.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
-            held.iter()
+            extra
+                .held
+                .iter()
                 .map(|c| c.0.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
+        ),
+        // 保释窗口同一条：点券、还关着谁、谁刚被放走 —— 少一位就是一次静默过期
+        Pending::Bail(_) => format!(
+            "{}|{}",
+            books.points_of(player),
+            extra
+                .bails
+                .iter()
+                .map(|row| row.target.to_bits().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         ),
         // 报价与收据的内容弹出即定稿（买地面板上的「你的现金」是那一刻的现金，
         // 而回合停在那几帧里谁也花不了钱）
@@ -1083,6 +1116,15 @@ fn plot_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &PlotRow) {
     });
 }
 
+/// 保释窗口的一行：关在这里的一个人，和「他现在能不能被赎出去」。
+#[derive(Debug, Clone)]
+pub(crate) struct BailRow {
+    pub target: Entity,
+    pub name: String,
+    /// `Some(为什么)` = 这颗按钮灰着
+    pub blocked: Option<&'static str>,
+}
+
 /// 柜台一行的全部读数。买与卖共用同一个形状，所以共用同一个结构而不是两套参数表 ——
 /// 这是这仓库的房规（同 `ButtonSpec`）：`shop_row` 本来要八份参数，而其中五份
 /// 本来就是「这一行长什么样」这一件事（§六 坑 8）。
@@ -1294,6 +1336,140 @@ fn shop_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &ShopRow) {
             .disabled(row.blocked.is_some()),
         );
         // 灰掉的话那句话就写在按钮旁边 —— 面板上只有一处解释会读漏（同手牌浮层）
+        if let Some(reason) = row.blocked {
+            line.spawn(label(&font.0, reason, size::ROW, col::JAILED));
+        }
+    });
+}
+
+/// 保释窗口要读的那一排：这一处关着谁、这笔钱够不够。与规则层读同一份
+/// [`bail_op_allowed`]，所以「灰着按不动」与「按下去办不成」不会分叉。
+fn bail_rows(
+    books: &Books,
+    names: &Query<&PlayerName>,
+    player: Entity,
+    place: DetentionPlace,
+) -> Vec<BailRow> {
+    let cost = books.rules.bail_points;
+    let points = books.points_of(player);
+    books
+        .held(place)
+        .into_iter()
+        .map(|(target, held)| {
+            let facts = BailFacts {
+                at_window: true,
+                window: place,
+                target_place: Some(held.place),
+                points,
+                cost,
+            };
+            BailRow {
+                target,
+                name: names
+                    .get(target)
+                    .map(|n| n.0.clone())
+                    .unwrap_or_else(|_| "?".into()),
+                blocked: bail_op_allowed(&facts).err().map(|d: BailDeny| d.label()),
+            }
+        })
+        .collect()
+}
+
+/// 保释窗口（P4③）。与百货柜台同一条形状：一个窗口、一排候选、一颗「离开」。
+/// 之所以不是「选一个回答」，是因为同一处可以关着好几个人，玩家可能想一次放两个。
+fn bail_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    books: &Books,
+    player: Entity,
+    place: DetentionPlace,
+    rows: &[BailRow],
+    stamp: String,
+) -> Entity {
+    let cost = books.rules.bail_points;
+    let points = books.points_of(player);
+
+    frame(
+        commands,
+        (player, Pending::Bail(place)),
+        stamp,
+        layout::SHOP_PANEL,
+        col::BORDER_SHOP,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                format!("{}门口", place.label()),
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                format!("点券 {points} — 花 {cost} 点券把里面的人放出来，办完才继续"),
+                size::ROW,
+                col::MUTED,
+            ));
+            p.spawn(separator());
+            if rows.is_empty() {
+                // 分派层在「没人可保」时不会摆这个窗口（见 `settle_bail_landing_system`），
+                // 走到这里只可能是保释刚把最后一个人放走、面板还没重建的那一帧
+                p.spawn(label(&font.0, "这里没有关着的人", size::ROW, col::KEY));
+            }
+            for row in rows {
+                bail_row(p, font, row);
+            }
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "离开",
+                        layout::MODAL_BUTTON,
+                        super::PRIMARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
+}
+
+/// 保释窗口的一行：「名字 + 说明 + 一颗带价目的按钮 + 灰掉时的那句话」。
+fn bail_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &BailRow) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        row_gap: Val::Px(layout::SHOP_ROW_GAP),
+        ..default()
+    })
+    .with_children(|line| {
+        line.spawn((
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            label(
+                &font.0,
+                format!("{} 关在里面", row.name),
+                size::ROW,
+                if row.blocked.is_some() {
+                    col::KEY
+                } else {
+                    col::BODY
+                },
+            ),
+        ));
+        button(
+            line,
+            &font.0,
+            ButtonSpec::new(
+                &format!("保释 {}", row.name),
+                layout::SHOP_BUTTON,
+                super::PRIMARY,
+                UiAction::Bail { target: row.target },
+            )
+            .disabled(row.blocked.is_some()),
+        );
         if let Some(reason) = row.blocked {
             line.spawn(label(&font.0, reason, size::ROW, col::JAILED));
         }

@@ -14,8 +14,9 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankVisited, CardPlayed, ChargeWaived, DetentionLifted,
     DetentionSkipped, GameOver, GameRules, GameSession, MarketClock, MortgageDone, MortgageOp,
-    Paused, PendingDecision, PlayerBankrupt, PlayerName, PointsChanged, ShopOpDone, StayLifted,
-    StaySkipped, StockTraded, StockVisited, TradeSide, TurnOrder, TurnPhase,
+    Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, ShopOpDone,
+    StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TradeSide, TurnOrder,
+    TurnPhase,
 };
 
 use super::finance::comma;
@@ -166,6 +167,9 @@ pub(crate) struct TurnView<'w, 's> {
     clock: Res<'w, MarketClock>,
     rules: Res<'w, GameRules>,
     names: Query<'w, 's, &'static PlayerName>,
+    /// 当前这位身上有没有停留计时（P4④）：有则那颗「掷骰」写「停留」。
+    /// 判据放在这里而不是按 `TurnPhase` 猜，是因为它跟人走、不跟阶段走。
+    stays: Query<'w, 's, &'static StaySentence>,
 }
 
 /// 一颗按钮此刻该不该亮。三颗按钮三种判据，都从这里出，
@@ -257,6 +261,12 @@ pub(crate) fn refresh_top_bar(
     mut seen_phase: Local<Option<TurnPhase>>,
 ) {
     let now = *turn.phase.get();
+    // 这一回合轮到的人被停留按住吗（P4④）。与 `button_allowed` 分开算：按钮仍然可用，
+    // 变的只是它代表哪个意图（「停留」），以及派发处发哪条消息
+    let held = turn
+        .order
+        .current()
+        .is_some_and(|p| turn.stays.get(p).is_ok());
     for entry in bars.iter() {
         for child in entry {
             // 顶栏名下还有旁白与阶段名两行文本，它们没有按钮的那套组件 → 跳过
@@ -276,6 +286,20 @@ pub(crate) fn refresh_top_bar(
                     paint_label(&mut paint, entity, true);
                 }
                 _ => {}
+            }
+            // 「掷骰」与「停留」是同一个按钮、同一个意图位（P4④）。写成每帧比对再写，
+            // 免得反复赋同一个字符串让排版重来
+            if matches!(action, UiAction::Roll) {
+                let want = if held { "停留" } else { "掷骰" };
+                if let Ok(kids) = paint.kids.get(entity) {
+                    for child in kids {
+                        if let Ok((mut text, ..)) = texts.get_mut(*child)
+                            && text.0 != want
+                        {
+                            text.0 = want.to_string();
+                        }
+                    }
+                }
             }
         }
     }
@@ -358,6 +382,9 @@ pub(crate) struct Notices<'w, 's> {
     /// 人回来了（P4①）。三个去处是三句话，但在模型里是同一条凭据，所以这里只多一个动词：
     /// 「出狱」「出院」「回国」由 `DetentionPlace::back_verb` 给
     detention_back: MessageReader<'w, 's, DetentionLifted>,
+    /// 保释成交（P4③）。与 `detention_back` 分开：那条说的是「期满」，这条说的是
+    /// 「有人替他付了账」—— 屏幕上要同时说得清谁付、付了多少
+    bailed: MessageReader<'w, 's, PlayerBailed>,
     /// 停留被跳过（P3d④c）。排在拘留之后：同时挂着两张计时的人，这一帧两条都会写，
     /// 而留下停留那句更对 —— 拘留是旧事，「被停留卡按住」才是刚刚发生的那件
     stay_skip: MessageReader<'w, 's, StaySkipped>,
@@ -422,7 +449,7 @@ pub(crate) fn hint_from_events(
     }
     for m in notices.stay_lifted.read() {
         line = Some(format!(
-            "{} 停留期满，本回合起照常行动",
+            "{} 停留期满，下一回合起照常行动",
             name(&names, m.player)
         ));
     }
@@ -473,6 +500,17 @@ pub(crate) fn hint_from_events(
             verb,
             amount,
             m.balance
+        ));
+    }
+    // 保释：这一行要同时说清「谁付」「付了多少」「放了谁」。它排在通用点券流水之后 ——
+    // 同一帧两条说的是同一件事，而带对象与价目的这条更能回答「我刚按下去发生了什么」
+    for m in notices.bailed.read() {
+        line = Some(format!(
+            "{} 花 {} 点券保释了 {}（{}）",
+            name(&names, m.by),
+            m.points,
+            name(&names, m.player),
+            m.place.back_verb()
         ));
     }
     // 百货成交：这一行要说得出「哪张卡」与「几点券」，因为柜台面板下一刻就重建了。

@@ -17,19 +17,19 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
-    ActiveBoard, Adjustment, AtmAccess, BankBalance, BankOp, BankOpDone, BankOpRequested,
-    BankVisited, Books, BuildingLevel, BuyOffered, CardAim, CardDrawn, CardGained, CardId,
-    CardKind, CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived, Correction, Corrections,
-    CouponBoxes, DamageTally, DataHandles, Decision, DecisionChosen, Deck, Detention,
+    ActiveBoard, Adjustment, AtmAccess, BailRequested, BankBalance, BankOp, BankOpDone,
+    BankOpRequested, BankVisited, Books, BuildingLevel, BuyOffered, CardAim, CardDrawn, CardGained,
+    CardId, CardKind, CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived, Correction,
+    Corrections, CouponBoxes, DamageTally, DataHandles, Decision, DecisionChosen, Deck, Detention,
     DetentionLifted, DetentionSkipped, DiceRolled, GameOver, GameRules, GameSeed, GameSession,
     GameSetup, Hand, Insulation, LandBought, LandDamage, LandId, LandStatus, LandUpgraded,
     LandView, Market, MarketClock, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Owner,
-    Pending, PendingDecision, PlayCardRequested, PlayerArrived, PlayerBankrupt, PlayerDetained,
-    PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, RentDue, RequestRoll, Rng, Scope,
-    Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped,
-    StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex,
-    TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted,
-    UpgradeOffered, WalkStarted, Wallet, deal_to,
+    Pending, PendingDecision, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
+    PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, RentDue,
+    RequestRoll, RequestStay, Rng, Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source,
+    StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested,
+    StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded,
+    TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet, deal_to,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -43,6 +43,11 @@ pub fn asset_root() -> PathBuf {
 /// 不直接塞消息是为了让测试走与真实 UI 完全相同的入口。
 #[derive(Resource, Default)]
 pub struct Inputs(pub Vec<Entity>);
+
+/// 测试侧的「点那颗已经翻成『停留』的按钮」（P4④）：排空成 `RequestStay`。
+/// 与 [`Inputs`] 分成两条队列，是因为它们现在是两个意图 —— 测试要能分别按。
+#[derive(Resource, Default)]
+pub struct StayRequests(pub Vec<Entity>);
 
 /// 测试侧的「点证券面板的买/卖按钮」。同理经一条泵 system 转成消息，
 /// 于是「阶段不对就不受理」这条门禁被真的走了一遍，而不是被测试绕过。
@@ -67,6 +72,11 @@ pub struct ShopRequests(pub Vec<ShopOpRequested>);
 /// （`Pending::BankTeller` 挂的是谁、银行今天开不开门）被真走到，而不是被测试绕过。
 #[derive(Resource, Default)]
 pub struct MortgageRequests(pub Vec<MortgageRequested>);
+
+/// 测试侧的「点保释窗口里的那一颗『保释 某人』」（P4③）。同样走队列 → 真消息，
+/// 于是「窗口挂的是谁」「那个人关在不在这一处」都被真走到。
+#[derive(Resource, Default)]
+pub struct BailRequests(pub Vec<BailRequested>);
 
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
@@ -105,7 +115,9 @@ fn auto_answer_system(
         // 柜台只认「办完」。这里必须显式答一句，否则每一个踩到银行格的回合都会
         // 停在 `WaitDecision`，把所有长跑用例整片挂死 —— 编译器逼这一条写出来。
         // 百货柜台同一条（P3d②）：13 格环上真有一格百货，长跑用例一定会踩到它。
-        (Pending::BankTeller | Pending::Shop, _) => Decision::Acknowledge,
+        // 百货柜台与保释窗口同一条（P3d②/P4③）：环上真有一格百货，接入点真能被踩到 ——
+        // 长跑用例不自动关掉它们就会整片停在 `WaitDecision`
+        (Pending::BankTeller | Pending::Shop | Pending::Bail(_), _) => Decision::Acknowledge,
         // `Hold` 在函数开头就返回了，这一支只为穷尽存在
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::Hold) => return,
     };
@@ -166,6 +178,8 @@ struct BookReaders<'w, 's> {
     bankrupts: MessageReader<'w, 's, PlayerBankrupt>,
     detained: MessageReader<'w, 's, PlayerDetained>,
     teleported: MessageReader<'w, 's, PlayerTeleported>,
+    /// 保释成交（P4③）。它**不是** `Lifted`：那条说的是期满，这条说的是有人替付了账
+    bailed: MessageReader<'w, 's, PlayerBailed>,
     cards: MessageReader<'w, 's, CardDrawn>,
     played: MessageReader<'w, 's, CardPlayed>,
     gained: MessageReader<'w, 's, CardGained>,
@@ -363,6 +377,15 @@ fn collect_books(
             m.tile.0
         ));
     }
+    for m in r.bailed.read() {
+        log.0.push(format!(
+            "Bail({}←{}@{},{}点券)",
+            who(&players, m.player),
+            who(&players, m.by),
+            m.place.label(),
+            m.points
+        ));
+    }
     for m in r.cards.read() {
         log.0
             .push(format!("Card({}:{})", who(&players, m.player), m.card.id));
@@ -473,22 +496,29 @@ fn collect_books(
 #[derive(SystemParam)]
 struct Pump<'w> {
     inputs: ResMut<'w, Inputs>,
+    stay_inputs: ResMut<'w, StayRequests>,
     trades: ResMut<'w, Trades>,
     asks: ResMut<'w, BankRequests>,
     plays: ResMut<'w, Plays>,
     shops: ResMut<'w, ShopRequests>,
     mortgages: ResMut<'w, MortgageRequests>,
+    bails: ResMut<'w, BailRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
+    stay_writes: MessageWriter<'w, RequestStay>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
     op_writes: MessageWriter<'w, BankOpRequested>,
     card_writes: MessageWriter<'w, PlayCardRequested>,
     shop_writes: MessageWriter<'w, ShopOpRequested>,
     mortgage_writes: MessageWriter<'w, MortgageRequested>,
+    bail_writes: MessageWriter<'w, BailRequested>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
     for player in pump.inputs.0.drain(..) {
         pump.rolls.write(RequestRoll { player });
+    }
+    for player in pump.stay_inputs.0.drain(..) {
+        pump.stay_writes.write(RequestStay { player });
     }
     for t in pump.trades.0.drain(..) {
         pump.trade_writes.write(t);
@@ -504,6 +534,9 @@ fn pump_inputs(mut pump: Pump<'_>) {
     }
     for m in pump.mortgages.0.drain(..) {
         pump.mortgage_writes.write(m);
+    }
+    for b in pump.bails.0.drain(..) {
+        pump.bail_writes.write(b);
     }
 }
 
@@ -521,11 +554,13 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .insert_resource(rules)
         .insert_resource(seed)
         .init_resource::<Inputs>()
+        .init_resource::<StayRequests>()
         .init_resource::<Trades>()
         .init_resource::<BankRequests>()
         .init_resource::<Plays>()
         .init_resource::<ShopRequests>()
         .init_resource::<MortgageRequests>()
+        .init_resource::<BailRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -610,7 +645,13 @@ pub fn play_turns(app: &mut App, want: u32) {
         match phase(app) {
             TurnPhase::WaitRoll if !pending => {
                 let cur = current(app);
-                roll(app, cur);
+                // 被停留按住的人那颗按钮已经翻成「停留」（P4④）：脚手架要像真人一样按它，
+                // 否则 `roll_dice_system` 会拒掉、回合机原地空转到超时
+                if app.world().entity(cur).get::<StaySentence>().is_some() {
+                    stay(app, cur);
+                } else {
+                    roll(app, cur);
+                }
                 pending = true;
             }
             TurnPhase::Over => break,
@@ -670,6 +711,15 @@ pub fn current(app: &App) -> Entity {
 /// 替 `player` 按下掷骰按钮。
 pub fn roll(app: &mut App, player: Entity) {
     app.world_mut().resource_mut::<Inputs>().0.push(player);
+}
+
+/// 替 `player` 按下那颗「停留」按钮（P4④）。与 [`roll`] 走同一类入口 ——
+/// 消息队列排空成 `RequestStay`，而不是直接改组件。
+pub fn stay(app: &mut App, player: Entity) {
+    app.world_mut()
+        .resource_mut::<StayRequests>()
+        .0
+        .push(player);
 }
 
 pub fn tile_of(app: &App, player: Entity) -> u32 {
@@ -1089,6 +1139,15 @@ pub fn mortgage_ask(app: &mut App, player: Entity, op: MortgageOp, land: u32) {
             op,
             land: LandId(land),
         });
+}
+
+/// 替 `player` 按一次保释窗口里的那颗按钮。与 [`mortgage_ask`]/[`shop_ask`] 同一条：
+/// 走队列 → 真消息，「窗口挂的是谁」与「那个人关在不在这一处」都被真走到。
+pub fn bail_ask(app: &mut App, player: Entity, target: Entity) {
+    app.world_mut()
+        .resource_mut::<BailRequests>()
+        .0
+        .push(BailRequested { player, target });
 }
 
 /// 这块地押着多少本金（`None` = 没押）。读的是组件，所以它同时是「`Mortgaged` 到底写没写进去」
