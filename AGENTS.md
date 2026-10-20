@@ -10,6 +10,7 @@
 | [`.agents/PLAN.md`](./.agents/PLAN.md) | **玩法补齐计划**（活文档，唯一的排期来源）。基线是大宇《大富翁4》，不是 Godot 版。§一=与 4 代的口径偏差（哪些东西其实不存在），§三=缺口对照表，§四=**T1 + P1–P17 实现顺序**与依赖，§五=点券格/小游戏格/新闻中心格设计，§六=AI/存档/音频/发行的安插，§七=待拍板（含已拍板项） | 碰「要不要加某个玩法/格子」；动手做任何阶段之前 |
 | [`docs/archive/migration-b0-b5b.md`](./docs/archive/migration-b0-b5b.md) | **冻结的移植历史**，不再维护：Godot→Bevy 概念映射表（原 §五/§5.1）+ B0–B5b 逐阶段产出与两节验收记录（原 §十/§10.1/§10.2） | 只在这两类情况下去查：「Godot 那个文件对应 Rust 哪个模块」、「当初验收时看到了什么」 |
 | [`.agents/ADR-001-board-topology.md`](./.agents/ADR-001-board-topology.md) | 棋盘拓扑决策，状态 **Accepted**（权威，不要重开讨论） | 碰 board / land / 移动逻辑 |
+| [`.agents/ADR-002-occupancy-vs-road-tiles.md`](./.agents/ADR-002-occupancy-vs-road-tiles.md) | 道路放置物（路障／地雷／定时炸弹／宝箱／神明）与「道路格不建实体」的边界，状态 **Accepted**（权威）。核心两句：occupancy 是挂在主环格坐标上的实体；拓扑真相仍只在 `BoardDef`/`ActiveBoard`。含一格一件、经过/落脚触发表、路障停在自身格、炸弹两相与转让、传送不触发 | 碰 P5 道具、P6 神明刷出/恶犬、P12 小偷搬放置物；任何要在路上「放东西」的改动 |
 | [`.agents/board-data-schema.md`](./.agents/board-data-schema.md) | 棋盘 JSON schema 与不变式（权威） | 改 `assets/data/**` 或对应 serde 结构 |
 | [`.agents/GLOSSARY-board.md`](./.agents/GLOSSARY-board.md) | 棋盘术语表 | 命名与讨论时用统一用语 |
 | [`.agents/CHARACTERS.md`](./.agents/CHARACTERS.md) | 角色设定（活文档）：三层结构与配比、入境诨名命名法、首发十二人档案、**开局参数表 + AI 四维**（角色不带规则分支，见其 §八）、**神明系谱**（四部下发钱、赵公明收钱＝巡回赛骨架，提案未拍板）、沈万三＝隐藏位、**IP 边界与红线清单**、**美术方向＝会动的剪纸 sprite（§十二，含 I2V 管线与踩坑）**、两颗 glb 退回形体参考 | 碰角色/文案/UI 文本/`assets/sprite`/`assets/model`/P14 的 AI 先验；任何要往 UI 或宣传里写角色名的时候 |
@@ -39,7 +40,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 1. **Bevy 锁 `=0.20.0`，禁止 `cargo update`**。升级 Bevy 是独立任务，不与功能改动混在一起。
 2. **分层红线**：`game_core` 只链接 bevy 的无渲染子集（`default_app`），不得引入窗口/渲染/UI 依赖；`render` 永不向 `core` 发"推进回合"的消息——core 拥有逻辑位置与步时，表现层只做视觉插值（§4.6）。
 3. **旧棋盘格式刻意不移植**（`tiles[]` + `position:float` + Curve3D 烘焙）。以 ADR-001 的新格式为唯一路径，不要写兼容层。
-4. **道路格不建实体**，只有土地建实体；拓扑查询走 `BoardDef`/`ActiveBoard`，别复制第二份真相来源（§4.2 的 B2a 修正）。⚠️ **P5 的放置物（路障／地雷／定时炸弹）是这条的唯一豁免申请中项**：10-20 拍板要求**先写 `.agents/ADR-002` 划边界再开工** —— 它们要成为带生命的实体（定时炸弹有附身、38 步、可转让三件状态，塞进资源里的 `HashMap` 等于手搓实体生命周期），但**拓扑真相仍只在 `BoardDef`**，道路格本身照旧不建实体。ADR 没写完不开工，也不要在读到它之前自行放宽这条红线。
+4. **道路格不建实体**，只有土地建实体；拓扑查询走 `BoardDef`/`ActiveBoard`，别复制第二份真相来源（§4.2 的 B2a 修正）。⚠️ **P5 的放置物（路障／地雷／定时炸弹，P6 的神明/恶犬、P12 的被偷）是这条的唯一豁免**：边界已写进 [`.agents/ADR-002-occupancy-vs-road-tiles.md`](./.agents/ADR-002-occupancy-vs-road-tiles.md)（10-20，Accepted）—— occupancy 是**挂在主环格坐标上的运行时实体**（`TileIndex` + 一个排他的位置状态），拓扑真相仍只在 `BoardDef`，**道路格本身照旧不建实体**；一格最多一件；经过/落脚触发是一张穷尽表。动手前读它，不要自行放宽这条红线，也不要给 `landing::domain_of` 加放置物分支。
 5. **移植时顺手修掉 §三 缺陷清单里的条目**，不要照搬 Godot 的错误行为；修完在 §三 的表下方标注归属阶段与覆盖它的测试。
 6. **Godot 端从 2026-10-15 起不再是参照主线**（B5 之后拍的）。它只剩两个用处：前期 ADR/规格出处，和 §三 缺陷清单的反例。**画面、UI 排版、交互路径一律不对齐**，Bevy 侧按自己的判断设计；经济/规则要改动也不必回头比对 Godot。§五 映射表因此**停止逐文件维护**，作为 B0–B5 的历史记录保留，不要再往里加行。
 7. `assets/font/dev_*` 是开发授权字体（已 gitignore），**不要提交字体**；发行前必须换成可分发的子集（§7.3）。
