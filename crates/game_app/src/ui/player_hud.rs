@@ -11,8 +11,8 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    Bankrupt, Detention, Heading, LandId, Owner, PlayerColor, PlayerId, PlayerName, Points,
-    StaySentence, TurnOrder, Wallet,
+    Bankrupt, Detention, Heading, Inventory, LandId, Mount, MoveCap, Owner, PlayerColor, PlayerId,
+    PlayerName, Points, StaySentence, TurnOrder, Wallet,
 };
 
 use super::theme::{col, layout, size};
@@ -201,6 +201,11 @@ type HudPlayer<'w> = (
     Option<&'w StaySentence>,
     Option<&'w Bankrupt>,
     &'w Heading,
+    // P5：载具、乌龟卡的夹步与道具总数。前两样是「这一回合怎么走」，道具数是
+    // 「还能放几件」—— 三样都不改名字与钱包，但截图要能在 HUD 上一眼读到
+    &'w Mount,
+    Option<&'w MoveCap>,
+    &'w Inventory,
 );
 
 /// 每帧从世界状态重算五段文案，只在真的变了才写文本（反复赋同一个字符串会让排版重来）。
@@ -231,8 +236,19 @@ pub(crate) fn refresh_player_hud(
     }
 
     for (mut card, mut bg, mut border, mut node) in &mut cards {
-        let Ok((pid, name, wallet, points, detained, stayed, bankrupt, heading)) =
-            players.get(card.player)
+        let Ok((
+            pid,
+            name,
+            wallet,
+            points,
+            detained,
+            stayed,
+            bankrupt,
+            heading,
+            mount,
+            cap,
+            inventory,
+        )) = players.get(card.player)
         else {
             continue;
         };
@@ -243,31 +259,43 @@ pub(crate) fn refresh_player_hud(
         // 文案与配色照 `player_hud.gd:191-199`；破产优先于拘留（同时成立时人已经出局）。
         // 三个去处共用一种颜色：它们在规则上是同一族（`col::JAILED` 如今是「不在场」的颜色），
         // 而「他在哪儿」由 `place.label()` 那一个词说清 —— 用三种颜色就是把三件事当三套状态
-        let (mut status, status_color) = match (bankrupt, detained, stayed) {
+        let (status, status_color) = match (bankrupt, detained, stayed) {
             (Some(_), ..) => ("[破产]".to_string(), col::BANKRUPT),
             (_, Some(d), _) => (format!("[{}]", d.place.label()), col::JAILED),
             (_, _, Some(_)) => ("[停留]".to_string(), col::MUTED),
             (None, None, None) => (String::new(), col::BODY),
         };
         // 方向与处境共用右侧那一段，但它**不是**处境：正向是常态、什么都不写，
-        // 只有逆向才占一个字 —— 一个永远亮着的标记等于没有标记
+        // 只有逆向才占一个字 —— 一个永远亮着的标记等于没有标记。
+        // P5 起这一段还读两个**不动位置**的状态：乌龟卡的夹步与载具 —— 前者解释
+        // 「骰了 5 点为什么只走 1 格」，后者解释「为什么能选 2/3 颗骰」
+        let mut flags = vec![status];
         if *heading == Heading::Backward {
-            status = if status.is_empty() {
-                "逆向".to_string()
-            } else {
-                format!("{status} 逆向")
-            };
+            flags.push("逆向".to_string());
         }
+        if let Some(cap) = cap {
+            flags.push(format!("少动剩{}", cap.turns_left));
+        }
+        if *mount != Mount::Foot {
+            flags.push(mount.label().to_string());
+        }
+        let status = flags
+            .into_iter()
+            .filter(|f| !f.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
         let cash = format!("${}", wallet.cash);
         let points = format!("点券:{}", points.0);
+        let items: u32 = inventory.entries().iter().map(|(_, n)| *n).sum();
+        let props_line = format!("地产:{props} 道具:{items}");
 
-        let line = format!("{}|{cash}|{points}|{props}|{status}", name.0);
+        let line = format!("{}|{cash}|{points}|{props_line}|{status}", name.0);
         if line != card.cached {
             card.cached = line;
             write(&mut texts, card.name, &name.0);
             write(&mut texts, card.cash, &cash);
             write(&mut texts, card.points, &points);
-            write(&mut texts, card.props, &format!("地产:{props}"));
+            write(&mut texts, card.props, &props_line);
             write(&mut texts, card.status, &status);
             if let Ok(mut color) = colors.get_mut(card.status) {
                 color.0 = status_color;

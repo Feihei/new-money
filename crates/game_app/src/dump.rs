@@ -18,9 +18,9 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiCon
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind, Corrections,
     CouponBoxes, Deck, DeckOrder, Detention, GameSeed, GameSession, Hand, Heading, HolidaySet,
-    Insulation, LandId, LandStatus, Landing, MarketClock, Mortgaged, Owner, Paused,
-    PendingDecision, PlayerId, PlayerName, Points, Shelf, ShopStock, StaySentence, Timed,
-    TurnOrder, TurnPhase, Wallet,
+    Insulation, Inventory, LandId, LandStatus, Landing, MarketClock, Mortgaged, Mount, MoveCap,
+    Occupancy, OccupancyAt, Owner, Paused, PendingDecision, PlayerId, PlayerName, Points, Shelf,
+    ShopStock, StaySentence, Timed, TurnOrder, TurnPhase, Wallet,
 };
 
 use crate::asset_root;
@@ -116,6 +116,11 @@ type PlayerRow = (
     Option<&'static Hand>,
     Option<&'static Insulation>,
     &'static Heading,
+    // P5：道具栏、载具、乌龟夹步。三样都是「他这回合怎么走」的输入 / 结果，
+    // 与手牌分开念 —— 查「遥控骰子为什么没生效」时，道具栏与夹步必须同时看得见
+    &'static Inventory,
+    &'static Mount,
+    Option<&'static MoveCap>,
 );
 
 /// 面板上每块地要摊开的那一栏。P3c 加进限时状态之后，就地凑齐了 clippy 的
@@ -155,6 +160,9 @@ pub struct DumpView<'w, 's> {
     /// 百货这一趟的货架（P3d②）。查「我买了卡却没拿到」时要能看见这一格摆过哪几张、
     /// 还剩哪几张 —— 那份事实只在这个资源里
     stock: Res<'w, ShopStock>,
+    /// 道路放置物（P5）。要同时看得见两种位置：落在哪一格、以及在谁身上剩几步 —
+    /// 「炸弹在哪」是查一局为什么突然有人住院时最先要问的事
+    occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
 }
 
 fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
@@ -184,6 +192,10 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             }
             ui.separator();
             for line in format_lands(&view) {
+                ui.monospace(line);
+            }
+            ui.separator();
+            for line in format_occupancies(&view) {
                 ui.monospace(line);
             }
         });
@@ -346,7 +358,23 @@ fn format_players(view: &DumpView) -> Vec<String> {
         .players
         .iter()
         .map(
-            |(entity, id, name, wallet, points, bank, held, stay, bankrupt, hand, shield, heading)| {
+            |(
+                entity,
+                id,
+                name,
+                wallet,
+                points,
+                bank,
+                held,
+                stay,
+                bankrupt,
+                hand,
+                shield,
+                heading,
+                inventory,
+                mount,
+                cap,
+            )| {
                 // 处境这一栏可以同时写两件事：拘留与停留各有自己的计时（`begin_turn_system`
                 // 两条各扣各的），面板只写「更重的那一个」就会让人以为早的那张卡没挂上。
                 // 拘留那一格带着他在哪儿 —— 三个去处在规则上是一族，在读数上是三句话
@@ -359,6 +387,12 @@ fn format_players(view: &DumpView) -> Vec<String> {
                     }
                     if let Some(sentence) = stay {
                         flag.push(format!("停留剩{}回合", sentence.turns_left));
+                    }
+                    if let Some(cap) = cap {
+                        flag.push(format!("少动剩{}", cap.turns_left));
+                    }
+                    if *mount != Mount::Foot {
+                        flag.push(mount.label().to_string());
                     }
                 }
                 // 方向与处境共用这一栏（正向什么都不写，一个永远亮着的标记等于没有）：
@@ -392,10 +426,21 @@ fn format_players(view: &DumpView) -> Vec<String> {
                     None => "免疫".to_string(),
                     Some(n) => n.to_string(),
                 });
+                // 道具栏按 kind 数：与手牌分开念 —— 这两条库存的规则本来就不一样
+                let items = if inventory.is_empty() {
+                    "-".to_string()
+                } else {
+                    inventory
+                        .entries()
+                        .iter()
+                        .map(|(kind, n)| format!("{}{n}", kind.label()))
+                        .collect::<Vec<_>>()
+                        .join("·")
+                };
                 (
                     id.0,
                     format!(
-                        "P{:<2} {:<6} 现金 {:>7} 点券 {:>4} 存 {:>6} 贷 {:>6} {:<18} 牌 {:<12} 护 {:<4} {:?}",
+                        "P{:<2} {:<6} 现金 {:>7} 点券 {:>4} 存 {:>6} 贷 {:>6} {:<18} 牌 {:<12} 护 {:<4} 具 {:<12} 载 {:<4} {:?}",
                         id.0,
                         name.0,
                         wallet.cash,
@@ -405,6 +450,8 @@ fn format_players(view: &DumpView) -> Vec<String> {
                         flag,
                         cards,
                         guard,
+                        items,
+                        mount.label(),
                         entity
                     ),
                 )
@@ -463,6 +510,43 @@ fn format_lands(view: &DumpView) -> Vec<String> {
                         .unwrap_or_default(),
                 ),
             )
+        })
+        .collect();
+    rows.sort();
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
+/// 道路放置物那一栏（P5）。地上的按格号排，携带中的排最后 —— 后者不是拓扑上的东西，
+/// 它是一条「还会走几步」的计时。「炸弹在谁身上、还剩几步」是这一栏存在的全部理由。
+fn format_occupancies(view: &DumpView) -> Vec<String> {
+    if view.occupancies.is_empty() {
+        return vec!["道路放置物：无".to_string()];
+    }
+    let def = view.active.as_ref().map(|a| &a.def);
+    let mut rows: Vec<(u32, String)> = view
+        .occupancies
+        .iter()
+        .map(|(_, occ)| match occ.at {
+            OccupancyAt::OnTile(tile) => {
+                let name = def
+                    .and_then(|d| d.tile(tile.0 as i64))
+                    .map_or("?", |t| t.name.as_str());
+                (
+                    tile.0,
+                    format!("格{:<2} {:<8} {}", tile.0, name, occ.kind.label()),
+                )
+            }
+            OccupancyAt::Carried { by, steps_left } => {
+                let pid = view
+                    .players
+                    .iter()
+                    .find(|(entity, ..)| *entity == by)
+                    .map_or("?".to_string(), |(_, id, ..)| format!("P{}", id.0));
+                (
+                    u32::MAX,
+                    format!("定时炸弹 在 {pid} 身上 剩 {steps_left} 步"),
+                )
+            }
         })
         .collect();
     rows.sort();

@@ -29,6 +29,8 @@ pub mod col {
     /// P3d② 百货公司柜台。跟 `palette::tile(TileKind::Shop)` 那一档玫瑰同族：
     /// 描边与地面的格子颜色对上，玩家才认得出这块面板是关于那一格的
     pub const BORDER_SHOP: Color = Color::srgba(0.85, 0.55, 0.65, 0.85);
+    /// P5 道具栏。橙黄色与路障图标同族，一眼分得出这块面板管的是路上的东西
+    pub const BORDER_ITEM: Color = Color::srgba(0.85, 0.65, 0.35, 0.85);
 
     // ===== 文字 =====
     pub const TITLE_GOLD: Color = Color::srgb(1.00, 0.85, 0.30);
@@ -58,6 +60,9 @@ pub mod col {
     pub const BTN_SECONDARY_HOVER: Color = Color::srgb(0.30, 0.30, 0.38);
     pub const BTN_DISABLED: Color = Color::srgb(0.15, 0.15, 0.18);
     pub const BTN_BORDER: Color = Color::srgb(0.45, 0.45, 0.50);
+    /// 灰按钮的描边。**不能跟底色一样**：面板底也是 0.10 级深色，纯深底深边会让
+    /// 灰按钮退化成一行浮在面板上的灰字（P5 道具栏冒烟时 4/5 两颗候选格就是这样没的）
+    pub const BTN_BORDER_DISABLED: Color = Color::srgb(0.30, 0.30, 0.35);
 
     pub const BTN_TEXT_DISABLED: Color = Color::srgb(0.45, 0.45, 0.50);
 
@@ -171,6 +176,18 @@ pub mod layout {
     /// 一张卡三行（卡名 / 效果 / 按钮），行间距比金额按钮那行再紧一档：
     /// 15 张牌时整块面板还要留在屏内
     pub const HAND_ROW_GAP: f32 = 6.0;
+
+    // ===== P5：道具栏 =====
+    /// 道具浮层：右下、手牌左边。`[宽, 右边距, 下边距]`，与手牌同一条水平线。
+    /// 手牌右缘 16、宽 330；这一块右缘 360，留 14 的缝。
+    pub const ITEMS_PANEL: [f32; 3] = [360.0, 360.0, 132.0];
+    /// 候选格按钮：3 颗一行。「4 外滩商业区·北」这类长名字在 13 号字下刚好一行，
+    /// 换行会把按钮撑成两截（真鼠标冒烟第一张就是这个形状）
+    pub const ITEM_TILE_BUTTON: [f32; 2] = [104.0, 30.0];
+    /// 遥控骰子的 1..=6 与载具的颗数：只有数字，窄一档
+    pub const ITEM_DICE_BUTTON: [f32; 2] = [44.0, 30.0];
+    /// 一件道具的标题行与候选行之间
+    pub const ITEM_ROW_GAP: f32 = 4.0;
 
     // ===== P3d②：百货公司柜台 =====
     /// 柜台模态：比银行柜台再宽一点 —— 每行是「卡名 + 效果 + 一颗带数额的按钮」三段，

@@ -28,10 +28,13 @@ pub struct TurnStarted {
 
 /// 请求掷骰。只有「当前回合玩家」的请求会被响应，UI 出错也不会替别人掷骰。
 ///
-/// 发送者只会是表现层或 AI；规则层从不因为收到它就「推进」到什么 —— 见 §4.6 的红线。
+/// `dice` 是**这一掷用几颗骰子**（P5 的载具：步行 1／机车 2／汽车 3）。`0` = 用载具的
+/// 上限（foot 就是 1），于是既有调用方与 AI 不必关心载具；真人可以按 1..=上限 先定颗数。
+/// 与「遥控骰子」是两条消息：那条决定的是**精确步数**，不是摇几颗。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestRoll {
     pub player: Entity,
+    pub dice: u32,
 }
 
 /// 请求「停留」：把这一回合用在原地不动上（停留卡，P4④）。
@@ -516,6 +519,11 @@ pub enum EffectOutcome {
     Stayed {
         turns: u32,
     },
+    /// 挂上「接下来 N 个掷骰回合只走 1 格」（乌龟卡，P5）。`turns` 是**叠完之后**的
+    /// 剩余回合数（同 [`Self::Stayed`] 的 `turns`）：短的不覆盖长的。
+    Slowed {
+        turns: u32,
+    },
 }
 
 /// 一条一次性修正**真的生效了**：`saved` 这笔账从这位身上免掉了，那张卡就此消失。
@@ -583,4 +591,95 @@ pub struct GiftGiven {
 pub struct RedEnvelope {
     pub player: Entity,
     pub amount: i64,
+}
+
+// ===== 道路放置物与道具（P5）=====
+
+/// 把一件放置类道具放到主环的某一格（路障／地雷／定时炸弹）。
+///
+/// 主语与窗口由 `occupancy::place_item_system` 判（当前回合玩家、掷骰前、没有待决事项），
+/// 目标格的三条合法性由 `occupancy::place_denied` 判 —— 两处合起来与 UI 的灰按钮同一句话。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaceItemRequested {
+    pub player: Entity,
+    pub item: crate::items::ItemKind,
+    pub tile: TileIndex,
+}
+
+/// 放置成功。`item` 已经从道具栏扣掉；被拒的那一笔不发这条。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemPlaced {
+    pub player: Entity,
+    pub item: crate::items::ItemKind,
+    pub tile: TileIndex,
+}
+
+/// 走步被道路放置物中途打断（地雷／定时炸弹／恶犬）。
+///
+/// **与 [`PlayerArrived`] 互斥**：中断不是到站，脚下那一格不结算；逻辑位置已经改回
+/// `tile`，剩余的步数一步都不走（ADR-002 §7）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalkHalted {
+    pub player: Entity,
+    pub tile: TileIndex,
+    pub cause: crate::occupancy::HaltCause,
+}
+
+/// 定时炸弹在路径经过另一名玩家所在格时自动换主人（ADR-002 §8）。
+///
+/// 不问、不挂 `Pending`：这是「相遇」的直接后果。`tile` 是他们相遇的那一格，
+/// `steps_left` 是换手时炸弹还剩几步（流水里要能看出它没有因换人而重置）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BombTransferred {
+    pub from: Entity,
+    pub to: Entity,
+    pub tile: TileIndex,
+    pub steps_left: u32,
+}
+
+/// 落脚拾取宝箱：得到一个随机道具（`occupancy::settle_landing_occupancy_system`）。
+///
+/// 路过不给 —— 宝箱是落脚触发种类（ADR-002 §5）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChestOpened {
+    pub player: Entity,
+    pub tile: TileIndex,
+    pub item: crate::items::ItemKind,
+}
+
+/// 用一颗遥控骰子决定**精确步数**（1..=6）。
+///
+/// 与 [`RequestRoll`] 分成两条：那条是「摇几颗骰子」，这条是「这一回合走几格」。
+/// 道具在受理时扣掉；被拒的那一笔不发 [`RemoteDiceUsed`]。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestRemoteDice {
+    pub player: Entity,
+    pub steps: u32,
+}
+
+/// 遥控骰子生效：这一回合按 `steps` 走（乌龟卡的夹步仍会把它压到 1）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteDiceUsed {
+    pub player: Entity,
+    pub steps: u32,
+}
+
+/// 乌龟卡／夹步生效：骰子掷出 `rolled`，实际只走 `moved` 格。
+///
+/// **`DiceRolled.steps` 仍是 `rolled`**（P3d④b 与 ADR-002 §7.1 的口径）：
+/// 骰面还是骰面，「这一回合走几格」是另一件事。P10 的 C 型收费读前者。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveCapped {
+    pub player: Entity,
+    pub rolled: u32,
+    pub moved: u32,
+    /// 夹完之后还剩几回合；`0` = 这一夹用完了。
+    pub turns_left: u32,
+}
+
+/// 载具变了（P5：地雷/炸弹把它炸毁时回到步行）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountChanged {
+    pub player: Entity,
+    pub mount: crate::player::Mount,
 }

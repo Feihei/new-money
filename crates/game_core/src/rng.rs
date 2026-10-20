@@ -5,10 +5,10 @@
 //! 假种子函数（缺陷 #6）。这里整局共用一个种子，于是「同种子 → 同对局」变成一条
 //! 可以断言的性质 —— 回放与失败复现都从这里长出来。
 //!
-//! **同一个种子分成七条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包）：
-//! 抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次取随机数就会把 `turn_flow`
-//! 里「对局骰点 == 独立掷出的骰点」那批回归网整片打翻，回放也对不齐；分流之后
-//! 每域的随机性各自稳定，加内容不互相扰动。
+//! **同一个种子分成九条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
+//! 宝箱位置 / 宝箱掉落）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
+//! 取随机数就会把 `turn_flow` 里「对局骰点 == 独立掷出的骰点」那批回归网整片打翻，
+//! 回放也对不齐；分流之后每域的随机性各自稳定，加内容不互相扰动。
 //!
 //! 百货那条流是 P3d② 加的，理由与牌堆分流同一条：**「这一局进过几次店」不该改变下一张
 //! 机会牌是谁**。把它并进牌堆流也能跑，只是换货会悄悄挪动抽卡顺序，而那正是分流要挡掉的
@@ -32,6 +32,10 @@ const SHOP_TAG: u64 = 0x5B0F_5EED_0000_0003;
 const EPOCH_TAG: u64 = 0xEC40_C000_0000_0004;
 const GIFT_TAG: u64 = 0x61F7_0000_0000_0005;
 const ENVELOPE_TAG: u64 = 0xE2E2_0000_0000_0006;
+/// P5：宝箱刷在哪几格。与掉落分成两条 —— 开局撒几个宝箱不该改变第一个宝箱开出什么。
+const SPAWN_TAG: u64 = 0x5BA0_0000_0000_0007;
+/// P5：宝箱开出哪一种道具。
+const LOOT_TAG: u64 = 0x1007_0000_0000_0008;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +60,8 @@ pub struct Rng {
     epoch: ChaCha8Rng,
     gift: ChaCha8Rng,
     envelope: ChaCha8Rng,
+    spawn: ChaCha8Rng,
+    loot: ChaCha8Rng,
 }
 
 impl Rng {
@@ -70,7 +76,19 @@ impl Rng {
             epoch: ChaCha8Rng::seed_from_u64(seed ^ EPOCH_TAG),
             gift: ChaCha8Rng::seed_from_u64(seed ^ GIFT_TAG),
             envelope: ChaCha8Rng::seed_from_u64(seed ^ ENVELOPE_TAG),
+            spawn: ChaCha8Rng::seed_from_u64(seed ^ SPAWN_TAG),
+            loot: ChaCha8Rng::seed_from_u64(seed ^ LOOT_TAG),
         }
+    }
+
+    /// 宝箱刷在哪一格（宝箱位置子流）。
+    pub fn pick_spawn(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.spawn.random_range(span)
+    }
+
+    /// 宝箱开出哪一种道具（掉落子流）。
+    pub fn pick_loot(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.loot.random_range(span)
     }
 
     /// 开局的月份（历法子流）。**专用子流是硬约束**：若从牌堆或骰子流里抽，

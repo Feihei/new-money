@@ -68,5 +68,14 @@
     "cost_points": 20,
     "target": "anybody",
     "effects": [{ "action": "stay", "turns": 1 }]
+  },
+  {
+    "id": "item_turtle",
+    "type": "item",
+    "title": "乌龟卡",
+    "desc": "让自己或任一对手接下来 3 个回合只走 1 格 —— 人还在动、地照收租，只是走不远（骰面照记，P10 的按步数收费读的仍是骰子）",
+    "cost_points": 70,
+    "target": "anybody",
+    "effects": [{ "action": "move_cap", "turns": 3 }]
   }
 ]

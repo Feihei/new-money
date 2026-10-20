@@ -26,8 +26,11 @@ use bevy::prelude::*;
 pub enum AfflictDomain {
     /// 进拘留类状态：坐牢、住院、被绑架（P4 的 `Detention` 是它的落地）
     Detention,
-    /// 原地停留 N 回合（乌龟卡、魔法屋「原地停留」）
+    /// 原地停留 N 回合（停留卡、魔法屋「原地停留」）
     Stay,
+    /// 接下来 N 个掷骰回合只走 1 格（乌龟卡，P5）。与 [`Self::Stay`] 分开：
+    /// 一个让人不动，一个让人走不远。
+    MoveCap,
     /// 行进方向被反转（向后转）
     Reversal,
     /// 建筑与地产受损（怪兽卡、飞弹、新闻天灾）—— 承受者是地块的业主
@@ -141,6 +144,7 @@ mod tests {
         for domain in [
             AfflictDomain::Detention,
             AfflictDomain::Stay,
+            AfflictDomain::MoveCap,
             AfflictDomain::Reversal,
             AfflictDomain::Damage,
         ] {

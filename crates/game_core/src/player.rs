@@ -147,8 +147,60 @@ pub struct StaySentence {
     pub turns_left: u32,
 }
 
-/// 绕行方向（转向卡，P3d④b）。
+/// 「这一回合走不远」（乌龟卡，P5）：连续 `turns_left` 个自己的掷骰回合，
+/// 骰子照摇、点数照记，实际只走 1 格。
 ///
+/// 与 [`StaySentence`] 是两条计时，分工就是 PLAN 拍板那一句：停留＝**不动**（吃掉整个
+/// 回合），少动＝**还在动、只是走不远**（回合照过、地照收租）。所以它不挂 `Detention`、
+/// 也不阻止掷骰，只在 `roll_dice_system` 入队前把步数夹到 1。
+///
+/// 计数口径与停留同一条**字面**：写 3 就影响 3 个自己的掷骰回合；被拘留/被停留按掉的
+/// 回合没有掷骰，也就不消耗它。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveCap {
+    pub turns_left: u32,
+}
+
+/// 载具（P5）：步行 1 颗骰、机车 2 颗、汽车 3 颗。
+///
+/// 必挂组件而不是 `Option`：缺组件与「步行」读出同一个能力，而 `Option` 只会把漏挂
+/// 变成一条永远不响的静默降级 —— 与 [`Heading`] 同一条理由。
+///
+/// 它决定的是**摇几颗骰子**（`Rng::roll_die` 摇 `dice()` 次再相加），不是「走几格」：
+/// 骰子颗数由玩家在掷骰前选（`RequestRoll.dice`），遥控骰子与乌龟卡的夹步是另一层。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mount {
+    #[default]
+    Foot,
+    Bike,
+    Car,
+}
+
+impl Mount {
+    /// 这一载具最多能摇几颗骰子。
+    pub const fn dice(self) -> u32 {
+        match self {
+            Self::Foot => 1,
+            Self::Bike => 2,
+            Self::Car => 3,
+        }
+    }
+
+    /// 是不是「有车」——恶犬与「交通堵塞」这类按载具筛人的规则读这一句。
+    pub const fn is_vehicle(self) -> bool {
+        !matches!(self, Self::Foot)
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Foot => "步行",
+            Self::Bike => "机车",
+            Self::Car => "汽车",
+        }
+    }
+}
+
+/// 绕行方向（转向卡，P3d④b）。
 /// **它是玩家身上的一个位，不是棋盘的第二份拓扑**：ADR-001 行为规则 3 说主环是单向环，
 /// 而转向卡的定义（`GLOSSARY-board.md`）是「仍沿同一环，只是反向」—— 所以环还是那一条
 /// `tiles[]`，变的只是步进取 `+1` 还是 `-1`。如果这里存的是「一条反向的格子表」，
@@ -283,10 +335,15 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
                     Points::default(),
                     // 手牌开局为空：道具卡只能从百货公司买到（P3d），没有任何格子会发卡
                     crate::hand::Hand::default(),
+                    // 道具栏开局送一个路障（PLAN §三：路障/机器娃娃/机器工人开局即送）
+                    crate::items::Inventory::starting(),
                     TokenPosition { tile: START_TILE },
                     WalkQueue::default(),
                     // 开局恒正向：转向卡是玩家身上的事，不是棋盘的事（见 [`Heading`]）
                     Heading::default(),
+                    // 开局步行：载具的来路（车行）还没装配，P5 先让规则层把骰子颗数
+                    // 与「毁载具」两条跑通；表现层的换车入口等车行落地再补
+                    Mount::Foot,
                     BankBalance::default(),
                     crate::stock::StockHoldings::default(),
                     Gameplay,

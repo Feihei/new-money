@@ -132,6 +132,14 @@ pub enum CardEffect {
     Stay {
         turns: u32,
     },
+    /// 让承受者「走不远」N 个自己的掷骰回合：骰子照摇、点数照记，实际只走 1 格
+    /// （乌龟卡，P5）。
+    ///
+    /// 与 [`Self::Stay`] 分成两条：停留是**不动**（吃掉整个回合），少动是**还在动**。
+    /// 四代那张 3 回合的停留卡身上混着的正是这条行为，10-20 拍板把它们拆开。
+    MoveCap {
+        turns: u32,
+    },
 }
 
 const fn default_detention_turns() -> u32 {
@@ -266,6 +274,12 @@ impl CardSet {
                             errs.push(format!("卡牌 {} 的停留回合数为 0", c.id));
                         }
                     }
+                    CardEffect::MoveCap { turns } => {
+                        // 同一条：0 回合的「走不远」什么都不做，而卡已经被打掉
+                        if *turns == 0 {
+                            errs.push(format!("卡牌 {} 的乌龟回合数为 0", c.id));
+                        }
+                    }
                 }
             }
         }
@@ -384,6 +398,10 @@ mod tests {
         assert!(has(|e| matches!(e, CardEffect::BuyLand)));
         assert!(has(|e| matches!(e, CardEffect::Reverse)));
         assert!(has(|e| matches!(e, CardEffect::Stay { .. })));
+        assert!(
+            has(|e| matches!(e, CardEffect::MoveCap { turns } if *turns == 3)),
+            "乌龟卡该是「3 回合只走 1 格」"
+        );
     }
 
     /// 「卡上的效果」与「卡要落在什么头上」必须成对，否则数据能过加载、卡却永远打不出去。

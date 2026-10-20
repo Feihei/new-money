@@ -18,19 +18,21 @@ use bevy::prelude::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
     ActiveBoard, Adjustment, AtmAccess, BailRequested, BankBalance, BankOp, BankOpDone,
-    BankOpRequested, BankVisited, Books, BuildingLevel, BuyOffered, CardAim, CardDrawn, CardGained,
-    CardId, CardKind, CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived, Correction,
-    Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen, Deck,
-    Detention, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules,
-    GameSeed, GameSession, GameSetup, GiftsGiven, Hand, Insulation, LandBought, LandDamage, LandId,
-    LandStatus, LandUpgraded, LandView, Market, MarketClock, MortgageDone, MortgageOp,
-    MortgageRequested, Mortgaged, Owner, Pending, PendingDecision, PlayCardRequested,
-    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported,
-    PlotArea, Points, PointsChanged, RedEnvelope, RentDue, RequestRoll, RequestStay, Rng, Scope,
-    Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped,
-    StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex,
-    TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted,
-    UpgradeOffered, WalkStarted, Wallet, deal_to,
+    BankOpRequested, BankVisited, BombTransferred, Books, BuildingLevel, BuyOffered, CardAim,
+    CardDrawn, CardGained, CardId, CardKind, CardPlayed, CardSet, CashChanged, ChargeKind,
+    ChargeWaived, ChestOpened, Correction, Corrections, CouponBoxes, DamageTally, DataHandles,
+    Date, Decision, DecisionChosen, Deck, Detention, DetentionLifted, DetentionSkipped, DiceRolled,
+    EpochOverride, GameOver, GameRules, GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven,
+    Hand, Insulation, Inventory, ItemKind, ItemPlaced, LandBought, LandDamage, LandId, LandStatus,
+    LandUpgraded, LandView, Market, MarketClock, MortgageDone, MortgageOp, MortgageRequested,
+    Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt, OccupancyKind,
+    Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived,
+    PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points,
+    PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll,
+    RequestStay, Rng, Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted,
+    StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested, StockTraded,
+    StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder,
+    TurnPhase, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted, Wallet, deal_to,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -42,9 +44,9 @@ pub fn asset_root() -> PathBuf {
 
 /// 测试侧的「点击掷骰按钮」：`PreUpdate` 把它排空成 `RequestRoll` 消息。
 /// 不直接塞消息是为了让测试走与真实 UI 完全相同的入口。
+/// 第二个数是这一掷用几颗骰子（`0` = 载具上限，见 `RequestRoll.dice`）。
 #[derive(Resource, Default)]
-pub struct Inputs(pub Vec<Entity>);
-
+pub struct Inputs(pub Vec<(Entity, u32)>);
 /// 测试侧的「点那颗已经翻成『停留』的按钮」（P4④）：排空成 `RequestStay`。
 /// 与 [`Inputs`] 分成两条队列，是因为它们现在是两个意图 —— 测试要能分别按。
 #[derive(Resource, Default)]
@@ -78,6 +80,15 @@ pub struct MortgageRequests(pub Vec<MortgageRequested>);
 /// 于是「窗口挂的是谁」「那个人关在不在这一处」都被真走到。
 #[derive(Resource, Default)]
 pub struct BailRequests(pub Vec<BailRequested>);
+
+/// 测试侧的「把道具放到某一格」（P5）。与其它队列同一条理由：走真消息，
+/// 于是「掷骰前」「主语是当前玩家」「这一格空不空」三道门都被真走到。
+#[derive(Resource, Default)]
+pub struct PlaceRequests(pub Vec<PlaceItemRequested>);
+
+/// 测试侧的「用遥控骰子定步数」（P5）。同样走队列 → 真消息。
+#[derive(Resource, Default)]
+pub struct RemoteDiceRequests(pub Vec<RequestRemoteDice>);
 
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
@@ -161,6 +172,8 @@ struct FlowReaders<'w, 's> {
     walk_started: MessageReader<'w, 's, WalkStarted>,
     tile_stepped: MessageReader<'w, 's, TileStepped>,
     player_arrived: MessageReader<'w, 's, PlayerArrived>,
+    /// 走步被放置物打断（P5）。它与 `Arrive` 互斥，所以同一张表里读得出来
+    walk_halted: MessageReader<'w, 's, WalkHalted>,
     turn_ended: MessageReader<'w, 's, TurnEnded>,
     game_over: MessageReader<'w, 's, GameOver>,
 }
@@ -200,6 +213,13 @@ struct BookReaders<'w, 's> {
     /// 日历事件（P2b）：礼物一条带全桌，红包一人一条（0 元也有一条）
     gifts: MessageReader<'w, 's, GiftsGiven>,
     envelopes: MessageReader<'w, 's, RedEnvelope>,
+    // ===== 道路放置物与道具（P5）=====
+    items_placed: MessageReader<'w, 's, ItemPlaced>,
+    bombs: MessageReader<'w, 's, BombTransferred>,
+    chests: MessageReader<'w, 's, ChestOpened>,
+    remote_used: MessageReader<'w, 's, RemoteDiceUsed>,
+    capped: MessageReader<'w, 's, MoveCapped>,
+    mount_changed: MessageReader<'w, 's, MountChanged>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -290,6 +310,14 @@ fn collect_flow(mut log: ResMut<Observed>, mut r: FlowReaders, players: Query<&P
             who(&players, m.player),
             m.from.0,
             m.to.0
+        ));
+    }
+    for m in r.walk_halted.read() {
+        log.0.push(format!(
+            "Halt({},格{},{})",
+            who(&players, m.player),
+            m.tile.0,
+            m.cause.label()
         ));
     }
     for m in r.turn_ended.read() {
@@ -492,6 +520,51 @@ fn collect_books(
         log.0
             .push(format!("Price({}:{:.2}→{:.2})", m.stock.0, m.old, m.new));
     }
+    for m in r.items_placed.read() {
+        log.0.push(format!(
+            "Place({}:{}→格{})",
+            who(&players, m.player),
+            m.item.label(),
+            m.tile.0
+        ));
+    }
+    for m in r.bombs.read() {
+        log.0.push(format!(
+            "Bomb({}→{}@格{},剩{})",
+            who(&players, m.from),
+            who(&players, m.to),
+            m.tile.0,
+            m.steps_left
+        ));
+    }
+    for m in r.chests.read() {
+        log.0.push(format!(
+            "Chest({}@格{}:{})",
+            who(&players, m.player),
+            m.tile.0,
+            m.item.label()
+        ));
+    }
+    for m in r.remote_used.read() {
+        log.0
+            .push(format!("Remote({},{}步)", who(&players, m.player), m.steps));
+    }
+    for m in r.capped.read() {
+        log.0.push(format!(
+            "Cap({},{}→{},剩{})",
+            who(&players, m.player),
+            m.rolled,
+            m.moved,
+            m.turns_left
+        ));
+    }
+    for m in r.mount_changed.read() {
+        log.0.push(format!(
+            "Mount({},{})",
+            who(&players, m.player),
+            m.mount.label()
+        ));
+    }
     for m in r.cash.read() {
         audit.0.push((m.player, m.delta, m.balance));
     }
@@ -518,6 +591,8 @@ struct Pump<'w> {
     shops: ResMut<'w, ShopRequests>,
     mortgages: ResMut<'w, MortgageRequests>,
     bails: ResMut<'w, BailRequests>,
+    places: ResMut<'w, PlaceRequests>,
+    remote: ResMut<'w, RemoteDiceRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
     stay_writes: MessageWriter<'w, RequestStay>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
@@ -526,11 +601,13 @@ struct Pump<'w> {
     shop_writes: MessageWriter<'w, ShopOpRequested>,
     mortgage_writes: MessageWriter<'w, MortgageRequested>,
     bail_writes: MessageWriter<'w, BailRequested>,
+    place_writes: MessageWriter<'w, PlaceItemRequested>,
+    remote_writes: MessageWriter<'w, RequestRemoteDice>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
-    for player in pump.inputs.0.drain(..) {
-        pump.rolls.write(RequestRoll { player });
+    for (player, dice) in pump.inputs.0.drain(..) {
+        pump.rolls.write(RequestRoll { player, dice });
     }
     for player in pump.stay_inputs.0.drain(..) {
         pump.stay_writes.write(RequestStay { player });
@@ -552,6 +629,12 @@ fn pump_inputs(mut pump: Pump<'_>) {
     }
     for b in pump.bails.0.drain(..) {
         pump.bail_writes.write(b);
+    }
+    for p in pump.places.0.drain(..) {
+        pump.place_writes.write(p);
+    }
+    for r in pump.remote.0.drain(..) {
+        pump.remote_writes.write(r);
     }
 }
 
@@ -576,6 +659,8 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<ShopRequests>()
         .init_resource::<MortgageRequests>()
         .init_resource::<BailRequests>()
+        .init_resource::<PlaceRequests>()
+        .init_resource::<RemoteDiceRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -723,9 +808,17 @@ pub fn current(app: &App) -> Entity {
         .expect("有当前玩家")
 }
 
-/// 替 `player` 按下掷骰按钮。
+/// 替 `player` 按下掷骰按钮（用载具上限的颗数）。
 pub fn roll(app: &mut App, player: Entity) {
-    app.world_mut().resource_mut::<Inputs>().0.push(player);
+    roll_with_dice(app, player, 0);
+}
+
+/// 替 `player` 按下「摇 N 颗骰子」那颗按钮。`0` = 载具上限。
+pub fn roll_with_dice(app: &mut App, player: Entity, dice: u32) {
+    app.world_mut()
+        .resource_mut::<Inputs>()
+        .0
+        .push((player, dice));
 }
 
 /// 替 `player` 按下那颗「停留」按钮（P4④）。与 [`roll`] 走同一类入口 ——
@@ -1029,6 +1122,114 @@ pub fn place(app: &mut App, player: Entity, tile: u32) {
         .get_mut::<TokenPosition>()
         .expect("玩家应有位置")
         .tile = TileIndex(tile);
+}
+
+// ===== 道路放置物与道具（P5）=====
+
+/// 清空场上所有放置物。开局会随机撒宝箱，而 P5 的用例要精确控制「哪一格有什么」。
+pub fn clear_occupancies(app: &mut App) {
+    let victims: Vec<Entity> = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<Entity, With<Occupancy>>();
+        q.iter(world).collect()
+    };
+    for entity in victims {
+        app.world_mut().entity_mut(entity).despawn();
+    }
+}
+
+/// 在某一格放一个放置物（测试侧夹具，不走 `place_item_system` —— 那条测的是「玩家放置」）。
+pub fn spawn_occupancy(app: &mut App, kind: OccupancyKind, tile: u32) -> Entity {
+    app.world_mut()
+        .spawn((Occupancy::on_tile(kind, TileIndex(tile)), Gameplay))
+        .id()
+}
+
+/// 场上所有「在地上」的放置物，按格号排。携带中的炸弹不在里面（它不占格）。
+pub fn occupancies_on(app: &mut App) -> Vec<(u32, OccupancyKind)> {
+    let world = app.world_mut();
+    let mut q = world.query::<&Occupancy>();
+    let mut rows: Vec<(u32, OccupancyKind)> = q
+        .iter(world)
+        .filter_map(|occ| occ.tile().map(|t| (t.0, occ.kind)))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// 场上的定时炸弹（含携带中的），返回 `(实体, 位置)`。
+pub fn bombs(app: &mut App) -> Vec<(Entity, OccupancyAt)> {
+    let world = app.world_mut();
+    let mut q = world.query::<(Entity, &Occupancy)>();
+    q.iter(world)
+        .filter(|(_, occ)| occ.kind == OccupancyKind::TimeBomb)
+        .map(|(e, occ)| (e, occ.at))
+        .collect()
+}
+
+/// 某位玩家的道具栏清单（按枚举顺序）。与 [`hand_of`] 分开读，正是「道具不是卡」的形状。
+pub fn inventory_of(app: &App, player: Entity) -> Vec<(ItemKind, u32)> {
+    app.world()
+        .entity(player)
+        .get::<Inventory>()
+        .map(Inventory::entries)
+        .unwrap_or_default()
+}
+
+/// 往道具栏里塞 `n` 个（夹具）。真正「用掉」仍走消息入口。
+pub fn grant_item(app: &mut App, player: Entity, item: ItemKind, n: u32) {
+    app.world_mut()
+        .entity_mut(player)
+        .get_mut::<Inventory>()
+        .expect("玩家应有道具栏")
+        .gain(item, n);
+}
+
+/// 替 `player` 把一件道具放到 `tile`（走 `PlaceRequests` → 真消息）。
+pub fn place_item(app: &mut App, player: Entity, item: ItemKind, tile: u32) {
+    app.world_mut()
+        .resource_mut::<PlaceRequests>()
+        .0
+        .push(PlaceItemRequested {
+            player,
+            item,
+            tile: TileIndex(tile),
+        });
+}
+
+/// 替 `player` 用一颗遥控骰子定步数（走 `RemoteDiceRequests` → 真消息）。
+pub fn use_remote_dice(app: &mut App, player: Entity, steps: u32) {
+    app.world_mut()
+        .resource_mut::<RemoteDiceRequests>()
+        .0
+        .push(RequestRemoteDice { player, steps });
+}
+
+/// 换载具（夹具）。
+pub fn set_mount(app: &mut App, player: Entity, mount: Mount) {
+    *app.world_mut()
+        .entity_mut(player)
+        .get_mut::<Mount>()
+        .expect("玩家应有 Mount 组件") = mount;
+}
+
+pub fn mount_of(app: &App, player: Entity) -> Mount {
+    *app.world()
+        .entity(player)
+        .get::<Mount>()
+        .expect("玩家应有 Mount 组件")
+}
+
+pub fn move_cap_of(app: &App, player: Entity) -> Option<u32> {
+    app.world()
+        .entity(player)
+        .get::<MoveCap>()
+        .map(|c| c.turns_left)
+}
+
+/// 某位玩家此刻的 `Detention`（P5 的验收要读「他住院了几天、在哪一处」）。
+pub fn detain_of(app: &App, player: Entity) -> Option<Detention> {
+    app.world().entity(player).get::<Detention>().copied()
 }
 
 /// 预置地块状态：归属（按 `PlayerId`）、等级、是否抵押。

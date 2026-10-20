@@ -9,11 +9,14 @@
 //! 它只写「他被这一处扣住了」这一件事，不推进回合、不替任何人做决定（分层红线：core 拥有
 //! 逻辑位置与步时，这里只是从表现层按一次 core 自己导出的 [`detain`]，走的正是命运牌那条路）。
 
+use std::collections::HashSet;
+
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, Detention, DetentionPlace, Pending, PendingDecision, PlayerDetained, PlayerId,
-    Points, TokenPosition, TurnOrder, TurnPhase, detain,
+    ActiveBoard, Detention, DetentionPlace, Inventory, ItemKind, Mount, MountChanged, Occupancy,
+    OccupancyKind, Pending, PendingDecision, PlayerDetained, PlayerId, Points, TileIndex,
+    TokenPosition, TurnOrder, TurnPhase, detain, place,
 };
 
 pub struct DevPlugin;
@@ -22,7 +25,15 @@ pub struct DevPlugin;
 pub fn install_if_requested(app: &mut App) {
     let forced = ForceDetention::from_env();
     let bail = ForceBail::from_env();
-    if forced.0.is_none() && bail.0.is_none() {
+    let items = ForceItems::from_env();
+    let mount = ForceMount::from_env();
+    let places = ForcePlace::from_env();
+    if forced.0.is_none()
+        && bail.0.is_none()
+        && !items.0
+        && mount.0.is_none()
+        && places.0.is_empty()
+    {
         return;
     }
     if let Some(place) = forced.0 {
@@ -35,6 +46,21 @@ pub fn install_if_requested(app: &mut App) {
         info!(
             "开发注入已开启（NM_BAIL）：另一位玩家将被关进{}，当前玩家面前挂出保释窗口",
             place.label()
+        );
+    }
+    if items.0 {
+        info!("开发注入已开启（NM_ITEMS）：当前玩家各得一个道具");
+    }
+    if let Some(mount) = mount.0 {
+        info!(
+            "开发注入已开启（NM_MOUNT）：当前玩家的载具是{}",
+            mount.label()
+        );
+    }
+    if !places.0.is_empty() {
+        info!(
+            "开发注入已开启（NM_PLACE）：预放 {} 件道路放置物",
+            places.0.len()
         );
     }
     app.add_plugins(DevPlugin);
@@ -91,11 +117,90 @@ impl ForceBail {
     }
 }
 
+/// `NM_ITEMS=1`：给当前玩家各发一个放置类道具与一颗遥控骰子。
+///
+/// 道具的正经来源是宝箱（落脚才开）与 P10 的研究所，两者都不由截图脚本控制。
+/// 面板的「非鼠标入口」是 `NM_ITEMS`，而面板要有东西可放，就得先有道具。
+#[derive(Resource)]
+struct ForceItems(bool);
+
+impl ForceItems {
+    fn from_env() -> Self {
+        Self(std::env::var_os("NM_ITEMS").is_some())
+    }
+}
+
+/// `NM_MOUNT=foot|bike|car`：把当前玩家的载具换掉（车行 P10 才有）。
+///
+/// 载具唯一可见的后果是「掷骰面板能选 1..=3 颗」与「踩雷毁车」，两者都没有别的
+/// 不靠运气的入口 —— 不注入就拍不到。
+#[derive(Resource)]
+struct ForceMount(Option<Mount>);
+
+impl ForceMount {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_MOUNT") else {
+            return Self(None);
+        };
+        let mount = match raw.trim() {
+            "foot" => Mount::Foot,
+            "bike" => Mount::Bike,
+            "car" => Mount::Car,
+            other => {
+                warn!("NM_MOUNT={other} 不认识，应为 foot|bike|car");
+                return Self(None);
+            }
+        };
+        Self(Some(mount))
+    }
+}
+
+/// `NM_PLACE=roadblock@5,mine@6`：开局在路上预放几件东西。
+///
+/// 路障要挡的人得下一回合才走到，地雷要有人踩上去才弹住院 —— 两件事都依赖骰子。
+/// 这个旋钮只放东西，不推进回合；放不进去（格号越界/已占）会逐条 warn。
+#[derive(Resource)]
+struct ForcePlace(Vec<(OccupancyKind, TileIndex)>);
+
+impl ForcePlace {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_PLACE") else {
+            return Self(Vec::new());
+        };
+        let mut out = Vec::new();
+        for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let Some((kind, tile)) = part.split_once('@') else {
+                warn!("NM_PLACE 的 {part:?} 不是 kind@tile 形状，跳过");
+                continue;
+            };
+            let kind = match kind {
+                "roadblock" => OccupancyKind::Roadblock,
+                "mine" => OccupancyKind::Mine,
+                "bomb" => OccupancyKind::TimeBomb,
+                "dog" => OccupancyKind::Dog,
+                "chest" => OccupancyKind::Chest,
+                other => {
+                    warn!("NM_PLACE 的 {other:?} 不是 roadblock|mine|bomb|dog|chest，跳过");
+                    continue;
+                }
+            };
+            match tile.parse::<u32>() {
+                Ok(n) => out.push((kind, TileIndex(n))),
+                Err(_) => warn!("NM_PLACE 的格号 {tile:?} 不是整数，跳过"),
+            }
+        }
+        Self(out)
+    }
+}
+
 impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Injected>()
             .insert_resource(ForceDetention::from_env())
             .insert_resource(ForceBail::from_env())
+            .insert_resource(ForceItems::from_env())
+            .insert_resource(ForceMount::from_env())
+            .insert_resource(ForcePlace::from_env())
             // 回菜单时清掉「已经注入过」：`NM_DETAIN` 配 `NM_MENULOOP` 要能在第二局再注入一次，
             // 而留在 true 就等于「新局什么都没有」，看着像注入失效（跨局残留那类坑的反面）
             .add_systems(OnEnter(crate::scene::Scene::Menu), clear_injected)
@@ -104,7 +209,13 @@ impl Plugin for DevPlugin {
             // （第一次冒烟丢的就是第二局）。只挡场景则会在 `Boot` 态空转，那时还没有玩家可扣
             .add_systems(
                 Update,
-                (force_bail, force_detention.after(force_bail))
+                (
+                    force_bail,
+                    force_detention.after(force_bail),
+                    force_items,
+                    force_mount,
+                    force_place,
+                )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
             );
@@ -112,9 +223,18 @@ impl Plugin for DevPlugin {
 }
 
 /// 「本局已经注入过一次」。**一局一次**：注入的是「回合开始那一刻之后」的状态，
-/// 再来一次就等于凭空多关一个人，或把刚放出来的人再抓回去。
+/// 再来一次就等于凭空多关一个人、把刚放出来的人再抓回去，或在同一格叠第二件。
+///
+/// 每个旋钮一位而不是共用一位：`NM_ITEMS=1` 与 `NM_MOUNT=car` 常常一起给，
+/// 共用一位会让后跑的那个永远轮不到。
 #[derive(Resource, Default)]
-struct Injected(bool);
+struct Injected {
+    detention: bool,
+    bail: bool,
+    items: bool,
+    mount: bool,
+    place: bool,
+}
 
 fn clear_injected(mut done: ResMut<Injected>) {
     *done = Injected::default();
@@ -141,7 +261,7 @@ fn force_detention(
     mut detained: MessageWriter<PlayerDetained>,
     mut done: ResMut<Injected>,
 ) {
-    let (Some(place), false) = (force.0, done.0) else {
+    let (Some(place), false) = (force.0, done.detention) else {
         return;
     };
     // 两个旋钮同时给时 `NM_BAIL` 优先：它的场景更强（窗口 + 一个被关在别处的人）
@@ -161,11 +281,11 @@ fn force_detention(
         place,
         DAYS,
     ) else {
-        done.0 = true;
+        done.detention = true;
         warn!("{} 在这张棋盘上没有那条分支，什么都没注入", place.label());
         return;
     };
-    done.0 = true;
+    done.detention = true;
     info!(
         "注入：当前玩家被关进{}（判 {DAYS} 回合），接入点格{}",
         sentence.place.label(),
@@ -202,7 +322,7 @@ fn force_bail(
     mut done: ResMut<Injected>,
     mut next: ResMut<NextState<TurnPhase>>,
 ) {
-    let (Some(place), false) = (force.0, done.0) else {
+    let (Some(place), false) = (force.0, done.bail) else {
         return;
     };
     let Some(current) = scene.order.current() else {
@@ -220,11 +340,11 @@ fn force_bail(
         place,
         DAYS,
     ) else {
-        done.0 = true;
+        done.bail = true;
         warn!("{} 在这张棋盘上没有那条分支，什么都没注入", place.label());
         return;
     };
-    done.0 = true;
+    done.bail = true;
     info!(
         "注入：另一位玩家被关进{}（判 {DAYS} 回合），当前玩家面前挂出保释窗口",
         sentence.place.label()
@@ -242,4 +362,80 @@ fn force_bail(
         points.0 = points.0.max(100);
     }
     next.set(TurnPhase::WaitDecision);
+}
+
+/// `NM_ITEMS=1` 的那一半：把四种道具各发一个给当前玩家。
+/// 走 `Inventory::gain` 而不是直接改容器 —— 堆叠规则只住在它里面。
+fn force_items(
+    force: Res<ForceItems>,
+    order: Res<TurnOrder>,
+    mut inventories: Query<&mut Inventory, With<PlayerId>>,
+    mut done: ResMut<Injected>,
+) {
+    if !force.0 || done.items {
+        return;
+    }
+    let Some(current) = order.current() else {
+        return;
+    };
+    done.items = true;
+    if let Ok(mut inventory) = inventories.get_mut(current) {
+        for kind in ItemKind::ALL {
+            inventory.gain(kind, 1);
+        }
+        info!("注入：当前玩家得到四种道具各一个");
+    }
+}
+
+/// `NM_MOUNT=car`：把当前玩家的载具换掉并留一条凭据（顶栏会播报）。
+fn force_mount(
+    force: Res<ForceMount>,
+    order: Res<TurnOrder>,
+    mut mounts: Query<&mut Mount, With<PlayerId>>,
+    mut changed: MessageWriter<MountChanged>,
+    mut done: ResMut<Injected>,
+) {
+    let (Some(wanted), false) = (force.0, done.mount) else {
+        return;
+    };
+    let Some(current) = order.current() else {
+        return;
+    };
+    done.mount = true;
+    if let Ok(mut mount) = mounts.get_mut(current) {
+        *mount = wanted;
+        changed.write(MountChanged {
+            player: current,
+            mount: wanted,
+        });
+        info!("注入：当前玩家的载具换成{}", wanted.label());
+    }
+}
+
+/// `NM_PLACE=roadblock@5,mine@6`：预放道路放置物。走 `occupancy::place` 的唯一闸门，
+/// 所以「一格一件」与 `NM_PLACE` 自己两行撞同一格这两件事都被它挡住并 warn。
+fn force_place(
+    force: Res<ForcePlace>,
+    active: Res<ActiveBoard>,
+    mut commands: Commands,
+    occupancies: Query<(Entity, &Occupancy)>,
+    mut done: ResMut<Injected>,
+) {
+    if force.0.is_empty() || done.place {
+        return;
+    }
+    done.place = true;
+    let mut claimed = HashSet::new();
+    for (kind, tile) in &force.0 {
+        if (tile.0 as usize) >= active.def.loop_len() as usize {
+            warn!("NM_PLACE：{} 号格不在主环上，跳过", tile.0);
+            continue;
+        }
+        let at = occupancies.iter().map(|(entity, occ)| (entity, occ.at));
+        if place(&mut commands, at, &mut claimed, *kind, *tile).is_none() {
+            warn!("NM_PLACE：{} 号格已经有一件东西，跳过", tile.0);
+            continue;
+        }
+        info!("注入：{} 放在 {} 号格", kind.label(), tile.0);
+    }
 }

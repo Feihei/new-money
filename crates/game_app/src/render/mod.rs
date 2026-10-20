@@ -9,6 +9,7 @@ pub mod board;
 pub mod camera;
 pub mod labels;
 pub mod land;
+pub mod occupancy;
 pub mod token;
 
 use bevy::prelude::*;
@@ -65,6 +66,7 @@ impl Plugin for RenderPlugin {
                 (
                     token::animate_tokens,
                     land::sync_buildings,
+                    occupancy::sync_occupancy_visuals,
                     camera::follow_current_token,
                     labels::project_tile_labels,
                 )

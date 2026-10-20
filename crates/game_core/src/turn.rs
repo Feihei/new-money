@@ -10,17 +10,20 @@ use bevy::prelude::*;
 
 use crate::bank::AtmAccess;
 use crate::economy;
+use crate::items::{Inventory, ItemKind};
 use crate::market::Market;
 use crate::msg::{
-    DetentionLifted, DetentionSkipped, DiceRolled, GameOver, RequestRoll, RequestStay, StayLifted,
-    StaySkipped, TurnEnded, TurnStarted, WalkStarted,
+    DetentionLifted, DetentionSkipped, DiceRolled, GameOver, MoveCapped, RemoteDiceUsed,
+    RequestRemoteDice, RequestRoll, RequestStay, StayLifted, StaySkipped, TurnEnded, TurnStarted,
+    WalkStarted,
 };
+use crate::occupancy::Occupancy;
 use crate::player::{
-    Bankrupt, Detention, Heading, PlayerId, StaySentence, TokenPosition, WalkQueue,
+    Bankrupt, Detention, Heading, Mount, MoveCap, PlayerId, StaySentence, TokenPosition, WalkQueue,
 };
 use crate::rng::Rng;
 use crate::settle::Books;
-use crate::walk::WalkClock;
+use crate::walk::{WalkClock, plan_walk};
 use crate::world::ActiveBoard;
 
 /// 回合阶段。`Boot` 是初始态：资产到位前什么都不做。
@@ -37,6 +40,10 @@ pub enum TurnPhase {
     /// （`walk_step_system`，见 §4.6 的所有权红线）。`walk_step_interval = 0`
     /// 时一帧走完，与 B2b 的瞬时落格行为等价。
     Walking,
+    /// 走步被道路放置物中断（P5）。**不是 `Landed`**：中断的那一格不结算静态格型，
+    /// 也没有 `PlayerArrived`。`occupancy::resolve_halt_system` 在这里应用后果
+    /// （住院、炸弹的 3×3 降层），随后直接收尾到 `TurnEnd`。
+    Halted,
     /// 落格结算的分派点。B3 在此接地产/卡牌/银行，目前所有格子都无结算。
     Landed,
     /// 等待玩家决策（买地/升级/确认租金/读卡）。生产者随 B3 的买地流程出现。
@@ -145,6 +152,8 @@ pub struct RollInput<'w, 's> {
     requests: MessageReader<'w, 's, RequestRoll>,
     order: Res<'w, TurnOrder>,
     active: Res<'w, ActiveBoard>,
+    /// 路障截断发生在入队时（ADR-002 §6）—— 掷骰这一侧只问「路径里第一个路障在哪」。
+    occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
 }
 
 /// 回合开始的唯一入口：跳过破产者 → 处理拘留 → 否则等掷骰。
@@ -276,21 +285,57 @@ pub fn take_stay_system(
 /// 骰子的点数是**步数**，往哪边走是玩家身上的 [`Heading`]（P3d④b 的转向卡）。两者相乘
 /// 喂给 `walk_path`，所以 `DiceRolled.steps` 与 `WalkStarted.steps` 里那个数永远是骰面本身 ——
 /// 「掷出 3 点」与「倒着走 3 步」是两件事，流水里不该把它混成一个带符号的位移。
+/// `roll_dice_system` 的出口。打包成参数包是房规：骰子、路径与乌龟夹步三件事
+/// 各自要留一条凭据，而它们本来就是同一次入队的产物。
+#[derive(SystemParam)]
+pub struct RollWriters<'w, 's> {
+    commands: Commands<'w, 's>,
+    rolled: MessageWriter<'w, DiceRolled>,
+    started: MessageWriter<'w, WalkStarted>,
+    capped: MessageWriter<'w, MoveCapped>,
+}
+
+/// 掷骰这条入口要读的玩家状态。名字是为了躲 clippy 的 `type_complexity` ——
+/// 六个分量一起回答「他从哪走、往哪走、能摇几颗、有没有被夹住」。
+type RollWalker = (
+    &'static mut TokenPosition,
+    &'static mut WalkQueue,
+    &'static Heading,
+    &'static Mount,
+    Option<&'static StaySentence>,
+    Option<&'static mut MoveCap>,
+);
+
+/// 遥控骰子那条入口的玩家状态：载具在这里不参与（它决定的是颗数，而这条已经
+/// 直接给出步数），所以少一个 `Mount`。
+type RemoteWalker = (
+    &'static mut TokenPosition,
+    &'static mut WalkQueue,
+    &'static Heading,
+    Option<&'static StaySentence>,
+    Option<&'static mut MoveCap>,
+);
+
+/// 掷骰并定下本次移动。只在 `WaitRoll` 里跑，且只认「当前回合玩家」的请求 ——
+/// 这是缺陷 #7 的修复点：Godot 的点数由表现层 `board.gd:704` 发出，逻辑因此离不开渲染、
+/// headless 根本掷不了骰。
+///
+/// 逻辑位置（`TokenPosition`）在掷骰的一刻就落定到 `to`；此后 `Walking` 态只是把
+/// 这次移动按 `GameRules.walk_step_interval` 展开成逐格时间线（`TileStepped`），
+/// 表现层拿它做插值 —— 任何等待动画的 `await` 都不存在了。
+///
+/// 骰子的点数是**步数**，往哪边走是玩家身上的 [`Heading`]（P3d④b 的转向卡）。两者相乘
+/// 喂给 `walk_path`，所以 `DiceRolled.steps` 与 `WalkStarted.steps` 里那个数永远是骰面本身 ——
+/// 「掷出 3 点」与「倒着走 3 步」是两件事，流水里不该把它混成一个带符号的位移。
+///
+/// P5 起这里还做三件事：按载具摇 1..=3 颗骰子、乌龟卡把**实际步数**夹到 1（骰面照记）、
+/// 路障把路径截断到自身格（ADR-002 §6/§7.1）。
 pub fn roll_dice_system(
-    mut input: RollInput,
+    mut input: RollInput<'_, '_>,
     mut rng: ResMut<Rng>,
     mut clock: ResMut<WalkClock>,
-    mut walkers: Query<
-        (
-            &mut TokenPosition,
-            &mut WalkQueue,
-            &Heading,
-            Option<&StaySentence>,
-        ),
-        With<PlayerId>,
-    >,
-    mut rolled: MessageWriter<DiceRolled>,
-    mut started: MessageWriter<WalkStarted>,
+    mut walkers: Query<RollWalker, With<PlayerId>>,
+    mut writers: RollWriters<'_, '_>,
     mut next: ResMut<NextState<TurnPhase>>,
 ) {
     let Some(current) = input.order.current() else {
@@ -298,13 +343,18 @@ pub fn roll_dice_system(
     };
     // 全部读完再判断：`any()` 会短路，没读完的请求下一帧又被读出来 → 多掷一次
     let mut asked = false;
+    let mut wanted = 0;
     for r in input.requests.read() {
-        asked |= r.player == current;
+        if r.player == current {
+            asked = true;
+            // 同一帧两条请求只取最后一条的颗数（真人一次只按一颗，AI 发 0）
+            wanted = r.dice;
+        }
     }
     if !asked {
         return;
     }
-    let Ok((mut pos, mut queue, heading, stay)) = walkers.get_mut(current) else {
+    let Ok((mut pos, mut queue, heading, mount, stay, cap)) = walkers.get_mut(current) else {
         return;
     };
     // 被停留按住的人这一回合不能掷骰 —— 他唯一的出口是按「停留」（`RequestStay`）。
@@ -314,37 +364,197 @@ pub fn roll_dice_system(
     }
 
     let from = pos.tile;
-    let steps = rng.roll_die();
-    let path = input
-        .active
-        .def
-        .walk_path(from.0 as i64, steps as i64 * heading.sign());
-    let to = path.last().copied().unwrap_or(from);
-    pos.tile = to;
-    *queue = WalkQueue {
-        path: path.into(),
+    let rolled: u32 = (0..dice_count(wanted, *mount))
+        .map(|_| rng.roll_die())
+        .sum();
+    let cap_turns = cap.as_ref().map(|c| c.turns_left);
+    let plan = plan_walk(
+        &input.active.def,
+        from,
+        *heading,
+        rolled,
+        cap_turns,
+        &input.occupancies,
+    );
+    let mut target = WalkTarget {
+        pos: &mut pos,
+        queue: &mut queue,
+        from,
+    };
+    apply_plan(
+        &mut writers,
+        &mut next,
+        &mut clock,
+        &mut target,
+        current,
+        &plan,
+    );
+    if let Some(mut held) = cap {
+        finish_cap(&mut writers, &mut held, current, &plan);
+    }
+}
+
+/// 这一掷用几颗骰子。`0` = 满载（步行 1／机车 2／汽车 3）；真人选少了就按选的来。
+pub fn dice_count(requested: u32, mount: Mount) -> u32 {
+    match requested {
+        0 => mount.dice(),
+        n => n.clamp(1, mount.dice()),
+    }
+}
+
+/// `apply_plan` 要落到的那个玩家：位置、队列、起点。三样一起变，打包成一个结构
+/// 而不是八个散装参数（房规：参数多了先问「它们是不是同一件事」）。
+struct WalkTarget<'a> {
+    pos: &'a mut TokenPosition,
+    queue: &'a mut WalkQueue,
+    from: crate::board::TileIndex,
+}
+
+/// 把一份 [`crate::walk::WalkPlan`] 落到玩家身上，并留三条凭据。掷骰与遥控骰子共用，
+/// 所以「骰面照记、实际步数照夹」这条口径不会在两条入口上各修一半。
+fn apply_plan(
+    writers: &mut RollWriters<'_, '_>,
+    next: &mut NextState<TurnPhase>,
+    clock: &mut WalkClock,
+    target: &mut WalkTarget<'_>,
+    player: Entity,
+    plan: &crate::walk::WalkPlan,
+) {
+    let from = target.from;
+    target.pos.tile = plan.to;
+    *target.queue = WalkQueue {
+        path: plan.path.iter().copied().collect(),
         done: 0,
         from,
     };
     clock.elapsed = 0.0;
-    rolled.write(DiceRolled {
-        player: current,
-        steps,
+    writers.rolled.write(DiceRolled {
+        player,
+        steps: plan.rolled,
         from,
-        to,
+        to: plan.rolled_to,
     });
-    started.write(WalkStarted {
-        player: current,
+    writers.started.write(WalkStarted {
+        player,
+        steps: plan.rolled,
         from,
-        to,
-        steps,
+        to: plan.to,
     });
     // 步数为 0（理论不可达：骰子 ≥1）也必须能出 Walking，否则状态机会卡死
-    next.set(if queue.path.is_empty() {
+    next.set(if target.queue.path.is_empty() {
         TurnPhase::Landed
     } else {
         TurnPhase::Walking
     });
+}
+
+/// 乌龟计时扣一格：写到 0 就摘组件，并留一条 [`MoveCapped`]。
+fn finish_cap(
+    writers: &mut RollWriters<'_, '_>,
+    cap: &mut MoveCap,
+    player: Entity,
+    plan: &crate::walk::WalkPlan,
+) {
+    let left = plan.cap_left.unwrap_or(0);
+    if left == 0 {
+        writers.commands.entity(player).remove::<MoveCap>();
+    } else {
+        cap.turns_left = left;
+    }
+    writers.capped.write(MoveCapped {
+        player,
+        rolled: plan.rolled,
+        moved: plan.moved,
+        turns_left: left,
+    });
+}
+
+/// 遥控骰子的输入包。与 [`RollInput`] 同形，只是请求换了一种。
+#[derive(SystemParam)]
+pub struct RemoteInput<'w, 's> {
+    requests: MessageReader<'w, 's, RequestRemoteDice>,
+    order: Res<'w, TurnOrder>,
+    active: Res<'w, ActiveBoard>,
+    occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
+    inventories: Query<'w, 's, &'static mut Inventory, With<PlayerId>>,
+}
+
+#[derive(SystemParam)]
+pub struct RemoteWriters<'w, 's> {
+    used: MessageWriter<'w, RemoteDiceUsed>,
+    roll: RollWriters<'w, 's>,
+}
+
+/// 用一颗遥控骰子定步数。与掷骰共享 [`plan_walk`] 与 [`apply_plan`] ——
+/// 乌龟夹步与路障截断不会因为换了入口就漏掉。只在 `WaitRoll`、只认当前回合玩家。
+pub fn remote_dice_system(
+    mut input: RemoteInput<'_, '_>,
+    mut clock: ResMut<WalkClock>,
+    mut walkers: Query<RemoteWalker, With<PlayerId>>,
+    mut writers: RemoteWriters<'_, '_>,
+    mut next: ResMut<NextState<TurnPhase>>,
+) {
+    let Some(current) = input.order.current() else {
+        for _ in input.requests.read() {}
+        return;
+    };
+    // 全部读完：短路会让没读完的请求下一帧再受理一次
+    let mut chosen = None;
+    for r in input.requests.read() {
+        if r.player == current {
+            chosen = Some(r.steps);
+        }
+    }
+    let Some(steps) = chosen else {
+        return;
+    };
+    if !(1..=6).contains(&steps) {
+        debug!("遥控骰子被拒：步数 {steps} 不在 1..=6");
+        return;
+    }
+    let Ok((mut pos, mut queue, heading, stay, cap)) = walkers.get_mut(current) else {
+        return;
+    };
+    if stay.is_some() {
+        return;
+    }
+    let Ok(mut inventory) = input.inventories.get_mut(current) else {
+        return;
+    };
+    if !inventory.spend(ItemKind::RemoteDice, 1) {
+        debug!("遥控骰子被拒：身上没有这个道具");
+        return;
+    }
+    let from = pos.tile;
+    let cap_turns = cap.as_ref().map(|c| c.turns_left);
+    let plan = plan_walk(
+        &input.active.def,
+        from,
+        *heading,
+        steps,
+        cap_turns,
+        &input.occupancies,
+    );
+    writers.used.write(RemoteDiceUsed {
+        player: current,
+        steps,
+    });
+    let mut target = WalkTarget {
+        pos: &mut pos,
+        queue: &mut queue,
+        from,
+    };
+    apply_plan(
+        &mut writers.roll,
+        &mut next,
+        &mut clock,
+        &mut target,
+        current,
+        &plan,
+    );
+    if let Some(mut held) = cap {
+        finish_cap(&mut writers.roll, &mut held, current, &plan);
+    }
 }
 
 /// 回合收尾：发 `TurnEnded`、回合计数、判终局，否则轮转下一位。

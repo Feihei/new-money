@@ -474,8 +474,21 @@ impl<'w, 's> Books<'w, 's> {
     /// 用 `Ref<T>` 检测），组件改了它就跟着改。等 P11 的新闻要播「外星人拆了哪几块」时
     /// 再补一条带地块清单的消息，而不是现在就为它准备一个没人读的字段。
     pub fn damage(&mut self, center: LandId, depth: LandDamage, area: PlotArea) -> DamageTally {
+        let lands = area_of(&self.active.def, center, area);
+        let tally = self.damage_lands(&lands, depth);
+        info!(
+            "建筑损害 {depth:?} × {area:?}（中心 {center:?}）：命中 {} 块、收回 {} 块",
+            tally.hit, tally.seized
+        );
+        tally
+    }
+
+    /// 对**一组地块**打同一拳。P5 的定时炸弹走这一条：它的爆心是道路格，
+    /// 3×3 要按网格算（`plot::lands_around_tile`），算完仍然只把地块集合交给账本 ——
+    /// 范围算术只有一份，`damage` 与炸弹共用同一段写组件。
+    pub fn damage_lands(&mut self, lands: &[LandId], depth: LandDamage) -> DamageTally {
         let mut tally = DamageTally::default();
-        for land in area_of(&self.active.def, center, area) {
+        for &land in lands {
             let Some(entity) = self.active.lands.get(&land).copied() else {
                 continue;
             };
@@ -490,10 +503,6 @@ impl<'w, 's> Books<'w, 's> {
                 mortgage.proceeds = 0;
             }
         }
-        info!(
-            "建筑损害 {depth:?} × {area:?}（中心 {center:?}）：命中 {} 块、收回 {} 块",
-            tally.hit, tally.seized
-        );
         tally
     }
 

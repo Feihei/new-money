@@ -136,9 +136,11 @@ pub fn begin_game_system(
     ] {
         commands.spawn((deck, Gameplay));
     }
+    // 路上的宝箱（P5）。位置走专用子流，所以「宝箱在哪」不改变骰点、牌序与行情。
+    let chests = crate::occupancy::spawn_starting_chests(&mut commands, &def, &mut rng);
 
     info!(
-        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张（起始现金 {}）· 开局 {epoch}",
+        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张 + 宝箱 {} 个（起始现金 {}）· 开局 {epoch}",
         def.board_name,
         def.loop_len(),
         lands.len(),
@@ -147,6 +149,7 @@ pub fn begin_game_system(
         chance.0.len(),
         fate.0.len(),
         items.0.len(),
+        chests.len(),
         cfg.rules.start_cash
     );
     match holidays.coverage() {

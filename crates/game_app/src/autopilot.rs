@@ -67,7 +67,7 @@ fn auto_roll(
         return;
     }
     *due = time.elapsed_secs() + gap.0;
-    requests.write(RequestRoll { player });
+    requests.write(RequestRoll { player, dice: 0 });
 }
 
 fn auto_answer(

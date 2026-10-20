@@ -21,7 +21,7 @@ use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision, d
 use crate::msg::{
     CardDrawn, CardNotice, EffectOutcome, LandBought, PlayerDetained, PlayerTeleported,
 };
-use crate::player::{Heading, PlayerId, StaySentence, TokenPosition};
+use crate::player::{Heading, MoveCap, PlayerId, StaySentence, TokenPosition};
 use crate::rng::Rng;
 use crate::settle::Books;
 
@@ -205,6 +205,8 @@ pub struct CardSink<'w, 's> {
     /// 停留计时。与 `headings` 同样是**就地**写（见 [`apply_card`] 的 `Stay` 那一支）：
     /// 第二张停留卡要看得见第一张，而这里读出来的数还要原样报进凭据。
     pub stays: Query<'w, 's, &'static mut StaySentence>,
+    /// 乌龟卡的计时（P5）。与 `stays` 同样就地写：第二张要看得见第一张的剩余回合。
+    pub caps: Query<'w, 's, &'static mut MoveCap>,
     pub detained: MessageWriter<'w, PlayerDetained>,
     pub teleported: MessageWriter<'w, PlayerTeleported>,
     /// 买地成交的流水。购地卡走的是 `Books::buy` 那条正路，所以它必须和「踩到无主地买下来」
@@ -462,6 +464,31 @@ pub fn apply_card(
                     }
                 };
                 outcomes.push(EffectOutcome::Stayed { turns: left });
+            }
+            CardEffect::MoveCap { turns } => {
+                // 与停留同一条反制形状：免罪挡的是**事**，不是钱
+                let affliction = Affliction::new(AfflictDomain::MoveCap, victim);
+                if absorb(&mut sink.insulations, &mut sink.commands, &affliction) {
+                    outcomes.push(EffectOutcome::Blocked {
+                        domain: affliction.domain,
+                    });
+                    continue;
+                }
+                // 就地写 + 取较大：两张乌龟卡不叠加，短的不覆盖长的（惩罚卡不该替人加速）。
+                // 计数在每次掷骰时扣一格（`turn::roll_dice_system`），不是打出即扣
+                let left = match sink.caps.get_mut(victim) {
+                    Ok(mut held) => {
+                        held.turns_left = held.turns_left.max(*turns);
+                        held.turns_left
+                    }
+                    Err(_) => {
+                        sink.commands
+                            .entity(victim)
+                            .insert(MoveCap { turns_left: *turns });
+                        *turns
+                    }
+                };
+                outcomes.push(EffectOutcome::Slowed { turns: left });
             }
         }
     }

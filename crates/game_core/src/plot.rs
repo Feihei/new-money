@@ -10,7 +10,7 @@
 //! 距离算，不是世界坐标半径。全部是 `BoardDef` 上的**纯函数**：不碰实体、不查组件，
 //! 因此「3×3 在角落该是 2×2」这类裁决只在这里说一次，损害与卡各自拿同一份结果。
 
-use crate::board::{BoardDef, LandDef};
+use crate::board::{BoardDef, LandDef, TileIndex};
 use crate::land::LandId;
 use serde::Deserialize;
 
@@ -49,6 +49,37 @@ pub fn is_in_area(hub: &LandDef, other: &LandDef, area: PlotArea) -> bool {
         }
         PlotArea::Whole => true,
     }
+}
+
+/// 以**道路格**为爆心的范围解析（P5 的定时炸弹）。
+///
+/// 为什么不能直接走 [`area_of`]：那条路线的中心是一块**地**，而炸弹的爆心是一格**路**。
+/// 3×3 是网格距离，不是「这块地周围一圈地块」—— `Books::damage` 仍只吃地块集合，
+/// 所以这里把「以格为中心命中哪些地块」算完再交给它（ADR-002 §8 明确要求这一句不要
+/// 在炸弹模块里另写一份）。
+///
+/// 地块按**足迹**算间隙：size=2 的商业地占两格，贴着爆心边缘就该算命中。
+pub fn lands_around_tile(board: &BoardDef, tile: TileIndex, side: u32) -> Vec<LandId> {
+    // 用下标而不是 `tile()`：`tile()` 会回绕，于是 `TileIndex(99)` 会悄悄变成环上某格，
+    // 「越界格什么都没打到」这条就用一条假中心炸出一片地
+    let Some(center) = board.tiles.get(tile.0 as usize) else {
+        return Vec::new();
+    };
+    let radius = side.saturating_sub(1) / 2;
+    board
+        .lands
+        .iter()
+        .filter(|land| point_gap(center.col, center.row, land) <= radius)
+        .map(|land| LandId(land.id))
+        .collect()
+}
+
+/// 一个网格点到一块地足迹的切比雪夫间隙（落在足迹上或内部 = 0）。
+fn point_gap(col: u32, row: u32, land: &LandDef) -> u32 {
+    let (col_hi, row_hi) = footprint_max(land);
+    let gap_on =
+        |p: u32, lo: u32, hi: u32| -> u32 { if p < lo { lo - p } else { p.saturating_sub(hi) } };
+    gap_on(col, land.col, col_hi).max(gap_on(row, land.row, row_hi))
 }
 
 /// 范围解析：中心 + 范围 → 哪些地块被圈进来（按棋盘声明顺序，稳定可断言）。
@@ -91,7 +122,7 @@ fn footprint_max(land: &LandDef) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::LandType;
+    use crate::board::{LandType, TileDef};
 
     /// 造一块地：`(编号, 列, 行, 占边长, 路段)`
     fn plot(id: u32, col: u32, row: u32, size: u8, group: Option<String>) -> LandDef {
@@ -260,5 +291,60 @@ mod tests {
                 "棋盘里没有这块地还照着 {area:?} 圈一遍 = 凭空毁一盘整盘"
             );
         }
+    }
+
+    /// P5 的炸弹爆心是**道路格**，不是地块。prototype 的坐标见 `board.rs`：
+    /// 1 号南京路 (2,1) 挨着地块 0 的 (2,0)；10 号点券箱 (1,3) 离最近的地块也有 1 格。
+    #[test]
+    fn a_tile_centered_box_hits_the_plots_whose_footprints_are_near() {
+        const PROTOTYPE: &str = include_str!("../../../assets/data/boards/prototype.json");
+        let b = BoardDef::from_json(PROTOTYPE).expect("prototype.json 应能解析");
+        // 在 1 号格（南京路）炸：3×3 覆盖 col 1..=3 / row 0..=2，
+        // 命中地块 0 南京路 (2,0)、1 汉口路 (3,0)、2 外滩 (6,2) 不在
+        assert_eq!(
+            lands_around_tile(&b, TileIndex(1), 3),
+            vec![LandId(0), LandId(1)]
+        );
+        // 9×9（半径 4）才够到外滩：爆心 (2,1) 到足迹 (6..=7, 2..=3) 的列间隙是 4
+        assert!(
+            lands_around_tile(&b, TileIndex(1), 9).contains(&LandId(2)),
+            "外滩商业区的足迹应当被更宽的范围命中"
+        );
+        assert!(
+            lands_around_tile(&b, TileIndex(99), 3).is_empty(),
+            "越界格不该凭空圈出一片地"
+        );
+    }
+
+    /// size=2 的地按足迹算：路格贴在它第二格旁边也算命中。
+    #[test]
+    fn a_two_by_two_lot_is_hit_by_a_tile_next_to_its_second_cell() {
+        let mut b = board(vec![plot(0, 2, 0, 2, None)]);
+        b.tiles = vec![
+            TileDef {
+                id: 0,
+                col: 4,
+                row: 0,
+                kind: crate::board::TileKind::Road,
+                name: "旁路".into(),
+                land_id: None,
+                branch: None,
+                data: Default::default(),
+            },
+            TileDef {
+                id: 1,
+                col: 4,
+                row: 2,
+                kind: crate::board::TileKind::Road,
+                name: "下角".into(),
+                land_id: None,
+                branch: None,
+                data: Default::default(),
+            },
+        ];
+        // 网格点 (4,0) 与足迹 (2..=3, 0..=1) 的列间隙是 1；半径 1 的 3×3 该命中
+        assert_eq!(lands_around_tile(&b, TileIndex(0), 3), vec![LandId(0)]);
+        // (4,2) 行间隙也是 1 → 对角仍命中
+        assert_eq!(lands_around_tile(&b, TileIndex(1), 3), vec![LandId(0)]);
     }
 }

@@ -14,6 +14,7 @@ pub mod calendar_fx;
 pub mod dialog;
 pub mod finance;
 pub mod hand;
+pub mod items;
 pub mod menu;
 pub mod pause;
 pub mod player_hud;
@@ -24,10 +25,10 @@ pub mod top_bar;
 use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BailRequested, BankOp, BankOpRequested, CardAim, CardId, Decision,
-    DecisionChosen, GameSession, HolidaySet, LandId, MarketClock, MortgageOp, MortgageRequested,
-    Paused, Pending, PendingDecision, PlayCardRequested, RequestRoll, RequestStay, ShopOpRequested,
-    StaySentence, StockId, StockTradeRequested, TradeSide, TurnOrder, TurnPhase, bank_op_allowed,
-    date_of,
+    DecisionChosen, GameSession, HolidaySet, ItemKind, LandId, MarketClock, MortgageOp,
+    MortgageRequested, Paused, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
+    RequestRemoteDice, RequestRoll, RequestStay, ShopOpRequested, StaySentence, StockId,
+    StockTradeRequested, TileIndex, TradeSide, TurnOrder, TurnPhase, bank_op_allowed, date_of,
 };
 
 use theme::{col, layout, size};
@@ -43,10 +44,12 @@ impl Plugin for UiPlugin {
             .insert_resource(tile_info::SelectedTile::from_env())
             // `NM_DECISION=buy|upgrade|rent|card|bank` 直接挂出某个模态（见 [`dialog::ForceModal`]）
             .insert_resource(dialog::ForceModal::from_env())
-            // `NM_STOCK=1` / `NM_ATM=1` / `NM_HAND=1`：三块浮层的非鼠标入口，理由同 `NM_PAUSE`
+            // `NM_STOCK=1` / `NM_ATM=1` / `NM_HAND=1` / `NM_ITEMS=1`：四块浮层的非鼠标
+            // 入口，理由同 `NM_PAUSE`
             .insert_resource(finance::StockPanelOpen::from_env())
             .insert_resource(finance::AtmPanelOpen::from_env())
             .insert_resource(hand::HandPanelOpen::from_env())
+            .insert_resource(items::ItemsPanelOpen::from_env())
             .add_systems(
                 Update,
                 (
@@ -66,6 +69,7 @@ impl Plugin for UiPlugin {
                         finance::sync_atm_panel.in_set(UiSet::Live),
                         finance::sync_stock_panel.in_set(UiSet::Live),
                         hand::sync_hand_panel.in_set(UiSet::Live),
+                        items::sync_items_panel.in_set(UiSet::Live),
                         pause::sync_pause_menu.in_set(UiSet::Live),
                         tile_info::pick_tile.in_set(UiSet::Live),
                         tile_info::sync_tile_card.in_set(UiSet::Live),
@@ -175,6 +179,21 @@ pub enum UiAction {
     ToggleStock,
     /// 开合手牌浮层（P3b：常驻入口，与证券同一 —— 「能不能看」与「能不能出牌」是两件事）
     ToggleHand,
+    /// 开合道具浮层（P5）：身上带着什么、能放到前方哪一格
+    ToggleItems,
+    /// 把一件道具放到主环的某一格。**目标烤在按钮里**（「5 南京路」本身就是一整个意图），
+    /// 与 [`Self::PlayCard`] 同一条形状
+    PlaceItem {
+        item: ItemKind,
+        tile: TileIndex,
+    },
+    /// 用一颗遥控骰子指定这一回合走几步（1..=6）
+    UseRemoteDice {
+        steps: u32,
+    },
+    /// 带颗数掷骰（P5 的载具）：`0` = 用载具上限，与 [`UiAction::Roll`] 同一条窗口。
+    /// 单开一个变体而不是把 `Roll` 改成带字段，是因为顶栏那颗按钮不关心颗数
+    RollWith(u32),
     /// 办一笔银行操作，金额在建按钮那一刻就烤成定值（面板跟着钱包重建，「全部」才是准的）
     BankOp {
         op: BankOp,
@@ -344,12 +363,14 @@ pub(crate) fn reset_ui_state(
     mut atm: ResMut<finance::AtmPanelOpen>,
     mut stock: ResMut<finance::StockPanelOpen>,
     mut hand_open: ResMut<hand::HandPanelOpen>,
+    mut items_open: ResMut<items::ItemsPanelOpen>,
 ) {
     memory.0 = None;
     selected.0 = None;
     *atm = finance::AtmPanelOpen::from_env();
     *stock = finance::StockPanelOpen::from_env();
     *hand_open = hand::HandPanelOpen::from_env();
+    *items_open = items::ItemsPanelOpen::from_env();
     commands.insert_resource(pause::PauseMenuOpen::from_env());
     commands.insert_resource(Paused::default());
 }
@@ -415,7 +436,7 @@ pub fn button(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, spec: Butt
         spec.palette
     };
     let edge = if spec.disabled {
-        col::BTN_DISABLED
+        col::BTN_BORDER_DISABLED
     } else {
         col::BTN_BORDER
     };
@@ -601,6 +622,8 @@ struct Sends<'w> {
     shops: MessageWriter<'w, ShopOpRequested>,
     mortgages: MessageWriter<'w, MortgageRequested>,
     bails: MessageWriter<'w, BailRequested>,
+    places: MessageWriter<'w, PlaceItemRequested>,
+    remotes: MessageWriter<'w, RequestRemoteDice>,
     exit: MessageWriter<'w, AppExit>,
 }
 
@@ -612,6 +635,24 @@ struct UiState<'w> {
     atm: ResMut<'w, finance::AtmPanelOpen>,
     stock: ResMut<'w, finance::StockPanelOpen>,
     hand: ResMut<'w, hand::HandPanelOpen>,
+    items: ResMut<'w, items::ItemsPanelOpen>,
+}
+
+/// 掷骰意图的唯一出口。`dice == 0` = 载具满载，与 [`UiAction::Roll`] 相同；
+/// 被停留按住的人一律改发 [`RequestStay`] —— 规则层也会拒掉他的掷骰，
+/// 但派发侧发对意图，AI 与恶人那条路才有对应的人类入口（P4④）。
+fn send_roll(sends: &mut Sends<'_>, gate: &Gate<'_, '_>, dice: u32) {
+    if !can_roll(*gate.phase.get(), &gate.paused, &gate.pending) {
+        return;
+    }
+    let Some(player) = gate.order.as_ref().and_then(|o| o.current()) else {
+        return;
+    };
+    if gate.stays.get(player).is_ok() {
+        sends.stays.write(RequestStay { player });
+    } else {
+        sends.rolls.write(RequestRoll { player, dice });
+    }
 }
 
 /// 读 `PointerClick`，沿父链找到动作后派发。
@@ -654,17 +695,36 @@ fn dispatch_ui_actions(
             // 掷骰：等轮到人、没暂停、且没有待决事项（判据与顶栏着色同源）。
             // 被停留按住的人（P4④）发的是同一个意图位的「停留」—— 规则层的
             // `roll_dice_system` 会拒掉他的掷骰，所以这里不把两个意图混成一个请求。
-            UiAction::Roll => {
-                if !can_roll(*gate.phase.get(), &gate.paused, &gate.pending) {
+            UiAction::Roll => send_roll(&mut sends, &gate, 0),
+            // 载具颗数由道具面板给（P5）：与顶栏那颗同一条窗口，也同一条「停留优先」
+            UiAction::RollWith(dice) => send_roll(&mut sends, &gate, *dice),
+            // 放道具与出牌同一条窗口（「本回合怎么走」在我走之前定完）。目标格合法性
+            // 由规则层的 `place_denied` 再判一次 —— 这里只挡窗口与主语
+            UiAction::PlaceItem { item, tile } => {
+                if !can_play(*gate.phase.get(), &gate.paused, &gate.pending) {
                     continue;
                 }
-                if let Some(player) = gate.order.as_ref().and_then(|o| o.current()) {
-                    if gate.stays.get(player).is_ok() {
-                        sends.stays.write(RequestStay { player });
-                    } else {
-                        sends.rolls.write(RequestRoll { player });
-                    }
+                let Some(player) = gate.order.as_ref().and_then(|o| o.current()) else {
+                    continue;
+                };
+                sends.places.write(PlaceItemRequested {
+                    player,
+                    item: *item,
+                    tile: *tile,
+                });
+            }
+            // 遥控骰子：与掷骰互斥地决定这一回合走几格，窗口也同一条
+            UiAction::UseRemoteDice { steps } => {
+                if !can_play(*gate.phase.get(), &gate.paused, &gate.pending) {
+                    continue;
                 }
+                let Some(player) = gate.order.as_ref().and_then(|o| o.current()) else {
+                    continue;
+                };
+                sends.remotes.write(RequestRemoteDice {
+                    player,
+                    steps: *steps,
+                });
             }
             // 回答待决事项：主语取自 `PendingDecision`，不是「当前玩家」——
             // 两者在「A 踩了 B 的地、收据挂在 A 名下」这类场合就是不同的人
@@ -713,6 +773,7 @@ fn dispatch_ui_actions(
             UiAction::ToggleAtm => ui.atm.0 = !ui.atm.0,
             UiAction::ToggleStock => ui.stock.0 = !ui.stock.0,
             UiAction::ToggleHand => ui.hand.0 = !ui.hand.0,
+            UiAction::ToggleItems => ui.items.0 = !ui.items.0,
             // 出牌：主语仍然取当前回合玩家，而不是按钮里带的谁 —— 手牌面板只画得下
             // 「这个人的手」，规则层 `play_card_system` 还会再认一次主语与窗口
             UiAction::PlayCard { card, aim } => {
@@ -843,7 +904,8 @@ mod tests {
     use bevy::state::app::StatesPlugin;
     use bevy::window::WindowRef;
     use game_core::prelude::{
-        Date, Decision, GameRules, LandId, Pending, PlayerId, StaySentence, TurnOrder,
+        Date, Decision, GameRules, ItemKind, LandId, Pending, PlayerId, StaySentence, TileIndex,
+        TurnOrder,
     };
     use std::time::Duration;
 
@@ -903,6 +965,9 @@ mod tests {
     #[derive(Resource, Default)]
     struct Seen {
         rolls: Vec<Entity>,
+        /// 掷骰请求里带的颗数（P5 载具）。单开一栏而不是改 `rolls` 的类型：那会让
+        /// 上面七八条旧断言都跟着改，而它们关心的是「谁发的」
+        dice: Vec<(Entity, u32)>,
         stays: Vec<Entity>,
         answers: Vec<(Entity, Decision)>,
         ops: Vec<(Entity, BankOp, i64)>,
@@ -910,6 +975,8 @@ mod tests {
         plays: Vec<(Entity, CardId, Option<CardAim>)>,
         shops: Vec<(Entity, TradeSide, CardId)>,
         mortgages: Vec<(Entity, LandId, MortgageOp)>,
+        places: Vec<(Entity, ItemKind, TileIndex)>,
+        remotes: Vec<(Entity, u32)>,
     }
 
     /// 派发出口的读者们。装成参数包而不是八个函数参数：这仓库遇到 `too_many_arguments`
@@ -925,10 +992,15 @@ mod tests {
         plays: MessageReader<'w, 's, PlayCardRequested>,
         shops: MessageReader<'w, 's, ShopOpRequested>,
         mortgages: MessageReader<'w, 's, MortgageRequested>,
+        places: MessageReader<'w, 's, PlaceItemRequested>,
+        remotes: MessageReader<'w, 's, RequestRemoteDice>,
     }
 
     fn collect(mut seen: ResMut<Seen>, mut r: Readers<'_, '_>) {
-        seen.rolls.extend(r.rolls.read().map(|x| x.player));
+        for roll in r.rolls.read() {
+            seen.rolls.push(roll.player);
+            seen.dice.push((roll.player, roll.dice));
+        }
         seen.stays.extend(r.stays.read().map(|x| x.player));
         seen.answers
             .extend(r.answers.read().map(|a| (a.player, a.action)));
@@ -945,6 +1017,10 @@ mod tests {
             .extend(r.shops.read().map(|s| (s.player, s.side, s.card)));
         seen.mortgages
             .extend(r.mortgages.read().map(|m| (m.player, m.land, m.op)));
+        seen.places
+            .extend(r.places.read().map(|p| (p.player, p.item, p.tile)));
+        seen.remotes
+            .extend(r.remotes.read().map(|p| (p.player, p.steps)));
     }
 
     /// 一套只装配到「能跑 UI 派发」的对局骨架：两名玩家、一颗掷骰按钮（文字是它的子节点）、
@@ -970,9 +1046,15 @@ mod tests {
         shop_buy: Entity,
         /// 银行柜台上的一颗「押」按钮（P3d③）
         mortgage_take: Entity,
+        /// 道具面板上的两颗（P5）：放一个路障到 5 号格、用遥控骰子走 3 步
+        place_rock: Entity,
+        remote_three: Entity,
+        /// 带颗数掷骰（载具 2 颗）
+        roll_two: Entity,
         toggle_atm: Entity,
         toggle_stock: Entity,
         toggle_hand: Entity,
+        toggle_items: Entity,
     }
 
     impl Harness {
@@ -992,6 +1074,8 @@ mod tests {
                 .add_message::<ShopOpRequested>()
                 .add_message::<MortgageRequested>()
                 .add_message::<BailRequested>()
+                .add_message::<PlaceItemRequested>()
+                .add_message::<RequestRemoteDice>()
                 .add_message::<AppExit>()
                 .init_resource::<Seen>()
                 .init_resource::<tile_info::SelectedTile>()
@@ -999,6 +1083,7 @@ mod tests {
                 .init_resource::<finance::AtmPanelOpen>()
                 .init_resource::<finance::StockPanelOpen>()
                 .init_resource::<hand::HandPanelOpen>()
+                .init_resource::<items::ItemsPanelOpen>()
                 .init_resource::<AtmAccess>()
                 .insert_resource(Paused(paused))
                 // 休市判据要读日历、锚点与节假日表，三者都由 core 常驻。
@@ -1084,6 +1169,19 @@ mod tests {
                 .id();
             let toggle_stock = app.world_mut().spawn(UiAction::ToggleStock).id();
             let toggle_hand = app.world_mut().spawn(UiAction::ToggleHand).id();
+            let toggle_items = app.world_mut().spawn(UiAction::ToggleItems).id();
+            let place_rock = app
+                .world_mut()
+                .spawn(UiAction::PlaceItem {
+                    item: ItemKind::Roadblock,
+                    tile: TileIndex(5),
+                })
+                .id();
+            let remote_three = app
+                .world_mut()
+                .spawn(UiAction::UseRemoteDice { steps: 3 })
+                .id();
+            let roll_two = app.world_mut().spawn(UiAction::RollWith(2)).id();
 
             // 先把阶段落实，再点击才不会落在 `Boot` 上
             app.update();
@@ -1103,9 +1201,13 @@ mod tests {
                 insulate,
                 shop_buy,
                 mortgage_take,
+                place_rock,
+                remote_three,
+                roll_two,
                 toggle_atm,
                 toggle_stock,
                 toggle_hand,
+                toggle_items,
             }
         }
 
@@ -1181,6 +1283,69 @@ mod tests {
         h.click(h.roll_label);
         assert!(h.seen().rolls.is_empty(), "被按住的人不该发掷骰");
         assert_eq!(h.seen().stays, vec![h.player]);
+    }
+
+    /// 放道具与出牌同一条窗口、同一个主语（P5）。按钮里烤的是「哪件、哪一格」，
+    /// 「这一格能不能放」由规则层再判 —— 派发只负责把意图送对。
+    #[test]
+    fn a_place_request_names_the_current_player_and_needs_the_roll_window() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let me = h.player;
+        h.click(h.place_rock);
+        assert_eq!(
+            h.seen().places,
+            vec![(me, ItemKind::Roadblock, TileIndex(5))],
+            "掷骰前那颗「5 号格」该派发，且主语是当前玩家"
+        );
+
+        let mut paused = Harness::new(TurnPhase::WaitRoll, true, PendingDecision::default());
+        paused.click(paused.place_rock);
+        assert!(paused.seen().places.is_empty(), "暂停时不该放道具");
+
+        let mut after = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let other = after.other;
+        after.offer(other, Pending::RentNotice(LandId(3)));
+        after.click(after.place_rock);
+        assert!(
+            after.seen().places.is_empty(),
+            "回合卡在决策上，还能往路上放东西？"
+        );
+    }
+
+    /// 遥控骰子与掷骰互斥地决定这一回合走几格，窗口与主语同一条。
+    #[test]
+    fn a_remote_dice_request_carries_its_steps_and_the_current_player() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let me = h.player;
+        h.click(h.remote_three);
+        assert_eq!(h.seen().remotes, vec![(me, 3)]);
+
+        let mut later = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let other = later.other;
+        later.offer(other, Pending::RentNotice(LandId(3)));
+        later.click(later.remote_three);
+        assert!(later.seen().remotes.is_empty(), "走完路还能遥控骰子？");
+    }
+
+    /// 载具颗数（P5）：`RollWith(2)` 送的是同一个 `RequestRoll`，只是 `dice = 2`；
+    /// 被停留按住时与顶栏那颗一样改发「停留」，颗数因此不该漏出去。
+    #[test]
+    fn a_roll_with_dice_count_still_yields_to_the_stay_intent() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let me = h.player;
+        h.click(h.roll_two);
+        assert_eq!(h.seen().rolls, vec![me]);
+        assert_eq!(h.seen().dice, vec![(me, 2)], "颗数没有送到规则层");
+
+        let mut staying = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        staying
+            .app
+            .world_mut()
+            .entity_mut(staying.player)
+            .insert(StaySentence { turns_left: 1 });
+        staying.click(staying.roll_two);
+        assert!(staying.seen().rolls.is_empty(), "被停留按住还掷骰");
+        assert_eq!(staying.seen().stays, vec![staying.player]);
     }
 
     #[test]
@@ -1335,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn the_three_floating_panels_toggle_from_their_own_buttons() {
+    fn the_floating_panels_toggle_from_their_own_buttons() {
         let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
         h.click(h.toggle_atm);
         assert!(h.app.world().resource::<finance::AtmPanelOpen>().0);
@@ -1343,6 +1508,8 @@ mod tests {
         assert!(h.app.world().resource::<finance::StockPanelOpen>().0);
         h.click(h.toggle_hand);
         assert!(h.app.world().resource::<hand::HandPanelOpen>().0);
+        h.click(h.toggle_items);
+        assert!(h.app.world().resource::<items::ItemsPanelOpen>().0);
         h.click(h.toggle_atm);
         assert!(!h.app.world().resource::<finance::AtmPanelOpen>().0);
     }
@@ -1491,6 +1658,7 @@ mod tests {
             TurnPhase::TurnStart,
             TurnPhase::WaitRoll,
             TurnPhase::Walking,
+            TurnPhase::Halted,
             TurnPhase::Landed,
             TurnPhase::WaitDecision,
             TurnPhase::TurnEnd,
@@ -1549,6 +1717,18 @@ mod tests {
             // P4③ 的两个出口：请求由派发写、成交由顶栏提示行读
             .add_message::<BailRequested>()
             .add_message::<game_core::prelude::PlayerBailed>()
+            // P5：道具与遥控骰子的请求，以及顶栏提示行要读的那一批成交/中断凭据。
+            // 漏任何一条不是「那行字不出现」，而是 `dispatch_ui_actions` 或
+            // `hint_from_events` 整个 SystemParam 建不出来 —— 一片按钮全死
+            .add_message::<PlaceItemRequested>()
+            .add_message::<RequestRemoteDice>()
+            .add_message::<game_core::prelude::ItemPlaced>()
+            .add_message::<game_core::prelude::WalkHalted>()
+            .add_message::<game_core::prelude::BombTransferred>()
+            .add_message::<game_core::prelude::ChestOpened>()
+            .add_message::<game_core::prelude::RemoteDiceUsed>()
+            .add_message::<game_core::prelude::MoveCapped>()
+            .add_message::<game_core::prelude::MountChanged>()
             // P2b：日历事件的表现层读这两条（礼物一屏、红包老虎机）
             .add_message::<game_core::prelude::GiftsGiven>()
             .add_message::<game_core::prelude::RedEnvelope>()
@@ -1601,6 +1781,7 @@ mod tests {
         app.insert_resource(finance::AtmPanelOpen(true));
         app.insert_resource(finance::StockPanelOpen(true));
         app.insert_resource(hand::HandPanelOpen(true));
+        app.insert_resource(items::ItemsPanelOpen(true));
 
         app.world_mut()
             .resource_mut::<NextState<crate::scene::Scene>>()
@@ -1620,6 +1801,10 @@ mod tests {
         assert!(
             !app.world().resource::<hand::HandPanelOpen>().0,
             "回主菜单没关手牌浮层"
+        );
+        assert!(
+            !app.world().resource::<items::ItemsPanelOpen>().0,
+            "回主菜单没关道具浮层"
         );
     }
 

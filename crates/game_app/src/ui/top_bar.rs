@@ -12,11 +12,12 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, AtmAccess, BankOpDone, BankVisited, CardPlayed, ChargeWaived, DetentionLifted,
-    DetentionSkipped, GameOver, GameSession, MarketClock, MortgageDone, MortgageOp, Paused,
-    PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, ShopOpDone,
-    StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TradeSide, TurnOrder,
-    TurnPhase,
+    ActiveBoard, AtmAccess, BankOpDone, BankVisited, BombTransferred, CardPlayed, ChargeWaived,
+    ChestOpened, DetentionLifted, DetentionSkipped, GameOver, GameSession, ItemPlaced, MarketClock,
+    MortgageDone, MortgageOp, MountChanged, MoveCapped, Paused, PendingDecision, PlayerBailed,
+    PlayerBankrupt, PlayerName, PointsChanged, RemoteDiceUsed, ShopOpDone, StayLifted,
+    StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide, TurnOrder,
+    TurnPhase, WalkHalted,
 };
 
 use super::finance::comma;
@@ -129,6 +130,17 @@ pub(crate) fn spawn_top_bar(mut commands: Commands, font: Res<DevFont>) {
                     UiAction::ToggleHand,
                 ),
             );
+            // 道具栏（P5）：与手牌同一条 —— 随时能看，能不能动手写在面板里那行字上
+            button(
+                bar,
+                &font.0,
+                ButtonSpec::new(
+                    "道具",
+                    layout::FINANCE_BUTTON,
+                    SECONDARY,
+                    UiAction::ToggleItems,
+                ),
+            );
             // Godot 的暂停只有 ESC 一条路（`pause_menu.gd:19-25`），这里补一个按钮：
             // 只用键盘能找到的功能，鼠标玩家就找不到
             button(
@@ -192,6 +204,8 @@ fn button_allowed(action: &UiAction, turn: &TurnView) -> bool {
         UiAction::ToggleStock => !turn.paused.0,
         // 手牌：同一条 —— 能不能看由暂停决定，能不能出牌写在面板里那行字上
         UiAction::ToggleHand => !turn.paused.0,
+        // 道具栏同理：看是随时的事，放不放得下由面板里那排候选与规则层判
+        UiAction::ToggleItems => !turn.paused.0,
         _ => true,
     }
 }
@@ -366,6 +380,7 @@ fn phase_name(phase: TurnPhase) -> String {
         TurnPhase::TurnStart => "回合开始",
         TurnPhase::WaitRoll => "等待掷骰",
         TurnPhase::Walking => "行走中",
+        TurnPhase::Halted => "行走中断",
         TurnPhase::Landed => "落格结算",
         TurnPhase::WaitDecision => "等待决策",
         TurnPhase::TurnEnd => "回合结束",
@@ -408,6 +423,18 @@ pub(crate) struct Notices<'w, 's> {
     /// 一次性修正生效那一笔（免费卡花掉了）。**没有对应的 `CashChanged`**：钱一分没动而
     /// 卡没了，玩家能看见的只有这一行
     waived: MessageReader<'w, 's, ChargeWaived>,
+    // ===== 道路放置物与道具（P5）=====
+    /// 放下了什么、放在哪一格。面板随道具数重建，一次性结果只有这一行能说
+    placed: MessageReader<'w, 's, ItemPlaced>,
+    /// 行走被道路放置物打断。这一行与落格结算互斥 —— 停在无主地上也不会弹买地面板
+    halted: MessageReader<'w, 's, WalkHalted>,
+    /// 定时炸弹换了主人。「换人」不是一次静默的状态改写，新主人得看见它跟过来了
+    bomb_transferred: MessageReader<'w, 's, BombTransferred>,
+    chest: MessageReader<'w, 's, ChestOpened>,
+    remote: MessageReader<'w, 's, RemoteDiceUsed>,
+    /// 乌龟卡夹步：骰面与实际步数两个数都要说，否则玩家会以为骰子坏了
+    capped: MessageReader<'w, 's, MoveCapped>,
+    mount: MessageReader<'w, 's, MountChanged>,
     over: MessageReader<'w, 's, GameOver>,
 }
 
@@ -593,6 +620,63 @@ pub(crate) fn hint_from_events(
             )
         });
     }
+    // ===== P5：道具与道路放置物 =====
+    for m in notices.placed.read() {
+        line = Some(format!(
+            "{} 把{}放在了 {}",
+            name(&names, m.player),
+            m.item.label(),
+            tile_word(&board, m.tile)
+        ));
+    }
+    for m in notices.halted.read() {
+        line = Some(format!(
+            "{} 在 {} 踩到{}，行走中断",
+            name(&names, m.player),
+            tile_word(&board, m.tile),
+            m.cause.label()
+        ));
+    }
+    for m in notices.bomb_transferred.read() {
+        line = Some(format!(
+            "{} 在 {} 把定时炸弹交给了 {}（剩 {} 步）",
+            name(&names, m.from),
+            tile_word(&board, m.tile),
+            name(&names, m.to),
+            m.steps_left
+        ));
+    }
+    for m in notices.chest.read() {
+        line = Some(format!(
+            "{} 在 {} 打开宝箱，得到「{}」",
+            name(&names, m.player),
+            tile_word(&board, m.tile),
+            m.item.label()
+        ));
+    }
+    for m in notices.remote.read() {
+        line = Some(format!(
+            "{} 用遥控骰子，这一回合走 {} 格",
+            name(&names, m.player),
+            m.steps
+        ));
+    }
+    for m in notices.capped.read() {
+        line = Some(format!(
+            "{} 掷出 {} 点，只走 {} 格（乌龟卡剩 {} 回合）",
+            name(&names, m.player),
+            m.rolled,
+            m.moved,
+            m.turns_left
+        ));
+    }
+    for m in notices.mount.read() {
+        line = Some(format!(
+            "{} 的载具变成{}",
+            name(&names, m.player),
+            m.mount.label()
+        ));
+    }
     for m in notices.over.read() {
         line = Some(match m.winner.and_then(|w| names.get(w).ok()) {
             Some(winner) => format!("胜者：{}！", winner.0),
@@ -643,6 +727,18 @@ fn name(names: &Query<&PlayerName>, player: Entity) -> String {
         .get(player)
         .map(|n| n.0.clone())
         .unwrap_or_else(|_| "玩家".to_string())
+}
+
+/// 「5 南京路」—— 顶栏那几行要说得出格名，否则「放在 5 号格」还得玩家自己数。
+/// 棋盘缺席时退化成格号，不猜名字。
+fn tile_word(board: &Option<Res<ActiveBoard>>, tile: TileIndex) -> String {
+    board
+        .as_ref()
+        .and_then(|b| b.def.tile(tile.0 as i64))
+        .map_or_else(
+            || format!("{} 号格", tile.0),
+            |t| format!("{} {}", tile.0, t.name),
+        )
 }
 
 #[cfg(test)]

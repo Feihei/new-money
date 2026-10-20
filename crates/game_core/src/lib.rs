@@ -23,12 +23,14 @@ pub mod data;
 pub mod deck;
 pub mod economy;
 pub mod hand;
+pub mod items;
 pub mod land;
 pub mod landing;
 pub mod loader;
 pub mod market;
 pub mod mortgage;
 pub mod msg;
+pub mod occupancy;
 pub mod player;
 pub mod plot;
 pub mod property;
@@ -75,6 +77,7 @@ pub mod prelude {
     };
     pub use crate::economy::LandView;
     pub use crate::hand::{CardAim, Hand, PlayWindow, card_notice, deal_to, play_card_system};
+    pub use crate::items::{Inventory, ItemKind};
     pub use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
     pub use crate::landing::{
         Landed, Landing, LandingDomain, Pending, PendingDecision, classify_landing_system,
@@ -90,20 +93,27 @@ pub mod prelude {
         read_facts,
     };
     pub use crate::msg::{
-        BailRequested, BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn,
-        CardGained, CardNotice, CardPlayed, CashChanged, ChargeWaived, Decision, DecisionChosen,
-        DetentionLifted, DetentionSkipped, DiceRolled, EffectOutcome, GameOver, GiftGiven,
-        GiftsGiven, LandBought, LandUpgraded, MortgageDone, MortgageOp, MortgageRequested,
+        BailRequested, BankOp, BankOpDone, BankOpRequested, BankVisited, BombTransferred,
+        BuyOffered, CardDrawn, CardGained, CardNotice, CardPlayed, CashChanged, ChargeWaived,
+        ChestOpened, Decision, DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled,
+        EffectOutcome, GameOver, GiftGiven, GiftsGiven, ItemPlaced, LandBought, LandUpgraded,
+        MortgageDone, MortgageOp, MortgageRequested, MountChanged, MoveCapped, PlaceItemRequested,
         PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
-        PlayerTeleported, PointsChanged, RedEnvelope, RentDue, RequestRoll, RequestStay,
-        ShopOpDone, ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged,
-        StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
-        TurnStarted, UpgradeOffered, WalkStarted,
+        PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
+        RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped,
+        StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide,
+        TurnEnded, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted,
+    };
+    pub use crate::occupancy::{
+        BOMB_HOSPITAL_DAYS, BOMB_STEPS, HaltCause, MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt,
+        OccupancyKind, PlaceDeny, STARTING_CHESTS, Trigger, WalkHalt, finish_halt_system,
+        first_roadblock, place, place_denied, place_item_system, resolve_halt_system,
+        settle_landing_occupancy_system, spawn_starting_chests, trigger_of, within_chebyshev,
     };
     pub use crate::player::{
-        BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Heading, PLAYER_COLORS,
-        PlayerColor, PlayerId, PlayerName, PlayerSetup, Points, START_TILE, StaySentence,
-        TokenPosition, WalkQueue, Wallet,
+        BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Heading, Mount, MoveCap,
+        PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, Points, START_TILE,
+        StaySentence, TokenPosition, WalkQueue, Wallet,
     };
     pub use crate::plot::{PlotArea, area_of, is_in_area};
     pub use crate::property::settle_property_landing;
@@ -116,29 +126,34 @@ pub mod prelude {
     pub use crate::status::{LandStatus, Timed, expire_land_status_system};
     pub use crate::stock::{PriceHistory, StockDef, StockHoldings, StockId, StockPrice, StockSet};
     pub use crate::turn::{GameSession, Paused, TurnOrder, TurnPhase, not_paused};
-    pub use crate::walk::{WalkClock, advance_walk_clock_system, walk_step_system};
+    pub use crate::walk::{
+        WalkClock, WalkPlan, advance_walk_clock_system, plan_walk, walk_step_system,
+    };
     pub use crate::world::{ActiveBoard, CoreSet, Gameplay, begin_game_system};
 }
 
 use bank::apply_month_end_interest_system;
 use prelude::{
     ActiveBoard, AtmAccess, BailRequested, BankOpDone, BankOpRequested, BankVisited, BoardDef,
-    BuyOffered, CardDrawn, CardGained, CardPlayed, CardSet, CashChanged, ChargeWaived, Corrections,
-    CouponBoxes, DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride,
-    GameOver, GameRules, GameSeed, GameSetup, GiftsGiven, HolidaySet, JsonAssetLoader, LandBought,
-    LandUpgraded, Landing, MarketClock, MortgageDone, MortgageRequested, Paused, PendingDecision,
-    PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
-    PlayerTeleported, PointsChanged, RedEnvelope, RentDue, RequestRoll, RequestStay, ShopOpDone,
-    ShopOpRequested, ShopStock, StayLifted, StaySkipped, StockPriceChanged, StockSet,
-    StockTradeRequested, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted,
-    UpgradeOffered, WalkClock, WalkStarted, advance_walk_clock_system, bail_op_system,
-    bank_op_system, begin_game_system, decision_system, deliver_calendar_events_system,
-    expire_land_status_system, grant_atm_access_system, market_tick_on_turn_end_system,
-    mortgage_op_system, play_card_system, shop_op_system, trade_request_system, walk_step_system,
+    BombTransferred, BuyOffered, CardDrawn, CardGained, CardPlayed, CardSet, CashChanged,
+    ChargeWaived, ChestOpened, Corrections, CouponBoxes, DecisionChosen, DetentionLifted,
+    DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed, GameSetup,
+    GiftsGiven, HolidaySet, ItemPlaced, JsonAssetLoader, LandBought, LandUpgraded, Landing,
+    MarketClock, MortgageDone, MortgageRequested, MountChanged, MoveCapped, Paused,
+    PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
+    PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed,
+    RentDue, RequestRemoteDice, RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, ShopStock,
+    StayLifted, StaySkipped, StockPriceChanged, StockSet, StockTradeRequested, StockTraded,
+    StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock,
+    WalkHalt, WalkHalted, WalkStarted, advance_walk_clock_system, bail_op_system, bank_op_system,
+    begin_game_system, decision_system, deliver_calendar_events_system, expire_land_status_system,
+    finish_halt_system, grant_atm_access_system, market_tick_on_turn_end_system,
+    mortgage_op_system, place_item_system, play_card_system, resolve_halt_system,
+    settle_landing_occupancy_system, shop_op_system, trade_request_system, walk_step_system,
 };
 use turn::{
-    begin_turn_system, end_turn_system, game_over_system, not_paused, roll_dice_system,
-    take_stay_system, update_price_index_system,
+    begin_turn_system, end_turn_system, game_over_system, not_paused, remote_dice_system,
+    roll_dice_system, take_stay_system, update_price_index_system,
 };
 use world::CoreSet;
 
@@ -184,6 +199,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<CouponBoxes>()
             .init_resource::<Corrections>()
             .init_resource::<ShopStock>()
+            .init_resource::<WalkHalt>()
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
             .add_message::<RequestRoll>()
@@ -242,6 +258,16 @@ impl Plugin for CoreGamePlugin {
             // ===== 抵押与赎回（P3d③）=====
             .add_message::<MortgageRequested>()
             .add_message::<MortgageDone>()
+            // ===== 道路放置物与道具（P5）=====
+            .add_message::<PlaceItemRequested>()
+            .add_message::<ItemPlaced>()
+            .add_message::<WalkHalted>()
+            .add_message::<BombTransferred>()
+            .add_message::<ChestOpened>()
+            .add_message::<RequestRemoteDice>()
+            .add_message::<RemoteDiceUsed>()
+            .add_message::<MoveCapped>()
+            .add_message::<MountChanged>()
             .init_state::<TurnPhase>()
             // 装配世界：初始态的 OnEnter 不会触发，所以用 in_state(Boot)
             .add_systems(
@@ -279,6 +305,16 @@ impl Plugin for CoreGamePlugin {
                     // 出牌与下单共用这一条窗口（见 `hand::play_card_system`）：
                     // 「本回合要怎么走」在我还没走之前决定完
                     play_card_system
+                        .run_if(in_state(TurnPhase::WaitRoll))
+                        .run_if(not_paused),
+                    // 放置道具与掷骰同一个窗口：路障要挡的是「接下来这几步」，所以
+                    // 必须在我自己走之前放下去（ADR-002 §4）
+                    place_item_system
+                        .run_if(in_state(TurnPhase::WaitRoll))
+                        .run_if(not_paused),
+                    // 遥控骰子：与掷骰互斥地决定这一回合走几格。谁先受理由消息定，
+                    // 同一帧两条时规则层各认各的窗口，不改回合状态
+                    remote_dice_system
                         .run_if(in_state(TurnPhase::WaitRoll))
                         .run_if(not_paused),
                 ),
@@ -332,6 +368,9 @@ impl Plugin for CoreGamePlugin {
                 OnEnter(TurnPhase::Landed),
                 (
                     landing::classify_landing_system,
+                    // 落脚触发的放置物（宝箱）。读 `PlayerArrived.to`，所以中断那一格
+                    // 不会误触发（ADR-002 §7）；它与下面各域互不相交，排第一只是先给出道具
+                    settle_landing_occupancy_system,
                     property::settle_property_landing,
                     bank::settle_bank_landing,
                     market::settle_market_landing,
@@ -344,6 +383,12 @@ impl Plugin for CoreGamePlugin {
                     landing::close_landing_system,
                 )
                     .chain(),
+            )
+            // 走步被放置物打断：先应用后果（住院/拆房），再收尾。中断那一格不走
+            // 落格分派 —— 它不是到站（ADR-002 §7）
+            .add_systems(
+                OnEnter(TurnPhase::Halted),
+                (resolve_halt_system, finish_halt_system).chain(),
             )
             // 回合结束 = 一天过去：行情 tick 与回合轮转同批、互不冲突（动的组件不相交），
             // 所以不排顺序 —— 谁先跑都不改结果。后面两跳都读「今天几号」，而 tick 就是

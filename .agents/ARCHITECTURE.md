@@ -292,7 +292,7 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 | UI 交互 | `Button`/`Interaction` 在 0.20 已弃用，改 `OnInteraction` 组件式；`TextScroll` → `EditableText::viewport`；cursor 模块并入 `bevy_picking` | B5 写按钮时按新形态，别抄旧教程 ⚠️ |
 | 存档/设置 | 新增内置 `bevy_settings`、`bevy_world_serialization`（`scene` feature 会带后者） | 同为 0.20 首发，按 §九 走手写快照 |
 
-**实跑发现的二十二条环境级坑（已踩过，记录避免重犯）**：
+**实跑发现的三十三条环境级坑（已踩过，记录避免重犯）**：
 1. **`AssetPlugin::file_path` 在 0.20 是相对「可执行文件目录」的 `String`（不是 `Option`）**，而 `cargo run -p game_app` 的 CWD 是仓库根 → 默认会把资产解析成 `target/debug/assets/**`，所有资产**静默 404**（只有一行 `bevy_asset::server` ERROR，程序不崩）。落地做法：启动时把资产根解析成绝对路径再塞给 `AssetPlugin`，`std::fs` 与 `AssetServer` 共用同一个根，否则会出现"直读文件成功、Asset 加载失败"这种极难排查的组合。
 2. **`default_font` feature 自带的是 Fira Mono 子集，无汉字**，所以不显式指定字体时中文不是"报错"而是**豆腐块/空白**。落地做法：把字体放 `assets/font/` 并用 `asset_server.load()` 显式指定（本仓库用开发授权的思源黑体，见 §7.3）。
 3. **中文必须开 `bevy` 的 `complex_script_segmentation` feature**（转发到 `parley/complex-scripts`）。不开时 Parley/ICU4X 找不到中日韩分词模型，会**每帧刷** `ICU4X data error: No segmentation model for complex script: Chinese/Japanese`，且长句换行按非 CJK 规则处理。B0 实测：开启后错误归零。
@@ -347,6 +347,8 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
     **但光换 profile 不够**：默认 `-j 12` 复测仍有 18.2 GB 工具链私有内存、24.6 GB 物理峰值，旁边开着 IDE 就悬。所以再加 `.cargo/config.toml` 的 `[build] jobs = 6`，复测降到 10.0 GB，而那一次重建的耗时没变（25 s → 26 s）：关键路径是「先编完库、再链 10 条二进制」，链接本身很便宜，多开并行本来就几乎没有收益。判据：**这台机器上别把 jobs 放满**，也别为了"快一点"回去调那两个 `debug` 键 —— 改 profile 会让**全部依赖重编一次**（实测 1285 s ≈ 21 分钟，一次性代价）。同理别顺手 `cargo clean`（全清），要清就 `cargo clean -p game_core`。改完之后 `./check.sh` 五项全绿用 242 s（那一次还含 clippy 按新 profile 把依赖重校一遍的代价）。
 
 
+
+33. **同一个 system 里两条查询都读 `Transform` 会以 B0001 panic，即使它们碰的是天然不相交的两批实体**（P5 的道路图标第一次上屏时踩到）。`sync_occupancy_visuals` 一条查图标（`&mut Transform`）、一条查棋子（`&Transform`），实体集合一个来自 occupancy、一个来自 token，肉眼绝不会相交；但 Bevy 0.20 的冲突检查只看**组件类型与过滤器**，不看实体从哪来，参数建立期直接 panic：`error[B0001]: Query<(&TokenVisual, &Transform)> ... accesses component(s) Transform in a way that conflicts with a previous system parameter`。修法：给其中一条加 `Without<另一批的标记组件>`（本项目是 `shown: Query<..., Without<TokenVisual>>`），把「它们不是同一批实体」写成调度器看得见的条件，而不是写成注释。判据：**同一个 system 里出现两条读写同一组件的查询时，必须用 `With<T>`/`Without<T>` 证明互不相交**；`ParamSet` 是另一条路，但它会强迫两条查询顺序借用，能拆开时优先拆开。
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
