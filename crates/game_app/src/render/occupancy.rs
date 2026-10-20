@@ -8,7 +8,7 @@
 //! 分得开。表现层只读 `Occupancy`，不向 core 发任何推进消息。
 
 use bevy::prelude::*;
-use game_core::prelude::{ActiveBoard, BoardDef, Occupancy, OccupancyAt, OccupancyKind};
+use game_core::prelude::{ActiveBoard, BoardDef, God, Occupancy, OccupancyAt, OccupancyKind};
 
 use super::{Rendered, flat, token::TokenVisual};
 
@@ -20,6 +20,9 @@ pub(crate) struct OccupancyVisual {
 }
 
 /// 一枚图标在格子上的落脚高度：路障横杆抬到膝盖、地雷贴着地、宝箱半身。
+///
+/// 神是这些人形里唯一「站在路上」的，所以它的锚点比道具高一档 —— 画在格心会读成
+/// 「地上一件东西」，而它是要被踩的那一位。
 fn icon_y(kind: OccupancyKind) -> f32 {
     match kind {
         OccupancyKind::Roadblock => 0.55,
@@ -27,9 +30,13 @@ fn icon_y(kind: OccupancyKind) -> f32 {
         OccupancyKind::TimeBomb => 0.45,
         OccupancyKind::Dog => 0.42,
         OccupancyKind::Chest => 0.32,
+        OccupancyKind::God(_) => 0.78,
     }
 }
 
+/// 十三位现在是十二位（死神不自己上街，见 `gods::roams`），今天先按**族**分色：
+/// 财神金、福神粉、穷神灰蓝、衰神暗紫、天使白、恶魔黑红、土地公土黄。
+/// 正式造型是剪纸 sprite（CHARACTERS §十二），这一层只是让截图里分得开谁是谁。
 fn icon_color(kind: OccupancyKind) -> Color {
     match kind {
         OccupancyKind::Roadblock => Color::srgb(0.95, 0.55, 0.15),
@@ -37,10 +44,20 @@ fn icon_color(kind: OccupancyKind) -> Color {
         OccupancyKind::TimeBomb => Color::srgb(0.85, 0.20, 0.20),
         OccupancyKind::Dog => Color::srgb(0.55, 0.35, 0.20),
         OccupancyKind::Chest => Color::srgb(0.95, 0.80, 0.30),
+        OccupancyKind::God(god) => match god {
+            God::BigRich | God::SmallRich => Color::srgb(0.92, 0.75, 0.22),
+            God::BigFortune | God::SmallFortune => Color::srgb(0.98, 0.62, 0.75),
+            God::BigPoor | God::SmallPoor => Color::srgb(0.42, 0.48, 0.58),
+            God::BigDoom | God::SmallDoom => Color::srgb(0.45, 0.22, 0.42),
+            God::Angel => Color::srgb(0.95, 0.96, 1.0),
+            God::Devil => Color::srgb(0.30, 0.10, 0.12),
+            God::LandDeity => Color::srgb(0.62, 0.45, 0.26),
+            God::Death => Color::srgb(0.86, 0.86, 0.80),
+        },
     }
 }
 
-/// 形状先让五种东西分得开：横杆 / 扁球 / 球 / 长条 / 方块。
+/// 形状先让六种东西分得开：横杆 / 扁球 / 球 / 长条 / 方块 / 立着的柱。
 fn icon_mesh(meshes: &mut Assets<Mesh>, kind: OccupancyKind) -> Handle<Mesh> {
     match kind {
         OccupancyKind::Roadblock => meshes.add(Cuboid::new(0.82, 0.16, 0.24)),
@@ -48,6 +65,9 @@ fn icon_mesh(meshes: &mut Assets<Mesh>, kind: OccupancyKind) -> Handle<Mesh> {
         OccupancyKind::TimeBomb => meshes.add(Sphere::new(0.26)),
         OccupancyKind::Dog => meshes.add(Cuboid::new(0.32, 0.34, 0.62)),
         OccupancyKind::Chest => meshes.add(Cuboid::new(0.58, 0.38, 0.44)),
+        // 一位神 = 一根竖着的窄柱。它与宝箱一样是方块，但**立着**：
+        // 平放读作货物，立着才读作「站在那里的一位」
+        OccupancyKind::God(_) => meshes.add(Cuboid::new(0.3, 0.66, 0.3)),
     }
 }
 

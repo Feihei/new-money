@@ -683,3 +683,81 @@ pub struct MountChanged {
     pub player: Entity,
     pub mount: crate::player::Mount,
 }
+
+// ===== 神明（P6）=====
+
+/// 一位神怎么走的。三种走法的差别是玩法，不是日志等级：
+/// 玩家要能分辨「我自己踩到另一位把它顶了」（可以怪自己）、「日子到了」（谁也不怪）
+/// 和「花点券请它走的」（花了钱）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GodExit {
+    /// 天数用完，自然走
+    Expired,
+    /// 踩到另一位神，被顶走（一人一神）
+    Replaced,
+    /// 被送神符送走（P6d）—— 死神不吃这一张
+    Banished,
+}
+
+impl GodExit {
+    /// 顶栏、HUD、dump 与测试流水要说同一句话，所以映射只写一次（与
+    /// [`DetentionPlace::label`] 同一条理由）。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Expired => "期满",
+            Self::Replaced => "顶走",
+            Self::Banished => "送走",
+        }
+    }
+}
+
+/// 路上刷出一位神（开局装配与每回合补刷都算）。
+///
+/// 漫游**不发这一条**：每回合几位神各挪一格会把顶栏刷成滚动字幕，而那件事没有玩家要
+/// 回答的动作。要看神此刻站在哪儿，读 dump 的放置物那一栏。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GodAppeared {
+    pub god: crate::gods::God,
+    pub tile: TileIndex,
+}
+
+/// 踩到神 → 上身。`replaced` 是被它顶走的那位（`None` = 他身上原本没有神）。
+///
+/// `days` 是这一位管几天（死神 13、其余 7）：写成数而不是让面板去查表，
+/// 因为「HUD 上那句还剩几天」要能与「上身那一刻写下的那个数」对得上账。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GodPossessed {
+    pub player: Entity,
+    pub god: crate::gods::God,
+    pub days: u32,
+    /// 踩到它的那一格。
+    pub tile: TileIndex,
+    pub replaced: Option<crate::gods::God>,
+}
+
+/// 一位神离开某人。与 [`GodPossessed`] 分成两条而不是带一个方向字段的同一条：
+/// 一来一回的读者不同（附身要播动画、离场只要把挂着的修正与 HUD 那一行清掉），
+/// 而 `GodExit` 已经说了「怎么走的」。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GodLeft {
+    pub player: Entity,
+    pub god: crate::gods::God,
+    pub reason: GodExit,
+}
+
+/// 一位神上身那一刻**当场做完的那件事**（P6b）：送钱、挨个收钱、抢钱、送卡。
+///
+/// 与 [`GodPossessed`] 分成两条是刻意的：那一条说的是「谁身上换了一位神、管几天」，
+/// HUD 与将来的存档读它就够；这一条说的是钱与卡的去处，顶栏那句「大财神给了你 3,521 元」
+/// 与老虎机动画读它。合成一条带可选字段的话，「附身但这次没给东西」与「没附身」就分不开了。
+///
+/// `cash` 是这个人现金的**净值**（进为正、出为负），只给面板一句话用；每一笔的明细照旧走
+/// [`CashChanged`]，所以它对不上账时审计仍然抓得住（B3 那条「余额 == 起始 + Σdelta」）。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct GodDeed {
+    pub player: Entity,
+    pub god: crate::gods::God,
+    pub cash: i64,
+    /// 送到手上的卡（大福神 2 张、小福神 1 张，其余为空）。
+    pub cards: Vec<CardNotice>,
+}

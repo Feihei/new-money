@@ -143,6 +143,9 @@ pub struct TurnWriters<'w> {
     released: MessageWriter<'w, DetentionLifted>,
     skipped: MessageWriter<'w, DetentionSkipped>,
     over: MessageWriter<'w, GameOver>,
+    /// 神老了一天/到期离场（P6）。挂在这里而不是单开一条 system：扣那一格必须发生在
+    /// 拘留分支**之前**，而那正是这个函数最靠前的几行。
+    god_left: MessageWriter<'w, crate::msg::GodLeft>,
 }
 
 /// `roll_dice_system` 的输入打包：请求流水 + 当前轮转 + 棋盘拓扑
@@ -156,6 +159,25 @@ pub struct RollInput<'w, 's> {
     occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
 }
 
+/// `begin_turn_system` 要动的那一摞。P6 起了第九个参数，按房规打包而不是挂
+/// `#[allow(clippy::too_many_arguments)]`（§六 坑 8）：这六样回答的是同一个问题 ——
+/// 「轮到他了吗、他被什么按住了」。
+#[derive(SystemParam)]
+pub struct TurnDesk<'w, 's> {
+    commands: Commands<'w, 's>,
+    order: ResMut<'w, TurnOrder>,
+    players:
+        Query<'w, 's, (Entity, Option<&'static Bankrupt>, &'static TokenPosition), With<PlayerId>>,
+    held: Query<'w, 's, &'static Detention, With<PlayerId>>,
+    possessions: Query<'w, 's, &'static mut crate::gods::Possession, With<PlayerId>>,
+    /// 修正登记处。**为什么是这么小的一块而不是整个 `Books`**：`Books` 带着
+    /// `&mut Detention`（P4② 搬进去的），而上面那格 `held` 读的是同一个组件 ——
+    /// 两条并排会在参数建立期撞成借用冲突。回合机要的只有「神到期时把那几条撤掉」，
+    /// 所以只把那一格拿进来。
+    corrections: ResMut<'w, crate::charge::Corrections>,
+    atm: ResMut<'w, AtmAccess>,
+}
+
 /// 回合开始的唯一入口：跳过破产者 → 处理拘留 → 否则等掷骰。
 ///
 /// 拘留的递减规则与 `player_data.gd:72-80` 一致：`turns_left` 每次回合开始减一，
@@ -166,23 +188,23 @@ pub struct RollInput<'w, 's> {
 /// 各走各的入口，也不再需要「一回合只跳一次」那条合取 —— 被拘留的人根本进不了 `WaitRoll`。
 /// 为什么不合成一个组件：见 [`StaySentence`] 那段 —— 被拘留的人被送进死胡同格，
 /// 停留的人还在自己踩到的那一格上。
+///
+/// 神的那一格（P6）扣在**所有分支之前**：PLAN §三 说「坐牢 3 天期间神的 7 天照算 3 天」，
+/// 而这句话在这台回合机里的意思就是 —— 他被拘留的那些回合，回合照样开始、扣数照样走。
+/// 放到拘留分支之后会得到一条看起来合理、实际永远不响的分支。
 pub fn begin_turn_system(
-    mut commands: Commands,
-    mut order: ResMut<TurnOrder>,
-    players: Query<(Entity, Option<&Bankrupt>, &TokenPosition), With<PlayerId>>,
-    held: Query<&Detention, With<PlayerId>>,
-    mut atm: ResMut<AtmAccess>,
+    mut desk: TurnDesk<'_, '_>,
     mut writers: TurnWriters,
     mut next: ResMut<NextState<TurnPhase>>,
 ) {
     let alive = |e: Entity| {
-        players
+        desk.players
             .get(e)
             .map(|(_, bankrupt, _)| bankrupt.is_none())
             .unwrap_or(false)
     };
 
-    let Some(player) = order.current_active(alive) else {
+    let Some(player) = desk.order.current_active(alive) else {
         // 阵容为空，或全员已破产（正常流程下 end_turn_system 会先一步进 Over）
         writers.over.write(GameOver { winner: None });
         next.set(TurnPhase::Over);
@@ -192,15 +214,25 @@ pub fn begin_turn_system(
     // 路过那一瞬间正是回合机最赶的时候（行走未完、落格已结算、下一位紧接着开始），
     // 只给那一帧的窗口等于按不到；放到下一次行动之前，玩家才有真正能点的一段 ——
     // 与证券面板「掷骰前可操作」是同一个窗口。
-    if atm.0 == Some(player) {
-        atm.0 = None;
+    if desk.atm.0 == Some(player) {
+        desk.atm.0 = None;
     }
-    let Ok((_, _, pos)) = players.get(player) else {
+    let Ok((_, _, pos)) = desk.players.get(player) else {
         return;
     };
 
+    // 身上那位神老一天。离场的那位由 `GodLeft` 说，恶犬接位在
+    // `gods::land_deity_succession_system` 读那条消息去做，不在这里顺手放。
+    crate::gods::age_possession(
+        &mut desk.commands,
+        &mut desk.corrections,
+        &mut desk.possessions,
+        player,
+        &mut writers.god_left,
+    );
+
     // 回合开始即扣一格，所以 turns_left==1 表示「最后一格服完，本回合可行动」
-    let held = held.get(player).ok().copied();
+    let held = desk.held.get(player).ok().copied();
     let jail_next = held.filter(|d| d.turns_left > 1).map(|d| Detention {
         place: d.place,
         turns_left: d.turns_left - 1,
@@ -209,7 +241,7 @@ pub fn begin_turn_system(
     if let Some(next_held) = jail_next {
         // 先让 UI 显示「谁的回合被跳了」，再发那条凭据（`turn_manager.gd:188-189` 的顺序）
         writers.turn_started.write(TurnStarted { player });
-        commands.entity(player).insert(next_held);
+        desk.commands.entity(player).insert(next_held);
         writers.skipped.write(DetentionSkipped {
             player,
             place: next_held.place,
@@ -221,7 +253,7 @@ pub fn begin_turn_system(
 
     // 走到这里 = 本回合没人被占用：把「最后一格」服完的放出来。
     if let Some(back) = held.filter(|d| d.turns_left == 1) {
-        commands.entity(player).remove::<Detention>();
+        desk.commands.entity(player).remove::<Detention>();
         writers.released.write(DetentionLifted {
             player,
             place: back.place,

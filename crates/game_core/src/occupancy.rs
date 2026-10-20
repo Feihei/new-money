@@ -59,6 +59,11 @@ pub enum OccupancyKind {
     Dog,
     /// 宝箱：落脚拾取，给一个随机道具
     Chest,
+    /// 神：落脚即附身（P6）。带变体而不是每种神一个 `OccupancyKind` ——
+    /// 「占不占格」「经过还是落脚」这十三位的答案是同一个，逐位再写一遍就是十三行废话。
+    /// 它们**各不相同**的那三样（管几天、对位是谁、上不上街）在
+    /// [`crate::gods::God`] 的三张穷尽表里。
+    God(crate::gods::God),
 }
 
 impl OccupancyKind {
@@ -69,6 +74,7 @@ impl OccupancyKind {
             Self::TimeBomb => "定时炸弹",
             Self::Dog => "恶犬",
             Self::Chest => "宝箱",
+            Self::God(god) => god.label(),
         }
     }
 }
@@ -119,7 +125,9 @@ pub const fn trigger_of(kind: OccupancyKind) -> Trigger {
         | OccupancyKind::Mine
         | OccupancyKind::TimeBomb
         | OccupancyKind::Dog => Trigger::Pass,
-        OccupancyKind::Chest => Trigger::Land,
+        // 神与宝箱同一条：走完骰子停在那一格才算。路过一位财神不给祝福，
+        // 这条口径与 ADR-002 §5 那张表一致，而 P6 的漫游「走到人那格不算附身」也靠它
+        OccupancyKind::Chest | OccupancyKind::God(_) => Trigger::Land,
     }
 }
 
@@ -568,6 +576,10 @@ mod tests {
             (K::TimeBomb, Trigger::Pass),
             (K::Dog, Trigger::Pass),
             (K::Chest, Trigger::Land),
+            // 神取一位代表整族：`trigger_of` 对十三位给的是同一个答案，
+            // 而「路过不给」这条正是 P6 漫游不触发附身的那个判据
+            (K::God(crate::gods::God::BigRich), Trigger::Land),
+            (K::God(crate::gods::God::Death), Trigger::Land),
         ];
         for (kind, want) in rows {
             assert_eq!(trigger_of(kind), want, "{kind:?} 的触发口径变了");

@@ -5,8 +5,8 @@
 //! 假种子函数（缺陷 #6）。这里整局共用一个种子，于是「同种子 → 同对局」变成一条
 //! 可以断言的性质 —— 回放与失败复现都从这里长出来。
 //!
-//! **同一个种子分成九条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
-//! 宝箱位置 / 宝箱掉落）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
+//! **同一个种子分成十条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
+//! 宝箱位置 / 宝箱掉落 / 神明）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
 //! 取随机数就会把 `turn_flow` 里「对局骰点 == 独立掷出的骰点」那批回归网整片打翻，
 //! 回放也对不齐；分流之后每域的随机性各自稳定，加内容不互相扰动。
 //!
@@ -36,6 +36,13 @@ const ENVELOPE_TAG: u64 = 0xE2E2_0000_0000_0006;
 const SPAWN_TAG: u64 = 0x5BA0_0000_0000_0007;
 /// P5：宝箱开出哪一种道具。
 const LOOT_TAG: u64 = 0x1007_0000_0000_0008;
+/// P6：刷哪位神、它落在哪一格、它自己往哪边走、财神给的那位数。
+///
+/// 神单独一条的理由与百货那一条同形：**「这一局撞见几位神」不该改变下一张机会牌是谁，
+/// 也不该改变下一个红包是几**。附身还有一层别处没有的耦合 —— 神每回合都要挪一格，
+/// 于是它是这条流上唯一一个「随回合稳定增加取数次数」的来源；把它并进骰子流，
+/// 第 30 回合之后的骰点就会随「前面几位神各晃了几步」漂移，回放当场对不齐。
+const GOD_TAG: u64 = 0x60D0_0000_0000_0009;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +69,7 @@ pub struct Rng {
     envelope: ChaCha8Rng,
     spawn: ChaCha8Rng,
     loot: ChaCha8Rng,
+    god: ChaCha8Rng,
 }
 
 impl Rng {
@@ -78,7 +86,13 @@ impl Rng {
             envelope: ChaCha8Rng::seed_from_u64(seed ^ ENVELOPE_TAG),
             spawn: ChaCha8Rng::seed_from_u64(seed ^ SPAWN_TAG),
             loot: ChaCha8Rng::seed_from_u64(seed ^ LOOT_TAG),
+            god: ChaCha8Rng::seed_from_u64(seed ^ GOD_TAG),
         }
+    }
+
+    /// 神明那一条流（P6）：刷哪位神、落在哪一格、往哪边走、神给的那位数。
+    pub fn pick_god(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.god.random_range(span)
     }
 
     /// 宝箱刷在哪一格（宝箱位置子流）。
@@ -127,6 +141,21 @@ impl Rng {
     pub fn range_f32(&mut self, span: RangeInclusive<f32>) -> f32 {
         self.market.random_range(span)
     }
+}
+
+/// 四个数字拼成一笔钱：千位是 `leading`，后三位各 0–9。
+///
+/// 为什么要一个公共函数而不是两处各写一遍 `acc * 10 + 数字`：PLAN §三 神明行点名
+/// 「大财神那笔四位数现金与春节红包共用同一个生成函数，别各写一套」。这两处的**位数形状**
+/// 是同一条规则（四位、逐位取数），只有千位范围不同 —— 红包允许 0000（空红包），
+/// 财神从 1000 起。逐位取数而不是 `rng(1000..=8999)` 一次取完，是因为表现层的老虎机
+/// 要逐位停下来给玩家看（`ui/calendar_fx.rs`），一次取出的整数拆不出那四位。
+pub fn four_digits(leading: u32, rest: [u32; 3]) -> i64 {
+    debug_assert!(
+        leading <= 9 && rest.iter().all(|d| *d <= 9),
+        "四位数的一位上出现了 {leading} 或 {rest:?}"
+    );
+    leading as i64 * 1_000 + rest[0] as i64 * 100 + rest[1] as i64 * 10 + rest[2] as i64
 }
 
 #[cfg(test)]
@@ -296,5 +325,53 @@ mod tests {
         let digits: Vec<u32> = (0..500).map(|_| r.pick_envelope_digit()).collect();
         assert!(digits.iter().all(|d| *d <= 9));
         assert!(digits.contains(&0), "千位允许 0，0000 是合法红包");
+    }
+
+    /// P6 的第十条流。神每回合都要挪一格，是这条流上唯一一个「取数次数随回合数增长」的来源
+    /// —— 所以它必须不能挪动骰点、牌序与红包。
+    #[test]
+    fn a_god_wandering_shifts_nothing() {
+        let draws = |seed: u64, busy: bool| {
+            let mut r = Rng::new(seed);
+            if busy {
+                for _ in 0..60 {
+                    r.pick_god(0..=1);
+                    r.pick_god(1..=12);
+                }
+            }
+            (
+                (0..6).map(|_| r.roll_die()).collect::<Vec<_>>(),
+                (0..6).map(|_| r.pick(0..=9)).collect::<Vec<_>>(),
+                (0..4)
+                    .map(|_| (0..4).map(|_| r.pick_envelope_digit()).collect::<Vec<_>>())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            draws(77, true),
+            draws(77, false),
+            "神明流污染了骰子/牌堆/红包流"
+        );
+    }
+
+    #[test]
+    fn god_draws_are_reproducible_and_in_range() {
+        let series = |seed: u64| {
+            let mut r = Rng::new(seed);
+            (0..40).map(|_| r.pick_god(0..=10)).collect::<Vec<_>>()
+        };
+        assert_eq!(series(5), series(5), "同种子必须复现同一条刷神序列");
+        assert_ne!(series(5), series(6));
+        assert!(series(5).iter().all(|v| (0..=10).contains(v)));
+    }
+
+    /// 财神与红包共用的那一句（PLAN §三 神明行点名的「别各写一套」）。
+    /// 两个边界要钉住：0000 是合法空红包，而千位为 1 的那一位是 1000 不是 1。
+    #[test]
+    fn four_digits_folds_place_values_not_a_string() {
+        assert_eq!(four_digits(0, [0, 0, 0]), 0, "空红包");
+        assert_eq!(four_digits(1, [0, 0, 0]), 1_000, "千位是千位，不是 1");
+        assert_eq!(four_digits(9, [9, 9, 9]), 9_999, "四位数的上限");
+        assert_eq!(four_digits(3, [0, 7, 5]), 3_075, "中间那位是 0 也要占位");
     }
 }

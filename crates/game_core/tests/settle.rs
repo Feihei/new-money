@@ -12,8 +12,8 @@ use common::*;
 use game_core::economy::dividend_per_share;
 use game_core::prelude::{
     BankBalance, Bankrupt, Books, CardEffect, CardKind, DataHandles, Date, Detention,
-    DetentionPlace, GameRules, GameSeed, GameSession, GameSetup, StockId, TileIndex, TileKind,
-    TradeSide, TurnPhase,
+    DetentionPlace, GameRules, GameSeed, GameSession, GameSetup, StaySentence, StockId, TileIndex,
+    TileKind, TradeSide, TurnPhase,
 };
 
 // prototype 的格子对照（`assets/data/boards/prototype.json`）：
@@ -270,6 +270,13 @@ fn month_end_compounds_every_players_balance() {
     let p0 = boot_to_wait_roll(&mut app);
     place(&mut app, p0, 0);
     let p1 = other(&mut app);
+    // 两个人都按在原地（P6b 之后必须的）：这一条测的是「结息挂日历」与「利息不经过现金」，
+    // 而 30 个回合的自动走路会让人踩到路上的神 —— 神**是**会动现金的（大财神给四位、
+    // 大穷神抢四分之一）。被按住的人照样进入 `WaitRoll`、照样结束回合（P4④），
+    // 所以日历与结息那两条路径一步没少，只是路上没人踩东西。
+    for player in [p0, p1] {
+        insert(&mut app, player, StaySentence { turns_left: 80 });
+    }
     insert(
         &mut app,
         p0,

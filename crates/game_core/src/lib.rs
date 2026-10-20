@@ -22,6 +22,7 @@ pub mod damage;
 pub mod data;
 pub mod deck;
 pub mod economy;
+pub mod gods;
 pub mod hand;
 pub mod items;
 pub mod land;
@@ -76,6 +77,12 @@ pub mod prelude {
         CardId, Deck, DeckOrder, Shelf, apply_card, card_of, order_of, settle_card_landing,
     };
     pub use crate::economy::LandView;
+    pub use crate::gods::{
+        God, GodDesk, MAX_ON_BOARD, Possession, Presence, Rival, STARTING_GODS, age_possession,
+        attach, detach, grant_effects, land_deity_succession_system, money_corrections,
+        presence_of, revoke_effects, settle_god_landing_system, spawn_starting_gods,
+        top_up_gods_system, wander_gods_system,
+    };
     pub use crate::hand::{CardAim, Hand, PlayWindow, card_notice, deal_to, play_card_system};
     pub use crate::items::{Inventory, ItemKind};
     pub use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
@@ -96,13 +103,14 @@ pub mod prelude {
         BailRequested, BankOp, BankOpDone, BankOpRequested, BankVisited, BombTransferred,
         BuyOffered, CardDrawn, CardGained, CardNotice, CardPlayed, CashChanged, ChargeWaived,
         ChestOpened, Decision, DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled,
-        EffectOutcome, GameOver, GiftGiven, GiftsGiven, ItemPlaced, LandBought, LandUpgraded,
-        MortgageDone, MortgageOp, MortgageRequested, MountChanged, MoveCapped, PlaceItemRequested,
-        PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
-        PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
-        RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped,
-        StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide,
-        TurnEnded, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted,
+        EffectOutcome, GameOver, GiftGiven, GiftsGiven, GodAppeared, GodDeed, GodExit, GodLeft,
+        GodPossessed, ItemPlaced, LandBought, LandUpgraded, MortgageDone, MortgageOp,
+        MortgageRequested, MountChanged, MoveCapped, PlaceItemRequested, PlayCardRequested,
+        PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported,
+        PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll,
+        RequestStay, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged,
+        StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
+        TurnStarted, UpgradeOffered, WalkHalted, WalkStarted,
     };
     pub use crate::occupancy::{
         BOMB_HOSPITAL_DAYS, BOMB_STEPS, HaltCause, MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt,
@@ -138,18 +146,20 @@ use prelude::{
     BombTransferred, BuyOffered, CardDrawn, CardGained, CardPlayed, CardSet, CashChanged,
     ChargeWaived, ChestOpened, Corrections, CouponBoxes, DecisionChosen, DetentionLifted,
     DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed, GameSetup,
-    GiftsGiven, HolidaySet, ItemPlaced, JsonAssetLoader, LandBought, LandUpgraded, Landing,
-    MarketClock, MortgageDone, MortgageRequested, MountChanged, MoveCapped, Paused,
-    PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
-    PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed,
-    RentDue, RequestRemoteDice, RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, ShopStock,
-    StayLifted, StaySkipped, StockPriceChanged, StockSet, StockTradeRequested, StockTraded,
-    StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock,
-    WalkHalt, WalkHalted, WalkStarted, advance_walk_clock_system, bail_op_system, bank_op_system,
-    begin_game_system, decision_system, deliver_calendar_events_system, expire_land_status_system,
-    finish_halt_system, grant_atm_access_system, market_tick_on_turn_end_system,
+    GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, ItemPlaced,
+    JsonAssetLoader, LandBought, LandUpgraded, Landing, MarketClock, MortgageDone,
+    MortgageRequested, MountChanged, MoveCapped, Paused, PendingDecision, PlaceItemRequested,
+    PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
+    PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
+    RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, ShopStock, StayLifted, StaySkipped,
+    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
+    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkHalt, WalkHalted,
+    WalkStarted, advance_walk_clock_system, bail_op_system, bank_op_system, begin_game_system,
+    decision_system, deliver_calendar_events_system, expire_land_status_system, finish_halt_system,
+    grant_atm_access_system, land_deity_succession_system, market_tick_on_turn_end_system,
     mortgage_op_system, place_item_system, play_card_system, resolve_halt_system,
-    settle_landing_occupancy_system, shop_op_system, trade_request_system, walk_step_system,
+    settle_god_landing_system, settle_landing_occupancy_system, shop_op_system, top_up_gods_system,
+    trade_request_system, walk_step_system, wander_gods_system,
 };
 use turn::{
     begin_turn_system, end_turn_system, game_over_system, not_paused, remote_dice_system,
@@ -268,6 +278,14 @@ impl Plugin for CoreGamePlugin {
             .add_message::<RemoteDiceUsed>()
             .add_message::<MoveCapped>()
             .add_message::<MountChanged>()
+            // ===== 神明（P6）=====
+            // `GodExit` 不注册：它只是 `GodLeft` 的一个字段，没有独立的读者
+            .add_message::<GodAppeared>()
+            .add_message::<GodPossessed>()
+            .add_message::<GodLeft>()
+            // 上身那一刻的一次性效果（P6b）。`GodDesk` 带着它的 writer，
+            // 漏注册 = 那个参数包建不出来 = 踩到神的那一刻整个 `Landed` 链不跑
+            .add_message::<GodDeed>()
             .init_state::<TurnPhase>()
             // 装配世界：初始态的 OnEnter 不会触发，所以用 in_state(Boot)
             .add_systems(
@@ -281,6 +299,15 @@ impl Plugin for CoreGamePlugin {
             .add_systems(
                 OnEnter(TurnPhase::TurnStart),
                 (deliver_calendar_events_system, begin_turn_system).chain(),
+            )
+            // 土地公期满 → 恶犬接位（P6）。挂在 `Update` 而不是 `OnEnter(TurnStart)`：
+            // 它是**消息的后果**，而消息要到下一帧才投递 —— 放进回合开始那一拍会让恶犬
+            // 晚整整一回合才出现在路上，而那件事没有任何判据需要它等。
+            // 它带 `Res<ActiveBoard>`（要找环长），而装配之前那个资源还不存在 ——
+            // 漏掉这道门就是每帧一次参数校验失败（与本文件上面 `bank_op_system` 那条注同族）
+            .add_systems(
+                Update,
+                land_deity_succession_system.run_if(resource_exists::<ActiveBoard>),
             )
             .add_systems(
                 Update,
@@ -371,6 +398,10 @@ impl Plugin for CoreGamePlugin {
                     // 落脚触发的放置物（宝箱）。读 `PlayerArrived.to`，所以中断那一格
                     // 不会误触发（ADR-002 §7）；它与下面各域互不相交，排第一只是先给出道具
                     settle_landing_occupancy_system,
+                    // 落脚踩到路上的神 → 上身（P6）。排在宝箱那条之后而不是合并进去：
+                    // 两者都读 `PlayerArrived`，但读者各有游标、互不吃消息，而附身要做的事
+                    // （顶掉旧神、挂修正、腾对位）比「给一件道具」重一个数量级
+                    settle_god_landing_system,
                     property::settle_property_landing,
                     bank::settle_bank_landing,
                     market::settle_market_landing,
@@ -405,6 +436,10 @@ impl Plugin for CoreGamePlugin {
                         // 都不相交，所以放进这组并行元组里，谁先跑都不改结果
                         expire_land_status_system,
                     ),
+                    // 神明过一天：先各自挪一格，再补刷到名额。这两条都要 `&mut Rng`，
+                    // 而上面那一组里的行情 tick 也要 —— 所以它们自己成一阶段，
+                    // 不能塞进那个并行元组（调度期直接撞成借用冲突）
+                    (wander_gods_system, top_up_gods_system).chain(),
                     apply_month_end_interest_system,
                     update_price_index_system,
                 )

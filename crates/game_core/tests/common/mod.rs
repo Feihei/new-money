@@ -23,16 +23,17 @@ use game_core::prelude::{
     ChargeWaived, ChestOpened, Correction, Corrections, CouponBoxes, DamageTally, DataHandles,
     Date, Decision, DecisionChosen, Deck, Detention, DetentionLifted, DetentionSkipped, DiceRolled,
     EpochOverride, GameOver, GameRules, GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven,
-    Hand, Insulation, Inventory, ItemKind, ItemPlaced, LandBought, LandDamage, LandId, LandStatus,
-    LandUpgraded, LandView, Market, MarketClock, MortgageDone, MortgageOp, MortgageRequested,
-    Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt, OccupancyKind,
-    Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived,
-    PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points,
-    PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll,
-    RequestStay, Rng, Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted,
-    StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested, StockTraded,
-    StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder,
-    TurnPhase, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted, Wallet, deal_to,
+    God, GodAppeared, GodDeed, GodLeft, GodPossessed, Hand, Insulation, Inventory, ItemKind,
+    ItemPlaced, LandBought, LandDamage, LandId, LandStatus, LandUpgraded, LandView, Market,
+    MarketClock, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged,
+    MoveCap, MoveCapped, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision,
+    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
+    PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, Possession,
+    Presence, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll, RequestStay,
+    Rng, Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted, StaySentence,
+    StaySkipped, StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
+    TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase,
+    TurnStarted, UpgradeOffered, WalkHalted, WalkStarted, Wallet, deal_to, grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -220,6 +221,13 @@ struct BookReaders<'w, 's> {
     remote_used: MessageReader<'w, 's, RemoteDiceUsed>,
     capped: MessageReader<'w, 's, MoveCapped>,
     mount_changed: MessageReader<'w, 's, MountChanged>,
+    // ===== 神明（P6）=====
+    gods_appeared: MessageReader<'w, 's, GodAppeared>,
+    gods_possessed: MessageReader<'w, 's, GodPossessed>,
+    /// 上身那一刻做完的那件事（给钱/收钱/抢钱/送卡）。它排在 `gods_possessed` 之后：
+    /// 记录顺序就是因果顺序，「先换神、后动手」在同一段流水里读得出来。
+    gods_deeds: MessageReader<'w, 's, GodDeed>,
+    gods_left: MessageReader<'w, 's, GodLeft>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -563,6 +571,50 @@ fn collect_books(
             "Mount({},{})",
             who(&players, m.player),
             m.mount.label()
+        ));
+    }
+    // ===== 神明（P6）=====
+    for m in r.gods_appeared.read() {
+        log.0
+            .push(format!("GodAppear({}@格{})", m.god.label(), m.tile.0));
+    }
+    for m in r.gods_possessed.read() {
+        log.0.push(format!(
+            "GodOn({}:{},{}天{})",
+            who(&players, m.player),
+            m.god.label(),
+            m.days,
+            match m.replaced {
+                Some(old) => format!("顶走{}", old.label()),
+                None => String::new(),
+            }
+        ));
+    }
+    for m in r.gods_deeds.read() {
+        let cards = m
+            .cards
+            .iter()
+            .map(|card| card.title.as_str())
+            .collect::<Vec<_>>()
+            .join("/");
+        log.0.push(format!(
+            "GodDeed({}:{},{:+}{})",
+            who(&players, m.player),
+            m.god.label(),
+            m.cash,
+            if cards.is_empty() {
+                String::new()
+            } else {
+                format!(",送卡{cards}")
+            }
+        ));
+    }
+    for m in r.gods_left.read() {
+        log.0.push(format!(
+            "GodOff({}:{},{})",
+            who(&players, m.player),
+            m.god.label(),
+            m.reason.label()
         ));
     }
     for m in r.cash.read() {
@@ -1157,6 +1209,21 @@ pub fn occupancies_on(app: &mut App) -> Vec<(u32, OccupancyKind)> {
     rows
 }
 
+/// 某一种放置物占着哪几格。
+///
+/// P5 那批用例原本写的是 `occupancies_on(..) == vec![(格, 我要的那一件)]` —— 那时路上不会有
+/// 别的东西。**P6 之后这个整表断言不再是它想说的东西**：补刷每回合都往路上放神，
+/// 于是「我的地雷没了」会红在「路上还站着一位财神」上。按种类筛，断言才只说它要说的那件事。
+pub fn tiles_holding(app: &mut App, kind: OccupancyKind) -> Vec<u32> {
+    let mut tiles: Vec<u32> = occupancies_on(app)
+        .into_iter()
+        .filter(|(_, other)| *other == kind)
+        .map(|(tile, _)| tile)
+        .collect();
+    tiles.sort();
+    tiles
+}
+
 /// 场上的定时炸弹（含携带中的），返回 `(实体, 位置)`。
 pub fn bombs(app: &mut App) -> Vec<(Entity, OccupancyAt)> {
     let world = app.world_mut();
@@ -1165,6 +1232,126 @@ pub fn bombs(app: &mut App) -> Vec<(Entity, OccupancyAt)> {
         .filter(|(_, occ)| occ.kind == OccupancyKind::TimeBomb)
         .map(|(e, occ)| (e, occ.at))
         .collect()
+}
+
+// ===== 神明（P6）=====
+
+/// 把场上的神清干净：路上那几位的实体 despawn，身上的 `Possession` 摘掉。
+///
+/// 与 [`clear_occupancies`] 分成两条是刻意的：装配会随机刷两位神，而 P6 的用例要的正是
+/// 「哪一格站着哪一位、谁身上挂着哪一天数」。只清路上那一半会留下身上的旧附身，
+/// 于是「一人一神」那条断言先被自己的前置污染 —— 这是 P5 那次「点券 0 的拒绝理由」
+/// 同一种假用例，别再犯第二遍。
+pub fn clear_gods(app: &mut App) {
+    let on_board: Vec<Entity> = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<Entity, With<Occupancy>>();
+        q.iter(world).collect()
+    };
+    for entity in on_board {
+        app.world_mut().entity_mut(entity).despawn();
+    }
+    let players: Vec<Entity> = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<Entity, With<PlayerId>>();
+        q.iter(world).collect()
+    };
+    for player in players {
+        app.world_mut().entity_mut(player).remove::<Possession>();
+        // P6b 之后「神留下的痕迹」不止那一个组件：修正登记处里还挂着一整条链。
+        // 只清组件会得到一个「神已经走了、租金还是双倍」的世界，而夹具里没有任何东西
+        // 说得出一格为什么是这个数。撤销按 `(bearer, Source::God)` 键，所以同一张卡
+        // 挂的免费修正照旧留得住。
+        let mut corrections = app.world_mut().resource_mut::<Corrections>();
+        corrections.release(player, Source::God);
+    }
+}
+
+/// 只清**路上**那几位神，人身上的留着。
+///
+/// 「谁会被抽出来」这类用例要的是每回合真的去抽一次签，而人身上的那位正是抽签要避开的那一半 ——
+/// 用 [`clear_gods`] 把两边一起清掉，等于把对位规则要测的那半个世界也清掉了。
+pub fn clear_board_gods(app: &mut App) {
+    let victims: Vec<Entity> = {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &Occupancy)>();
+        q.iter(world)
+            .filter(|(_, occ)| matches!(occ.kind, OccupancyKind::God(_)))
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for entity in victims {
+        app.world_mut().entity_mut(entity).despawn();
+    }
+}
+/// 在某一格放一位神（夹具，不走那条随机刷出 —— 刷出本身另有用例）。
+pub fn spawn_god(app: &mut App, god: God, tile: u32) -> Entity {
+    spawn_occupancy(app, OccupancyKind::God(god), tile)
+}
+
+/// 路上有哪几位神、各站在哪一格（按格号排）。
+pub fn gods_on_board(app: &mut App) -> Vec<(u32, God)> {
+    let mut rows: Vec<(u32, God)> = occupancies_on(app)
+        .into_iter()
+        .filter_map(|(tile, kind)| match kind {
+            OccupancyKind::God(god) => Some((tile, god)),
+            _ => None,
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// 某人身上那位（`None` = 没被附身）。天数一并带出来：验收③断言的就是那个数。
+pub fn possession_of(app: &App, player: Entity) -> Option<Possession> {
+    app.world().entity(player).get::<Possession>().copied()
+}
+
+/// 直接给某人挂上一位神，并把祂那条修正链登记好。`days` = `None` 用这位神的默认天数。
+///
+/// 到期与「拘留期间照老」两类用例的前置：附身路径本身另有用例，让它们各自陪跑七回合
+/// 只会把断言变慢，不会把它变严。
+///
+/// **登记那半句不能省**：真实路径（[`game_core::prelude::attach`]）把「挂组件」与「挂修正」
+/// 绑成一句，夹具只写组件就会测出一个世界上不存在的状态 —— 身上的神不花钱、也不收钱，
+/// 而「租金翻了三倍」的用例会红在错误的那一行上。一次性效果（给钱/抢钱/送卡）**不做**：
+/// 它要 `Books`/`Shelf`/`Rng` 那一摞，而夹具要的正是「只有状态、没有那一次」，
+/// 给钱那条由真落格路径覆盖。
+pub fn attach_god(app: &mut App, player: Entity, god: God, days: Option<u32>) {
+    app.world_mut().entity_mut(player).insert(Possession {
+        god,
+        days_left: days.unwrap_or_else(|| god.days()),
+    });
+    let mut corrections = app.world_mut().resource_mut::<Corrections>();
+    grant_effects(&mut corrections, god, player);
+}
+
+/// 现在还能刷出谁（对位那条规则的可读入口：它读的是世界，不是测试自己算的表）。
+pub fn god_pool(app: &mut App) -> Vec<God> {
+    let world = app.world_mut();
+    let mut gods = world.query::<&Occupancy>();
+    let mut attached = world.query::<&Possession>();
+    let on_board = gods.iter(world).map(|occ| occ.kind);
+    let worn = attached.iter(world).map(|held| held.god);
+    Presence::observe(on_board, worn).pool()
+}
+
+/// 在场的所有位（路上 + 身上），排好序。对位不同场那条断言读的是这个，
+/// 而不是池 —— 「现在能刷谁」是将来，「谁已经在了」是现在。
+pub fn gods_in_play(app: &mut App) -> Vec<God> {
+    let world = app.world_mut();
+    let mut on_board = world.query::<&Occupancy>();
+    let mut worn = world.query::<&Possession>();
+    let mut rows: Vec<God> = on_board
+        .iter(world)
+        .filter_map(|occ| match occ.kind {
+            OccupancyKind::God(god) => Some(god),
+            _ => None,
+        })
+        .chain(worn.iter(world).map(|held| held.god))
+        .collect();
+    rows.sort();
+    rows
 }
 
 /// 某位玩家的道具栏清单（按枚举顺序）。与 [`hand_of`] 分开读，正是「道具不是卡」的形状。

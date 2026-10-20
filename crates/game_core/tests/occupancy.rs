@@ -207,7 +207,7 @@ fn a_mine_sends_its_own_placer_to_the_hospital_for_three_days() {
     );
     assert_eq!(tile_of(&app, p0), 7, "逻辑位置回到医院的接入点");
     assert!(
-        occupancies_on(&mut app).is_empty(),
+        tiles_holding(&mut app, OccupancyKind::Mine).is_empty(),
         "地雷被踩掉，场上不该还留着"
     );
     assert!(
@@ -337,8 +337,8 @@ fn a_halt_does_not_trigger_a_landing_only_chest_underfoot() {
         ledger(&app)
     );
     assert_eq!(
-        occupancies_on(&mut app),
-        vec![(2, OccupancyKind::Chest)],
+        tiles_holding(&mut app, OccupancyKind::Chest),
+        vec![2],
         "宝箱还在原地"
     );
 }
@@ -361,8 +361,8 @@ fn a_dog_bites_a_walker_for_three_days_and_stays_on_the_road() {
     let held = detain_of(&app, p0).expect("被咬该住院");
     assert_eq!((held.place, held.turns_left), (DetentionPlace::Hospital, 3));
     assert_eq!(
-        occupancies_on(&mut app),
-        vec![(3, OccupancyKind::Dog)],
+        tiles_holding(&mut app, OccupancyKind::Dog),
+        vec![3],
         "步行的人被咬，狗还在"
     );
 }
@@ -384,7 +384,10 @@ fn a_car_runs_the_dog_over_and_keeps_going() {
         events(&app)
     );
     assert_eq!(tile_of(&app, p0), 5, "撞飞之后照常走完");
-    assert!(occupancies_on(&mut app).is_empty(), "狗被撞飞了");
+    assert!(
+        tiles_holding(&mut app, OccupancyKind::Dog).is_empty(),
+        "狗被撞飞了"
+    );
     assert!(detain_of(&app, p0).is_none());
     assert_eq!(mount_of(&app, p0), game_core::prelude::Mount::Car);
 }
@@ -583,8 +586,8 @@ fn a_chest_pays_only_on_landing_not_when_walking_past() {
         ledger(&app)
     );
     assert_eq!(
-        occupancies_on(&mut app),
-        vec![(1, OccupancyKind::Chest)],
+        tiles_holding(&mut app, OccupancyKind::Chest),
+        vec![1],
         "宝箱还在"
     );
 }
@@ -604,22 +607,46 @@ fn a_chest_on_the_destination_grants_an_item_and_disappears() {
         "{:?}",
         ledger(&app)
     );
-    assert!(occupancies_on(&mut app).is_empty(), "开过的宝箱要消失");
+    assert!(
+        tiles_holding(&mut app, OccupancyKind::Chest).is_empty(),
+        "开过的宝箱要消失"
+    );
 }
 
 #[test]
 fn the_starting_chests_are_two_and_all_on_the_ring() {
     let mut app = boot_default();
     boot_to_wait_roll(&mut app);
-    let chests = occupancies_on(&mut app);
+    let rows = occupancies_on(&mut app);
+    let mut chests: Vec<u32> = rows
+        .iter()
+        .filter(|(_, kind)| *kind == OccupancyKind::Chest)
+        .map(|(tile, _)| *tile)
+        .collect();
+    chests.sort();
     assert_eq!(
         chests.len(),
         game_core::prelude::STARTING_CHESTS,
-        "开局该有两只宝箱"
+        "开局该有两只宝箱：{rows:?}"
     );
-    assert!(
-        chests.iter().all(|(_, kind)| *kind == OccupancyKind::Chest),
-        "开局路上只有宝箱，没有别的放置物：{chests:?}"
+    let unique: std::collections::HashSet<u32> = chests.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        chests.len(),
+        "两只宝箱挤在同一格 —— 一格一件没挡住开局的两次刷出：{chests:?}"
+    );
+    // 「开局路上只有宝箱」这句在 P6 之后不再成立：装配那一步除了宝箱还放满了神。
+    // 这里改成各数各的 —— 一格一件由两条一起占住同一批格子这件事才是真风险，
+    // 而它由 `the_board_starts_with_the_complement_and_no_rival_pair` 与下面那条
+    // 不重叠断言守着。
+    let gods: usize = rows
+        .iter()
+        .filter(|(_, kind)| matches!(kind, OccupancyKind::God(_)))
+        .count();
+    assert_eq!(
+        gods,
+        game_core::prelude::STARTING_GODS,
+        "开局路上也该放满这几位神：{rows:?}"
     );
     let len = app
         .world()
@@ -627,12 +654,12 @@ fn the_starting_chests_are_two_and_all_on_the_ring() {
         .def
         .loop_len();
     assert!(
-        chests.iter().all(|(tile, _)| *tile < len),
-        "宝箱只能落在主环上：{chests:?}"
+        rows.iter().all(|(tile, _)| *tile < len),
+        "路上的东西只能落在主环上：{rows:?}"
     );
     assert!(
-        chests.iter().all(|(tile, _)| *tile != 0),
-        "起点不撒宝箱（那一格没人会落脚）"
+        rows.iter().all(|(tile, _)| *tile != 0),
+        "起点不撒任何东西（那一格没人会落脚，宝箱与神同一条理由）"
     );
 }
 

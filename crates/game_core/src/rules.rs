@@ -79,6 +79,15 @@ pub struct GameRules {
     ///
     /// 30 是 10-20 拍板时给的单子（监狱与医院同价）—— 4 代原文查不到，所以这是设计值。
     pub bail_points: u32,
+    /// 大穷神上身当场拿走现金的**分母**（P6b）：`现金 / 4`。
+    ///
+    /// 写成分母而不是百分比，是因为这条天生是「按比例抢」而不是「抢一个固定数」——
+    /// 神明金额本来豁免物价指数（`scales_with_price(God) == false`，PLAN §三 点名），
+    /// 一个固定数在物价 5 倍时就成了白送；而按比例抢的数额自动跟着钱包走，不必再乘一遍。
+    ///
+    /// 4 是设计值（4 代只说「损失现金」，没给数）。读它的那一处夹成**至少 1**：
+    /// 这个数一旦从存档或设置里读进来，`0` 就是一次当场崩掉的除法，而它换来的只是「不抢钱」。
+    pub poor_cash_divisor: u32,
 }
 
 impl Default for GameRules {
@@ -103,6 +112,7 @@ impl Default for GameRules {
             mortgage_percent: 50,
             redeem_percent: 110,
             bail_points: 30,
+            poor_cash_divisor: 4,
         }
     }
 }

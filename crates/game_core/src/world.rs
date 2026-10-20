@@ -138,9 +138,13 @@ pub fn begin_game_system(
     }
     // 路上的宝箱（P5）。位置走专用子流，所以「宝箱在哪」不改变骰点、牌序与行情。
     let chests = crate::occupancy::spawn_starting_chests(&mut commands, &def, &mut rng);
+    // 路上的神（P6）。它们与宝箱抢的是同一批格子，而那一刻两边的 spawn 都还压在
+    // `Commands` 里、查询一个字也读不到 —— 所以把宝箱已经选中的格交给这一步，
+    // 而不是让 `place` 去查一份还不存在的世界。
+    let gods = crate::gods::spawn_starting_gods(&mut commands, &def, &mut rng, &chests);
 
     info!(
-        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张 + 宝箱 {} 个（起始现金 {}）· 开局 {epoch}",
+        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张 + 宝箱 {} 个 + 神明 {} 位（起始现金 {}）· 开局 {epoch}",
         def.board_name,
         def.loop_len(),
         lands.len(),
@@ -150,6 +154,7 @@ pub fn begin_game_system(
         fate.0.len(),
         items.0.len(),
         chests.len(),
+        gods.len(),
         cfg.rules.start_cash
     );
     match holidays.coverage() {

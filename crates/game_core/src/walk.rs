@@ -199,6 +199,11 @@ pub fn walk_step_system(mut desk: WalkDesk<'_, '_>) {
                     // 路障在掷骰入队时已经截断；走到这里只可能是路径被别的东西改了。
                     // 它不中断也不消耗 —— 静态格照常结算（ADR-002 §5/§6）
                     OccupancyKind::Roadblock | OccupancyKind::Chest => {}
+                    // 神：落脚触发，上面那道 `trigger_of` 已经把它挡在外面。
+                    // 这一格不是可达分支，是**这张表要求的表态** —— 谁哪天把神改成 Pass
+                    // 触发，这里会立刻变成「走路时被附身」那条没人见过的路径，
+                    // 而那时必须重新读一遍这段循环。
+                    OccupancyKind::God(_) => {}
                 }
             }
             if let Some(bomb_entity) = bomb

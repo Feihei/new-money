@@ -44,6 +44,9 @@ fn answer(app: &mut App, player: Entity, action: Decision) {
 /// `P0` 的点券先调到 100 —— 保释的价目与「不够的时候会怎样」各有用例。
 fn walk_onto(app: &mut App, p0: Entity) -> Entity {
     assert_eq!(current(app), p0, "该轮到要走路的那位");
+    // 路上不能有东西等着被踩：P6b 之后神是**动现金**的（大财神给四位、小财神向每人收三位），
+    // 而这一条测的是「保释只花点券」。装配随机刷了两位神，正好可能站在接入点那一格上。
+    clear_board_gods(app);
     roll(app, p0);
     let mut at_decision = false;
     for _ in 0..80 {

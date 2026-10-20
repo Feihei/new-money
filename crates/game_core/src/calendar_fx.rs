@@ -22,7 +22,7 @@ use crate::hand::{Hand, card_notice, deal_to};
 use crate::market::MarketClock;
 use crate::msg::{CardGained, GiftGiven, GiftsGiven, RedEnvelope};
 use crate::player::PlayerId;
-use crate::rng::Rng;
+use crate::rng::{Rng, four_digits};
 use crate::settle::Books;
 use crate::turn::TurnOrder;
 
@@ -96,10 +96,11 @@ fn deliver_envelopes(fx: &mut CalendarFx<'_, '_>, today: crate::calendar::Date) 
     fx.books.session.last_envelope_year = Some(today.year);
 
     for player in present(fx) {
-        // 四位各 0–9，千位也可以是 0 → 0000–9999；0000 是空红包
-        let amount = (0..4).fold(0i64, |acc, _| {
-            acc * 10 + fx.rng.pick_envelope_digit() as i64
-        });
+        // 四位各 0–9，千位也可以是 0 → 0000–9999；0000 是空红包。
+        // 那一句折叠与大财神共用（[`four_digits`]），PLAN §三 神明行点名的「别各写一套」
+        let leading = fx.rng.pick_envelope_digit();
+        let rest = [0u32; 3].map(|_| fx.rng.pick_envelope_digit());
+        let amount = four_digits(leading, rest);
         // `Books::credit` 对 `<= 0` 本来就是空操作（连 `CashChanged` 都不发），
         // 所以空红包在这里不必再判一次 —— 但凭据照发，老虎机照播
         fx.books.credit(player, amount);

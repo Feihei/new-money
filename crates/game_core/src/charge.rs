@@ -298,6 +298,23 @@ impl Corrections {
         self.items.len()
     }
 
+    /// 撤销某个人身上、由某个来源给的全部修正。**返回撤掉了几条**。
+    ///
+    /// 本文件头说「没有按名字撤销某条的接口，是有意的 —— 寿命由来源管」，这一句是它的落地：
+    /// 来源知道什么时候该消失（神到期、被顶走、被送神符送走），所以它必须有一个出口，
+    /// 否则「附身七天、第八天租金还是双倍」这种错没有任何地方能拦住。
+    /// 键是 `(bearer, source)` 而不是条目 id：同一条链上给一个人的几条修正**寿命相同**
+    /// （都是那位神在场的那几天），而 id 会逼来源自己记账 —— 那正是这张表不想有的第二份真相。
+    ///
+    /// 顺序保持：`retain` 不重排，所以剩下那些条目的下标只会整体前移，
+    /// 而 [`stage_and_spend`] 的下标是**同一次调用内**算的，跨调用没有意义。
+    pub fn release(&mut self, bearer: Entity, source: Source) -> usize {
+        let before = self.items.len();
+        self.items
+            .retain(|c| !(c.bearer == bearer && c.source == source));
+        before - self.items.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -759,5 +776,71 @@ mod tests {
             assert_eq!(stage(charge, 1.0, &corrections).amount, 0);
         }
         assert_eq!(corrections.len(), 1, "报价报了三次，卡还在");
+    }
+
+    /// 神明离场要清干净他给的那几条（P6b）。这条测试要防的是两种相反的错：
+    /// 少清（第八天租金还是双倍）与清过头（把同一个人手里的免费卡一起撤掉）。
+    #[test]
+    fn releasing_a_god_takes_its_rows_and_nobody_elses() {
+        let mut corrections = Corrections::default();
+        // 同一个人身上：一位神给两条（租金加倍 + 奖金作废），一张卡给一条（免付）
+        corrections.register(Correction::always(
+            player(1),
+            Scope::Domain(ChargeDomain::Rent),
+            Adjustment::Scale { by: 2.0 },
+            Source::God,
+        ));
+        corrections.register(Correction::always(
+            player(1),
+            Scope::Domain(ChargeDomain::Bonus),
+            Adjustment::Cancel,
+            Source::God,
+        ));
+        corrections.register(Correction::one_shot(
+            player(1),
+            Scope::Any,
+            Adjustment::Cancel,
+            Source::Card,
+            2_000,
+        ));
+        // 另一个人身上也挂着一位神，不该被这次撤销碰到
+        corrections.register(Correction::always(
+            player(2),
+            Scope::Domain(ChargeDomain::Rent),
+            Adjustment::Scale { by: 2.0 },
+            Source::God,
+        ));
+
+        assert_eq!(corrections.release(player(1), Source::God), 2);
+        assert_eq!(corrections.len(), 2, "只该撤掉那两条神给的");
+        assert!(
+            corrections
+                .for_bearer(player(1))
+                .any(|c| c.source == Source::Card),
+            "免费卡不是那位神给的，撤销不该顺手带走"
+        );
+        assert_eq!(
+            corrections.for_bearer(player(2)).count(),
+            1,
+            "别人的神不是他请的"
+        );
+        // 撤完之后那条链回到「没有这位神」的样子。故意挑一笔**够不着免费卡门槛**的金额：
+        // 用 5000 的话那笔会被剩下的那条 `Cancel` 吃掉，读不出「加倍已经不在了」
+        let rent = Charge::new(
+            ChargeKind::Rent { land: land(1) },
+            Some(player(1)),
+            None,
+            1_500,
+        );
+        assert_eq!(
+            stage(rent, 1.0, &corrections).amount,
+            1_500,
+            "还在的话该是 3000"
+        );
+        assert_eq!(
+            corrections.release(player(1), Source::God),
+            0,
+            "重复撤销要说得出「什么都没撤」"
+        );
     }
 }
