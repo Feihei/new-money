@@ -15,16 +15,15 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AfflictDomain, BailDeny, BailFacts, BankOp, Books, BuildingLevel, CardDef,
     CardDrawn, CardId, CardKind, CardNotice, Decision, DetentionPlace, EffectOutcome, Hand, LandId,
-    LandStatus, LandType, MarketClock, MortgageDeny, MortgageOp, Owner, Pending, PendingDecision,
-    PlayerId, PlayerName, Rng, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed,
-    buyback, counter_plots, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
+    LandStatus, LandType, MortgageDeny, MortgageOp, Owner, Pending, PendingDecision, PlayerId,
+    PlayerName, Rng, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed, buyback,
+    counter_plots, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
 use super::theme::{col, layout, size};
 use super::{
-    BoardUi, ButtonSpec, SECONDARY, UiAction, button, info_row, is_open_day, label, overlay, panel,
-    separator,
+    BoardUi, ButtonSpec, SECONDARY, UiAction, button, info_row, label, overlay, panel, separator,
 };
 use crate::render::{DevFont, palette};
 
@@ -150,7 +149,6 @@ pub(crate) fn remember_drawn_card(
 pub(crate) struct ModalView<'w, 's> {
     pending: Res<'w, PendingDecision>,
     memory: Res<'w, RecentCard>,
-    clock: Res<'w, MarketClock>,
     /// 百货柜台这一趟的货架（P3d②）。它是资源而不是世界状态：同一时刻只有柜台前那位看得见
     stock: Res<'w, ShopStock>,
     /// 卡面文案在货架上（`ShopStock` 里只有下标）
@@ -174,7 +172,6 @@ pub(crate) fn sync_modal(
     view: ModalView<'_, '_>,
 ) {
     let want = view.pending.active();
-    let banking_hours = is_open_day(&view.clock, &books.rules);
     // 柜台前那位手里有哪几张（卖回那一排的内容，也进签名）
     let held: Vec<CardId> = want
         .and_then(|(player, _)| view.hands.get(player).ok())
@@ -182,7 +179,7 @@ pub(crate) fn sync_modal(
         .unwrap_or_default();
     // 银行柜台那一节「你的地产」：只有柜台开着才算，别的模态不读地块表
     let plots: Vec<PlotRow> = match want {
-        Some((player, Pending::BankTeller)) => plot_rows(&books, player, banking_hours),
+        Some((player, Pending::BankTeller)) => plot_rows(&books, player),
         _ => Vec::new(),
     };
     // 保释窗口的一排候选：只有保释窗口才算（P4③）
@@ -195,7 +192,6 @@ pub(crate) fn sync_modal(
             about,
             &books,
             player,
-            banking_hours,
             ModalExtra {
                 stock: &view.stock,
                 held: &held,
@@ -228,15 +224,7 @@ pub(crate) fn sync_modal(
                 rent_modal(&mut commands, &font, &books, &names, player, land, stamp)
             }
             Pending::Card => card_modal(&mut commands, &font, &view.memory, player, stamp),
-            Pending::BankTeller => bank_modal(
-                &mut commands,
-                &font,
-                &books,
-                player,
-                stamp,
-                banking_hours,
-                &plots,
-            ),
+            Pending::BankTeller => bank_modal(&mut commands, &font, &books, player, stamp, &plots),
             Pending::Shop => shop_modal(
                 &mut commands,
                 &font,
@@ -254,11 +242,6 @@ pub(crate) fn sync_modal(
 
 /// 这一屏「该写成什么样」的签名。只有两种**窗口**需要，报价与收据返回空串。
 ///
-/// `banking_hours` 也在柜台签名里：正常对局里回合停在 `WaitDecision` 上，日历动不了，
-/// 柜台开着的那几帧不可能跨到周末 —— 但 `NM_DAY` 与「读档回到某一天」都能让日子在
-/// 面板背后跳。签名少了它，面板就会停在按开门那天烤死的样子（灰按钮配「办完才继续」），
-/// 而这正是 §6.1 坑 22 那一族：**刷新判据漏了一个输入，且没有任何报错**。
-///
 /// 写成对 `Pending` 的穷尽匹配：新增一种待决事项时必须当场回答「它的屏幕上有什么是由
 /// 判据决定的」，漏了不会编译失败、只会静默过期。
 /// 签名要读的「这一屏的附加内容」。收成一个结构是房规（§六 坑 8）：
@@ -270,18 +253,12 @@ struct ModalExtra<'a> {
     bails: &'a [BailRow],
 }
 
-fn modal_stamp(
-    about: Pending,
-    books: &Books,
-    player: Entity,
-    banking_hours: bool,
-    extra: ModalExtra<'_>,
-) -> String {
+fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<'_>) -> String {
     match about {
         Pending::BankTeller => {
             let bank = books.bank_of(player);
             format!(
-                "{}|{}|{}|{}|{banking_hours}|{}",
+                "{}|{}|{}|{}|{}",
                 books.balance(player),
                 bank.deposit,
                 bank.loan,
@@ -849,17 +826,15 @@ fn fallback_note(
 /// 每笔之后数字都要重算 —— 所以 [`sync_modal`] 的重建判据里带了金额签名这一半。
 /// 「办完」才把回合交还给结束流程；中途按别的（`Accept`/`Decline`）规则层一律不认。
 ///
-/// 窗口判据在这里只剩 `banking_hours` 一条：柜台既然开着，四种操作的主语与地点都已经
-/// 成立，剩下「这笔金额办不办得动」。周末柜台照样开（人踩上去了就是事实），但八颗按钮
-/// 全灰 + 一句「周末休市」—— 规则层的 `bank_op_system` 那两天一律不受理，
-/// 按钮亮着按下去没声音是这里最坏的一种失败。
+/// 窗口判据在这里只剩金额一条：柜台既然开着，四种操作的主语与地点都已经成立，
+/// 剩下「这笔金额办不办得动」。**银行全年无休**（P2b）—— 周末与节假日走进柜台照办，
+/// 日历只管股市。
 fn bank_modal(
     commands: &mut Commands,
     font: &DevFont,
     books: &Books,
     player: Entity,
     stamp: String,
-    banking_hours: bool,
     plots: &[PlotRow],
 ) -> Entity {
     let cash = books.balance(player);
@@ -886,17 +861,9 @@ fn bank_modal(
             ));
             p.spawn(center_label(
                 &font.0,
-                if banking_hours {
-                    "存取款、借贷都在这里办，办完才继续"
-                } else {
-                    "周末休市，今天八笔都办不了 —— 先办完离开"
-                },
+                "存取款、借贷都在这里办，办完才继续",
                 size::ROW,
-                if banking_hours {
-                    col::MUTED
-                } else {
-                    col::BANKRUPT
-                },
+                col::MUTED,
             ));
             p.spawn(separator());
             p.spawn(Node {
@@ -953,7 +920,7 @@ fn bank_modal(
                 p,
                 font,
                 BankOp::Deposit,
-                banking_hours,
+                true,
                 ("存", 1_000, cash >= 1_000),
                 ("存全部", cash, cash > 0),
             );
@@ -961,7 +928,7 @@ fn bank_modal(
                 p,
                 font,
                 BankOp::Withdraw,
-                banking_hours,
+                true,
                 ("取", 1_000, bank.deposit >= 1_000),
                 ("取全部", bank.deposit, bank.deposit > 0),
             );
@@ -969,7 +936,7 @@ fn bank_modal(
                 p,
                 font,
                 BankOp::Borrow,
-                banking_hours,
+                true,
                 ("借", 5_000, headroom >= 5_000),
                 ("借到上限", headroom, headroom > 0),
             );
@@ -977,7 +944,7 @@ fn bank_modal(
                 p,
                 font,
                 BankOp::Repay,
-                banking_hours,
+                true,
                 ("还", 5_000, bank.loan >= 5_000 && cash >= 5_000),
                 ("还清", clear_debt, bank.loan > 0 && clear_debt >= bank.loan),
             );
@@ -1033,7 +1000,7 @@ pub(crate) struct PlotRow {
 /// 自己发明一套「能不能办」，也不许自己乘一遍 `mortgage_percent`（那样一来规则改一次、
 /// 面板就悄悄过期一次）。`at_counter` 在这里恒为 `true`：柜台既然开着，`NoCounter`
 /// 那一格在这一屏永远碰不到，而它在派发那一侧是真的会挡（见 `counter_of`）。
-fn plot_rows(books: &Books, player: Entity, open: bool) -> Vec<PlotRow> {
+fn plot_rows(books: &Books, player: Entity) -> Vec<PlotRow> {
     let def = &books.active.def;
     counter_plots(books, player)
         .into_iter()
@@ -1050,7 +1017,7 @@ fn plot_rows(books: &Books, player: Entity, open: bool) -> Vec<PlotRow> {
                 ),
                 MortgageOp::Redeem => ("赎", books.redeem_cost_of(land).unwrap_or(0)),
             };
-            let facts = read_facts(books, player, land, true, open);
+            let facts = read_facts(books, player, land, true);
             PlotRow {
                 land,
                 op,

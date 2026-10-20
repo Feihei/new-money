@@ -14,7 +14,8 @@ use bevy::ecs::entity::Entity;
 use bevy::prelude::NextState;
 use common::*;
 use game_core::prelude::{
-    AtmAccess, BankOp, GameRules, GameSession, Pending, StockId, TradeSide, TurnOrder, TurnPhase,
+    AtmAccess, BankOp, Date, GameRules, GameSession, Pending, StockId, TradeSide, TurnOrder,
+    TurnPhase,
 };
 
 fn me(app: &mut App) -> Entity {
@@ -325,9 +326,10 @@ fn the_market_advances_once_per_turn_end() {
 }
 
 #[test]
-fn a_default_rules_game_pays_dividends_on_the_first_of_each_month() {
-    // 默认 12 天一月、1 号派息：走到 tick 12 才是第一次发钱
+fn a_default_rules_game_pays_dividends_on_the_fifteenth_of_each_month() {
+    // 锚点钉在 2048-01-01、每月 15 号派息：第 14 次 tick 之后才是第一次发钱
     let mut app = boot_default();
+    pin_epoch(&mut app, Date::new(2048, 1, 1));
     assert!(run_until_world(&mut app));
     let p0 = me(&mut app);
     run_op(&mut app, move |books, _| books.credit(p0, 90_000));
@@ -337,21 +339,57 @@ fn a_default_rules_game_pays_dividends_on_the_first_of_each_month() {
     });
 
     let rules = *app.world().resource::<GameRules>();
-    assert_eq!((rules.days_per_month, rules.dividend_day), (12, 1));
-    for _ in 0..11 {
+    assert_eq!(rules.dividend_day, 15, "P2b 把派息日挪到月中");
+    for _ in 0..13 {
         let before = cash_of(&mut app, p0);
         run_op(&mut app, move |books, market| {
             market.tick_at_turn_end(books)
         });
-        assert_eq!(cash_of(&mut app, p0), before, "还没到 1 号");
+        assert_eq!(cash_of(&mut app, p0), before, "还没到 15 号");
     }
     let before = cash_of(&mut app, p0);
     run_op(&mut app, move |books, market| {
         market.tick_at_turn_end(books)
     });
+    assert_eq!(today(&app), Date::new(2048, 1, 15));
     assert!(
         cash_of(&mut app, p0) > before,
-        "第 12 天是 2 月 1 日，该派息了"
+        "第 14 次 tick 落在 1 月 15 日，该派息了"
     );
     assert_cash_audit(&mut app, 20_000);
+}
+
+/// P2b ②：休市只挡股市。元旦与周六各测一次 —— ATM 存款照办，证券下单被拒；
+/// 到了下一个工作日，同一条下单才成交。抵押那半条不用另测：`MortgageFacts` 里
+/// 根本没有日历字段（结构上办不到），这一条正是把旧 `open` 位退役的依据。
+#[test]
+fn a_holiday_and_a_weekend_close_only_the_market() {
+    let mut app = boot_default();
+    pin_epoch(&mut app, Date::new(2048, 1, 1));
+    let p0 = boot_to_wait_roll(&mut app);
+    app.world_mut().resource_mut::<AtmAccess>().0 = Some(p0);
+
+    // tick 0 = 元旦
+    assert_eq!(today(&app), Date::new(2048, 1, 1));
+    bank_ask(&mut app, p0, BankOp::Deposit, 1_000);
+    settle(&mut app, 4);
+    assert_eq!(cash_of(&mut app, p0), 19_000, "元旦银行该照办");
+    trade(&mut app, p0, "stock_001", TradeSide::Buy, 1);
+    settle(&mut app, 3);
+    assert_eq!(shares_of(&mut app, p0, "stock_001"), 0, "元旦股市不开");
+
+    // tick 3 = 1 月 4 日（周六）：同一条分叉再走一遍
+    set_tick(&mut app, 3);
+    bank_ask(&mut app, p0, BankOp::Deposit, 1_000);
+    settle(&mut app, 4);
+    assert_eq!(cash_of(&mut app, p0), 18_000, "周六银行该照办");
+    trade(&mut app, p0, "stock_001", TradeSide::Buy, 1);
+    settle(&mut app, 3);
+    assert_eq!(shares_of(&mut app, p0, "stock_001"), 0, "周六股市不开");
+
+    // tick 5 = 1 月 6 日（周一）：下单终于成交
+    set_tick(&mut app, 5);
+    trade(&mut app, p0, "stock_001", TradeSide::Buy, 1);
+    settle(&mut app, 3);
+    assert_eq!(shares_of(&mut app, p0, "stock_001"), 1, "工作日该放行");
 }

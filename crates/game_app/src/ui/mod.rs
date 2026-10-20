@@ -10,6 +10,7 @@
 //! （[`action_of`]）。顺带这也让遮罩真的能挡住下面：遮罩是最深命中节点、没有动作，
 //! 事件就停在那里，不会穿到顶栏按钮上。
 
+pub mod calendar_fx;
 pub mod dialog;
 pub mod finance;
 pub mod hand;
@@ -23,9 +24,10 @@ pub mod top_bar;
 use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BailRequested, BankOp, BankOpRequested, CardAim, CardId, Decision,
-    DecisionChosen, GameRules, LandId, MarketClock, MortgageOp, MortgageRequested, Paused, Pending,
-    PendingDecision, PlayCardRequested, RequestRoll, RequestStay, ShopOpRequested, StaySentence,
-    StockId, StockTradeRequested, TradeSide, TurnOrder, TurnPhase, bank_op_allowed,
+    DecisionChosen, GameSession, HolidaySet, LandId, MarketClock, MortgageOp, MortgageRequested,
+    Paused, Pending, PendingDecision, PlayCardRequested, RequestRoll, RequestStay, ShopOpRequested,
+    StaySentence, StockId, StockTradeRequested, TradeSide, TurnOrder, TurnPhase, bank_op_allowed,
+    date_of,
 };
 
 use theme::{col, layout, size};
@@ -128,6 +130,8 @@ impl Plugin for UiPlugin {
             app.add_systems(Update, pin_day.run_if(resource_exists::<ActiveBoard>));
             app.insert_resource(PinnedDay(tick));
         }
+        // 日历事件的表现层（P2b）：`NM_AUTOROLL` 下它自己会拒绝安装
+        calendar_fx::install(app);
     }
 }
 
@@ -246,9 +250,9 @@ pub(crate) fn can_trade(
     phase: TurnPhase,
     paused: &Paused,
     pending: &PendingDecision,
-    open: bool,
+    market_open: bool,
 ) -> bool {
-    open && can_roll(phase, paused, pending)
+    market_open && can_roll(phase, paused, pending)
 }
 
 /// 出牌的窗口也是同一条：`WaitRoll`、没暂停、没被模态占住。规则层
@@ -280,12 +284,15 @@ pub(crate) fn shop_customer(pending: &PendingDecision) -> Option<Entity> {
     }
 }
 
-/// 今天开门吗。股市与银行共用同一条日历（`economy::is_weekend`）——
-/// 「股市休市」与「银行休业」是同一件事的两面，规则层 `bank::bank_op_allowed` 的 `open`
-/// 位与 `market::trade_request_system` 的那条拒绝读的都是同一个数。
+/// 今天股市开盘吗。**只反问股市**（P2b）：周末 ∪ 节假日休市，银行全年无休。
+/// 规则层 `market::trade_request_system` 读的是同一个 `HolidaySet::is_market_closed`；
 /// UI 只负责在玩家按下之前把按钮灰掉并写明为什么。
-pub(crate) fn is_open_day(clock: &MarketClock, rules: &GameRules) -> bool {
-    !game_core::economy::is_weekend(clock.tick, rules)
+pub(crate) fn is_market_open(
+    clock: &MarketClock,
+    session: &GameSession,
+    holidays: &HolidaySet,
+) -> bool {
+    !holidays.is_market_closed(date_of(clock.tick, session.epoch))
 }
 
 /// 此刻能不能办这一笔银行操作。面板着色与派发共用这一句（同 `can_roll` 的理由）。
@@ -298,14 +305,13 @@ pub(crate) fn can_bank_op(
     paused: &Paused,
     pending: &PendingDecision,
     atm: &AtmAccess,
-    open: bool,
 ) -> bool {
     if paused.0 {
         return false;
     }
     let counter = counter_of(pending).is_some();
     let other_modal_up = pending.active().is_some() && !counter;
-    !other_modal_up && bank_op_allowed(op, atm.0.is_some() || counter, counter, open)
+    !other_modal_up && bank_op_allowed(op, atm.0.is_some() || counter, counter)
 }
 
 /// 这笔操作的**主语**是谁：柜台优先（那就是柜台的客人），否则是 ATM 卡的持有人。
@@ -564,9 +570,11 @@ struct Gate<'w, 's> {
     paused: Res<'w, Paused>,
     /// ATM 卡是谁的。`init_resource` 常驻，菜单态也在（所以派发不受门禁，见 `build`）
     atm: Res<'w, AtmAccess>,
-    /// 周末休市要挡在派发这一层：面板的灰色只是提示，按下去仍然会走到这里
+    /// 股市休市要挡在派发这一层：面板的灰色只是提示，按下去仍然会走到这里。
+    /// 银行不看日历（P2b：全年无休），所以它不再读这两样里的任何一个数。
     clock: Res<'w, MarketClock>,
-    rules: Res<'w, GameRules>,
+    session: Option<Res<'w, GameSession>>,
+    holidays: Res<'w, HolidaySet>,
     /// 身上挂着停留计时的人那一颗「掷骰」是「停留」（P4④）。派发读它，不是为了替规则
     /// 层判资格 —— 那边 `roll_dice_system` 仍会拒掉被按住的掷骰，这里只决定发哪个意图。
     stays: Query<'w, 's, &'static StaySentence>,
@@ -632,8 +640,11 @@ fn dispatch_ui_actions(
         let Ok(action) = widgets.actions.get(entity) else {
             continue;
         };
-        // 银行与股市一起算：同一个日历事实，两处读它，不写两遍判据
-        let open = is_open_day(&gate.clock, &gate.rules);
+        // 休市只挡股市（P2b）。银行派发不看这一条 —— 柜台全年开
+        let market_open = gate
+            .session
+            .as_ref()
+            .is_some_and(|session| is_market_open(&gate.clock, session, &gate.holidays));
         match action {
             UiAction::NewGame => next_scene.set(crate::scene::Scene::Board),
             UiAction::BackToMenu => next_scene.set(crate::scene::Scene::Menu),
@@ -667,7 +678,7 @@ fn dispatch_ui_actions(
             }
             // 银行操作：主语是柜台的客人，或 ATM 卡的持有人（两者不会同时挂着别人）
             UiAction::BankOp { op, amount } => {
-                if !can_bank_op(*op, &gate.paused, &gate.pending, &gate.atm, open) {
+                if !can_bank_op(*op, &gate.paused, &gate.pending, &gate.atm) {
                     continue;
                 }
                 if let Some(player) = bank_op_subject(&gate.pending, &gate.atm) {
@@ -678,13 +689,13 @@ fn dispatch_ui_actions(
                     });
                 }
             }
-            // 股票：只有当前回合玩家在掷骰前能下单，与规则层同一条窗口（周末那两天没有）
+            // 股票：只有当前回合玩家在掷骰前能下单，与规则层同一条窗口（休市日没有）
             UiAction::Trade {
                 stock,
                 side,
                 shares,
             } => {
-                if !can_trade(*gate.phase.get(), &gate.paused, &gate.pending, open) {
+                if !can_trade(*gate.phase.get(), &gate.paused, &gate.pending, market_open) {
                     continue;
                 }
                 let Some(player) = gate.order.as_ref().and_then(|o| o.current()) else {
@@ -831,7 +842,9 @@ mod tests {
     };
     use bevy::state::app::StatesPlugin;
     use bevy::window::WindowRef;
-    use game_core::prelude::{Decision, LandId, Pending, PlayerId, StaySentence, TurnOrder};
+    use game_core::prelude::{
+        Date, Decision, GameRules, LandId, Pending, PlayerId, StaySentence, TurnOrder,
+    };
     use std::time::Duration;
 
     /// 造一条落在 `entity` 上的左键点击。这些字段平时由 picking 后端填，
@@ -988,9 +1001,19 @@ mod tests {
                 .init_resource::<hand::HandPanelOpen>()
                 .init_resource::<AtmAccess>()
                 .insert_resource(Paused(paused))
-                // 休市那条判据要读日历与规则，两者在真实对局里由 core 常驻
+                // 休市判据要读日历、锚点与节假日表，三者都由 core 常驻。
+                // 锚点钉 2048-01-06（周一），于是 tick 5 = 1 月 11 日（周六）是休市日
                 .insert_resource(MarketClock::default())
                 .insert_resource(GameRules::default())
+                .insert_resource(HolidaySet::default())
+                .insert_resource(GameSession {
+                    turn_count: 0,
+                    seed: 0,
+                    price_index: 1.0,
+                    epoch: Date::new(2048, 1, 6),
+                    last_gift_year: None,
+                    last_envelope_year: None,
+                })
                 .insert_resource(pending)
                 .add_systems(Update, (dispatch_ui_actions, collect).chain());
 
@@ -1266,11 +1289,10 @@ mod tests {
         assert!(h.seen().trades.is_empty(), "暂停时不该放行下单");
     }
 
-    /// P2④ 的周末：银行与股市那两天都不开门，规则层会拒（`bank_op_allowed` 的 `open` 位、
-    /// `trade_request_system` 的那条早退）。派发这一层必须同步挡下，否则面板上那四颗
-    /// 亮着的按钮按下去毫无反应 —— 与 §6.1 坑 27 是同一族故障：**按不动**与**坏了**分不清。
+    /// P2b：休市只挡股市、银行全年无休。派发这一层必须跟着分叉 ——
+    /// 若把银行也挡下，周末走进柜台会成为「按不动且没有理由」那类故障（§6.1 坑 27）。
     #[test]
-    fn a_weekend_drops_every_bank_op_and_trade() {
+    fn a_closed_market_drops_trades_but_never_bank_ops() {
         let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
         let holder = h.player;
         h.set_atm(holder);
@@ -1279,40 +1301,37 @@ mod tests {
         assert_eq!(h.seen().ops, vec![(holder, BankOp::Deposit, 1_000)]);
         assert_eq!(h.seen().trades.len(), 1, "工作日这两笔都该办成");
 
-        // tick 5 = 每周第 6 天。`days_per_week: 7` 时最后两天关门，而月长 12 与 7 不整除，
-        // 所以周末在月内逐月漂移 —— 测试里直接摆数字，不重跑那套日历算术
+        // 锚点 2048-01-06（周一）→ tick 5 = 1 月 11 日（周六）
         h.set_tick(5);
         h.click(h.deposit);
         h.click(h.buy);
         let seen = h.seen();
-        assert_eq!(seen.ops.len(), 1, "休市那天还多出一笔存款");
+        assert_eq!(seen.ops.len(), 2, "银行全年无休，周末存款该照办");
         assert_eq!(seen.trades.len(), 1, "休市那天还受理了一笔下单");
     }
 
     #[test]
-    fn the_panel_greys_bank_ops_on_a_closed_day() {
-        // 判据本身也要独立测一条：`can_bank_op` 的 `open` 位对四种操作一律关
+    fn bank_ops_are_never_gated_by_the_calendar_but_trades_are() {
         let paused = Paused(false);
         let pending = PendingDecision::default();
         let atm = AtmAccess(Some(Entity::from_raw_u32(7).expect("7 不是保留值")));
+        // 银行四个窗口与日历无关：有卡/柜台就亮
         for op in [
             BankOp::Deposit,
             BankOp::Withdraw,
             BankOp::Borrow,
             BankOp::Repay,
         ] {
-            assert!(
-                !can_bank_op(op, &paused, &pending, &atm, false),
-                "{op:?} 在休市那天还亮着"
-            );
-            // 同一位持卡人在工作日只办得成存取（借还要柜台）
             let needs_counter = matches!(op, BankOp::Borrow | BankOp::Repay);
             assert_eq!(
-                can_bank_op(op, &paused, &pending, &atm, true),
+                can_bank_op(op, &paused, &pending, &atm),
                 !needs_counter,
-                "{op:?} 在工作日的窗口判据漂了"
+                "{op:?} 的窗口判据漂了"
             );
         }
+        // 股市反过来：休市就不亮
+        assert!(can_trade(TurnPhase::WaitRoll, &paused, &pending, true));
+        assert!(!can_trade(TurnPhase::WaitRoll, &paused, &pending, false));
     }
 
     #[test]
@@ -1512,6 +1531,7 @@ mod tests {
             // `init_resource` 常驻，菜单态也在 —— 少了它们崩的是测试，多的那条路径崩的会是玩家
             .init_resource::<MarketClock>()
             .init_resource::<GameRules>()
+            .init_resource::<HolidaySet>()
             .add_message::<PointerClick>()
             .add_message::<RequestRoll>()
             .add_message::<RequestStay>()
@@ -1529,6 +1549,9 @@ mod tests {
             // P4③ 的两个出口：请求由派发写、成交由顶栏提示行读
             .add_message::<BailRequested>()
             .add_message::<game_core::prelude::PlayerBailed>()
+            // P2b：日历事件的表现层读这两条（礼物一屏、红包老虎机）
+            .add_message::<game_core::prelude::GiftsGiven>()
+            .add_message::<game_core::prelude::RedEnvelope>()
             .add_message::<AppExit>()
             // hover_feedback 读的两条 picking 消息，真实应用由 picking 后端注册
             .add_message::<PointerOver>()

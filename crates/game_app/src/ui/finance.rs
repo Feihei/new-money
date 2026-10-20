@@ -14,14 +14,15 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    AtmAccess, BankOp, Books, DataHandles, GameRules, MarketClock, Paused, PendingDecision,
-    PriceHistory, StockId, StockPrice, StockSet, TradeSide, TurnOrder, TurnPhase,
+    AtmAccess, BankOp, Books, DataHandles, GameRules, HolidaySet, MarketClock, Paused,
+    PendingDecision, PriceHistory, StockId, StockPrice, StockSet, TradeSide, TurnOrder, TurnPhase,
+    date_of, days_until_dividend,
 };
 
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, SECONDARY, UiAction, border_color, button, can_bank_op, can_trade,
-    counter_of, info_row, is_open_day, label,
+    counter_of, info_row, is_market_open, label,
 };
 use crate::render::DevFont;
 
@@ -83,8 +84,6 @@ pub(crate) struct AtmView<'w> {
     open: Res<'w, AtmPanelOpen>,
     pending: Res<'w, PendingDecision>,
     paused: Res<'w, Paused>,
-    clock: Res<'w, MarketClock>,
-    rules: Res<'w, GameRules>,
 }
 
 /// ATM 浮层：现金与存款，四颗金额按钮，一个关闭。
@@ -99,16 +98,10 @@ pub(crate) fn sync_atm_panel(
     // 那种同帧交接的时刻仍然有钱可办）
     let holder = counter_of(&view.pending).or(view.atm.0);
     let want = if view.open.0 { holder } else { None };
-    // 周末银行不开门。写进 stamp 是为了「日子一变面板就重建」——只按余额建，
-    // 休市那天余额没动的玩家会看着四颗亮按钮按下去没声音（§6.1 坑 27 的 UI 版）
-    let banking_hours = is_open_day(&view.clock, &view.rules);
+    // 银行全年无休（P2b），所以面板只按余额重建
     let stamp = want.map(|player| {
         let bank = books.bank_of(player);
-        format!(
-            "{player:?}|{}|{}|{banking_hours}",
-            books.balance(player),
-            bank.deposit
-        )
+        format!("{player:?}|{}|{}", books.balance(player), bank.deposit)
     });
 
     if shown
@@ -128,20 +121,8 @@ pub(crate) fn sync_atm_panel(
     let deposit = books.bank_of(player).deposit;
     // 窗口判据在外面算好：`with_children` 的闭包拿不到 `Books` 那类借用，
     // 而这两句本来也只依赖状态资源，不依赖余额
-    let deposit_window = can_bank_op(
-        BankOp::Deposit,
-        &view.paused,
-        &view.pending,
-        &view.atm,
-        banking_hours,
-    );
-    let withdraw_window = can_bank_op(
-        BankOp::Withdraw,
-        &view.paused,
-        &view.pending,
-        &view.atm,
-        banking_hours,
-    );
+    let deposit_window = can_bank_op(BankOp::Deposit, &view.paused, &view.pending, &view.atm);
+    let withdraw_window = can_bank_op(BankOp::Withdraw, &view.paused, &view.pending, &view.atm);
 
     let mut root = commands.spawn((
         BoardUi,
@@ -169,15 +150,6 @@ pub(crate) fn sync_atm_panel(
         p.spawn(label(&font.0, "ATM", size::NAME, col::TITLE_GOLD));
         info_row(p, &font.0, "现金", &format!("${cash}"), col::CASH_OK, 60.0);
         info_row(p, &font.0, "存款", &format!("${deposit}"), col::VALUE, 60.0);
-        // 灰按钮必须自带一句为什么，否则「按不动」与「坏了」在玩家眼里是同一件事
-        if !banking_hours {
-            p.spawn(label(
-                &font.0,
-                "周末休市 · 下周再来",
-                size::ROW,
-                col::BANKRUPT,
-            ));
-        }
         // 「全部」的数额在建按钮这一刻算：面板随余额重建，所以它永远是准的
         money_row(
             p,
@@ -257,6 +229,7 @@ pub(crate) struct StockView<'w, 's> {
     order: Option<Res<'w, TurnOrder>>,
     clock: Res<'w, MarketClock>,
     rules: Res<'w, GameRules>,
+    holidays: Res<'w, HolidaySet>,
     sets: Res<'w, Assets<StockSet>>,
     data: Res<'w, DataHandles>,
     stocks: Query<'w, 's, (&'static StockId, &'static StockPrice, &'static PriceHistory)>,
@@ -277,7 +250,7 @@ pub(crate) fn sync_stock_panel(
         return;
     }
     let player = view.order.as_ref().and_then(|o| o.current());
-    let trading_hours = is_open_day(&view.clock, &view.rules);
+    let trading_hours = is_market_open(&view.clock, &books.session, &view.holidays);
     let tradable = player.is_some_and(|p| {
         can_trade(
             *view.phase.get(),
@@ -326,8 +299,8 @@ pub(crate) fn sync_stock_panel(
         commands.entity(entity).despawn();
     }
 
-    let (month, day) = game_core::economy::date_of(view.clock.tick, view.rules.days_per_month);
-    let until = game_core::economy::days_until_dividend(view.clock.tick, &view.rules);
+    let date = date_of(view.clock.tick, books.session.epoch);
+    let until = days_until_dividend(date, view.rules.dividend_day);
     let mut root = commands.spawn((
         BoardUi,
         StockPanel,
@@ -352,7 +325,10 @@ pub(crate) fn sync_stock_panel(
     root.with_children(|p| {
         p.spawn(label(
             &font.0,
-            format!("证券 · 第 {month} 月 {day} 日（距派息 {until} 天）"),
+            format!(
+                "证券 · {} 年 {} 月 {} 日（距派息 {until} 天）",
+                date.year, date.month, date.day
+            ),
             size::NAME,
             col::TITLE_GOLD,
         ));
@@ -362,7 +338,7 @@ pub(crate) fn sync_stock_panel(
             format!(
                 "现金 ${cash} — {}",
                 if !trading_hours {
-                    "周末休市，下单不受理"
+                    "股市休市，下单不受理"
                 } else if tradable {
                     "掷骰前可买卖"
                 } else {

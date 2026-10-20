@@ -17,10 +17,9 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::economy::{self, LandView};
+use crate::economy::LandView;
 use crate::land::LandId;
 use crate::landing::{Pending, PendingDecision};
-use crate::market::MarketClock;
 use crate::msg::{MortgageDone, MortgageOp, MortgageRequested};
 use crate::settle::Books;
 use crate::status::LandStatus;
@@ -33,8 +32,6 @@ use crate::turn::TurnPhase;
 pub struct MortgageFacts {
     /// 人站在银行柜台前吗（`Pending::BankTeller` 挂着他）
     pub at_counter: bool,
-    /// 银行今天开门吗（周末休市，与四种 `BankOp` 同一条）
-    pub open: bool,
     /// 棋盘里有这块地
     pub on_board: bool,
     /// 这块地是**请求者**的（不是别人的、也不是无主）
@@ -54,8 +51,6 @@ pub struct MortgageFacts {
 pub enum MortgageDeny {
     /// 人不站在银行柜台前
     NoCounter,
-    /// 周末休市
-    Closed,
     /// 棋盘里没有这块地（数据错误，`validate` 已在加载期拦下）
     NotOnBoard,
     /// 这块地不是你的
@@ -75,7 +70,6 @@ impl MortgageDeny {
     pub fn label(self) -> &'static str {
         match self {
             Self::NoCounter => "要走进银行柜台",
-            Self::Closed => "周末休市",
             Self::NotOnBoard => "棋盘里没有这块地",
             Self::NotYours => "这块地不是你的",
             Self::AlreadyHeld => "已经押在这里了",
@@ -92,9 +86,6 @@ impl MortgageDeny {
 pub fn mortgage_op_allowed(op: MortgageOp, f: &MortgageFacts) -> Result<(), MortgageDeny> {
     if !f.at_counter {
         return Err(MortgageDeny::NoCounter);
-    }
-    if !f.open {
-        return Err(MortgageDeny::Closed);
     }
     if !f.on_board {
         return Err(MortgageDeny::NotOnBoard);
@@ -133,13 +124,7 @@ pub fn mortgage_op_allowed(op: MortgageOp, f: &MortgageFacts) -> Result<(), Mort
 /// 「这一笔为什么被拒」是同一个函数算出来的同一个数。
 ///
 /// `cost` 只在赎回那一支有内容：押出去是收钱，没有「先问够不够」这一说。
-pub fn read_facts(
-    books: &Books,
-    player: Entity,
-    land: LandId,
-    at_counter: bool,
-    open: bool,
-) -> MortgageFacts {
+pub fn read_facts(books: &Books, player: Entity, land: LandId, at_counter: bool) -> MortgageFacts {
     let view = books.view(land);
     let pid = books.id_of(player);
     // 主语查不到时一律「不是他的」：`view.owner` 与 `pid` 同为 `Option`，直接比会让
@@ -150,7 +135,6 @@ pub fn read_facts(
     };
     MortgageFacts {
         at_counter,
-        open,
         on_board: view.is_some(),
         owned,
         held: view.as_ref().is_some_and(|v| v.mortgaged),
@@ -198,10 +182,9 @@ pub fn mortgage_op_system(
         // 终局之后还在改地产与负债，回放与存档就对不上账了
         return;
     }
-    let open = !economy::is_weekend(desk.clock.tick, &desk.books.rules);
     for r in requests.read() {
         let at_counter = desk.pending.active() == Some((r.player, Pending::BankTeller));
-        let facts = read_facts(&desk.books, r.player, r.land, at_counter, open);
+        let facts = read_facts(&desk.books, r.player, r.land, at_counter);
         if let Err(why) = mortgage_op_allowed(r.op, &facts) {
             debug!(
                 "抵押柜台被拒：{:?} 想{:?}第 {} 号地 —— {}",
@@ -237,7 +220,6 @@ pub struct MortgageDesk<'w, 's> {
     pub books: Books<'w, 's>,
     pub pending: Res<'w, PendingDecision>,
     pub phase: Res<'w, State<TurnPhase>>,
-    pub clock: Res<'w, MarketClock>,
     pub done: MessageWriter<'w, MortgageDone>,
 }
 
@@ -245,11 +227,10 @@ pub struct MortgageDesk<'w, 's> {
 mod tests {
     use super::*;
 
-    /// 一件「站在柜台前、银行开门、地是自己的、没押没查封」的普通请求要读到的事实。
+    /// 一件「站在柜台前、地是自己的、没押没查封」的普通请求要读到的事实。
     fn take() -> MortgageFacts {
         MortgageFacts {
             at_counter: true,
-            open: true,
             on_board: true,
             owned: true,
             held: false,
@@ -279,28 +260,8 @@ mod tests {
             );
             let mut g = take();
             g.at_counter = false;
-            g.open = false;
             assert_eq!(mortgage_op_allowed(op, &g), Err(MortgageDeny::NoCounter));
         }
-    }
-
-    /// 休市挡两件，且**有柜台也挡** —— 周末走进银行，人站着、地是自己的，照样办不成。
-    /// 与四种 `BankOp` 同一条日历判据（`bank::a_closed_bank_refuses_everything` 的地产版）。
-    #[test]
-    fn a_closed_bank_refuses_land_moves_too() {
-        let mut f = take();
-        f.open = false;
-        assert_eq!(
-            mortgage_op_allowed(MortgageOp::Take, &f),
-            Err(MortgageDeny::Closed)
-        );
-        let mut g = take();
-        g.open = false;
-        g.held = true;
-        assert_eq!(
-            mortgage_op_allowed(MortgageOp::Redeem, &g),
-            Err(MortgageDeny::Closed)
-        );
     }
 
     /// 别人的地块连「押没押」都不该被读到：拒绝必须是 `NotYours`，
@@ -393,7 +354,6 @@ mod tests {
     fn every_denial_says_something_different() {
         let all = [
             MortgageDeny::NoCounter,
-            MortgageDeny::Closed,
             MortgageDeny::NotOnBoard,
             MortgageDeny::NotYours,
             MortgageDeny::AlreadyHeld,

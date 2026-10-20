@@ -1,0 +1,39 @@
+{
+  "years": [
+    {
+      "year": 2048,
+      "spring_festival": [2, 14],
+      "qingming": [4, 4],
+      "dragon_boat": [6, 15],
+      "mid_autumn": [9, 22]
+    },
+    {
+      "year": 2049,
+      "spring_festival": [2, 2],
+      "qingming": [4, 4],
+      "dragon_boat": [6, 4],
+      "mid_autumn": [9, 11]
+    },
+    {
+      "year": 2050,
+      "spring_festival": [1, 23],
+      "qingming": [4, 4],
+      "dragon_boat": [6, 23],
+      "mid_autumn": [9, 30]
+    },
+    {
+      "year": 2051,
+      "spring_festival": [2, 11],
+      "qingming": [4, 5],
+      "dragon_boat": [6, 13],
+      "mid_autumn": [9, 19]
+    },
+    {
+      "year": 2052,
+      "spring_festival": [2, 1],
+      "qingming": [4, 4],
+      "dragon_boat": [6, 1],
+      "mid_autumn": [9, 7]
+    }
+  ]
+}

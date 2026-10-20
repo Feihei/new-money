@@ -11,7 +11,7 @@ use bevy::{
     window::{PresentMode, Window},
 };
 use game_core::CoreGamePlugin;
-use game_core::prelude::{DataHandles, GameSeed, TurnPhase};
+use game_core::prelude::{DataHandles, Date, EpochOverride, GameSeed, TurnPhase};
 
 mod autopilot;
 mod dev;
@@ -81,6 +81,7 @@ fn main() {
 fn insert_boot_resources(world: &mut World) {
     let server = world.resource::<AssetServer>().clone();
     world.insert_resource(GameSeed(boot_seed()));
+    world.insert_resource(boot_epoch());
     world.insert_resource(DataHandles::load(&server));
     world.insert_resource(render::DevFont(server.load(DEV_FONT)));
 }
@@ -93,6 +94,26 @@ fn boot_seed() -> u64 {
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or_else(clock_seed)
+}
+
+/// `NM_EPOCH=<YYYY-MM-DD>` 钉死历法锚点；不设则由会话种子的历法子流抽 2048 年的某个月 1 日。
+///
+/// `NM_DAY` 钉的是 tick，钉不住日期 —— 闰日、圣诞节、节假日这几张截图都要求「具体某一天」，
+/// 两个旋钮配着用。
+fn boot_epoch() -> EpochOverride {
+    let Ok(raw) = std::env::var("NM_EPOCH") else {
+        return EpochOverride(None);
+    };
+    match Date::parse(&raw) {
+        Some(date) => {
+            info!("历法锚点已钉死（NM_EPOCH）：{date}");
+            EpochOverride(Some(date))
+        }
+        None => {
+            warn!("NM_EPOCH={raw:?} 不是 YYYY-MM-DD，改用种子抽的月份");
+            EpochOverride(None)
+        }
+    }
 }
 
 fn clock_seed() -> u64 {
@@ -115,6 +136,8 @@ fn check_assets(server: Res<AssetServer>, data: Res<DataHandles>) {
     // 少一份就是卡在 `Boot` 上不动 —— 而 Bevy 对失败资产只打一条日志然后永远等下去
     expect_ready(&server, &data.items, "道具牌");
     expect_ready(&server, &data.stocks, "股票");
+    // 节假日表也是装配要的一份：少了它世界永远停在 Boot，而失败资产只有这一句会响
+    expect_ready(&server, &data.holidays, "节假日表");
 }
 
 fn expect_ready<T: Asset>(server: &AssetServer, handle: &Handle<T>, what: &str) {

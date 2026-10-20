@@ -1,8 +1,8 @@
 //! 抵押与赎回（P3d③）的 App 级测试：真踩银行那一格、真按柜台上的按钮。
 //!
 //! 这一层要守的四件事：
-//! - **窗口**：与借/还同一格 —— 踩到银行、停在上面、按「办完」之前那一段才办得成，
-//!   周末照样休。别人的点击、离开之后的点击都不算。
+//! - **窗口**：与借/还同一格 —— 踩到银行、停在上面、按「办完」之前那一段才办得成。
+//!   银行全年无休（P2b），周末走进柜台照样办；别人的点击、离开之后的点击都不算。
 //! - **一块地只押一次**：同一帧里两条押同一块地的请求只成一次（这条是 `Mortgaged`
 //!   从「存在即押」的单位标记改成「带本金的值」的全部理由）。
 //! - **它进的是负债那一格，不是资产的黑洞**：押出去对物价指数必须中性，否则
@@ -20,8 +20,7 @@ mod common;
 use bevy::app::App;
 use bevy::ecs::entity::Entity;
 use common::*;
-use game_core::economy::is_weekend;
-use game_core::prelude::{GameRules, LandStatus, MortgageOp, Pending, TurnPhase};
+use game_core::prelude::{LandStatus, MortgageOp, Pending, TurnPhase};
 
 /// 柜台开着、p0 名下有 0 号南京路（Lv1）的那一帧。
 fn desk() -> (App, Entity) {
@@ -210,31 +209,6 @@ fn leaving_the_counter_closes_the_mortgage_window() {
 
     assert_eq!(cash_of(&mut app, p0), 20_000, "柜台关了还能押");
     assert_eq!(mortgage_of(&app, 0), None);
-}
-
-/// 休市挡的是**全部**柜台业务，地产变现不是例外。
-/// 哪天是周末由 `days_per_week` 推出来，所以这里现找一个休市的日子，不把 tick 写死。
-#[test]
-fn a_closed_bank_wont_touch_the_land_either() {
-    let (mut app, p0) = desk();
-    let rules = *app.world().resource::<GameRules>();
-    let off = (0..14u32)
-        .find(|tick| is_weekend(*tick, &rules))
-        .expect("一周里总有休市那天");
-    set_tick(&mut app, off);
-
-    take(&mut app, p0, 0);
-
-    assert_eq!(cash_of(&mut app, p0), 20_000, "休市那天押出去了");
-    assert_eq!(mortgage_of(&app, 0), None);
-
-    // 同一条请求、同一个人，开门那天就办得成 —— 差别只在日历
-    set_tick(
-        &mut app,
-        (0..14u32).find(|t| !is_weekend(*t, &rules)).unwrap(),
-    );
-    take(&mut app, p0, 0);
-    assert_eq!(mortgage_of(&app, 0), Some(750), "开门那天反倒办不成了");
 }
 
 /// 查封中的地块既押不出去也赎不回来：银行不收有纠纷的抵押物，也不替法院解押。

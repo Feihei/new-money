@@ -20,16 +20,17 @@ use game_core::prelude::{
     ActiveBoard, Adjustment, AtmAccess, BailRequested, BankBalance, BankOp, BankOpDone,
     BankOpRequested, BankVisited, Books, BuildingLevel, BuyOffered, CardAim, CardDrawn, CardGained,
     CardId, CardKind, CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived, Correction,
-    Corrections, CouponBoxes, DamageTally, DataHandles, Decision, DecisionChosen, Deck, Detention,
-    DetentionLifted, DetentionSkipped, DiceRolled, GameOver, GameRules, GameSeed, GameSession,
-    GameSetup, Hand, Insulation, LandBought, LandDamage, LandId, LandStatus, LandUpgraded,
-    LandView, Market, MarketClock, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Owner,
-    Pending, PendingDecision, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
-    PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, RentDue,
-    RequestRoll, RequestStay, Rng, Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source,
-    StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested,
-    StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded,
-    TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkStarted, Wallet, deal_to,
+    Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen, Deck,
+    Detention, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules,
+    GameSeed, GameSession, GameSetup, GiftsGiven, Hand, Insulation, LandBought, LandDamage, LandId,
+    LandStatus, LandUpgraded, LandView, Market, MarketClock, MortgageDone, MortgageOp,
+    MortgageRequested, Mortgaged, Owner, Pending, PendingDecision, PlayCardRequested,
+    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported,
+    PlotArea, Points, PointsChanged, RedEnvelope, RentDue, RequestRoll, RequestStay, Rng, Scope,
+    Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped,
+    StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex,
+    TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted,
+    UpgradeOffered, WalkStarted, Wallet, deal_to,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -196,6 +197,9 @@ struct BookReaders<'w, 's> {
     prices: MessageReader<'w, 's, StockPriceChanged>,
     cash: MessageReader<'w, 's, CashChanged>,
     points: MessageReader<'w, 's, PointsChanged>,
+    /// 日历事件（P2b）：礼物一条带全桌，红包一人一条（0 元也有一条）
+    gifts: MessageReader<'w, 's, GiftsGiven>,
+    envelopes: MessageReader<'w, 's, RedEnvelope>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -375,6 +379,17 @@ fn collect_books(
             "Teleport({}→{})",
             who(&players, m.player),
             m.tile.0
+        ));
+    }
+    for m in r.gifts.read() {
+        log.0
+            .push(format!("Gifts({}年,{}张)", m.year, m.gifts.len()));
+    }
+    for m in r.envelopes.read() {
+        log.0.push(format!(
+            "Envelope({}${})",
+            who(&players, m.player),
+            m.amount
         ));
     }
     for m in r.bailed.read() {
@@ -1301,6 +1316,18 @@ pub fn tick_of(app: &App) -> u32 {
 /// **代价**同那个旋钮：拨完那天行情与结息都不再往前走，它是前置不是时光机。
 pub fn set_tick(app: &mut App, tick: u32) {
     app.world_mut().resource_mut::<MarketClock>().tick = tick;
+}
+
+/// 钉死历法锚点（`NM_EPOCH` 的测试版）。必须在世界装配之前调用 —— 装配时它被读一次，
+/// 之后 `GameSession.epoch` 就是那份值。
+pub fn pin_epoch(app: &mut App, date: Date) {
+    app.insert_resource(EpochOverride(Some(date)));
+}
+
+/// 「今天」是哪天：会话锚点 + 行情钟。所有断言都从这里读，不自己再算一遍。
+pub fn today(app: &App) -> Date {
+    let session = app.world().resource::<GameSession>();
+    game_core::prelude::date_of(app.world().resource::<MarketClock>().tick, session.epoch)
 }
 
 /// 现金审计：每位玩家的 `Σ delta` 与钱包余额逐一对账。

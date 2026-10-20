@@ -553,3 +553,34 @@ pub enum Decision {
     /// 关闭只需阅读的通知（租金单 / 卡面）
     Acknowledge,
 }
+
+// ===== 日历事件（P2b）=====
+
+/// 圣诞礼物：12 月 25 日给每个在场玩家一张道具卡。
+///
+/// 一条消息带全桌，而不是每人一条：表现层的动画是**一段**（一屏列出谁收到什么），
+/// 逐人一条会让 UI 去猜「这一批到底有几个人」。卡本身另走既有的 [`CardGained`]
+/// （手牌满时 `pushed_out` 那半条因此不用为圣诞再写一遍）。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct GiftsGiven {
+    pub year: i32,
+    pub gifts: Vec<GiftGiven>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GiftGiven {
+    pub player: Entity,
+    pub card: CardNotice,
+}
+
+/// 春节红包：正月初一那天每个在场玩家抽一个四位数（0000–9999），
+/// 效果等于大财神那笔现金、不附免费特权。
+///
+/// **0 元也发这一条**：老虎机照播、账上分文不动 —— 空红包是规则的一部分，
+/// 把它吞掉会让「为什么我没收到红包」变成一句查不动的话。现金那半走 [`CashChanged`]，
+/// 且只在 `amount > 0` 时写（0 元不该在现金流水里留一条假账）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RedEnvelope {
+    pub player: Entity,
+    pub amount: i64,
+}

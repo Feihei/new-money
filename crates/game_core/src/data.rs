@@ -6,6 +6,7 @@
 use bevy::prelude::*;
 
 use crate::board::BoardDef;
+use crate::calendar::HolidaySet;
 use crate::card::CardSet;
 use crate::stock::StockSet;
 
@@ -16,6 +17,8 @@ pub const FATE_PATH: &str = "data/cards/fate_cards.json";
 /// 所以**不在** `domain_of` 那张分派表上 —— 加这一行不是为了让人踩它。
 pub const ITEMS_PATH: &str = "data/cards/item_cards.json";
 pub const STOCKS_PATH: &str = "data/stocks/stocks.json";
+/// 节假日表（P2b）：农历四节查表、固定公历四条由代码算。表覆盖 2048–2052。
+pub const HOLIDAYS_PATH: &str = "data/calendar/holidays.json";
 
 #[derive(Resource, Debug, Clone)]
 pub struct DataHandles {
@@ -24,6 +27,7 @@ pub struct DataHandles {
     pub fate: Handle<CardSet>,
     pub items: Handle<CardSet>,
     pub stocks: Handle<StockSet>,
+    pub holidays: Handle<HolidaySet>,
 }
 
 impl DataHandles {
@@ -34,6 +38,7 @@ impl DataHandles {
             fate: server.load(FATE_PATH),
             items: server.load(ITEMS_PATH),
             stocks: server.load(STOCKS_PATH),
+            holidays: server.load(HOLIDAYS_PATH),
         }
     }
 }

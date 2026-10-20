@@ -11,9 +11,9 @@ use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::economy::dividend_per_share;
 use game_core::prelude::{
-    BankBalance, Bankrupt, Books, CardEffect, CardKind, DataHandles, Detention, DetentionPlace,
-    GameRules, GameSeed, GameSession, GameSetup, StockId, TileIndex, TileKind, TradeSide,
-    TurnPhase,
+    BankBalance, Bankrupt, Books, CardEffect, CardKind, DataHandles, Date, Detention,
+    DetentionPlace, GameRules, GameSeed, GameSession, GameSetup, StockId, TileIndex, TileKind,
+    TradeSide, TurnPhase,
 };
 
 // prototype 的格子对照（`assets/data/boards/prototype.json`）：
@@ -259,15 +259,13 @@ fn a_bank_visit_no_longer_compounds_anyones_balance() {
 /// 「不只是访客」这条老语义留着，只是触发者从「谁踩到银行」换成了「今天几号」。
 #[test]
 fn month_end_compounds_every_players_balance() {
-    // 三天一月：回合 1 结束是 2 号（不该结），回合 2 结束正好 3 号 = 月末
+    // 锚点钉在 1 月 1 日：回合 29 结束是 1 月 30 日（不该结），回合 30 结束是 1 月 31 日 = 月末
     let mut app = boot(
         GameSetup::default(),
-        GameRules {
-            days_per_month: 3,
-            ..GameRules::instant()
-        },
+        GameRules::instant(),
         seed_rolling_first(1),
     );
+    pin_epoch(&mut app, Date::new(2048, 1, 1));
     app.insert_resource(DecisionPolicy::DeclineAll);
     let p0 = boot_to_wait_roll(&mut app);
     place(&mut app, p0, 0);
@@ -289,14 +287,15 @@ fn month_end_compounds_every_players_balance() {
         },
     );
 
-    play_turns(&mut app, 1);
+    play_turns(&mut app, 29);
     assert_eq!(
         (bank_of(&mut app, p0), bank_of(&mut app, p1)),
         ((10_000, 0), (0, 4_000)),
-        "2 号不是月末，不该有人涨息"
+        "1 月 30 日不是月末，不该有人涨息（今天是 {}）",
+        today(&app)
     );
 
-    play_turns(&mut app, 2);
+    play_turns(&mut app, 30);
     assert_eq!(bank_of(&mut app, p0), (11_000, 0), "储金月息 10%");
     assert_eq!(
         bank_of(&mut app, p1),
@@ -418,28 +417,35 @@ fn prices_move_once_per_turn_end_and_a_stock_tile_adds_no_extra_tick() {
         3,
         "踩格不该多推行情：走到第 3 天就该是 3 次 tick"
     );
+    // 休市日（周末 ∪ 节假日）只推日历不推行情 —— 三天里有几天开盘由锚点与日历算，
+    // 不把初版那条「固定 15 条」写死（P2b 换真实公历后它会随开局月份漂移）
+    let holidays = app.world().resource::<game_core::prelude::HolidaySet>();
+    let epoch = app.world().resource::<GameSession>().epoch;
+    let open = (1..=3)
+        .filter(|t| !holidays.is_market_closed(game_core::prelude::date_of(*t, epoch)))
+        .count();
     assert_eq!(
         ledger(&app)
             .iter()
             .filter(|e| e.starts_with("Price("))
             .count(),
-        15,
-        "三天 = 十五条价格流水"
+        open * 5,
+        "开盘 {open} 天 = 每只股各推进一次"
     );
 }
 
 #[test]
 fn dividends_land_on_the_calendar_day_only() {
-    // 3 天一月、每月 2 号派息：tick 1、4、7 发钱，其余日子一分不给
+    // 锚点 2048-01-01、每月 15 号派息：tick 14 = 1/15、tick 45 = 2/15、tick 74 = 3/15
     let mut app = boot(
         GameSetup::default(),
         GameRules {
-            days_per_month: 3,
-            dividend_day: 2,
+            dividend_rate: 0.5,
             ..GameRules::instant()
         },
         GameSeed::default(),
     );
+    pin_epoch(&mut app, Date::new(2048, 1, 1));
     assert!(run_until_world(&mut app));
     let p0 = me(&mut app);
     // 建仓用 `credit` 而不是直改钱包：现金审计要求每笔变动都留下流水
@@ -456,18 +462,19 @@ fn dividends_land_on_the_calendar_day_only() {
     let rules = *app.world().resource::<GameRules>();
     let mut paid_total = 0i64;
     let mut paid_on: Vec<u32> = Vec::new();
-    for tick in 1..=7 {
+    for tick in 1..=75 {
         let before = cash_of(&mut app, p0);
         run_op(&mut app, move |books, market| {
             market.tick_at_turn_end(books)
         });
         let delta = cash_of(&mut app, p0) - before;
-        let want = if game_core::economy::is_dividend_day(tick, &rules) {
+        let date = game_core::prelude::date_of(tick, Date::new(2048, 1, 1));
+        let want = if game_core::prelude::is_dividend_day(date, rules.dividend_day) {
             dividend_per_share(price_of(&mut app, "stock_001"), &rules) * 1_000
         } else {
             0
         };
-        assert_eq!(delta, want, "第 {tick} 天的现金变动应只来自分红");
+        assert_eq!(delta, want, "第 {tick} 天（{date}）的现金变动应只来自分红");
         if delta > 0 {
             paid_on.push(tick);
         }
@@ -475,12 +482,12 @@ fn dividends_land_on_the_calendar_day_only() {
     }
     assert_eq!(
         paid_on,
-        vec![1, 4, 7],
-        "派息日应恰好落在每月的 2 号（1 月 2 日、2 月 2 日、3 月 2 日）"
+        vec![14, 45, 74],
+        "派息日应恰好落在每月的 15 号（1 月 15、2 月 15、3 月 15）"
     );
     assert!(
         paid_total > 0,
-        "七次 tick 里一次分红都没发，说明分红线没接通"
+        "75 次 tick 里一次分红都没发，说明分红线没接通"
     );
     assert_cash_audit(&mut app, 20_000);
 }

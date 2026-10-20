@@ -6,6 +6,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::board::BoardDef;
+use crate::calendar::{Date, EPOCH_YEAR, EpochOverride, HolidaySet};
 use crate::card::{CardKind, CardSet};
 use crate::charge::Corrections;
 use crate::coupon::CouponBoxes;
@@ -62,15 +63,17 @@ pub struct BootAssets<'w> {
     boards: Res<'w, Assets<BoardDef>>,
     card_sets: Res<'w, Assets<CardSet>>,
     stock_sets: Res<'w, Assets<StockSet>>,
+    holidays: Res<'w, Assets<HolidaySet>>,
 }
 
-/// 开局要读的配置打包成一个系统参数（阵容、数值、种子）。
+/// 开局要读的配置打包成一个系统参数（阵容、数值、种子、历法锚点）。
 /// `pub` 是必须的：`begin_game_system` 是公开 system，参数类型比它更私有条目会报错。
 #[derive(SystemParam)]
 pub struct BeginCfg<'w> {
     rules: Res<'w, GameRules>,
     setup: Res<'w, GameSetup>,
     seed: Res<'w, GameSeed>,
+    epoch: Res<'w, EpochOverride>,
 }
 
 /// 四类数据资产全部就位后一次性装配世界：校验 → spawn 土地/玩家/股票/牌堆实体 →
@@ -93,12 +96,13 @@ pub fn begin_game_system(
     if active.is_some() {
         return;
     }
-    let (Some(def), Some(chance), Some(fate), Some(items), Some(stocks)) = (
+    let (Some(def), Some(chance), Some(fate), Some(items), Some(stocks), Some(holidays)) = (
         assets.boards.get(&assets.data.board).cloned(),
         assets.card_sets.get(&assets.data.chance),
         assets.card_sets.get(&assets.data.fate),
         assets.card_sets.get(&assets.data.items),
         assets.stock_sets.get(&assets.data.stocks).cloned(),
+        assets.holidays.get(&assets.data.holidays).cloned(),
     ) else {
         return;
     };
@@ -108,6 +112,7 @@ pub fn begin_game_system(
         ("命运牌", fate.validate(CardKind::Fate)),
         ("道具牌", items.validate(CardKind::Item)),
         ("股票", stocks.validate()),
+        ("节假日表", holidays.validate()),
     ] {
         if let Err(errs) = errs {
             panic!("{what}校验失败:\n  {}", errs.join("\n  "));
@@ -116,7 +121,12 @@ pub fn begin_game_system(
 
     // 洗牌消耗的是**牌堆子流**，骰子流一位没动 —— 所以「对局第一手点数 ==
     // `Rng::new(seed).roll_die()`」这条 B2 的断言在 B3 之后依然成立（见 rng.rs）。
+    // 历法锚点走自己的子流：同一种子随机到同一个月，且不影响牌序与骰点。
     let mut rng = Rng::new(cfg.seed.0);
+    let epoch = cfg
+        .epoch
+        .0
+        .unwrap_or_else(|| Date::new(EPOCH_YEAR, rng.pick_epoch_month(), 1));
     let lands = land::spawn_lands(&mut commands, &def);
     let players = player::spawn_players(&mut commands, &cfg.setup, &cfg.rules);
     spawn_stocks(&mut commands, &stocks);
@@ -128,7 +138,7 @@ pub fn begin_game_system(
     }
 
     info!(
-        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张（起始现金 {}）",
+        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张（起始现金 {}）· 开局 {epoch}",
         def.board_name,
         def.loop_len(),
         lands.len(),
@@ -139,14 +149,26 @@ pub fn begin_game_system(
         items.0.len(),
         cfg.rules.start_cash
     );
+    match holidays.coverage() {
+        Some((first, last)) => {
+            warn!("节假日表覆盖 {first}–{last}：表外年份农历三节与清明不放假，公历四条照常")
+        }
+        None => warn!("节假日表为空：所有年份都只按公历四条放假"),
+    }
 
     commands.insert_resource(ActiveBoard { def, lands });
     commands.insert_resource(TurnOrder::new(players));
     commands.insert_resource(rng);
+    // 节假日是这一局的静态日历事实：克隆成资源，规则层与 UI 都直接读，
+    // 免得每处再解一遍 `Assets`。装配失败前它不存在，于是所有读者都躲在状态门禁后面。
+    commands.insert_resource(holidays);
     commands.insert_resource(GameSession {
         turn_count: 0,
         seed: cfg.seed.0,
         price_index: 1.0,
+        epoch,
+        last_gift_year: None,
+        last_envelope_year: None,
     });
     commands.insert_resource(MarketClock::default());
     // 修正登记处是**这一局**的账：上一局挂着的免罪卡若不清，新局第一笔租金就会静默归零

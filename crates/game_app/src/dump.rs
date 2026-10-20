@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind, Corrections,
-    CouponBoxes, Deck, DeckOrder, Detention, GameRules, GameSeed, GameSession, Hand, Heading,
+    CouponBoxes, Deck, DeckOrder, Detention, GameSeed, GameSession, Hand, Heading, HolidaySet,
     Insulation, LandId, LandStatus, Landing, MarketClock, Mortgaged, Owner, Paused,
     PendingDecision, PlayerId, PlayerName, Points, Shelf, ShopStock, StaySentence, Timed,
     TurnOrder, TurnPhase, Wallet,
@@ -138,8 +138,8 @@ pub struct DumpView<'w, 's> {
     active: Option<Res<'w, ActiveBoard>>,
     phase: Res<'w, State<TurnPhase>>,
     paused: Res<'w, Paused>,
-    rules: Res<'w, GameRules>,
     clock: Res<'w, MarketClock>,
+    holidays: Res<'w, HolidaySet>,
     landing: Res<'w, Landing>,
     pending: Res<'w, PendingDecision>,
     atm: Res<'w, AtmAccess>,
@@ -197,15 +197,25 @@ fn format_session(view: &DumpView) -> String {
     let Some(session) = &view.session else {
         return format!("世界未装配（种子 {:#x}）", view.seed.0);
     };
-    let (month, day) = game_core::economy::date_of(view.clock.tick, view.rules.days_per_month);
-    let closed = if game_core::economy::is_weekend(view.clock.tick, &view.rules) {
-        " · 周末休市"
+    let date = game_core::prelude::date_of(view.clock.tick, session.epoch);
+    let closed = if view.holidays.is_market_closed(date) {
+        " · 股市休市"
     } else {
         ""
     };
+    let holiday = view
+        .holidays
+        .holiday_name(date)
+        .map(|name| format!(" · {name}"))
+        .unwrap_or_default();
+    let cover = view
+        .holidays
+        .coverage()
+        .map(|(first, last)| format!("{first}–{last}"))
+        .unwrap_or_else(|| "空表".to_string());
     format!(
-        "第 {} 回合 · 种子 {:#06x} · 日历 第 {} 月 {} 日（行情 tick {}）{closed} · 物价 ×{:.2}",
-        session.turn_count, session.seed, month, day, view.clock.tick, session.price_index
+        "第 {} 回合 · 种子 {:#06x} · 日历 {date}{holiday}（行情 tick {}）{closed} · 物价 ×{:.2} · 节日表 {cover}",
+        session.turn_count, session.seed, view.clock.tick, session.price_index
     )
 }
 

@@ -15,13 +15,14 @@
 //! 而是**每个回合结束 tick 一次**（[`market_tick_on_turn_end_system`]）。
 //! 理由：`prototype.json` 的 12 格里没有证券格，照搬 `turn_manager.gd:372-378` 就得到
 //! 「整局行情一动不动、分红永不发放」；更重要的是没有日历的市场不是市场。
-//! 分红因此改挂日历：**每月固定日派息**（`economy::is_dividend_day`），
-//! 一天就是一个回合，于是「每月 1 号」与「行情每天更新」是同一个数。
+//! 分红因此改挂日历：**每月 15 号派息**（`calendar::is_dividend_day`），
+//! 一天就是一个回合，于是「每月 15 号」与「行情每天更新」是同一个数。
 //! 踩到证券格（将来 40 格棋盘会有）只报到、不再推行情。
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use crate::calendar::{HolidaySet, date_of, is_dividend_day};
 use crate::data::DataHandles;
 use crate::economy;
 use crate::landing::{Landed, Landing, LandingDomain};
@@ -44,6 +45,8 @@ pub struct MarketClock {
 pub struct Market<'w, 's> {
     sets: Res<'w, Assets<StockSet>>,
     data: Res<'w, DataHandles>,
+    /// 节假日表（P2b）：休市看它。只读资源，不与 `Books` 里的 `ResMut<GameSession>` 冲突。
+    holidays: Res<'w, HolidaySet>,
     rng: ResMut<'w, Rng>,
     clock: ResMut<'w, MarketClock>,
     stocks: Query<
@@ -78,14 +81,15 @@ impl<'w, 's> Market<'w, 's> {
     /// 一个回合结束 = 一天过去：推行情，到点分红。
     /// 全项目只有 [`market_tick_on_turn_end_system`] 调它 —— 一天只走一次，日历才对得齐。
     ///
-    /// 周末**只推日历、不推行情**（PLAN §三「周末股市休市」）。tick 照常 +1，否则
-    /// 「1 回合 = 1 天」这条日历的地基就断了：休市的那两天会变成不存在。
+    /// 周末与节假日**只推日历、不推行情**（P2b：休市只挡股市，银行全年无休）。
+    /// tick 照常 +1，否则「1 回合 = 1 天」这条日历的地基就断了：休市的那两天会变成不存在。
     pub fn tick_at_turn_end(&mut self, books: &mut Books) {
         self.clock.tick += 1;
-        if !economy::is_weekend(self.clock.tick, &books.rules) {
+        let date = date_of(self.clock.tick, books.session.epoch);
+        if !self.holidays.is_market_closed(date) {
             self.advance_prices(books);
         }
-        self.pay_dividends(books);
+        self.pay_dividends(books, date);
     }
 
     /// 一次 tick：每只股独立随机游走。迭代顺序由实体生成顺序决定，
@@ -108,12 +112,14 @@ impl<'w, 's> Market<'w, 's> {
         }
     }
 
-    /// 分红：**每月固定日**给持股人发现金，`floor(股价 × rate) × 股数`
+    /// 分红：**每月 15 号**给持股人发现金，`floor(股价 × rate) × 股数`
     /// （派息规则来自 `stock_market.gd:156-176`，日期口径是新拍的）。破产者不发
     /// （Godot 的 `status` 过滤）。
-    fn pay_dividends(&mut self, books: &mut Books) {
+    ///
+    /// P2b 起分红与月末结息是两个日子：15 号分红（P8 乐透也在这天开奖），月末结息。
+    fn pay_dividends(&mut self, books: &mut Books, date: crate::calendar::Date) {
         let rules = *books.rules;
-        if !economy::is_dividend_day(self.clock.tick, &rules) {
+        if !is_dividend_day(date, rules.dividend_day) {
             return;
         }
         // 先把价格收成小表再发钱：迭代持仓时不该挂着 `self.stocks` 的可变借用
@@ -227,9 +233,12 @@ pub fn trade_request_system(
     let Some(current) = order.current() else {
         return;
     };
-    // 周末休市（PLAN §三）：不开盘就不许下单。与银行那条同一个日历判据，
-    // 但挡在这里而不是 `economy::buy_plan` 里 —— 成交函数不该知道今天是星期几。
-    if economy::is_weekend(market.tick_count(), &books.rules) {
+    // 周末与节假日休市（P2b）：不开盘就不许下单。只挡股市 —— 银行全年无休。
+    // 挡在这里而不是 `economy::buy_plan` 里 —— 成交函数不该知道今天是星期几。
+    if market
+        .holidays
+        .is_market_closed(date_of(market.tick_count(), books.session.epoch))
+    {
         for r in requests.read() {
             debug!("交易被拒：周末股市休市（{:?} {}）", r.player, r.stock.0);
         }

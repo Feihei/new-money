@@ -13,6 +13,8 @@ pub mod afflict;
 pub mod bail;
 pub mod bank;
 pub mod board;
+pub mod calendar;
+pub mod calendar_fx;
 pub mod card;
 pub mod charge;
 pub mod coupon;
@@ -53,6 +55,11 @@ pub mod prelude {
     pub use crate::board::{
         BoardDef, BranchDef, BranchKind, GridPos, LandDef, LandType, TileDef, TileIndex, TileKind,
     };
+    pub use crate::calendar::{
+        Date, EPOCH_YEAR, EpochOverride, HolidaySet, LunarYear, date_of, days_in_month,
+        days_until_dividend, is_dividend_day, is_leap_year, is_month_end,
+    };
+    pub use crate::calendar_fx::deliver_calendar_events_system;
     pub use crate::card::{CardDef, CardEffect, CardKind, CardSet, CardTarget};
     pub use crate::charge::{
         Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, Scope, Source,
@@ -85,12 +92,13 @@ pub mod prelude {
     pub use crate::msg::{
         BailRequested, BankOp, BankOpDone, BankOpRequested, BankVisited, BuyOffered, CardDrawn,
         CardGained, CardNotice, CardPlayed, CashChanged, ChargeWaived, Decision, DecisionChosen,
-        DetentionLifted, DetentionSkipped, DiceRolled, EffectOutcome, GameOver, LandBought,
-        LandUpgraded, MortgageDone, MortgageOp, MortgageRequested, PlayCardRequested,
-        PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported,
-        PointsChanged, RentDue, RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, StayLifted,
-        StaySkipped, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
-        TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkStarted,
+        DetentionLifted, DetentionSkipped, DiceRolled, EffectOutcome, GameOver, GiftGiven,
+        GiftsGiven, LandBought, LandUpgraded, MortgageDone, MortgageOp, MortgageRequested,
+        PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
+        PlayerTeleported, PointsChanged, RedEnvelope, RentDue, RequestRoll, RequestStay,
+        ShopOpDone, ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged,
+        StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
+        TurnStarted, UpgradeOffered, WalkStarted,
     };
     pub use crate::player::{
         BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Heading, PLAYER_COLORS,
@@ -116,14 +124,15 @@ use bank::apply_month_end_interest_system;
 use prelude::{
     ActiveBoard, AtmAccess, BailRequested, BankOpDone, BankOpRequested, BankVisited, BoardDef,
     BuyOffered, CardDrawn, CardGained, CardPlayed, CardSet, CashChanged, ChargeWaived, Corrections,
-    CouponBoxes, DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled, GameOver,
-    GameRules, GameSeed, GameSetup, JsonAssetLoader, LandBought, LandUpgraded, Landing,
-    MarketClock, MortgageDone, MortgageRequested, Paused, PendingDecision, PlayCardRequested,
-    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged,
-    RentDue, RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, ShopStock, StayLifted,
-    StaySkipped, StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited,
-    TileStepped, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkStarted,
-    advance_walk_clock_system, bail_op_system, bank_op_system, begin_game_system, decision_system,
+    CouponBoxes, DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride,
+    GameOver, GameRules, GameSeed, GameSetup, GiftsGiven, HolidaySet, JsonAssetLoader, LandBought,
+    LandUpgraded, Landing, MarketClock, MortgageDone, MortgageRequested, Paused, PendingDecision,
+    PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
+    PlayerTeleported, PointsChanged, RedEnvelope, RentDue, RequestRoll, RequestStay, ShopOpDone,
+    ShopOpRequested, ShopStock, StayLifted, StaySkipped, StockPriceChanged, StockSet,
+    StockTradeRequested, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted,
+    UpgradeOffered, WalkClock, WalkStarted, advance_walk_clock_system, bail_op_system,
+    bank_op_system, begin_game_system, decision_system, deliver_calendar_events_system,
     expire_land_status_system, grant_atm_access_system, market_tick_on_turn_end_system,
     mortgage_op_system, play_card_system, shop_op_system, trade_request_system, walk_step_system,
 };
@@ -154,14 +163,18 @@ impl Plugin for CoreGamePlugin {
         app.init_asset::<BoardDef>()
             .init_asset::<CardSet>()
             .init_asset::<StockSet>()
+            .init_asset::<HolidaySet>()
             .register_asset_loader(JsonAssetLoader::<BoardDef>::default())
             .register_asset_loader(JsonAssetLoader::<CardSet>::default())
             .register_asset_loader(JsonAssetLoader::<StockSet>::default())
+            .register_asset_loader(JsonAssetLoader::<HolidaySet>::default())
             // 对局配置有默认值（prototype 双人阵容 + 可复现种子），
             // 表现层要换阵容/换种子就在 Startup 前 insert_resource 覆盖
             .init_resource::<GameRules>()
             .init_resource::<GameSetup>()
             .init_resource::<GameSeed>()
+            .init_resource::<EpochOverride>()
+            .init_resource::<HolidaySet>()
             .init_resource::<Paused>()
             .init_resource::<WalkClock>()
             .init_resource::<MarketClock>()
@@ -220,6 +233,9 @@ impl Plugin for CoreGamePlugin {
             // 漏一条就是 `Books` 那批参数整局不跑（症状见 ARCHITECTURE §六 的消息表注）
             .add_message::<ShopOpRequested>()
             .add_message::<ShopOpDone>()
+            // ===== 日历事件（P2b）=====
+            .add_message::<GiftsGiven>()
+            .add_message::<RedEnvelope>()
             // ===== 保释（P4③）=====
             .add_message::<BailRequested>()
             .add_message::<PlayerBailed>()
@@ -234,7 +250,12 @@ impl Plugin for CoreGamePlugin {
                     .in_set(CoreSet::Boot)
                     .run_if(in_state(TurnPhase::Boot)),
             )
-            .add_systems(OnEnter(TurnPhase::TurnStart), begin_turn_system)
+            // 日历事件排在回合开始之前：12/25 的礼物与正月初一的红包要在
+            // 「那一天的第一个回合」动手之前发完，且不挂 `Pending`（不挡回合机）
+            .add_systems(
+                OnEnter(TurnPhase::TurnStart),
+                (deliver_calendar_events_system, begin_turn_system).chain(),
+            )
             .add_systems(
                 Update,
                 (

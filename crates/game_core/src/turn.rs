@@ -104,6 +104,13 @@ pub struct GameSession {
     /// 不设上限（PC 原版口径，PLAN §一）。哪些钱受它缩放是 `charge::scales_with_price`
     /// 那张穷尽表说了算 —— 股价与神明金额是点名豁免的。
     pub price_index: f32,
+    /// 开局那天（P2b）。2048 年随机一个月的 1 日，由**历法专用子流**从会话种子抽出；
+    /// `NM_EPOCH` 可钉死。它决定整局日历，所以必须进 `GameSnapshot`（P15）。
+    pub epoch: crate::calendar::Date,
+    /// 最后一次发圣诞礼物的年份（P2b）。没有这一位，读档回到 12/25 会再发一轮。
+    pub last_gift_year: Option<i32>,
+    /// 最后一次发春节红包的年份（P2b）。理由同上。
+    pub last_envelope_year: Option<i32>,
 }
 
 /// 暂停总闸（`pause_menu.gd` 的 `get_tree().paused`）。规则层只读，写的永远是输入侧。

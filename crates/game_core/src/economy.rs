@@ -379,58 +379,8 @@ pub fn sell_plan(price: f32, owned: u32, want: u32) -> Option<(u32, i64)> {
     (actual > 0).then(|| (actual, sell_proceeds(price, actual)))
 }
 
-// ===== 日历 =====
-
-/// 把「第几个行情 tick」换算成「第几月第几日」，两者都从 1 起。
-///
-/// 一天就是一个回合结束（`market::market_tick_on_turn_end_system` 在那里推进 tick），
-/// 所以日历不需要另一条时钟 —— 玩家听到的「每月 1 号派息」与看到的行情更新是同一个数。
-/// `tick 0` 是开局那天，即 1 月 1 日。`days_per_month == 0` 退化成「每月一天」而不是除零。
-pub fn date_of(tick: u32, days_per_month: u32) -> (u32, u32) {
-    let span = days_per_month.max(1);
-    (tick / span + 1, tick % span + 1)
-}
-
-/// 今天是这周的第几天（1 起，1 = 周一）。`tick 0` 是开局那天 = 1 月 1 日 = 周一。
-pub fn weekday_of(tick: u32, days_per_week: u32) -> u32 {
-    let span = days_per_week.max(1);
-    tick % span + 1
-}
-
-/// 周末吗（每周最后两天）。股市与银行这两天都不开门。
-///
-/// 周长按 7、月长按 12，两者不整除 —— 于是周末在月内逐月漂移，「这个月哪天办不了业务」
-/// 不是一张能背下来的表。这是要的：日历得真的被看一眼。
-pub fn is_weekend(tick: u32, rules: &GameRules) -> bool {
-    let span = rules.days_per_week.max(1);
-    weekday_of(tick, span) + 2 > span
-}
-
-/// 月末吗 —— 储金与贷款结息的那一天（PLAN §三「月末发 10% 储金利息」）。
-///
-/// 口径说清：回合结束时 tick 已经推进到**新的一天**，所以这条问的是「今天开局是不是月末」，
-/// 于是利息在月末那天的**开头**到账，而不是月末过完才补。一次月结一次，不会重也不会漏。
-pub fn is_month_end(tick: u32, rules: &GameRules) -> bool {
-    date_of(tick, rules.days_per_month).1 >= rules.days_per_month.max(1)
-}
-
-/// 今天发不发股息。`dividend_day` 落在月长之外时按月末收拢 —— 配置写错该表现为
-/// 「派息日挪到月末」，而不是「这局永远不发钱」那种静默失效。
-pub fn is_dividend_day(tick: u32, rules: &GameRules) -> bool {
-    let span = rules.days_per_month.max(1);
-    let wanted = rules.dividend_day.clamp(1, span);
-    date_of(tick, span).1 == wanted
-}
-
-/// 下一个派息日（给 UI 说「距派息还有几天」）。同一天不返回 0 —— 刚发过一次，
-/// 屏幕上要说的是下一次，而不是「今天」（今天的那笔已经在现金里了）。
-pub fn days_until_dividend(tick: u32, rules: &GameRules) -> u32 {
-    let span = rules.days_per_month.max(1);
-    let wanted = rules.dividend_day.clamp(1, span);
-    let (_, today) = date_of(tick, span);
-    let gap = (wanted + span - today) % span;
-    if gap == 0 { span } else { gap }
-}
+// 日历（P2b 起）整个搬到 `crate::calendar`：真实公历、节假日表、派息日都在那边。
+// 这里留一个指针而不是转发函数 —— 两处都能问「今天几号」就是第二份真相。
 
 #[cfg(test)]
 mod tests {
@@ -1073,60 +1023,5 @@ mod tests {
         assert_eq!(dividend_per_share(80.0, &r), 1, "80×1.5%=1.2 → 1");
         assert_eq!(dividend_per_share(66.0, &r), 0, "不足一分不给");
         assert_eq!(dividend_per_share(400.0, &r), 6);
-    }
-
-    #[test]
-    fn the_calendar_counts_months_and_days_from_day_one() {
-        // 12 天一月：tick 0 就是 1 月 1 日，满一月翻到 2 月 1 日
-        assert_eq!(date_of(0, 12), (1, 1));
-        assert_eq!(date_of(11, 12), (1, 12));
-        assert_eq!(date_of(12, 12), (2, 1));
-        assert_eq!(date_of(25, 12), (3, 2));
-        assert_eq!(date_of(3, 0), (4, 1), "月长写 0 退化成每月一天，不能除零");
-    }
-
-    #[test]
-    fn dividend_day_is_a_date_not_a_tick_modulus() {
-        let r = GameRules {
-            days_per_month: 3,
-            dividend_day: 2,
-            ..rules()
-        };
-        // 3 天一月、2 号派息 → tick 1、4、7…（1 月 2 日、2 月 2 日…）
-        assert!(!is_dividend_day(0, &r), "开局那天不算一次派息");
-        assert!(is_dividend_day(1, &r));
-        assert!(!is_dividend_day(2, &r));
-        assert!(!is_dividend_day(3, &r), "3 号是月末");
-        assert!(is_dividend_day(4, &r), "2 月 2 日");
-    }
-
-    #[test]
-    fn a_dividend_day_outside_the_month_moves_to_month_end() {
-        // 配置写成「1 月 45 号」：应挪到月末发，而不是这局永远不发钱
-        let r = GameRules {
-            days_per_month: 6,
-            dividend_day: 45,
-            ..rules()
-        };
-        assert!(is_dividend_day(5, &r), "应收拢成每月 6 号");
-        assert!(is_dividend_day(11, &r));
-        assert!(!is_dividend_day(4, &r));
-    }
-
-    #[test]
-    fn countdown_never_reports_zero() {
-        let r = GameRules {
-            days_per_month: 12,
-            dividend_day: 1,
-            ..rules()
-        };
-        assert_eq!(days_until_dividend(0, &r), 12, "今天就是派息日也说下一次");
-        assert_eq!(
-            days_until_dividend(5, &r),
-            7,
-            "1 月 6 日 → 2 月 1 日还差 7 天"
-        );
-        assert_eq!(days_until_dividend(11, &r), 1, "1 月 12 日是明天就派息");
-        assert_eq!(days_until_dividend(12, &r), 12, "2 月 1 日刚发过");
     }
 }

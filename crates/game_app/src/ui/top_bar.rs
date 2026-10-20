@@ -13,8 +13,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankVisited, CardPlayed, ChargeWaived, DetentionLifted,
-    DetentionSkipped, GameOver, GameRules, GameSession, MarketClock, MortgageDone, MortgageOp,
-    Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, ShopOpDone,
+    DetentionSkipped, GameOver, GameSession, MarketClock, MortgageDone, MortgageOp, Paused,
+    PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, ShopOpDone,
     StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TradeSide, TurnOrder,
     TurnPhase,
 };
@@ -165,7 +165,6 @@ pub(crate) struct TurnView<'w, 's> {
     pending: Res<'w, PendingDecision>,
     atm: Res<'w, AtmAccess>,
     clock: Res<'w, MarketClock>,
-    rules: Res<'w, GameRules>,
     names: Query<'w, 's, &'static PlayerName>,
     /// 当前这位身上有没有停留计时（P4④）：有则那颗「掷骰」写「停留」。
     /// 判据放在这里而不是按 `TurnPhase` 猜，是因为它跟人走、不跟阶段走。
@@ -335,23 +334,23 @@ pub(crate) fn refresh_top_bar(
 ///
 /// 等待掷骰那一行带上日历与物价：行情每回合结束动一次、分红按「几月几日」发、
 /// 地价租金按 [`game_core::GameSession::price_index`] 缩放，玩家要能在动手之前看见这三个数，
-/// 否则「每月 1 号派息」与「地价翻了一倍」只是两句写在文档里的话。
+/// 否则「每月 15 号派息」与「地价翻了一倍」只是两句写在文档里的话。
 fn phase_hint(phase: TurnPhase, turn: &TurnView) -> Option<String> {
     let text = match phase {
         TurnPhase::Boot => "准备中".to_string(),
         TurnPhase::WaitRoll => {
-            let (month, day) =
-                game_core::economy::date_of(turn.clock.tick, turn.rules.days_per_month);
+            let date = game_core::prelude::date_of(turn.clock.tick, turn.session.epoch);
             // 指数每回合末重算，而这一行在进入 WaitRoll 时才写 —— 两者同帧之后，
             // 所以这里读到的就是「今天」那个数（旁白不会显示昨天的物价）
             let index = turn.session.price_index;
             match turn.order.current().and_then(|p| turn.names.get(p).ok()) {
                 Some(name) => format!(
-                    "{} 的回合 — 请掷骰（第 {turn_no} 回合 · 第 {month} 月 {day} 日 · 物价 ×{index:.2}）",
+                    "{} 的回合 — 请掷骰（第 {turn_no} 回合 · {} · 物价 ×{index:.2}）",
                     name.0,
+                    date,
                     turn_no = turn.session.turn_count
                 ),
-                None => format!("请掷骰（第 {month} 月 {day} 日 · 物价 ×{index:.2}）"),
+                None => format!("请掷骰（{date} · 物价 ×{index:.2}）"),
             }
         }
         TurnPhase::Walking => "移动中…".to_string(),
@@ -650,7 +649,7 @@ fn name(names: &Query<&PlayerName>, player: Entity) -> String {
 mod tests {
     use super::*;
     use bevy::state::app::StatesPlugin;
-    use game_core::prelude::{PlayerId, StockId, TradeSide, TurnOrder};
+    use game_core::prelude::{GameRules, PlayerId, StockId, TradeSide, TurnOrder};
 
     /// 顶栏刷新只许动顶栏名下的按钮（§6.1 坑 31）。
     ///
@@ -670,6 +669,9 @@ mod tests {
                 turn_count: 0,
                 seed: 0,
                 price_index: 1.0,
+                epoch: game_core::prelude::Date::new(2048, 1, 1),
+                last_gift_year: None,
+                last_envelope_year: None,
             })
             .insert_resource(MarketClock::default())
             .insert_resource(GameRules::default())

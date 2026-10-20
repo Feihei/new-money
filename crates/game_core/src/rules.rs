@@ -33,15 +33,11 @@ pub struct GameRules {
     pub max_loan_ratio: f32,
     /// 股价每 tick 的基础漂移，`stock_market.gd:14`。
     pub stock_base_drift: f32,
-    /// 一个月多少天。一天 == 一个回合结束（行情就在那里 tick 一次），所以这条同时是
-    /// 「多少回合一个月」。B5b 起分红不再挂在 tick 计数上，而是挂在日历的固定日 ——
-    /// 「每月 1 号派息」是玩家能记住的规则，「每 5 次 tick」不是。
-    pub days_per_month: u32,
-    /// 一周多少天。周末（每周最后两天）**股市与银行都休**（PLAN §三「日期系统」行）。
-    /// 与 `days_per_month` 不整除是刻意的：月长 12、周长按 7 走，周末在月内逐月漂移，
-    /// 于是「这个月踩银行格能不能办业务」不是一眼能背出来的表 —— 玩家要抬头看日历。
-    pub days_per_week: u32,
-    /// 每月哪一天派息（1 起）。被 `economy::date_of` 的日历解释。
+    /// 每月哪一天派息（1 起）。被 `calendar::is_dividend_day` 解释；
+    /// P2b 起是 **15 号**（月中那天＝乐透开奖 + 公司分红，月末另结储金息）。
+    ///
+    /// 一天 == 一个回合结束（行情在那里 tick 一次），所以「一个月」不再是固定回合数：
+    /// 月长由真实公历给出（28–31、闰年 2/29），见 [`crate::calendar`]。
     pub dividend_day: u32,
     /// 每股股息 = 股价 × 该比例，`stock_market.gd:16`。
     pub dividend_rate: f32,
@@ -97,9 +93,7 @@ impl Default for GameRules {
             loan_rate: 0.15,
             max_loan_ratio: 2.0,
             stock_base_drift: 0.002,
-            days_per_month: 12,
-            days_per_week: 7,
-            dividend_day: 1,
+            dividend_day: 15,
             dividend_rate: 0.015,
             max_price_history: 50,
             coupon_refresh_turns: 6,
