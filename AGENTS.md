@@ -22,7 +22,7 @@
 常用命令见 [`README.md` 的快速开始](./README.md)；agent 侧额外需要的是：
 
 ```bash
-./check.sh                  # 五项质量门，逐步取退出码；提交前必须退出码 0
+./check.sh                  # 六项质量门（含 `cargo test -p game_app`），逐步取退出码；提交前必须退出码 0
 cargo test -p game_core      # 只跑规则层（无窗口，编译量小）
 cargo clippy --workspace --all-targets -- -D warnings
 ```

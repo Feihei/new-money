@@ -11,7 +11,7 @@
 ```bash
 cargo run -p game_app     # 打开窗口：主菜单 → 新游戏 → 用顶栏「掷骰」玩
 cargo test -p game_core   # 规则层测试，不需要窗口
-./check.sh                # 质量门：fmt + 测试 + check + clippy(-D warnings) + 棋盘校验
+./check.sh                # 质量门：fmt + 规则层测试 + check + clippy(-D warnings) + 表现层测试 + 棋盘校验
 ```
 
 窗口里可以调的（全部只在开发侧生效）：`NM_CAM_SIZE`（取景高度，默认 8 = Godot 的 `CAM_SIZE`，`0` 整盘取景）、
