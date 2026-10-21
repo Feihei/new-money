@@ -19,8 +19,8 @@ use game_core::prelude::{
     ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind, Corrections,
     CouponBoxes, Deck, DeckOrder, Detention, GameSeed, GameSession, Hand, Heading, HolidaySet,
     Insulation, Inventory, LandId, LandStatus, Landing, MarketClock, Mortgaged, Mount, MoveCap,
-    Occupancy, OccupancyAt, Owner, Paused, PendingDecision, PlayerId, PlayerName, Points, Shelf,
-    ShopStock, StaySentence, Timed, TurnOrder, TurnPhase, Wallet,
+    Occupancy, OccupancyAt, Owner, Paused, PendingDecision, PlayerId, PlayerName, Points,
+    Possession, Shelf, ShopStock, StaySentence, Timed, TurnOrder, TurnPhase, Wallet, resists,
 };
 
 use crate::asset_root;
@@ -114,7 +114,11 @@ type PlayerRow = (
     Option<&'static StaySentence>,
     Option<&'static Bankrupt>,
     Option<&'static Hand>,
-    Option<&'static Insulation>,
+    // 护身的**两个来源**成对读：卡给的层数（组件）与神给的免疫（现读 `Possession`，
+    // P6b②）。合成一格而不是相邻两格有两个理由：语义上它们回答同一个问题（「这次陷害
+    // 为什么没生效」），而 Bevy 的 `QueryData` 元组实现到 15 元为止 —— 第 16 格会在这里
+    // 报「not valid to request as data in a Query」，症状看着像查询写坏了而不是行数超限。
+    (Option<&'static Insulation>, Option<&'static Possession>),
     &'static Heading,
     // P5：道具栏、载具、乌龟夹步。三样都是「他这回合怎么走」的输入 / 结果，
     // 与手牌分开念 —— 查「遥控骰子为什么没生效」时，道具栏与夹步必须同时看得见
@@ -369,7 +373,7 @@ fn format_players(view: &DumpView) -> Vec<String> {
                 stay,
                 bankrupt,
                 hand,
-                shield,
+                (shield, god),
                 heading,
                 inventory,
                 mount,
@@ -400,6 +404,12 @@ fn format_players(view: &DumpView) -> Vec<String> {
                 if *heading == Heading::Backward {
                     flag.push("逆向".to_string());
                 }
+                // 神带着**天数**，而天数数的是他自己的回合（与拘留同族、与地块的涨价不同），
+                // 所以这一格写的必须是「剩几回合」而不是「第几天」—— 查验收③
+                // 「坐牢期间神的 7 天照算」时，两个数要在同一行里对得上
+                if let Some(held_god) = god {
+                    flag.push(format!("{}剩{}", held_god.god.label(), held_god.days_left));
+                }
                 let flag = if flag.is_empty() {
                     "-".to_string()
                 } else {
@@ -421,11 +431,17 @@ fn format_players(view: &DumpView) -> Vec<String> {
                         .join("·")
                 });
                 // 护身是「打过免罪卡之后」唯一留下的状态。查陷害为什么没生效，
-                // 看的就是这一栏 —— 它在手牌面板上只有一行小字，容易被当成装饰
-                let guard = shield.map_or("-".to_string(), |s| match s.remaining() {
-                    None => "免疫".to_string(),
-                    Some(n) => n.to_string(),
-                });
+                // 看的就是这一栏 —— 它在手牌面板上只有一行小字，容易被当成装饰。
+                // 两个来源分开念：`免疫` 是那位神给的（不消耗、随神消失），数字是卡给的层数
+                let guard = match (
+                    god.map(|held| held.god).is_some_and(resists),
+                    shield.map(|s| s.charges).filter(|n| *n > 0),
+                ) {
+                    (true, Some(n)) => format!("免疫+卡{n}"),
+                    (true, None) => "免疫".to_string(),
+                    (false, Some(n)) => n.to_string(),
+                    (false, None) => "-".to_string(),
+                };
                 // 道具栏按 kind 数：与手牌分开念 —— 这两条库存的规则本来就不一样
                 let items = if inventory.is_empty() {
                     "-".to_string()

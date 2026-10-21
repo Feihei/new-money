@@ -224,7 +224,7 @@ fn an_insulated_victim_shrugs_off_a_trip_abroad_too() {
     deal(&mut app, p0, insulate.0);
     play_card(&mut app, p0, insulate.0, None);
     settle(&mut app, 2);
-    assert_eq!(shield_of(&app, p0), Some(Some(1)), "刚挂上两层？");
+    assert_eq!(shield_of(&app, p0), Some(1), "刚挂上两层？");
 
     draw_it(&mut app);
 

@@ -146,6 +146,9 @@ pub struct TurnWriters<'w> {
     /// 神老了一天/到期离场（P6）。挂在这里而不是单开一条 system：扣那一格必须发生在
     /// 拘留分支**之前**，而那正是这个函数最靠前的几行。
     god_left: MessageWriter<'w, crate::msg::GodLeft>,
+    /// 衰神这一回合从他手里弄走的卡（P6b②）。与 `god_left` 同一个位置：那是「他的回合
+    /// 开始」这一刻的事，而神到期那一回合不该再多弄走一张（判据见 `age_possession` 的注）。
+    card_lost: MessageWriter<'w, crate::msg::CardLost>,
 }
 
 /// `roll_dice_system` 的输入打包：请求流水 + 当前轮转 + 棋盘拓扑
@@ -175,6 +178,11 @@ pub struct TurnDesk<'w, 's> {
     /// 两条并排会在参数建立期撞成借用冲突。回合机要的只有「神到期时把那几条撤掉」，
     /// 所以只把那一格拿进来。
     corrections: ResMut<'w, crate::charge::Corrections>,
+    /// 衰神每回合弄走一张手牌（P6b②）要的三样。同样**不是整个 `Books`**（同上一条理由），
+    /// 而这三样确实是那一件事的全部：从谁手里、按哪条随机流抽、抽到的那张叫什么名字。
+    hands: Query<'w, 's, &'static mut crate::hand::Hand, With<PlayerId>>,
+    shelf: crate::deck::Shelf<'w>,
+    rng: ResMut<'w, Rng>,
     atm: ResMut<'w, AtmAccess>,
 }
 
@@ -223,13 +231,26 @@ pub fn begin_turn_system(
 
     // 身上那位神老一天。离场的那位由 `GodLeft` 说，恶犬接位在
     // `gods::land_deity_succession_system` 读那条消息去做，不在这里顺手放。
-    crate::gods::age_possession(
+    let still_held = crate::gods::age_possession(
         &mut desk.commands,
         &mut desk.corrections,
         &mut desk.possessions,
         player,
         &mut writers.god_left,
     );
+    // 衰神的「每回合丢一张」。读的是上面那个**返回值**而不是再查一次组件 ——
+    // 摘组件走的是 `Commands`，同帧查得到旧值，那样会把「期满那一回合也丢一张」
+    // 变成一条静默的规则（`age_possession` 的注里记了这条坑的出处）
+    if let Some(god) = still_held {
+        crate::gods::drain_cards(
+            god,
+            player,
+            &mut desk.hands,
+            &desk.shelf,
+            &mut desk.rng,
+            &mut writers.card_lost,
+        );
+    }
 
     // 回合开始即扣一格，所以 turns_left==1 表示「最后一格服完，本回合可行动」
     let held = desk.held.get(player).ok().copied();

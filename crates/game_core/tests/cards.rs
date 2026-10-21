@@ -90,7 +90,7 @@ fn an_insulated_victim_shrugs_off_the_frame_and_both_sides_keep_their_trail() {
     deal(&mut app, p1, insulate.0);
     play_card(&mut app, p1, insulate.0, None);
     settle(&mut app, 2);
-    assert_eq!(shield_of(&app, p1), Some(Some(1)), "一张免罪 = 一层护身");
+    assert_eq!(shield_of(&app, p1), Some(1), "一张免罪 = 一层护身");
     assert!(hand_of(&app, p1).is_empty(), "打过就没了");
 
     make_current(&mut app, p0);
@@ -128,7 +128,7 @@ fn two_shields_block_two_frames_and_the_third_one_lands() {
         play_card(&mut app, p1, insulate.0, None);
         settle(&mut app, 2);
     }
-    assert_eq!(shield_of(&app, p1), Some(Some(2)), "护身是叠层不是刷新");
+    assert_eq!(shield_of(&app, p1), Some(2), "护身是叠层不是刷新");
 
     make_current(&mut app, p0);
     for _ in 0..2 {

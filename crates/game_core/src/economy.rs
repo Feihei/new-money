@@ -148,21 +148,31 @@ pub fn owns_full_group(all: &[LandView], player: PlayerId, group: &str) -> bool 
     any
 }
 
-/// 组内等级差 ≤ 1（经典大富翁规则，`property_system.gd:164-178`）。空组返回 `false`。
-pub fn group_levels_within_one(all: &[LandView], group: &str) -> bool {
-    let mut min = u8::MAX;
-    let mut max = 0;
+/// 这块地是不是同色组里的**最低层** —— 唯一有资格加盖的那一格。
+///
+/// 取代原来那条「组内等级差 ≤1」（`property_system.gd:164-178`）。差值判定的毛病是
+/// 它**只在事前查一次**，于是允许把差距拉开：(1,2) 合法 → 升高的那块 → (1,3) 之后
+/// 谁都升不了，整组永久卡死。而 P6b② 大福神的「加盖多一层」必然造出 (3,1) 这种
+/// 落差，卡死就从边缘情况变成日常。取最低层那一条把方向钉死：**低的那块永远能追，
+/// 高的那块永远不能先跑**，正常 +1 加盖根本拉不开差距，外来的落差也能自己愈合。
+/// 不在组里（`group` 为 `None`）返回 `false`，与 [`owns_full_group`] 同一口径。
+pub fn is_group_floor(all: &[LandView], land: &LandView) -> bool {
+    let Some(group) = land.group.as_deref() else {
+        return false;
+    };
     let mut any = false;
+    let mut min = u8::MAX;
     for l in all.iter().filter(|l| l.group.as_deref() == Some(group)) {
         any = true;
         min = min.min(l.level);
-        max = max.max(l.level);
     }
-    any && (max - min) <= 1
+    // `<=` 而不是 `==`：调用方给的 `all` 未必包含这块地（例如刚插入还没进快照），
+    // 而判据的本意是「组里没有比我低的」，与我自己在不在这份表里无关
+    any && land.level <= min
 }
 
 /// 升级判定（`property_system.gd:105-125`）：**由 `by` 发起** + 未抵押 + 未满级 +
-/// 垄断同色组 + 组内等级差 ≤1 + 现金够。
+/// 垄断同色组 + 这块地是组内最低层 + 现金够。
 ///
 /// `by` 是刻意多出来的参数：Godot 的 `can_upgrade(player, tile_index, ...)` 第一件事就是
 /// `is_owned_by_key(key, player.player_id)`。只看 `land.owner` 虽然在此刻等价
@@ -193,7 +203,7 @@ pub fn can_upgrade(
     let Some(group) = land.group.as_deref() else {
         return false;
     };
-    owns_full_group(all, by, group) && group_levels_within_one(all, group) && cash >= cost
+    owns_full_group(all, by, group) && is_group_floor(all, land) && cash >= cost
 }
 
 // ===== 银行（`bank_system.gd`）=====
@@ -653,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_needs_monopoly_and_level_spread_within_one() {
+    fn upgrade_needs_monopoly_and_only_the_floor_plot_rises() {
         let def = board();
         let r = rules();
         let max = r.max_building_level;
@@ -676,20 +686,38 @@ mod tests {
             "差一口气也不可"
         );
 
-        // 组内等级差 2 → 低的那块不许再拉开（`property_system.gd:164-178`）
+        // 落差 2（大福神一次加两层留下的形状）：**低的那块能追**，
+        // 高的那块不许再跑 —— 这两句合起来才是「永久卡死」的解药
         let all = world(&def, &[(0, p(0), 1, false), (1, p(0), 3, false)]);
-        let land = at(&all, 0);
+        let low = at(&all, 0);
+        let high = at(&all, 1);
         assert!(
-            !can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r),
-            "等级差必须 ≤1"
+            can_upgrade(&low, me, &all, cost(&def, &low), 99_999, &r),
+            "落差再大，最低层那块总要能追上去，否则整组冻死"
+        );
+        assert!(
+            !can_upgrade(&high, me, &all, cost(&def, &high), 99_999, &r),
+            "比最低层高的那块不许再加盖 —— 拉开落差的那一步必须走不通"
         );
 
-        // 差 1 时低的那块可升（升到与高的齐平）
+        // 差 1 时同样只有低的那块可升（升到与高的齐平）
         let all = world(&def, &[(0, p(0), 2, false), (1, p(0), 3, false)]);
         let land = at(&all, 0);
         assert!(
             can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r),
             "差 1 时低的那块可升"
+        );
+        assert!(
+            !can_upgrade(&at(&all, 1), me, &all, cost(&def, &at(&all, 1)), 99_999, &r),
+            "齐平之前高的那块等着"
+        );
+
+        // 齐平之后两块都可升（正常加盖走的就是这一格）
+        let all = world(&def, &[(0, p(0), 3, false), (1, p(0), 3, false)]);
+        assert!(
+            can_upgrade(&at(&all, 0), me, &all, 0, 99_999, &r)
+                && can_upgrade(&at(&all, 1), me, &all, 0, 99_999, &r),
+            "齐平时谁都能升，否则一条合法的升级流水都发不出来"
         );
 
         // 满级不可再升（Godot 的 test_cant_upgrade_beyond_6）

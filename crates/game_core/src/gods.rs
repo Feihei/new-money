@@ -54,7 +54,8 @@ use crate::charge::{
 use crate::deck::{CardId, Shelf};
 use crate::hand::{Hand, card_notice, deal_to};
 use crate::msg::{
-    CardGained, CardNotice, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, PlayerArrived,
+    CardGained, CardLost, CardNotice, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed,
+    PlayerArrived,
 };
 use crate::occupancy::{Occupancy, OccupancyAt, OccupancyKind, place};
 use crate::player::PlayerId;
@@ -449,6 +450,157 @@ fn deal_god_cards(
     given
 }
 
+// ===== 不是钱的那几处（P6b②）=====
+
+/// 这位神在场时，落到 bearer 头上的**事**（拘留／停留／转向／乌龟）整件不生效。
+///
+/// **穷尽表，不许 `_`**，理由与 [`money_corrections`] 同一条：加一位神必须当场回答
+/// 「它免不免厄运」。今天只有两句真话（大福神与天使免 —— PLAN §三 神明行，与被绑架那行的
+/// 「天使与福神可免」是同一条规则的两个说法），其余八位都是「不免」——
+/// 而那八行是**写下来的不免**，不是漏掉。
+///
+/// 为什么这是一句现读的判据而不是 [`Insulation`](crate::afflict::Insulation) 的一格：
+/// 卡给的护身有**次数**、会被吃掉，神给的免疫没有次数、随神一起消失。两者塞进同一个组件
+/// 就必然出现「上身覆盖掉卡、离场把卡一起摘走」—— 一个不崩也不会红的丢账。
+/// 所以这里只回答「此刻这位神免不免」，那份次数留在它自己的组件里。
+pub fn resists(god: God) -> bool {
+    match god {
+        God::BigFortune | God::Angel => true,
+        God::SmallFortune | God::BigRich | God::SmallRich => false,
+        God::BigPoor | God::SmallPoor => false,
+        God::BigDoom | God::SmallDoom => false,
+        // 恶魔与死神在 PLAN §三 那一行里是「延长厄运天数」而不是「免除」，土地公不管事
+        God::Devil | God::LandDeity | God::Death => false,
+    }
+}
+
+/// 这位神在场时，落到 bearer 头上的**厄运天数**乘几。
+///
+/// 同样是穷尽表。今天只有大衰神一位说话（PLAN §三「衰神＝…厄运天数加倍」），
+/// 而 PLAN §三 被绑架那一行还写着「恶魔／死神附身会延长」—— 那两位现在填的是**中性值 1**，
+/// 意思是「今天不延长」，不是「没想过」：P6c 落地时必须回到这张表改一个数，
+/// 而不是在某个调用点旁边补一句 `if`。小衰神按「小的那一半只动钱」读（与 P6b①
+/// 那条「抢钱是大穷神独有」同一个分法）。
+pub fn doom_multiplier(god: God) -> u32 {
+    match god {
+        God::BigDoom => 2,
+        God::SmallDoom
+        | God::BigFortune
+        | God::SmallFortune
+        | God::BigRich
+        | God::SmallRich
+        | God::BigPoor
+        | God::SmallPoor
+        | God::Angel
+        | God::Devil
+        | God::LandDeity
+        | God::Death => 1,
+    }
+}
+
+/// 神在不在场由调用方查（这里只回答「那位神说几倍」），乘完向下取整。
+///
+/// 判 3 变 6、判 1 变 2 —— 与 P4④ 那条「天数只来自卡面」不冲突：卡面那个数是**名义值**，
+/// 过的是这条乘法，就像租金过的是 [`crate::charge::stage`]。
+pub fn doom_days(god: Option<God>, days: u32) -> u32 {
+    days * god.map_or(1, doom_multiplier)
+}
+
+/// 这位神在场时，**置产这一族的事办不成**：买地必败、加盖必败（PLAN §三 衰神那一格，
+/// 与 P9 那行「衰神／死神附身者买地必流标」是同一条判据的两种场合）。
+///
+/// 它刻意**不是**一条 `Adjustment::Cancel`。`Cancel` 把金额改成 0，而 0 元成交仍然是成交
+/// —— 那是大福神的「买地免费」，正好是相反的那张卡。PLAN §三 设施行那句「三种豁免都只是
+/// 同一个 subscriber 把金额改成 0」说的是**付钱义务**的豁免；「事办不成」在这里没有金额可改，
+/// 所以它走 [`crate::settle::Books::acquire_denied`] 这一句判据，不进管线。
+///
+/// 死神在这里就说「是」：PLAN §三 已经写了它要必败，而它今天只能由 P13 的女巫召来 ——
+/// 表先说对，召唤那条路来了自然读得到。
+pub fn denies_acquire(god: God) -> bool {
+    match god {
+        God::BigDoom | God::SmallDoom | God::Death => true,
+        God::BigRich | God::SmallRich | God::BigFortune | God::SmallFortune => false,
+        God::BigPoor | God::SmallPoor | God::Angel | God::Devil | God::LandDeity => false,
+    }
+}
+
+/// 这位神在场时，一次加盖**多盖几层**（PLAN §三 大福神「加盖多盖一层」）。
+///
+/// 单位是「层」而不是「倍」：`1 + extra` 之后还要被 `max_building_level` 夹住，
+/// 所以封顶那一层上多盖的那一层会少掉 —— 那不是缺陷，4 代也没有「盖穿顶」这件事。
+/// 它与 [`denies_acquire`] 是相反的一对，正好落在同一个域上：大福神多盖一层、
+/// 大衰神一层都不许盖。两个都写成表而不是在 `Books::upgrade` 里各加一句 `if`。
+pub fn extra_levels(god: God) -> u8 {
+    match god {
+        God::BigFortune => 1,
+        God::SmallFortune
+        | God::BigRich
+        | God::SmallRich
+        | God::BigPoor
+        | God::SmallPoor
+        | God::BigDoom
+        | God::SmallDoom
+        | God::Angel
+        | God::Devil
+        | God::LandDeity
+        | God::Death => 0,
+    }
+}
+
+/// 这位神在场时，**每回合从他手里弄走几张卡**（PLAN §三 衰神那一格的第一项）。
+///
+/// 大小各差一张，与钱那两档（加倍 vs 一成半）同一条分法。其余九位都是 0 —— 写下来而不是
+/// 省掉，是为了让「加一位神」时这一格也要被回答一次。
+pub fn cards_lost_per_turn(god: God) -> u32 {
+    match god {
+        God::BigDoom => 2,
+        God::SmallDoom => 1,
+        God::BigRich | God::SmallRich | God::BigFortune | God::SmallFortune => 0,
+        God::BigPoor | God::SmallPoor | God::Angel | God::Devil | God::LandDeity | God::Death => 0,
+    }
+}
+
+/// 衰神那一回合的抽卡：随机弄走 `cards_lost_per_turn` 张，手里空了就少弄几张。
+///
+/// 它是**容器上的一个 drain**，不是账（不碰 `Corrections`）也不是一时的事（不挂
+/// `Affliction`）：上限、挤档、流水这些规矩全在 `hand.rs`，这里只负责「谁被拿走一张」。
+/// 抽哪一张走神明那条子流（[`Rng::pick_god`]）：一位神弄丢几张卡，不该改变下一个骰点
+/// 与下一张机会牌是谁。
+///
+/// 返回真的弄走了几张 —— 给日志与测试用，凭据本身逐张写在 [`CardLost`] 里。
+pub fn drain_cards(
+    god: God,
+    player: Entity,
+    hands: &mut Query<&mut Hand, With<PlayerId>>,
+    shelf: &Shelf<'_>,
+    rng: &mut Rng,
+    lost: &mut MessageWriter<CardLost>,
+) -> u32 {
+    let Ok(mut hand) = hands.get_mut(player) else {
+        return 0;
+    };
+    let mut gone = 0u32;
+    for _ in 0..cards_lost_per_turn(god) {
+        if hand.is_empty() {
+            break;
+        }
+        let at = rng.pick_god(0..=hand.len() as u32 - 1) as usize;
+        let Some(card) = hand.cards.get(at).copied() else {
+            break;
+        };
+        // `spend` 摘的是**第一张**同 id 的那格：手里有两张陷害卡时，弄丢一张就是少一张，
+        // 不必再判「丢的到底是第几格」—— 那件事没有读者
+        hand.spend(card);
+        lost.write(CardLost {
+            player,
+            card: card_notice(shelf, card),
+            by: god,
+        });
+        gone += 1;
+    }
+    gone
+}
+
 /// 附身与它的一次性效果要动的全部东西。收成参数包是房规（§六 坑 8），
 /// 而这几样确实是同一件事：谁上身、挂哪几条修正、当场给／抢／送多少。
 ///
@@ -575,7 +727,13 @@ pub fn settle_god_landing_system(
 /// 神走了而它给的那几条还挂着，于是「大穷神七天」变成「终身双倍租金」，而第七天之后的
 /// 每一笔账都读得对、只是读的是死神的账。
 ///
-/// 返回值刻意是 `()`：谁走掉了由 [`GodLeft`] 说，恶犬接位那条后果读消息
+/// 回来的是**扣完之后**他身上还有谁（`None` = 这一回合开始他自由了）。调用方必须读这个
+/// 返回值而不是再查一次组件：摘组件那一步走的是 `Commands`，**同一帧查得到旧值** ——
+/// 于是「期满那一回合还照常被衰神丢一张卡」会静默地成立。同一条坑 P3d③ 抵押那次踩过
+/// （「同帧两条押同一块地都读到还没押」），那次得到的结论是：**能就地写的就地写，
+/// 交给 `Commands` 的那一步要把结果自己说出去**。
+///
+/// 谁走掉了仍然由 [`GodLeft`] 说，恶犬接位那条后果读消息
 /// （见 [`land_deity_succession_system`]），这里不留第二条通知通道。
 pub fn age_possession(
     commands: &mut Commands,
@@ -583,16 +741,17 @@ pub fn age_possession(
     possessions: &mut Query<&mut Possession, With<PlayerId>>,
     player: Entity,
     left: &mut MessageWriter<GodLeft>,
-) {
+) -> Option<God> {
     let Ok(mut held) = possessions.get_mut(player) else {
-        return;
+        return None;
     };
     if held.days_left > 1 {
         held.days_left -= 1;
-        return;
+        return Some(held.god);
     }
     let god = held.god;
     detach(commands, corrections, player, god, GodExit::Expired, left);
+    None
 }
 
 /// 土地公期满 → 恶犬接位（PLAN §三「土地公＝…期满变恶犬」）。

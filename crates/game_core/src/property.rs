@@ -46,6 +46,18 @@ pub fn settle_property_landing(
     match view.owner {
         // 无主 → 挂牌待决。Godot 也是「不管买不买得起都弹一张」（`confirm_buy` 里
         // 才做二次判定），差别在于这里买不起就是 `None`，不会静默扣成负数。
+        //
+        // 但**必败**那一格不给弹（P6b② 大衰神）：报价与成交读的是同一句
+        // [`Books::buy_price`]，弹一张按下去必然失败的模态，比不弹更糟 ——
+        // 玩家会以为是自己按错了，而不是身上那位神不让买。
+        None if books.acquire_denied(player) => {
+            let god = books.god_of(player).map(|held| held.god);
+            debug!(
+                "{} 想踩下这块无主地，但{}在场 —— 买地建屋必败",
+                books.id_of(player).map(|p| p.0).unwrap_or_default(),
+                god.map_or(String::new(), |g| g.label().to_string())
+            );
+        }
         None => {
             pending.offer(player, Pending::Buy(land));
             offers.write(BuyOffered { player, land });
@@ -56,7 +68,9 @@ pub fn settle_property_landing(
             let base = economy::upgrade_cost(def, &view).unwrap_or(0);
             let cost = books.quoted(ChargeKind::Upgrade { land }, player, base);
             let views = books.views();
-            if economy::can_upgrade(&view, owner, &views, cost, books.balance(player), rules) {
+            if !books.acquire_denied(player)
+                && economy::can_upgrade(&view, owner, &views, cost, books.balance(player), rules)
+            {
                 pending.offer(player, Pending::Upgrade(land));
                 upgrades.write(UpgradeOffered { player, land, cost });
             }

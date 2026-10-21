@@ -20,7 +20,7 @@ use bevy::app::App;
 use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::prelude::{
-    ChargeKind, Detention, DetentionPlace, GameRules, GameSeed, GameSetup, God, LandId,
+    CardAim, ChargeKind, Detention, DetentionPlace, GameRules, GameSeed, GameSetup, God, LandId,
     MAX_ON_BOARD, OccupancyKind, PlayerId, Possession, Rival, STARTING_GODS, StaySentence,
     TileKind,
 };
@@ -855,4 +855,478 @@ fn two_players_with_opposite_gods_do_not_read_each_other_s_chain() {
     // P0 的租金整笔免掉，而 P1 的那条链只在他自己付钱时才抬价 —— 报价各问一遍
     assert_rent_quote(&mut app, PlayerId(0), 0);
     assert_rent_quote(&mut app, PlayerId(1), 10_000);
+}
+
+// ===== P6b②：不是钱的那几处 =====
+
+/// 装配到「P0 的回合、掷骰之前」，回来两名玩家（路上随机刷的那两位已清掉）。
+/// 出牌类前置与 `cards.rs` 同一条：打出去的卡走真入口（请求 → `play_card_system`
+/// → `apply_card`），不是直接改组件。
+fn two_players() -> (App, Entity, Entity) {
+    let mut app = boot_default();
+    let p0 = boot_to_wait_roll(&mut app);
+    let p1 = other_of(&mut app, p0);
+    clear_gods(&mut app);
+    (app, p0, p1)
+}
+
+/// 三处「天数」各用一把尺，所以要挨个读：拘留数他的回合、停留数他按那颗按钮的回合、
+/// 乌龟数他掷骰的回合。合成一个「处境」就读不出「三处都过了同一个倍数」这件事。
+#[derive(Clone, Copy)]
+enum Doom {
+    Jail,
+    Stay,
+    Cap,
+}
+
+/// 让 p1 挂上某位神（`None` = 谁都不挂），把 `card` 由 p0 打在他头上，读回那格计时。
+/// 三处共用这一句，所以「哪几处被翻倍」只由 `doom_multiplier` 那张表决定。
+fn days_played(card: &str, god: Option<God>, which: Doom) -> u32 {
+    let (mut app, p0, p1) = two_players();
+    if let Some(god) = god {
+        attach_god(&mut app, p1, god, Some(40));
+    }
+    let card = item_index(&app, card);
+    deal(&mut app, p0, card.0);
+    play_card(&mut app, p0, card.0, Some(CardAim::Player(p1)));
+    settle(&mut app, 3);
+    let left = match which {
+        Doom::Jail => detain_of(&app, p1).map(|held| held.turns_left),
+        Doom::Stay => stay_of(&app, p1),
+        Doom::Cap => move_cap_of(&app, p1),
+    };
+    left.expect("那张卡该在 p1 身上留下一格计时，否则这条用例什么都没读")
+}
+
+#[test]
+fn every_doom_day_a_god_multiplies_covers_all_three_places() {
+    // PLAN §三「衰神＝…厄运天数加倍」。只在 `detain` 那一条分支上乘一次的话，
+    // 停留与乌龟会静默地不加倍 —— 所以三处各跑三遍（没神／大衰神／小衰神）
+    for (card, which, plain) in [
+        ("item_frame", Doom::Jail, 5u32),
+        ("item_stay", Doom::Stay, 1),
+        ("item_turtle", Doom::Cap, 3),
+    ] {
+        assert_eq!(
+            days_played(card, None, which),
+            plain,
+            "{card} 没有神时该是卡面那个数（乘数的基准）"
+        );
+        assert_eq!(
+            days_played(card, Some(God::BigDoom), which),
+            plain * 2,
+            "{card} 在大衰神在场时要翻倍"
+        );
+        assert_eq!(
+            days_played(card, Some(God::SmallDoom), which),
+            plain,
+            "{card}：小衰神只动钱，不动天数（与 P6b① 那条「抢钱是大穷神独有」同一个分法）"
+        );
+    }
+}
+
+#[test]
+fn the_fortune_god_shrugs_off_every_affliction_while_his_rival_does_not() {
+    // 大福神「厄运豁免」＝期间每一次都不生效。判据现读 `Possession`，
+    // 不往 `Insulation` 里塞一格（理由写在那个组件的注里）
+    let (mut app, p0, p1) = two_players();
+    let p1_tile = tile_of(&app, p1);
+    attach_god(&mut app, p1, God::BigFortune, Some(40));
+    let frame = item_index(&app, "item_frame");
+    deal(&mut app, p0, frame.0);
+    play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
+    settle(&mut app, 3);
+
+    assert_eq!(
+        detain_of(&app, p1),
+        None,
+        "大福神在场，陷害这一件根本没发生"
+    );
+    assert_eq!(
+        tile_of(&app, p1),
+        p1_tile,
+        "被抵消的那次不该把他搬到任何接入点 —— 与 cards.rs 那条同一条口径"
+    );
+    assert!(
+        ledger(&app)
+            .iter()
+            .any(|line| line.starts_with("Play(P0->P1:item_frame") && line.contains('挡')),
+        "挡下来了也要留一句为什么，否则流水只说得出「什么都没发生」：{:?}",
+        ledger(&app)
+    );
+
+    // 反例的反例：小福神不免厄运。少了这一格，上面那条会把「整张陷害卡坏了」也测成绿
+    let (mut app, p0, p1) = two_players();
+    attach_god(&mut app, p1, God::SmallFortune, Some(40));
+    let frame = item_index(&app, "item_frame");
+    deal(&mut app, p0, frame.0);
+    play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
+    settle(&mut app, 3);
+    assert_eq!(
+        detain_of(&app, p1).map(|held| held.turns_left),
+        Some(5),
+        "小福神该照常被关进去（PLAN §三 只给大的那一半豁免）"
+    );
+}
+
+#[test]
+fn immunity_spends_no_card_layers() {
+    // 两个来源、一个出口，而**顺序是有内容的**：反过来写，大福神在场时每一件事都会
+    // 白白吃掉一层免罪卡，玩家那两层会在他还「免疫」的时候悄悄清零 —— 而那件事只有到
+    // 他不再免疫的下一件上才看得见，也就是看不见。
+    let (mut app, p0, p1) = two_players();
+    let frame = item_index(&app, "item_frame");
+    let insulate = item_index(&app, "item_insulate");
+    // 两张免罪卡**由他自己打**（免罪卡没有目标那一格，卡面写的是「落到自己头上的一次」），
+    // 而出牌的资格是「当前回合玩家」—— 所以这里把轮次交给他，别用夹具绕过那条判据
+    make_current(&mut app, p1);
+    for _ in 0..2 {
+        deal(&mut app, p1, insulate.0);
+        play_card(&mut app, p1, insulate.0, None);
+        settle(&mut app, 2);
+    }
+    assert_eq!(shield_of(&app, p1), Some(2), "前置：两张卡该叠成两层");
+    make_current(&mut app, p0);
+
+    // 1) 没有神：陷害吃掉一层
+    deal(&mut app, p0, frame.0);
+    play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
+    settle(&mut app, 2);
+    assert_eq!(detain_of(&app, p1), None, "第一件被卡挡住");
+    assert_eq!(shield_of(&app, p1), Some(1), "卡挡的事要消耗卡");
+
+    // 2) 大福神在场：陷害整件不生效，而**那一层卡分文不动**
+    attach_god(&mut app, p1, God::BigFortune, Some(40));
+    deal(&mut app, p0, frame.0);
+    play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
+    settle(&mut app, 2);
+    assert_eq!(detain_of(&app, p1), None, "那位神在场，这一件同样没发生");
+    assert_eq!(
+        shield_of(&app, p1),
+        Some(1),
+        "免疫期间不许吃卡 —— 两个来源的顺序写反了红在这里"
+    );
+
+    // 3) 神走了（这里直接摘，等价于期满/被顶走）：卡又变成唯一那道防线
+    clear_gods(&mut app);
+    deal(&mut app, p0, frame.0);
+    play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
+    settle(&mut app, 2);
+    assert_eq!(detain_of(&app, p1), None, "最后一层还挡得住一次");
+    assert_eq!(shield_of(&app, p1), None, "用完那一层之后组件要被摘掉");
+
+    // 4) 两层都用掉了：第三件照关，这条用例不能永远绿下去
+    deal(&mut app, p0, frame.0);
+    play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
+    settle(&mut app, 2);
+    assert_eq!(
+        detain_of(&app, p1).map(|held| held.turns_left),
+        Some(5),
+        "没有卡也没有神的时候，陷害该照常生效"
+    );
+}
+
+// ===== P6b②：买地／建屋必败 与 加盖多一层 =====
+
+/// L0 那一组（brown）的第二块。注意它与 `RENT_TILE` 都是数字 1，但一个数是**地块**、
+/// 另一个是**格子** —— prototype 里 L0 挂在 1 号格上，纯属撞车。
+const SECOND_LAND: u32 = 1;
+
+/// 造一条「P0 走 1 步踩到 1 号格（那块 L0 **无主**，脚下站着 `god`）」的对局，
+/// 回来 `(app, L0 业主, P0 现金)`。
+///
+/// 策略是 `AcceptAll`：报价一发出来就接下。于是「地没到手」只剩一种解释 ——
+/// 报价根本没发（`acquire_denied` 那条闸门），而不是「他自己点了拒绝」。
+fn acquire_with(god: Option<God>) -> (App, Option<u32>, i64) {
+    let (mut app, p0) = ready_on(0, 1, DecisionPolicy::AcceptAll);
+    clear_gods(&mut app);
+    if let Some(god) = god {
+        spawn_god(&mut app, god, RENT_TILE);
+    }
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), RENT_TILE, "前置：他要真的踩到那一格");
+    if let Some(god) = god {
+        assert_eq!(
+            possession_of(&app, p0).map(|held| held.god),
+            Some(god),
+            "前置：{} 要真的上了身，否则这句「买不成」测的是别的东西",
+            god.label()
+        );
+    }
+    let owner = plot_state(&mut app, RENT_LAND).0;
+    let cash = cash_of(&mut app, p0);
+    (app, owner, cash)
+}
+
+#[test]
+fn the_doom_gods_and_death_refuse_the_purchase_entirely() {
+    // PLAN §三「衰神＝…买地建屋必败」+「死神」同一条。这条**不能**做成 `Corrections`
+    // 里的一条 `Cancel`：0 元成交仍然是成交，地会归他，而「必败」要的是这块地不属于任何人。
+    // 所以判据在 `Books::acquire_denied`，报价与成交两处共读它（同一个理由见 P3d④a）
+    let (app, owner, cash) = acquire_with(None);
+    assert_eq!(
+        (owner, cash),
+        (Some(0), 18_500),
+        "对照物：没有神时这一格买得下来（L0 地价 1500）"
+    );
+    assert!(
+        ledger(&app)
+            .iter()
+            .any(|line| line.starts_with("BuyOffer(P0,@0)")),
+        "前置：报价真的发出去过 —— 下面那句「没有报价」才不是空跑：{:?}",
+        ledger(&app)
+    );
+    drop(app);
+
+    // 死神上不了街（`roams` 那条），但夹具能把他按在人身上 —— 这一格要靠它才测得到
+    for god in [God::BigDoom, God::SmallDoom, God::Death] {
+        let (app, owner, cash) = acquire_with(Some(god));
+        assert_eq!(owner, None, "{} 在场：这块地不该归任何人", god.label());
+        assert_eq!(
+            cash,
+            20_000,
+            "{} 在场：必败＝这件事根本没做成，不是「付了钱再退回来」",
+            god.label()
+        );
+        assert!(
+            !ledger(&app)
+                .iter()
+                .any(|line| line.starts_with("BuyOffer(P0,@0)")),
+            "连报价都不该弹出来（弹了就是一条玩家答得成的窗口）：{:?}",
+            ledger(&app)
+        );
+    }
+}
+
+#[test]
+fn the_grab_card_buys_nothing_while_a_doom_god_watches() {
+    // 同一道闸门的第二个入口：购地卡不去那一格也能买，所以它必须**也**问一句。
+    // 判据借 `Books::buy_price`（出牌那道 `aim_is_legal` 读的就是它），所以这里买不成的
+    // 同时，面板上那颗按钮同样是灰的 —— 两个入口共用一份真相
+    for god in [None, Some(God::BigDoom)] {
+        let (mut app, p0, _p1) = two_players();
+        if let Some(god) = god {
+            attach_god(&mut app, p0, god, Some(40));
+        }
+        let grab = item_index(&app, "item_grab");
+        deal(&mut app, p0, grab.0);
+        assert_eq!(hand_of(&app, p0).len(), 1, "前置：手里只有这一张购地卡");
+
+        play_card(&mut app, p0, grab.0, Some(CardAim::Land(LandId(RENT_LAND))));
+        settle(&mut app, 3);
+
+        let kept = hand_of(&app, p0).contains(&grab);
+        let owner = plot_state(&mut app, RENT_LAND).0;
+        match god {
+            None => assert_eq!(
+                (kept, owner),
+                (false, Some(0)),
+                "没有神：卡花掉、地到手（这一格是下面那条的对照物）"
+            ),
+            Some(god) => assert_eq!(
+                (kept, owner),
+                (true, None),
+                "{} 在场：卡该留在手里、地不该归他 —— 红在「卡没了」那一半就是白扣一张",
+                god.label()
+            ),
+        }
+    }
+}
+
+/// 手握整组（L0 + L1，brown，都是 Lv1），付**一次**加盖费，回来 `(L0 等级, P0 现金)`。
+///
+/// 走 `Books::upgrade` 而不是真踩上去：这一格问的是「等级跳了几级、钱扣了几次」，
+/// 而真踩还得先凑出「业主本人踩到自己那块地」的骰点，一路随机刷出来的神还会改这个数
+fn build_with(god: Option<God>) -> (u8, i64) {
+    let (mut app, p0, _p1) = two_players();
+    own(&mut app, RENT_LAND, Some(0), 1, false);
+    own(&mut app, SECOND_LAND, Some(0), 1, false);
+    if let Some(god) = god {
+        attach_god(&mut app, p0, god, Some(40));
+    }
+    // 指数直接摆平：`own()` 是凭空塞地，跑过回合末它就会不是 1.0（P4② 记过同一条），
+    // 而这里要的读数是「一次加盖费到底扣了几回」
+    set_price_index(&mut app, 1.0);
+    run_op(&mut app, move |books, _| {
+        let got = books.upgrade(p0, LandId(RENT_LAND));
+        assert!(got.is_some(), "整组在手、又是组内最低层，这一格加盖该办成");
+    });
+    (plot_state(&mut app, RENT_LAND).1, cash_of(&mut app, p0))
+}
+
+#[test]
+fn the_fortune_god_raises_two_levels_for_the_price_of_one() {
+    // PLAN §三「大福神＝…加盖多盖一层」。多出来的那一层**不多收一次钱** ——
+    // 卡面那句是「多盖一层」不是「买两层」。对照组先钉死「没有神时只跳一级、收一次费」
+    assert_eq!(
+        build_with(None),
+        (2, 19_200),
+        "没有大福神：一级 + 一次加盖费（L0 的 `upgrade_cost` 是 800）"
+    );
+    // 大福神那一次跳到 3 级，而现金分文不动：`Acquire` 域整条抵消，
+    // 加盖费与地价同在域里，所以连它一起免 —— 这条已知口径写在 P6b① 的记录 ③
+    assert_eq!(
+        build_with(Some(God::BigFortune)),
+        (3, 20_000),
+        "大福神：跳两级，钱只该有一条抵消（0 元），不该收到第二次"
+    );
+    // 反例的反例：小福神只有半价，不多盖。少了这一格，上面那条会把
+    // 「所有福神都多盖一层」也测成绿
+    assert_eq!(
+        build_with(Some(God::SmallFortune)),
+        (2, 19_600),
+        "小福神：还是两级，而那一笔收半价（800/2）"
+    );
+}
+
+#[test]
+fn the_extra_level_stops_at_the_roof() {
+    // 封顶那一位上多出来的那一层少掉，不是缺陷（4 代也没有「盖穿顶」）
+    let (mut app, p0, _p1) = two_players();
+    let max = app.world().resource::<GameRules>().max_building_level;
+    own(&mut app, RENT_LAND, Some(0), max - 1, false);
+    own(&mut app, SECOND_LAND, Some(0), max - 1, false);
+    attach_god(&mut app, p0, God::BigFortune, Some(40));
+    run_op(&mut app, move |books, _| {
+        assert_eq!(
+            books.upgrade(p0, LandId(RENT_LAND)),
+            Some(max),
+            "只该到顶，不该越过顶"
+        );
+    });
+    assert_eq!(plot_state(&mut app, RENT_LAND).1, max);
+    run_op(&mut app, move |books, _| {
+        assert_eq!(
+            books.upgrade(p0, LandId(RENT_LAND)),
+            None,
+            "到了顶之后那位神在场也不能再走一步 —— 少一层不等于多一格"
+        );
+    });
+}
+
+#[test]
+fn the_imbalance_a_god_creates_can_be_evened_up_again() {
+    // 这条是 `economy::is_group_floor` 存在的全部理由。旧判据「组内等级差 ≤1」只在**事前**查，
+    // 于是 (3,1) 这个形状里两块地都动不了：低的差 2 不合法、高的再升就差 3 —— 整组永久冻死，
+    // 而大福神一次加两层**必然**造出这个形状。取最低层那一条把方向钉死：低的能追，高的等着
+    let (mut app, p0, _p1) = two_players();
+    own(&mut app, RENT_LAND, Some(0), 1, false);
+    own(&mut app, SECOND_LAND, Some(0), 1, false);
+    attach_god(&mut app, p0, God::BigFortune, Some(40));
+    run_op(&mut app, move |books, _| {
+        let me = books.holder(PlayerId(0)).unwrap();
+        assert_eq!(
+            books.upgrade(me, LandId(RENT_LAND)),
+            Some(3),
+            "前置：先造出落差 2"
+        );
+    });
+    assert_eq!(plot_state(&mut app, SECOND_LAND).1, 1, "另一块还低着");
+    // 神先请走：追平那一步要是一次**普通**加盖（+1），不然读到的还是「多盖一层」，
+    // 这条用例想钉的那道闸门就被另一件事遮住了
+    clear_gods(&mut app);
+    run_op(&mut app, move |books, _| {
+        assert_eq!(
+            books.upgrade(p0, LandId(SECOND_LAND)),
+            Some(2),
+            "低的那一块要追得回来 —— 旧判据（组内等级差 ≤1）在这里返回 None，整组从此卡死"
+        );
+        assert_eq!(
+            books.upgrade(p0, LandId(RENT_LAND)),
+            None,
+            "而高的那一块在追平之前不许再跑：拉开落差的那一步必须走不通"
+        );
+    });
+    assert_eq!(
+        (
+            plot_state(&mut app, RENT_LAND).1,
+            plot_state(&mut app, SECOND_LAND).1
+        ),
+        (3, 2),
+        "两次加盖的落点要正好是这两级"
+    );
+}
+
+// ===== P6b②：衰神每回合吃掉几张卡 =====
+
+/// 让 `god` 附身在 p0 身上 `days` 天，两人都按住（不让走路卷进别的发牌与落格），
+/// 发 8 张卡，跑到第 `turns` 个**全局**回合，回来「他被吃掉的张数」。
+///
+/// 按全局回合数是因为天数数的是**他自己的**回合：两人轮转，所以 `turns` 要给到
+/// `days` 的两倍以上，才真跑过「到期那一回合」这一格。
+fn cards_eaten(god: God, days: u32, turns: u32) -> usize {
+    let (mut app, p0, p1) = two_players();
+    for player in [p0, p1] {
+        insert(&mut app, player, StaySentence { turns_left: 120 });
+    }
+    let frame = item_index(&app, "item_frame");
+    for _ in 0..8 {
+        deal(&mut app, p0, frame.0);
+    }
+    attach_god(&mut app, p0, god, Some(days));
+    let start = hand_of(&app, p0).len();
+    // 只数**这一趟跑出来的**那些流水：`deal` 那 8 张自己就写了 8 条 `Gain`，
+    // 拿整张表去算「进账 − 丢卡」会把手牌数算成两倍（第一次跑就红在这里）
+    let before = ledger(&app).len();
+
+    play_turns(&mut app, turns);
+
+    let all = ledger(&app);
+    let lines = &all[before..];
+    let lost = lines
+        .iter()
+        .filter(|line| line.starts_with("Lose(P0:") && line.contains(god.label()))
+        .count();
+    // 流水与手牌必须对上：每一条 `Lose` 真的少了一张卡，而少的每一张都留了流水。
+    // 进账那几条（圣诞礼物之类，日期由锚点决定）也算进来，这条等式才对任何日历成立
+    let gained = lines
+        .iter()
+        .filter(|line| line.starts_with("Gain(P0:"))
+        .count();
+    assert_eq!(
+        hand_of(&app, p0).len(),
+        start + gained - lost,
+        "手牌与丢卡流水对不上（{lines:?}）"
+    );
+    lost
+}
+
+#[test]
+fn the_doom_god_eats_two_cards_a_turn_while_the_small_one_takes_one() {
+    // PLAN §三「衰神＝丢卡」。每回合吃的张数只在 `cards_lost_per_turn` 那张表上写一次
+    // （大衰神 2、小衰神 1、其余 0），而这里三行各跑一遍
+    assert_eq!(
+        cards_eaten(God::BigDoom, 3, 10),
+        4,
+        "大衰神 2 张/回合，而他身上一共待成两回合（第三回合是期满那一回合，见下面那条）"
+    );
+    assert_eq!(
+        cards_eaten(God::SmallDoom, 3, 10),
+        2,
+        "小衰神 1 张/回合 —— 与大的那个差一整倍，写反了就红"
+    );
+    assert_eq!(
+        cards_eaten(God::BigRich, 3, 10),
+        0,
+        "财神不吃卡：这张表只有衰神那一族有值（否则「谁身上都掉卡」的世界也能全绿）"
+    );
+}
+
+#[test]
+fn the_turn_a_god_expires_he_takes_no_more_cards() {
+    // `age_possession` 先把那位神扣到期满、再回答「还剩谁」，就是为这一格写的：
+    // 组件走的是 `Commands`（延迟），而丢卡在同一帧就要读「他还有没有神」。
+    // 拿 `Commands` 里那份过期的读数丢卡，这条会数出 2 而不是 0
+    assert_eq!(
+        cards_eaten(God::BigDoom, 1, 10),
+        0,
+        "只剩最后一天：那一回合他离场，卡一张不该少"
+    );
+    assert_eq!(
+        cards_eaten(God::BigDoom, 2, 10),
+        2,
+        "两天：第一回合格照吃 2 张，第二回合格期满不吃 —— 这条把上面那条的下限也钉住了"
+    );
 }

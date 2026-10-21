@@ -57,14 +57,20 @@ impl Affliction {
     }
 }
 
-/// 护身：抵消落到自己头上的厄运。存在即「至少还有一层」。
+/// 护身：用**卡**抵消落到自己头上的厄运。存在即「至少还有一层」。
 ///
-/// `charges` 用 `Option` 而不是拿 `u32::MAX` 当无限：`None` 是**神明附身那一类**
-/// （P6 的大福神「厄运豁免」＝期间每一次都不生效，不消耗），`Some(n)` 是卡那一类
-/// （免罪卡＝抵掉 n 次）。两种在 P6 都有真用户，所以这不是为假想留的口子。
+/// `charges` 是 `u32` 而不是 `Option<u32>`，是有意的收窄：`None` 那一格原本留给「神明附身
+/// 那种不限次的免疫」（P3a 当时只有这一种用户，写在类型上像是提前铺路）。P6b② 落地时
+/// 它变成一个**陷阱** —— 大福神的免疫与免罪卡会同时挂在一个人身上，而一个实体同一组件
+/// 只能有一份：上身把 `Some(2)` 覆盖成 `None`、离场把整个组件摘掉，玩家手里那两层护身
+/// 就这么无声消失了 —— 少花一张卡与多花一张卡一样难查。
+///
+/// 所以神明那一半**不在这个组件里**：它现读那位神是谁（[`crate::gods::resists`]），
+/// 与 `Presence` 同一条纪律 —— 会过期的账不留副本。两条来源各只有一个写点，
+/// 于是「谁吃掉谁的次数」这件事在结构上没有出现的机会。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Insulation {
-    pub charges: Option<u32>,
+    pub charges: u32,
 }
 
 impl Insulation {
@@ -73,22 +79,16 @@ impl Insulation {
     /// 不可抵消的那类**不吃掉护身**（否则一张免罪卡会被「向后转」白白耗掉，
     /// 而玩家根本没有选择权 —— 免疫规则该免的是事，不是卡）。
     pub fn absorb(&mut self, affliction: &Affliction) -> bool {
-        if !affliction.cancellable {
+        if !affliction.cancellable || self.charges == 0 {
             return false;
         }
-        match self.charges {
-            None => true,
-            Some(0) => false,
-            Some(n) => {
-                self.charges = Some(n - 1);
-                true
-            }
-        }
+        self.charges -= 1;
+        true
     }
 
-    /// 还剩几层。`None` = 不限（面板要写成「免疫」而不是「∞」）。
-    pub fn remaining(&self) -> Option<u32> {
-        self.charges
+    /// 一层都不剩了。空护身不该留在身上：面板会写出一个「有免罪卡但什么都不挡」的玩家。
+    pub fn is_empty(&self) -> bool {
+        self.charges == 0
     }
 }
 
@@ -102,38 +102,28 @@ mod tests {
 
     #[test]
     fn a_card_shield_absorbs_exactly_once() {
-        let mut shield = Insulation { charges: Some(1) };
+        let mut shield = Insulation { charges: 1 };
         let jail = Affliction::new(AfflictDomain::Detention, victim());
         assert!(shield.absorb(&jail), "第一件该被吃掉");
-        assert_eq!(shield.remaining(), Some(0));
+        assert_eq!(shield.charges, 0);
         assert!(
             !shield.absorb(&jail),
-            "空护身不再抵消 —— 免罪卡一张抵一次，说成「这几天免疫」是另一张卡"
+            "空护身不再抵消 —— 免罪卡一张抵一次，说成「这几天免疫」是另一位神的事"
         );
-    }
-
-    #[test]
-    fn a_god_shield_never_runs_out() {
-        let mut shield = Insulation { charges: None };
-        let jail = Affliction::new(AfflictDomain::Detention, victim());
-        for _ in 0..5 {
-            assert!(shield.absorb(&jail), "附身期间每次都不生效");
-        }
-        assert_eq!(shield.remaining(), None);
+        assert!(
+            shield.is_empty(),
+            "耗尽的护身要被摘掉，别留一个什么都不挡的组件"
+        );
     }
 
     /// 免疫规则免的是**事**，不是玩家的卡。
     #[test]
     fn an_immune_affliction_does_not_eat_the_shield() {
-        let mut shield = Insulation { charges: Some(1) };
+        let mut shield = Insulation { charges: 1 };
         let mut immune = Affliction::new(AfflictDomain::Reversal, victim());
         immune.cancellable = false;
         assert!(!shield.absorb(&immune));
-        assert_eq!(
-            shield.remaining(),
-            Some(1),
-            "不可抵消的那类不该把免罪卡白白耗掉"
-        );
+        assert_eq!(shield.charges, 1, "不可抵消的那类不该把免罪卡白白耗掉");
         // 同一层护身接下来照样吃得掉可抵消的那类
         assert!(shield.absorb(&Affliction::new(AfflictDomain::Stay, victim())));
     }

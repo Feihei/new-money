@@ -79,8 +79,9 @@ pub mod prelude {
     pub use crate::economy::LandView;
     pub use crate::gods::{
         God, GodDesk, MAX_ON_BOARD, Possession, Presence, Rival, STARTING_GODS, age_possession,
-        attach, detach, grant_effects, land_deity_succession_system, money_corrections,
-        presence_of, revoke_effects, settle_god_landing_system, spawn_starting_gods,
+        attach, cards_lost_per_turn, denies_acquire, detach, doom_days, doom_multiplier,
+        drain_cards, extra_levels, grant_effects, land_deity_succession_system, money_corrections,
+        presence_of, resists, revoke_effects, settle_god_landing_system, spawn_starting_gods,
         top_up_gods_system, wander_gods_system,
     };
     pub use crate::hand::{CardAim, Hand, PlayWindow, card_notice, deal_to, play_card_system};
@@ -101,10 +102,10 @@ pub mod prelude {
     };
     pub use crate::msg::{
         BailRequested, BankOp, BankOpDone, BankOpRequested, BankVisited, BombTransferred,
-        BuyOffered, CardDrawn, CardGained, CardNotice, CardPlayed, CashChanged, ChargeWaived,
-        ChestOpened, Decision, DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled,
-        EffectOutcome, GameOver, GiftGiven, GiftsGiven, GodAppeared, GodDeed, GodExit, GodLeft,
-        GodPossessed, ItemPlaced, LandBought, LandUpgraded, MortgageDone, MortgageOp,
+        BuyOffered, CardDrawn, CardGained, CardLost, CardNotice, CardPlayed, CashChanged,
+        ChargeWaived, ChestOpened, Decision, DecisionChosen, DetentionLifted, DetentionSkipped,
+        DiceRolled, EffectOutcome, GameOver, GiftGiven, GiftsGiven, GodAppeared, GodDeed, GodExit,
+        GodLeft, GodPossessed, ItemPlaced, LandBought, LandUpgraded, MortgageDone, MortgageOp,
         MortgageRequested, MountChanged, MoveCapped, PlaceItemRequested, PlayCardRequested,
         PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported,
         PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll,
@@ -143,7 +144,7 @@ pub mod prelude {
 use bank::apply_month_end_interest_system;
 use prelude::{
     ActiveBoard, AtmAccess, BailRequested, BankOpDone, BankOpRequested, BankVisited, BoardDef,
-    BombTransferred, BuyOffered, CardDrawn, CardGained, CardPlayed, CardSet, CashChanged,
+    BombTransferred, BuyOffered, CardDrawn, CardGained, CardLost, CardPlayed, CardSet, CashChanged,
     ChargeWaived, ChestOpened, Corrections, CouponBoxes, DecisionChosen, DetentionLifted,
     DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed, GameSetup,
     GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, ItemPlaced,
@@ -286,6 +287,9 @@ impl Plugin for CoreGamePlugin {
             // 上身那一刻的一次性效果（P6b）。`GodDesk` 带着它的 writer，
             // 漏注册 = 那个参数包建不出来 = 踩到神的那一刻整个 `Landed` 链不跑
             .add_message::<GodDeed>()
+            // 衰神每回合弄走的那张（P6b②）。它挂在 `TurnWriters` 上 ——
+            // 漏这一行不是少一条流水，是**回合机整个不跑**（本文件上面那条坑注）
+            .add_message::<CardLost>()
             .init_state::<TurnPhase>()
             // 装配世界：初始态的 OnEnter 不会触发，所以用 in_state(Boot)
             .add_systems(

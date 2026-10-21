@@ -79,6 +79,11 @@ pub struct Books<'w, 's> {
     /// **只有 `Detention` 这一族**：P3d④c 的停留（`StaySentence`）不在这里 —— 被停留按住的
     /// 人还在场上，名下的地照收租，而卡面上没写「顺便收不到租」这一条（`tests/stay.rs` 钉着）。
     pub detained: Query<'w, 's, &'static mut Detention, With<PlayerId>>,
+    /// 身上挂着哪位神（P6b②）。账本要读得到它，是因为「买地建屋必败」与「加盖多盖一层」
+    /// 这两条**必须与扣款在同一处判**：判据放在调用方（落格那段、购地卡那条），
+    /// 迟早会有一边忘了问 —— 而「衰神照样买到了地」这种错不会崩，只会在玩家眼里变成
+    /// 「这神是假的」。与 `detained` 同一族：账本读得出，UI 才不必自己开第二份查询。
+    possessions: Query<'w, 's, &'static crate::gods::Possession, With<PlayerId>>,
     cash: MessageWriter<'w, CashChanged>,
     /// 一次性修正生效那一笔的凭据（免费卡免掉了多少）。与 `cash` 分开写，
     /// 因为这里没有钱动 —— 见 [`ChargeWaived`]。
@@ -765,8 +770,34 @@ impl<'w, 's> Books<'w, 's> {
         Some(price)
     }
 
+    /// 他身上挂着哪位神、还剩几格（`None` = 没被附身）。
+    ///
+    /// 挂在账本上而不是让面板自己开一条 `Query<&Possession>`：HUD 那一行「跟着谁、剩几天」
+    /// 与顶栏那句播报要读的就是同一份事实（P4② 给 `Detention` 立的那条同一条理由）。
+    pub fn god_of(&self, player: Entity) -> Option<crate::gods::Possession> {
+        self.possessions.get(player).ok().copied()
+    }
+
+    /// 置产这一族的事（买地、加盖）此刻对他**办不成**吗 —— 大衰神／小衰神／死神的「必败」。
+    ///
+    /// 唯一读点。判据本身在 [`crate::gods::denies_acquire`] 那张表上，这里只负责把它接到
+    /// 账本上：[`Books::buy_price`] 与 [`Books::upgrade`] 都问这一句，所以「报价的按钮」与
+    /// 「成交的那一步」不可能一个说行一个说不行（P3d④a 给 `buy_price` 立的同一条纪律）。
+    pub fn acquire_denied(&self, player: Entity) -> bool {
+        self.possessions
+            .get(player)
+            .is_ok_and(|held| crate::gods::denies_acquire(held.god))
+    }
+
+    /// 这次加盖多盖几层（大福神＝1）。封顶那一位由调用方夹（见 [`Books::upgrade`]）。
+    pub fn extra_levels(&self, player: Entity) -> u8 {
+        self.possessions
+            .get(player)
+            .map_or(0, |held| crate::gods::extra_levels(held.god))
+    }
+
     /// 这块地**此刻**对这位玩家而言买得下来吗？买下来实付多少？`None` = 买不了
-    /// （棋盘上没这块地 / 已经有人持有 / 过了物价与修正之后的价付不起）。
+    /// （棋盘上没这块地 / 已经有人持有 / 过了物价与修正之后的价付不起 / 他身上有衰神）。
     ///
     /// [`Self::buy`] 扣的就是这个数，所以它同时是「能不能买」与「买了要付多少」两份事实的
     /// 唯一来源：手牌浮层那颗 `→ 南京路 $1,200` 的按钮与购地卡的合法性判据读的都是这一句，
@@ -774,16 +805,26 @@ impl<'w, 's> Books<'w, 's> {
     /// 报价侧照旧不花钱（`quoted` 只算不调账本）。
     pub fn buy_price(&self, player: Entity, land: LandId) -> Option<i64> {
         let view = self.view(land)?;
+        // 「必败」问在算价之前：它不是折扣，是这件事根本不给做
+        if self.acquire_denied(player) {
+            return None;
+        }
         let base = economy::land_price(&self.active.def, &view)?;
         let price = self.quoted(ChargeKind::BuyLand { land }, player, base);
         economy::can_buy(&view, price, self.balance(player)).then_some(price)
     }
 
-    /// 升级：扣**实付**建筑费 + 等级 +1。结构判定（业主本人、未抵押、未满级、垄断、
-    /// 组内等级差 ≤1）全在 `economy::can_upgrade`。
+    /// 升级：扣**实付**建筑费 + 等级 +1（大福神在场则 +2，见 [`Books::extra_levels`]）。
+    /// 结构判定（业主本人、未抵押、未满级、垄断、这块地是组内最低层）全在 `economy::can_upgrade`。
+    ///
+    /// 多盖的那一层**不多收一次钱**：卡面那句话是「加盖多盖一层」，不是「一次买两层」——
+    /// 付的是这一级的费，得到两级。这也是它与 [`Self::buy`] 一样只在账本里判一次的理由。
     pub fn upgrade(&mut self, player: Entity, land: LandId) -> Option<u8> {
         let view = self.view(land)?;
         let pid = self.id_of(player)?;
+        if self.acquire_denied(player) {
+            return None;
+        }
         let base = economy::upgrade_cost(&self.active.def, &view)?;
         let cost = self.quoted(ChargeKind::Upgrade { land }, player, base);
         let views = self.views();
@@ -793,8 +834,11 @@ impl<'w, 's> Books<'w, 's> {
         }
         let entity = self.land_entity(land)?;
         self.debit(player, cost).ok()?;
+        let max = self.rules.max_building_level;
+        let extra = self.extra_levels(player);
         let (_, _, _, mut level, _) = self.plots.get_mut(entity).ok()?;
-        level.0 += 1;
+        // 封顶那一位上多出来的那一层少掉，不是缺陷：4 代也没有「盖穿顶」这件事
+        level.0 = level.0.saturating_add(1 + extra).min(max);
         Some(level.0)
     }
 

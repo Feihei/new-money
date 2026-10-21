@@ -9,7 +9,7 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, CoreSet, CouponBoxes, GameSession, Gameplay, Landing, MarketClock,
+    ActiveBoard, CoreSet, Corrections, CouponBoxes, GameSession, Gameplay, Landing, MarketClock,
     PendingDecision, Rng, TurnOrder, TurnPhase, WalkClock,
 };
 
@@ -138,8 +138,8 @@ fn stop_turn_machine(mut phase: ResMut<NextState<TurnPhase>>) {
 /// 只收一次。
 ///
 /// 表现层的实体由 `crate::render` 自己的标记负责清理，这里只动规则层的东西。
-/// `WalkClock`/`Landing`/`PendingDecision`/`MarketClock`/`CouponBoxes` 是 `init_resource`
-/// 常驻的（结算 system 用 `Res<T>` 拿它们），所以重置成默认值而不是移除。
+/// `WalkClock`/`Landing`/`PendingDecision`/`MarketClock`/`CouponBoxes`/`Corrections`
+/// 是 `init_resource` 常驻的（结算 system 用 `Res<T>` 拿它们），所以重置成默认值而不是移除。
 fn clear_match(
     mut commands: Commands,
     phase: Res<State<TurnPhase>>,
@@ -163,6 +163,11 @@ fn clear_match(
     commands.insert_resource(PendingDecision::default());
     // 上一局捡空的点券箱必须在新局重新长出来，否则第二局一整盘都是冷却中
     commands.insert_resource(CouponBoxes::default());
+    // 修正登记处里那几条的主语是**上一局那些人**（`Corrections` 按 bearer 实体键）。
+    // 槽位带世代，所以死人不会被活人复用成同一个人 —— 行为上无害，但 `NM_DUMP` 会在
+    // 主菜单上写出「修正登记处：1 条」而那条指向一个已经 despawn 的实体。面板是查账
+    // 工具，说这种话就等于把下一次排查带偏（本文件头那句「回菜单必须清场」的完整含义）
+    commands.insert_resource(Corrections::default());
     info!("清场：回收 {count} 个规则层实体，回合机已停在 Boot");
 }
 
@@ -189,5 +194,45 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<State<Scene>>().get(), &Scene::Menu);
         assert!(app.world().resource::<Entered>().0, "OnEnter(Menu) 没触发");
+    }
+
+    /// 「回菜单必须清场」那条纪律在 P6b② 之后多了一格：修正登记处里那几条的主语是
+    /// **上一局那些人**。这一条不跑整局，只把 `clear_match` 单独走一遍 —— 它要的两道门
+    /// （回合机停在 `Boot`、`TurnOrder` 还在）都是能直接摆出来的事实。
+    ///
+    /// 为什么值得为一句「面板说错话」写测试：这张面板存在的理由就是「查钱为什么是这个数」，
+    /// 而主菜单上一句指向死人的「修正登记处：1 条」正好是它最该防的那类假象
+    #[test]
+    fn clear_match_releases_the_previous_match_s_corrections() {
+        use game_core::prelude::{Adjustment, Correction, Scope, Source};
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(StatesPlugin)
+            .init_state::<TurnPhase>()
+            .insert_resource(TurnOrder::new(vec![]))
+            .init_resource::<Corrections>()
+            .add_systems(Update, clear_match);
+        let bearer = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<Corrections>()
+            .register(Correction::always(
+                bearer,
+                Scope::Any,
+                Adjustment::Cancel,
+                Source::God,
+            ));
+        assert_eq!(
+            app.world().resource::<Corrections>().len(),
+            1,
+            "前置：登记处得真挂着一条，否则下面那句「清零」是空跑"
+        );
+
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<Corrections>().len(),
+            0,
+            "回菜单那一次清场要把上一局那几条一起收走"
+        );
     }
 }

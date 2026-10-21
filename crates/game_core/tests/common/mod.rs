@@ -19,21 +19,22 @@ use game_core::CoreGamePlugin;
 use game_core::prelude::{
     ActiveBoard, Adjustment, AtmAccess, BailRequested, BankBalance, BankOp, BankOpDone,
     BankOpRequested, BankVisited, BombTransferred, Books, BuildingLevel, BuyOffered, CardAim,
-    CardDrawn, CardGained, CardId, CardKind, CardPlayed, CardSet, CashChanged, ChargeKind,
-    ChargeWaived, ChestOpened, Correction, Corrections, CouponBoxes, DamageTally, DataHandles,
-    Date, Decision, DecisionChosen, Deck, Detention, DetentionLifted, DetentionSkipped, DiceRolled,
-    EpochOverride, GameOver, GameRules, GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven,
-    God, GodAppeared, GodDeed, GodLeft, GodPossessed, Hand, Insulation, Inventory, ItemKind,
-    ItemPlaced, LandBought, LandDamage, LandId, LandStatus, LandUpgraded, LandView, Market,
-    MarketClock, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged,
-    MoveCap, MoveCapped, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision,
-    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
-    PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, Possession,
-    Presence, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll, RequestStay,
-    Rng, Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted, StaySentence,
-    StaySkipped, StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
-    TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase,
-    TurnStarted, UpgradeOffered, WalkHalted, WalkStarted, Wallet, deal_to, grant_effects,
+    CardDrawn, CardGained, CardId, CardKind, CardLost, CardPlayed, CardSet, CashChanged,
+    ChargeKind, ChargeWaived, ChestOpened, Correction, Corrections, CouponBoxes, DamageTally,
+    DataHandles, Date, Decision, DecisionChosen, Deck, Detention, DetentionLifted,
+    DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed, GameSession,
+    GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed, GodLeft, GodPossessed, Hand,
+    Insulation, Inventory, ItemKind, ItemPlaced, LandBought, LandDamage, LandId, LandStatus,
+    LandUpgraded, LandView, Market, MarketClock, MortgageDone, MortgageOp, MortgageRequested,
+    Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt, OccupancyKind,
+    Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived,
+    PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points,
+    PointsChanged, Possession, Presence, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
+    RequestRoll, RequestStay, Rng, Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source,
+    StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested,
+    StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded,
+    TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted, Wallet, deal_to,
+    grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -228,6 +229,9 @@ struct BookReaders<'w, 's> {
     /// 记录顺序就是因果顺序，「先换神、后动手」在同一段流水里读得出来。
     gods_deeds: MessageReader<'w, 's, GodDeed>,
     gods_left: MessageReader<'w, 's, GodLeft>,
+    /// 衰神每回合弄走的卡（P6b②）。它与 `CardPlayed` 分开读：那条说出牌人，这条说的是
+    /// 「我明明有卡，它去哪了」—— 而后者才是这条用例要能回答的那句话。
+    cards_lost: MessageReader<'w, 's, CardLost>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -615,6 +619,14 @@ fn collect_books(
             who(&players, m.player),
             m.god.label(),
             m.reason.label()
+        ));
+    }
+    for m in r.cards_lost.read() {
+        log.0.push(format!(
+            "Lose({}:{}·{})",
+            who(&players, m.player),
+            m.card.title,
+            m.by.label()
         ));
     }
     for m in r.cash.read() {
@@ -1629,8 +1641,11 @@ pub fn deal(app: &mut App, player: Entity, index: u32) {
     app.update();
 }
 
-/// 某人身上还剩几层护身（`None` = 没有护身；`Some(None)` = 不限次的神明那一类）。
-pub fn shield_of(app: &App, player: Entity) -> Option<Option<u32>> {
+/// 某人身上还剩几层**卡给的**护身（`None` = 没有护身组件）。
+///
+/// 神给的那一半不在这里（P6b②：它现读 `Possession`，见 [`possession_of`]）—— 两半共用一个
+/// 读数的话，「免疫期间卡上的层数没被吃掉」这件事就测不出来。
+pub fn shield_of(app: &App, player: Entity) -> Option<u32> {
     app.world()
         .entity(player)
         .get::<Insulation>()

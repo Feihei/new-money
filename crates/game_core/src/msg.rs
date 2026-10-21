@@ -735,6 +735,19 @@ pub struct GodPossessed {
     pub replaced: Option<crate::gods::God>,
 }
 
+/// 一张卡**离开手牌但不是被打出**（P6b② 衰神每回合弄走一张）。
+///
+/// 为什么不给 `CardPlayed` 加一个「谁弄走的」字段：那条说的是「某人按了某颗按钮」，
+/// 带着出牌人与目标，而这里没有人按任何东西 —— 玩家问的是「我明明有卡，它去哪了」，
+/// 这一条说得出是**哪位神**干的。`Hand::spend` 那边也不动：它是出牌那条路的出口。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct CardLost {
+    pub player: Entity,
+    pub card: CardNotice,
+    /// 谁弄走的。今天只有衰神，但这一格是这条消息存在的全部理由
+    pub by: crate::gods::God,
+}
+
 /// 一位神离开某人。与 [`GodPossessed`] 分成两条而不是带一个方向字段的同一条：
 /// 一来一回的读者不同（附身要播动画、离场只要把挂着的修正与 HUD 那一行清掉），
 /// 而 `GodExit` 已经说了「怎么走的」。

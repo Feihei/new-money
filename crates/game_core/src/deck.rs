@@ -195,6 +195,10 @@ pub struct CardSink<'w, 's> {
     pub commands: Commands<'w, 's>,
     pub positions: Query<'w, 's, &'static mut TokenPosition, With<PlayerId>>,
     pub insulations: Query<'w, 's, &'static mut Insulation>,
+    /// 身上挂着哪位神（P6b②）。**只读**，而且它不是效果的存放处 —— 神给的免疫与天数
+    /// 加倍每次都现读这一格（见 [`crate::gods::resists`]），因为「附身期间」这件事的
+    /// 真相只有 `Possession` 一份，抄进 `Insulation` 就会有两份到期时间。
+    pub possessions: Query<'w, 's, &'static crate::gods::Possession, With<PlayerId>>,
     /// 绕行方向。转向卡要**就地**翻它（见 [`apply_card`] 里那一支），所以是 `&mut` 查询
     /// 而不是 `Commands`。
     pub headings: Query<'w, 's, &'static mut Heading, With<PlayerId>>,
@@ -266,16 +270,17 @@ pub fn apply_card(
             }
             CardEffect::Detain { place, turns } => {
                 let affliction = Affliction::new(AfflictDomain::Detention, victim);
-                if absorb(&mut sink.insulations, &mut sink.commands, &affliction) {
+                if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
                         domain: affliction.domain,
                     });
                     continue;
                 }
+                let days = doom_days_for(sink, victim, *turns);
                 // 接入点与死胡同格由 `detain` 一处算（三个去处共用）。它查不到那条分支时
                 // 什么都不改并返回 `None` —— 与「数据写了个棋盘上没有的格名」同一条纪律：
                 // 不猜一个格子，也不回退到起点。返回的那条拘留**可能是原来更久的那一张**，
-                // 所以凭据一律用它给的值，而不是卡面上那个数
+                // 所以凭据一律用它给的值，而不是算完的那个倍数
                 let Some((held, junction, end)) = detain(
                     &mut sink.commands,
                     &mut sink.positions,
@@ -283,7 +288,7 @@ pub fn apply_card(
                     &sink.books.active.def,
                     victim,
                     *place,
-                    *turns,
+                    days,
                 ) else {
                     debug!(
                         "这张棋盘没有「{}」那条分支，把 {} 送去那里这条路落空",
@@ -333,25 +338,21 @@ pub fn apply_card(
                 }
             }
             CardEffect::Insulate { charges } => {
-                // 护身叠层：两张免罪卡 = 抵两次。`None`（神明那种不限次）不被加法吃掉
+                // 护身叠层：两张免罪卡 = 抵两次。神明那一半不在这个组件里（见
+                // [`crate::afflict::Insulation`] 的注），所以这里没有「不限次」要保护
                 let stacked = match sink.insulations.get_mut(victim) {
                     Ok(mut existing) => {
-                        // `None`（不限次）保持 `None`：`map` 天生不做这件事，
-                        // 而「神明附身被一张免罪卡变成只剩一次」是不可接受的
-                        existing.charges =
-                            existing.charges.map(|held| held.saturating_add(*charges));
+                        existing.charges = existing.charges.saturating_add(*charges);
                         existing.charges
                     }
                     Err(_) => {
-                        sink.commands.entity(victim).insert(Insulation {
-                            charges: Some(*charges),
-                        });
-                        Some(*charges)
+                        sink.commands
+                            .entity(victim)
+                            .insert(Insulation { charges: *charges });
+                        *charges
                     }
                 };
-                outcomes.push(EffectOutcome::Shielded {
-                    charges: stacked.unwrap_or(*charges),
-                });
+                outcomes.push(EffectOutcome::Shielded { charges: stacked });
             }
             CardEffect::LandStatus { status, days, area } => {
                 // 锚点来自**请求里的目标**，不在卡面上：同一张「涨价卡」打在南京路还是
@@ -418,7 +419,7 @@ pub fn apply_card(
                 // 与入狱同一条形状：它先过护身。被抵消的那次不该留下半个掉头 ——
                 // 「方向没变」与「方向变了又变回来」在流水上是两件事
                 let affliction = Affliction::new(AfflictDomain::Reversal, victim);
-                if absorb(&mut sink.insulations, &mut sink.commands, &affliction) {
+                if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
                         domain: affliction.domain,
                     });
@@ -440,12 +441,13 @@ pub fn apply_card(
                 // 还是那条形状：先过护身（PLAN §三「免罪抵消坐牢/住院/停留/转向」）。
                 // 停留是**事**不是钱，所以它不挂 `Corrections`（P3a 的划分）
                 let affliction = Affliction::new(AfflictDomain::Stay, victim);
-                if absorb(&mut sink.insulations, &mut sink.commands, &affliction) {
+                if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
                         domain: affliction.domain,
                     });
                     continue;
                 }
+                let days = doom_days_for(sink, victim, *turns);
                 // 就地写而不是 `Commands`：同一个窗口打两张，第二条要读得到第一条的剩余值。
                 // **取较大**而不是相加或覆盖：给一个已经停留 2 回合的人再打一张 1，
                 // 覆盖等于替他减刑 —— 惩罚卡不该有让人早走的副作用。
@@ -453,14 +455,14 @@ pub fn apply_card(
                 // 计数由玩家按「停留」时扣（`take_stay_system`），这里只写状态
                 let left = match sink.stays.get_mut(victim) {
                     Ok(mut held) => {
-                        held.turns_left = held.turns_left.max(*turns);
+                        held.turns_left = held.turns_left.max(days);
                         held.turns_left
                     }
                     Err(_) => {
                         sink.commands
                             .entity(victim)
-                            .insert(StaySentence { turns_left: *turns });
-                        *turns
+                            .insert(StaySentence { turns_left: days });
+                        days
                     }
                 };
                 outcomes.push(EffectOutcome::Stayed { turns: left });
@@ -468,24 +470,25 @@ pub fn apply_card(
             CardEffect::MoveCap { turns } => {
                 // 与停留同一条反制形状：免罪挡的是**事**，不是钱
                 let affliction = Affliction::new(AfflictDomain::MoveCap, victim);
-                if absorb(&mut sink.insulations, &mut sink.commands, &affliction) {
+                if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
                         domain: affliction.domain,
                     });
                     continue;
                 }
+                let days = doom_days_for(sink, victim, *turns);
                 // 就地写 + 取较大：两张乌龟卡不叠加，短的不覆盖长的（惩罚卡不该替人加速）。
                 // 计数在每次掷骰时扣一格（`turn::roll_dice_system`），不是打出即扣
                 let left = match sink.caps.get_mut(victim) {
                     Ok(mut held) => {
-                        held.turns_left = held.turns_left.max(*turns);
+                        held.turns_left = held.turns_left.max(days);
                         held.turns_left
                     }
                     Err(_) => {
                         sink.commands
                             .entity(victim)
-                            .insert(MoveCap { turns_left: *turns });
-                        *turns
+                            .insert(MoveCap { turns_left: days });
+                        days
                     }
                 };
                 outcomes.push(EffectOutcome::Slowed { turns: left });
@@ -495,23 +498,43 @@ pub fn apply_card(
     outcomes
 }
 
-/// 用掉一层护身去挡这件厄运。挡住了才把空护身收走 —— 留着 `Some(0)` 会让面板上
-/// 出现一个「有免罪卡但什么都不挡」的玩家。
-fn absorb(
-    insulations: &mut Query<&mut Insulation>,
-    commands: &mut Commands,
-    affliction: &Affliction,
-) -> bool {
-    let Ok(mut shield) = insulations.get_mut(affliction.victim) else {
+/// 这件厄运有没有被挡下来。**两个来源、一个出口**：
+/// 神给的免疫先问（它不消耗任何东西），否则用掉一层卡给的护身。
+///
+/// 顺序是有内容的：反过来写，大福神在场时每一件事都会白白吃掉一层免罪卡，
+/// 玩家手里那两张会在他还「免疫」的时候悄悄清零 —— 而那件事只有在他不再免疫的
+/// 下一件上才看得见，也就是看不见。
+fn resist(sink: &mut CardSink<'_, '_>, affliction: &Affliction) -> bool {
+    let victim = affliction.victim;
+    if sink
+        .possessions
+        .get(victim)
+        .is_ok_and(|held| crate::gods::resists(held.god))
+    {
+        return true;
+    }
+    let Ok(mut shield) = sink.insulations.get_mut(victim) else {
         return false;
     };
     if !shield.absorb(affliction) {
         return false;
     }
-    if shield.charges == Some(0) {
-        commands.entity(affliction.victim).remove::<Insulation>();
+    // 挡住了才把空护身收走 —— 留着一个 0 层的组件，面板上就是一个
+    // 「有免罪卡但什么都不挡」的玩家
+    if shield.is_empty() {
+        sink.commands.entity(victim).remove::<Insulation>();
     }
     true
+}
+
+/// 落在 `victim` 头上的厄运天数，过一遍「那位神说延长几倍」。
+///
+/// 三个调用点（拘留／停留／乌龟）共用这一句，所以倍数只写在
+/// [`crate::gods::doom_multiplier`] 一处 —— 与钱那一侧「乘数只在 `money_corrections`
+/// 里写一次」是同一条纪律。
+fn doom_days_for(sink: &CardSink<'_, '_>, victim: Entity, days: u32) -> u32 {
+    let god = sink.possessions.get(victim).ok().map(|held| held.god);
+    crate::gods::doom_days(god, days)
 }
 
 // ===== 落格那一段：抽卡并当场结算效果 =====

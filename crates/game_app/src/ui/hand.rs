@@ -12,8 +12,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, Bankrupt, Books, CardAim, CardDef, CardGained, CardId, CardKind, CardTarget,
-    GameRules, Hand, Insulation, LandId, Paused, PendingDecision, PlayerId, PlayerName, Shelf,
-    TurnOrder, TurnPhase, deal_to,
+    GameRules, God, Hand, Insulation, LandId, Paused, PendingDecision, PlayerId, PlayerName,
+    Possession, Shelf, TurnOrder, TurnPhase, deal_to, resists,
 };
 
 use super::theme::{col, layout, size};
@@ -121,6 +121,9 @@ pub(crate) struct HandView<'w, 's> {
     board: Option<Res<'w, ActiveBoard>>,
     hands: Query<'w, 's, &'static Hand, With<PlayerId>>,
     shields: Query<'w, 's, &'static Insulation>,
+    /// 身上挂着哪位神（P6b②）。护身那一行有**两个来源**，少读一个就会在玩家其实免疫的时候
+    /// 只念出卡上的层数（§6.1 坑 30 同一条：可见位要有它的全部判据）。
+    possessions: Query<'w, 's, &'static Possession>,
     /// 地块表 + 「这块无主地买得下来吗」的那句判据（[`Books::buy_price`]）。
     /// 按钮上的价不在这里另算：修正登记处（小福神买地免费那一类）与物价指数只住在账本
     /// 那一侧，抄一份就迟早分叉成「按钮写着 1,200、实际扣 2,400」。
@@ -165,12 +168,17 @@ pub(crate) struct LandPick {
 ///
 /// 写成对 `CardTarget` 的穷尽匹配、不留 `_`：新增一种目标时必须当场决定它长什么样，
 /// 而不是等截图时才发现有颗哑弹。
+/// `parcels` 是「此刻**买得下来**的无主地」（买不起的不在里面，同一句判据的另一半），
+/// `denied` 是「他身上有衰神／死神，置产这一族的事一件也办不成」（`Books::acquire_denied`）。
+/// 两者都能让那一排空掉，而玩家要听到的是一句不同的话：「没有买得起的无主地」在
+/// 必败那一位身上是一句**假话**——地是无主的、钱也是够的。
 pub(crate) fn play_buttons(
     def: &CardDef,
     opponents: &[(Entity, String)],
     anyone: &[(Entity, String)],
     lands: &[LandPick],
     parcels: &[LandPick],
+    denied: bool,
 ) -> Vec<PlayButton> {
     match def.target {
         CardTarget::SelfOnly => vec![PlayButton {
@@ -226,6 +234,16 @@ pub(crate) fn play_buttons(
         // 这句说的是「买得起的无主地」而不是「没有无主地」：候选排是账本筛出来的，
         // 面板只读得到「筛完是空」，读不到空在哪一头。反过来写就是一句假话
         // （地全有主时同样「没有买得起的无主地」，那句话倒是永远成立）
+        //
+        // 而「空」现在有**两个**来源：钱不够，与身上那位衰神／死神让整族事办不成
+        // （P6b② `Books::acquire_denied`）。两者在候选排上长得一模一样，所以那句
+        // 为什么必须分开说 —— 对附身的人念「没有买得起的无主地」是句假话：
+        // 地是无主的，钱也是够的，缺的是「这件事今天不给做」
+        CardTarget::UnownedLand if denied => vec![PlayButton {
+            text: "用".into(),
+            aim: None,
+            blocked: Some("那位神让买地必败"),
+        }],
         CardTarget::UnownedLand if parcels.is_empty() => vec![PlayButton {
             text: "用".into(),
             aim: None,
@@ -253,13 +271,21 @@ fn aim_text(def: &CardDef) -> &'static str {
     }
 }
 
-/// 护身那一行。没挂护身就不写这一句；`Some(0)` 也不写 —— 规则层在用完那一层就把组件
+/// 护身那一行。没挂护身就不写这一句；0 层也不写 —— 规则层在用完那一层就把组件
 /// 摘了，这里再兜一次，免得面板说出「免罪护身 0 层」这种自相矛盾的话。
-fn shield_text(shield: Option<&Insulation>) -> Option<String> {
-    match shield?.remaining() {
-        None => Some("护身：免疫".into()),
-        Some(0) => None,
-        Some(n) => Some(format!("护身 {n} 层")),
+///
+/// `god` 是那位神给的那半（P6b② 的大福神／天使＝厄运豁免）。它**不在这个组件里**
+/// （见 `game_core::afflict::Insulation` 的注），所以这里要把两半一起念，否则面板会在
+/// 玩家其实免疫的时候只写「护身 2 层」—— 那句话说的是卡，而玩家问的是「为什么这次没关进去」。
+/// 两半都在时那句必须说清是两层**加**免疫：免疫期间卡上的层数不会被吃掉，这是玩法信息。
+fn shield_text(shield: Option<&Insulation>, god: Option<God>) -> Option<String> {
+    let immune = god.is_some_and(resists);
+    let charges = shield.map(|s| s.charges).filter(|n| *n > 0);
+    match (immune, charges) {
+        (true, Some(n)) => Some(format!("护身：免疫（另有卡 {n} 层）")),
+        (true, None) => Some("护身：免疫".into()),
+        (false, Some(n)) => Some(format!("护身 {n} 层")),
+        (false, None) => None,
     }
 }
 
@@ -310,6 +336,10 @@ pub(crate) fn sync_hand_panel(
     let mine = player
         .and_then(|p| view.faces.get(p).ok())
         .map(|(_, pid, _, _)| *pid);
+    // 「买不下来」有两个来源，而候选排只把两者都收成空排，所以这里单独问一句、
+    // 让灰按钮那句为什么说得准。读的仍是账本那一句判据（`Books::acquire_denied`），
+    // 面板不查 `Possession` —— 与 `buy_price` 那条「报价与成交共读一句」同一条纪律
+    let denied = player.is_some_and(|p| view.books.acquire_denied(p));
     if let Some(board) = view.board.as_deref() {
         for plot in view.books.views() {
             let Some(def) = board.def.land(plot.id.0) else {
@@ -355,7 +385,12 @@ pub(crate) fn sync_hand_panel(
         .and_then(|p| view.hands.get(p).ok())
         .map(|h| h.cards.iter().copied().collect())
         .unwrap_or_default();
-    let shield = shield_text(player.and_then(|p| view.shields.get(p).ok()));
+    let shield = shield_text(
+        player.and_then(|p| view.shields.get(p).ok()),
+        player
+            .and_then(|p| view.possessions.get(p).ok())
+            .map(|held| held.god),
+    );
     // 签名要覆盖面板上每一个由判据决定的可见位（§6.1 坑 30：少一位就是一次静默过期）。
     // `lands` 那一位是 P3c 加上的：地块卡的按钮排跟着「谁买了哪块地」变，
     // 少了它，玩家刚买下的那块地不会出现在按钮排里，而下一次别的原因重建面板时才冒出来。
@@ -458,7 +493,7 @@ pub(crate) fn sync_hand_panel(
                 ));
                 continue;
             };
-            let buttons = play_buttons(def, &opponents, &anyone, &lands, &parcels);
+            let buttons = play_buttons(def, &opponents, &anyone, &lands, &parcels, denied);
             // 三行分开：合成一行的话，两张卡名加两颗按钮在 1024 宽的屏上就顶到边了
             let mut title = p.spawn(Node {
                 flex_direction: FlexDirection::Row,
@@ -587,6 +622,7 @@ mod tests {
             &[foe(5, "自己"), foe(2, "孙小美")],
             &[pick("我的南京路", 0)],
             &[pick("外滩北 $1500", 2)],
+            false,
         );
         assert_eq!(buttons.len(), 1, "给自己的卡不该长出「对谁」这一排按钮");
         assert_eq!(buttons[0].aim, None);
@@ -602,6 +638,7 @@ mod tests {
             &[foe(5, "自己"), foe(2, "孙小美"), foe(3, "阿土伯")],
             NO_PLOTS,
             NO_PARCELS,
+            false,
         );
         assert_eq!(buttons.len(), 2, "两个对手就该有两颗可选的按钮");
         // 目标烤在按钮里：按下去就是一个完整意图，规则层不必再挂「选目标」的待决
@@ -621,6 +658,7 @@ mod tests {
             NO_PEOPLE,
             NO_PLOTS,
             NO_PARCELS,
+            false,
         );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("场上没有别的人了"));
@@ -637,6 +675,7 @@ mod tests {
             &[foe(5, "自己"), foe(2, "孙小美")],
             NO_PLOTS,
             NO_PARCELS,
+            false,
         );
         assert_eq!(buttons.len(), 2, "自己 + 一名对手 = 两颗按钮");
         assert_eq!(
@@ -658,6 +697,7 @@ mod tests {
             NO_PEOPLE,
             NO_PLOTS,
             NO_PARCELS,
+            false,
         );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("现在没有可行动的人"));
@@ -675,6 +715,7 @@ mod tests {
             NO_PEOPLE,
             &picks,
             &[pick("外滩北 $1500", 2)],
+            false,
         );
         assert_eq!(buttons.len(), 2, "两块有主的地就该有两颗按钮");
         assert_eq!(
@@ -689,7 +730,14 @@ mod tests {
     #[test]
     fn a_land_card_with_nothing_owned_is_greyed_with_a_reason() {
         // 开局第一回合谁都没买地。这时打地块卡是空转，而空转该读成一句话
-        let buttons = play_buttons(&def(CardTarget::Land), &[], NO_PEOPLE, NO_PLOTS, NO_PARCELS);
+        let buttons = play_buttons(
+            &def(CardTarget::Land),
+            &[],
+            NO_PEOPLE,
+            NO_PLOTS,
+            NO_PARCELS,
+            false,
+        );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("还没有人有地"));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
@@ -706,6 +754,7 @@ mod tests {
             NO_PEOPLE,
             &[pick("我的南京路", 0)],
             &parcels,
+            false,
         );
         assert_eq!(buttons.len(), 2, "两块买得下来的无主地就该有两颗按钮");
         assert_eq!(
@@ -727,6 +776,7 @@ mod tests {
             NO_PEOPLE,
             NO_PLOTS,
             NO_PARCELS,
+            false,
         );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("没有买得起的无主地"));
@@ -734,21 +784,61 @@ mod tests {
     }
 
     #[test]
-    fn the_shield_line_names_layers_and_never_shows_zero() {
-        assert_eq!(shield_text(None), None, "没挂护身就不写这一句");
+    fn a_doom_bearer_hears_why_he_cannot_buy_rather_than_that_nothing_is_cheap_enough() {
+        // 空排有两个来源，而那句「没有买得起的无主地」对附身的人是假话：地是无主的、
+        // 钱也够，缺的是「这件事今天不给做」。两条各占一格，红在该换的那一句上
+        let buttons = play_buttons(
+            &def(CardTarget::UnownedLand),
+            &[],
+            NO_PEOPLE,
+            NO_PLOTS,
+            NO_PARCELS,
+            true,
+        );
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].blocked, Some("那位神让买地必败"));
+        let again = play_buttons(
+            &def(CardTarget::UnownedLand),
+            &[],
+            NO_PEOPLE,
+            NO_PLOTS,
+            NO_PARCELS,
+            false,
+        );
         assert_eq!(
-            shield_text(Some(&Insulation { charges: Some(2) })),
+            again[0].blocked,
+            Some("没有买得起的无主地"),
+            "没有神时仍要说钱那一头 —— 两句换成同一句就测不出判据分了叉"
+        );
+    }
+
+    #[test]
+    fn the_shield_line_names_both_sources_and_never_shows_zero() {
+        assert_eq!(shield_text(None, None), None, "两样都没有就不写这一句");
+        assert_eq!(
+            shield_text(Some(&Insulation { charges: 2 }), None),
             Some("护身 2 层".into())
         );
         assert_eq!(
-            shield_text(Some(&Insulation { charges: Some(0) })),
+            shield_text(Some(&Insulation { charges: 0 }), None),
             None,
             "用完的那一层规则层已经摘了组件，面板不许说「护身 0 层」"
         );
+        // 神明那一半不在组件里（P6b②），所以它由第二个参数带进来：大福神＝免疫
         assert_eq!(
-            shield_text(Some(&Insulation { charges: None })),
+            shield_text(None, Some(God::BigFortune)),
             Some("护身：免疫".into()),
-            "不限次那一类（P6 神明）要写成「免疫」，不是「∞」也不是一个大数"
+            "免疫要写成「免疫」，不是「∞」也不是一个大数"
+        );
+        assert_eq!(
+            shield_text(None, Some(God::SmallFortune)),
+            None,
+            "小福神不免厄运（PLAN §三 只给大的那一半），面板不该替他吹"
+        );
+        assert_eq!(
+            shield_text(Some(&Insulation { charges: 2 }), Some(God::Angel)),
+            Some("护身：免疫（另有卡 2 层）".into()),
+            "两半都要念出来：免疫期间卡上的层数不消耗，这是玩家要知道的玩法"
         );
     }
 
