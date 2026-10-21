@@ -25,16 +25,16 @@ use game_core::prelude::{
     DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed, GameSession,
     GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed, GodLeft, GodPossessed, Hand,
     Insulation, Inventory, ItemKind, ItemPlaced, LandBought, LandDamage, LandId, LandStatus,
-    LandUpgraded, LandView, Market, MarketClock, MortgageDone, MortgageOp, MortgageRequested,
-    Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt, OccupancyKind,
-    Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived,
-    PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points,
-    PointsChanged, Possession, Presence, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
-    RequestRoll, RequestStay, Rng, Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source,
-    StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested,
-    StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded,
-    TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted, Wallet, deal_to,
-    grant_effects,
+    LandTaken, LandUpgraded, LandView, Market, MarketClock, MortgageDone, MortgageOp,
+    MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt,
+    OccupancyKind, Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
+    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported,
+    PlotArea, Points, PointsChanged, Possession, Presence, RedEnvelope, RemoteDiceUsed, RentDue,
+    RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, Shelf, ShopOpDone, ShopOpRequested,
+    ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged,
+    StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition,
+    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkHalted,
+    WalkStarted, Wallet, deal_to, grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -186,6 +186,9 @@ struct BookReaders<'w, 's> {
     offers: MessageReader<'w, 's, BuyOffered>,
     upgrade_offers: MessageReader<'w, 's, UpgradeOffered>,
     bought: MessageReader<'w, 's, LandBought>,
+    /// 土地公的直接占有（P6c）。与 `bought` 分开记：那条说「有人付了这笔钱」，
+    /// 这一条没有付款，而两者的主语甚至可以是同一个人（他先付租、后拿地）
+    lands_taken: MessageReader<'w, 's, LandTaken>,
     upgraded: MessageReader<'w, 's, LandUpgraded>,
     rents: MessageReader<'w, 's, RentDue>,
     /// 一次性修正生效那一笔（免费卡花掉了）。它**没有**对应的 `CashChanged`，
@@ -372,6 +375,16 @@ fn collect_books(
             who(&players, m.player),
             m.land.0,
             m.price
+        ));
+    }
+    for m in r.lands_taken.read() {
+        let from = m
+            .from
+            .map_or_else(|| "无主".to_string(), |old| who(&players, old));
+        log.0.push(format!(
+            "Take({}:L{}←{from})",
+            who(&players, m.player),
+            m.land.0
         ));
     }
     for m in r.upgraded.read() {

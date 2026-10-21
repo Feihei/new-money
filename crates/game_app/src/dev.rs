@@ -14,9 +14,9 @@ use std::collections::HashSet;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, Detention, DetentionPlace, Inventory, ItemKind, Mount, MountChanged, Occupancy,
-    OccupancyKind, Pending, PendingDecision, PlayerDetained, PlayerId, Points, TileIndex,
-    TokenPosition, TurnOrder, TurnPhase, detain, place,
+    ActiveBoard, Detention, DetentionPlace, God, GodDesk, Inventory, ItemKind, Mount, MountChanged,
+    Occupancy, OccupancyKind, Pending, PendingDecision, PlayerDetained, PlayerId, Points,
+    TileIndex, TokenPosition, TurnOrder, TurnPhase, attach, detain, place,
 };
 
 pub struct DevPlugin;
@@ -28,11 +28,13 @@ pub fn install_if_requested(app: &mut App) {
     let items = ForceItems::from_env();
     let mount = ForceMount::from_env();
     let places = ForcePlace::from_env();
+    let god = ForceGod::from_env();
     if forced.0.is_none()
         && bail.0.is_none()
         && !items.0
         && mount.0.is_none()
         && places.0.is_empty()
+        && god.0.is_none()
     {
         return;
     }
@@ -61,6 +63,13 @@ pub fn install_if_requested(app: &mut App) {
         info!(
             "开发注入已开启（NM_PLACE）：预放 {} 件道路放置物",
             places.0.len()
+        );
+    }
+    if let Some(god) = god.0 {
+        info!(
+            "开发注入已开启（NM_GOD）：当前玩家将被{}附身（{} 天）",
+            god.label(),
+            god.days()
         );
     }
     app.add_plugins(DevPlugin);
@@ -193,6 +202,40 @@ impl ForcePlace {
     }
 }
 
+/// `NM_GOD=天使` / `NM_GOD=Angel`：把一位神直接附到当前玩家身上。
+///
+/// 附身的正经入口是「踩到路上那一位」，而路上刷谁由随机子流决定、谁踩到由骰子决定。
+/// P6c 那三条效果吃的是**步数与落脚格**（「所经」要走过好几格），靠运气拍不到一张能说清
+/// 问题的图 —— 与 `NM_DETAIN`/`NM_MOUNT` 同一条理由：进不了截图的状态等于没做完。
+///
+/// 中文名与英文名都收，因为 [`God::ALL`] 就是那张穷尽表，不必再维护一份 slug 对照。
+#[derive(Resource)]
+struct ForceGod(Option<God>);
+
+impl ForceGod {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_GOD") else {
+            return Self(None);
+        };
+        match Self::parse(raw.trim()) {
+            Some(god) => Self(Some(god)),
+            None => {
+                warn!("NM_GOD={raw} 不认识，应为 12 位神名（大财神…死神）或它的英文名");
+                Self(None)
+            }
+        }
+    }
+
+    /// 认中文名也认英文名（`Angel`／`angel` 都行）。单独成一句是为了能被测到：
+    /// 一个拼错的旋钮值不会崩、也不会红，只会「注入没发生」，而那张截图看起来只是
+    /// 「今天没有神」—— 与 `ui/hand.rs` 那条「样例卡的 id 不在货架上，NM_HAND 拍不到东西」同一种坑。
+    fn parse(raw: &str) -> Option<God> {
+        God::ALL
+            .into_iter()
+            .find(|g| g.label() == raw || format!("{g:?}").eq_ignore_ascii_case(raw))
+    }
+}
+
 impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Injected>()
@@ -201,6 +244,7 @@ impl Plugin for DevPlugin {
             .insert_resource(ForceItems::from_env())
             .insert_resource(ForceMount::from_env())
             .insert_resource(ForcePlace::from_env())
+            .insert_resource(ForceGod::from_env())
             // 回菜单时清掉「已经注入过」：`NM_DETAIN` 配 `NM_MENULOOP` 要能在第二局再注入一次，
             // 而留在 true 就等于「新局什么都没有」，看着像注入失效（跨局残留那类坑的反面）
             .add_systems(OnEnter(crate::scene::Scene::Menu), clear_injected)
@@ -215,6 +259,7 @@ impl Plugin for DevPlugin {
                     force_items,
                     force_mount,
                     force_place,
+                    force_god,
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
@@ -234,6 +279,7 @@ struct Injected {
     items: bool,
     mount: bool,
     place: bool,
+    god: bool,
 }
 
 fn clear_injected(mut done: ResMut<Injected>) {
@@ -437,5 +483,81 @@ fn force_place(
             continue;
         }
         info!("注入：{} 放在 {} 号格", kind.label(), tile.0);
+    }
+}
+
+/// `NM_GOD=天使`：把一位神附到当前玩家身上。
+///
+/// 走 [`attach`] 而不是自己插组件 —— 那是规则里唯一的附身出口，四件事必须同时成立
+/// （顶掉旧神、挂修正链、做完一次性效果、发 `GodPossessed`）。插个裸组件会得到
+/// 「身上多一位、账与房子都不动」，而那正是这条函数被合成一句的理由。
+fn force_god(
+    force: Res<ForceGod>,
+    order: Res<TurnOrder>,
+    positions: Query<&TokenPosition, With<PlayerId>>,
+    mut desk: GodDesk<'_, '_>,
+    mut done: ResMut<Injected>,
+) {
+    let (Some(god), false) = (force.0, done.god) else {
+        return;
+    };
+    let Some(player) = order.current() else {
+        return;
+    };
+    done.god = true;
+    let at = positions
+        .get(player)
+        .map(|pos| pos.tile)
+        .unwrap_or(TileIndex(0));
+    attach(&mut desk, player, god, at);
+    info!(
+        "注入：当前玩家被{}附身（{} 天），他从 {} 号格起走",
+        god.label(),
+        god.days(),
+        at.0
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ForceGod;
+    use game_core::prelude::God;
+
+    /// 每一位神都要能被两种写法点名 —— 这张穷尽表是旋钮唯一的名字来源，
+    /// 谁把它换成手写 slug 对照，加一位神时就会漏掉一位（漏掉的那一位拍不到，
+    /// 而症状是「今天没有神」，不是报错）
+    #[test]
+    fn nm_god_accepts_both_name_forms_for_every_god() {
+        for god in God::ALL {
+            assert_eq!(
+                ForceGod::parse(god.label()),
+                Some(god),
+                "中文名 {}",
+                god.label()
+            );
+            let english = format!("{god:?}");
+            assert_eq!(ForceGod::parse(&english), Some(god), "英文名 {english}");
+            assert_eq!(
+                ForceGod::parse(&english.to_lowercase()),
+                Some(god),
+                "小写 {english}"
+            );
+        }
+    }
+
+    /// 名字撞车 = 旋钮分不出要给哪一位（`find` 永远给表里排前面的那个，且不报错）
+    #[test]
+    fn no_two_gods_share_a_label() {
+        let mut labels: Vec<&str> = God::ALL.iter().map(|god| god.label()).collect();
+        labels.sort_unstable();
+        let every = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), every, "有两位神同名：{labels:?}");
+    }
+
+    #[test]
+    fn an_unknown_name_injects_nothing() {
+        assert_eq!(ForceGod::parse("土地婆"), None);
+        assert_eq!(ForceGod::parse(""), None);
     }
 }

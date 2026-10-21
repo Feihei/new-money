@@ -21,8 +21,8 @@ use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::prelude::{
     CardAim, ChargeKind, Detention, DetentionPlace, GameRules, GameSeed, GameSetup, God, LandId,
-    MAX_ON_BOARD, OccupancyKind, PlayerId, Possession, Rival, STARTING_GODS, StaySentence,
-    TileKind,
+    LandStatus, MAX_ON_BOARD, OccupancyKind, PlayerId, Possession, Rival, STARTING_GODS,
+    StaySentence, TileKind, WalkEffect, takes_landing, walk_effect,
 };
 
 /// prototype 的 1 号格挂着 L0 南京路（见 `settle.rs` 顶上那张格子对照表）。
@@ -918,6 +918,11 @@ fn every_doom_day_a_god_multiplies_covers_all_three_places() {
             "{card} 在大衰神在场时要翻倍"
         );
         assert_eq!(
+            days_played(card, Some(God::Devil), which),
+            plain * 2,
+            "{card}：恶魔也延长（P6c，与被绑架那一格同一个倍数、同一把尺）"
+        );
+        assert_eq!(
             days_played(card, Some(God::SmallDoom), which),
             plain,
             "{card}：小衰神只动钱，不动天数（与 P6b① 那条「抢钱是大穷神独有」同一个分法）"
@@ -1328,5 +1333,379 @@ fn the_turn_a_god_expires_he_takes_no_more_cards() {
         cards_eaten(God::BigDoom, 2, 10),
         2,
         "两天：第一回合格照吃 2 张，第二回合格期满不吃 —— 这条把上面那条的下限也钉住了"
+    );
+}
+
+// ===== P6c：所经（天使／恶魔）与所到（土地公） =====
+
+/// 从 0 号格起步、第一掷钉为 `steps`，回来 `(app, p0)`。
+///
+/// 三条「所经」用例共用这一句：起点与骰点都钉住，「他经过哪几格」才是算得出的事，
+/// 而不是等运气 —— 这条效果吃的就是**步数**，随机骰点会让断言变成一次巧合。
+/// 顺手把 3 号命运格铺成路面：落格时抽一张命运牌会改掉他的位置，而那不是本条要测的东西。
+///
+/// 演示盘的格子对照：格1＝L0 南京路、格2＝L1 汉口路、格4＝L2 外滩（2×2，无主）。
+fn walker(god: God, steps: u32) -> (App, Entity) {
+    let (mut app, p0) = ready_on(0, steps, DecisionPolicy::DeclineAll);
+    pave(&mut app, 3..=3);
+    clear_gods(&mut app);
+    attach_god(&mut app, p0, god, Some(40));
+    (app, p0)
+}
+
+#[test]
+fn the_angel_raises_every_plot_he_walks_over_regardless_of_who_owns_it() {
+    // PLAN §三「天使＝所经一律加盖（不分敌我、无主地也盖）」。
+    // 三块地三种归属：L0 是别人的、L1 是他自己的、L2 无主 —— 三种都要长一层，
+    // 少一种就是「一律」被某道归属判定偷偷过滤掉了
+    let (mut app, p0) = walker(God::Angel, 4);
+    own(&mut app, RENT_LAND, Some(1), 1, false);
+    own(&mut app, SECOND_LAND, Some(0), 2, false);
+    own(&mut app, 2, None, 0, false);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(
+        tile_of(&app, p0),
+        4,
+        "前置：他应当正好走过格1、格2、格3、格4"
+    );
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND).1,
+        2,
+        "别人的地也加盖（不分敌我）"
+    );
+    assert_eq!(plot_state(&mut app, SECOND_LAND).1, 3, "自己的地照样加盖");
+    assert_eq!(
+        plot_state(&mut app, 2).1,
+        1,
+        "无主地也盖 —— 这条是括号里点名的那一半，也是 `buy` 那处「下限 1」存在的前提"
+    );
+    assert_eq!(
+        cash_of(&mut app, p0),
+        20_000,
+        "祝福不是一笔交易：它没有付款人，现金分文不动"
+    );
+}
+
+#[test]
+fn a_plot_that_was_blessed_while_unowned_keeps_its_building_when_bought() {
+    // `Books::buy` 那句从「等级置 1」改成「下限 1」的全部理由：无主地平时是 Lv0，
+    // 两种写法结果一样，而天使会先在无主地上盖出几层 —— 那时「置 1」等于把别人的楼抹平。
+    // PLAN §三 拍卖行那句「建筑随土地一起过户」说的就是这件事
+    let (mut app, p0, _p1) = two_players();
+    own(&mut app, RENT_LAND, None, 0, false);
+    for _ in 0..3 {
+        run_op(&mut app, move |books, _| {
+            assert!(
+                books.bless(LandId(RENT_LAND)).is_some(),
+                "无主空地也该盖得上去"
+            );
+        });
+    }
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND),
+        (None, 3, false),
+        "前置：三次祝福"
+    );
+
+    run_op(&mut app, move |books, _| {
+        let price = books
+            .buy_price(p0, LandId(RENT_LAND))
+            .expect("无主、买得起 —— 报价该给得出来");
+        assert_eq!(books.buy(p0, LandId(RENT_LAND)), Some(price));
+    });
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND),
+        (Some(0), 3, false),
+        "过户的是这块地**现在的样子**：三层楼跟着地一起走，而不是被压回空地"
+    );
+}
+
+#[test]
+fn the_angel_stops_at_the_roof_and_does_not_build_past_a_seal() {
+    let (mut app, _p0, _p1) = two_players();
+    let max = app.world().resource::<GameRules>().max_building_level;
+    own(&mut app, RENT_LAND, Some(1), max, false);
+    own(&mut app, SECOND_LAND, Some(1), 1, false);
+    stamp(&mut app, SECOND_LAND, LandStatus::Sealed, 5);
+    run_op(&mut app, move |books, _| {
+        assert_eq!(
+            books.bless(LandId(RENT_LAND)),
+            Some(max),
+            "封顶那一位上不该再加一层"
+        );
+        assert_eq!(
+            books.bless(LandId(SECOND_LAND)),
+            None,
+            "查封中的地不许施工 —— 与 `can_upgrade` 里那一条同一个读法：条子贴在法院那儿"
+        );
+    });
+    assert_eq!(plot_state(&mut app, SECOND_LAND).1, 1, "查封那块一层没动");
+}
+
+#[test]
+fn the_devil_tears_down_everything_he_passes_but_never_past_empty_ground() {
+    // PLAN §三「恶魔＝所经降一级（空地不拆）」。三块地三种起点：Lv3 该塌成 Lv2、
+    // Lv1 该塌成 Lv0（下面那条注写清了「空地不拆」今天按哪条口径读）、
+    // 无主的 Lv0 本来就没东西可拆
+    let (mut app, p0) = walker(God::Devil, 4);
+    own(&mut app, RENT_LAND, Some(1), 3, false);
+    own(&mut app, SECOND_LAND, Some(0), 1, false);
+    own(&mut app, 2, None, 0, false);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), 4, "前置：他应当走过那三块地所在的格");
+    assert_eq!(plot_state(&mut app, RENT_LAND).1, 2, "三级塌成二级");
+    assert_eq!(
+        plot_state(&mut app, SECOND_LAND).1,
+        0,
+        "空地不拆今天这条口径是「不穿成负数」（`damage::strike` 与它的单测早就这么定），\
+         而 Lv1 就是我们现在那半条「买地即 Lv1 ＝ 空地」，所以塌下去是 Lv0 而不是停在 Lv1。\
+         「有主的 Lv0 到底存不存在」是 PLAN §七 那条 Lv0 待重判，定时炸弹同样会留下它 —— \
+         不在 P6c 现场替 P10 拍它"
+    );
+    assert_eq!(
+        plot_state(&mut app, 2).1,
+        0,
+        "无主空地没东西可拆，也不该被拆出个负数"
+    );
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND).0,
+        Some(1),
+        "降一级不动归属 —— `Degrade` 那一支压根没有 `seize` 这个开关"
+    );
+    assert_eq!(cash_of(&mut app, p0), 20_000, "拆房也不赔钱");
+}
+
+#[test]
+fn a_money_god_walks_over_the_same_street_and_touches_no_buildings() {
+    // 反例的反例：附身一位**钱神**走同一条路，三块地一格都不该动。
+    // 少了这一格，「走路时动房子」这条系统可以被写成「任何人走过都动」而全绿
+    let (mut app, _p0) = walker(God::BigPoor, 4);
+    own(&mut app, RENT_LAND, Some(1), 2, false);
+    own(&mut app, SECOND_LAND, Some(0), 2, false);
+    own(&mut app, 2, None, 2, false);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(
+        (
+            plot_state(&mut app, RENT_LAND).1,
+            plot_state(&mut app, SECOND_LAND).1,
+            plot_state(&mut app, 2).1
+        ),
+        (2, 2, 2),
+        "只有天使与恶魔动房子：其余九位在 `walk_effect` 那张表上答的都是 Nothing"
+    );
+}
+
+#[test]
+fn a_man_who_never_walked_built_nothing() {
+    // 「所经」经的是**步**。他被停留按住、一步没走 → 一格都不该动。
+    // 这条挡的是「把效果挂在回合开始/结束上」那种写法 —— 它跑起来同样「每回合动几格」，
+    // 只是动的不是他走过的那几格
+    let (mut app, p0) = walker(God::Angel, 4);
+    own(&mut app, RENT_LAND, Some(1), 1, false);
+    own(&mut app, SECOND_LAND, Some(0), 1, false);
+    insert(&mut app, p0, StaySentence { turns_left: 2 });
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), 0, "前置：他一步没走");
+    assert_eq!(
+        (
+            plot_state(&mut app, RENT_LAND).1,
+            plot_state(&mut app, SECOND_LAND).1
+        ),
+        (1, 1),
+        "没走过就不加盖"
+    );
+}
+
+#[test]
+fn the_two_walk_tables_answer_every_god() {
+    // 两张穷尽表一次钉住：`walk_effect`（所经）与 `takes_landing`（所到）。
+    // 它们必须是**两张**表 —— 合成一张就会把「走一圈」变成「拆一圈」，
+    // 而 PLAN §三 用两个不同的词写的正是这两件事
+    for god in God::ALL {
+        assert_eq!(
+            walk_effect(god),
+            match god {
+                God::Angel => WalkEffect::Bless,
+                God::Devil => WalkEffect::Blight,
+                _ => WalkEffect::Nothing,
+            },
+            "{} 的「所经」不对",
+            god.label()
+        );
+        assert_eq!(
+            takes_landing(god),
+            god == God::LandDeity,
+            "{} 的「所到」不对 —— 直接占有只有土地公一位",
+            god.label()
+        );
+    }
+}
+
+/// 装配到「p0 站在 0 号格、第一掷钉为 1 点（正好踩到 1 号格那块 L0）、身上挂着 `god`」。
+/// 策略 `AcceptAll`：只要报价弹出来他就会接 —— 于是「地没到手」只剩一种解释（根本没办成），
+/// 而「没被问价」与「问了又拒」在流水里是两条不同的话。
+///
+/// 这里**不替他跑回合**：地块归属、租金、查封都要先摆好再走那一步（与 `ready_on` 同一条前置
+/// 纪律）。先跑一次再把地塞给他，测的就是「一次已经发生的落格」，什么都读不出来。
+fn land_deity_ready(god: Option<God>) -> (App, Entity) {
+    let (mut app, p0) = ready_on(0, 1, DecisionPolicy::AcceptAll);
+    clear_gods(&mut app);
+    if let Some(god) = god {
+        attach_god(&mut app, p0, god, Some(40));
+    }
+    (app, p0)
+}
+
+#[test]
+fn the_land_deity_pays_the_rent_first_and_only_then_takes_the_plot() {
+    // PLAN §三「土地公＝所到之地直接占有（**过路费照付原主**）」。
+    // 括号里那四个字是这条设计的全部意思：地抢了，这一趟的租还是照交。
+    // 所以断言要同时看三样：钱到了原主手上、归属翻到了他名下、楼没被抹平
+    let (mut app, p0) = land_deity_ready(Some(God::LandDeity));
+    let owner = other_of(&mut app, p0);
+    own(&mut app, RENT_LAND, Some(1), 4, false);
+    flat_rent(&mut app, RENT_LAND, 5_000);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), RENT_TILE, "前置：他要真的踩到那块地");
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND).0,
+        Some(0),
+        "地翻到土地公名下"
+    );
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND).1,
+        4,
+        "过户的是这块地现在的样子：四级楼跟着地走（与「买地保留建筑」同一条口径）"
+    );
+    let lines = ledger(&app);
+    assert!(
+        lines.contains(&"Rent(P0->P1@L0$5000)".to_string()),
+        "过路费要照原样收，而且收的时候原主还是原主：{lines:?}"
+    );
+    assert!(
+        lines.contains(&"Take(P0:L0←P1)".to_string()),
+        "过户要留一条凭据，且说得出从谁手里拿的：{lines:?}"
+    );
+    assert_eq!(cash_of(&mut app, p0), 15_000, "他付了这一趟的租");
+    assert_eq!(
+        cash_of(&mut app, owner),
+        25_000,
+        "钱真的到了原主手上，不是凭空免掉"
+    );
+    assert_cash_audit(&mut app, 20_000);
+}
+
+#[test]
+fn unowned_land_goes_to_him_without_ever_being_offered() {
+    // 无主那一支：不问价、不收钱。少了 property.rs 里那句 `takes_landing`，
+    // 玩家会先被问一句「是否购买此地」，答完才发现地已经归他 —— 一个答完就失效的窗口
+    let (mut app, p0) = land_deity_ready(Some(God::LandDeity));
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), RENT_TILE, "前置：他要真的踩到那块地");
+    assert_eq!(plot_state(&mut app, RENT_LAND).0, Some(0), "无主地直接归他");
+    assert_eq!(cash_of(&mut app, p0), 20_000, "这不是交易，没有付款人");
+    let lines = ledger(&app);
+    assert!(
+        !lines.iter().any(|line| line.starts_with("BuyOffer(P0,@0)")),
+        "报价根本不该弹出来：{lines:?}"
+    );
+    assert!(
+        lines.contains(&"Take(P0:L0←无主)".to_string()),
+        "无主也要留一句这块地从哪儿来：{lines:?}"
+    );
+
+    // 反例的反例：没有土地公时，同一格走的是「弹报价 → 接受 → 付钱买」那条老路
+    let (mut app, p0) = land_deity_ready(None);
+    play_turns(&mut app, 1);
+    assert_eq!(plot_state(&mut app, RENT_LAND).0, Some(0));
+    assert_eq!(cash_of(&mut app, p0), 18_500, "买地要付 1500");
+    assert!(
+        ledger(&app)
+            .iter()
+            .any(|line| line.starts_with("BuyOffer(P0,@0)")),
+        "没有神时报价照弹：{:?}",
+        ledger(&app)
+    );
+}
+
+#[test]
+fn a_plot_mortgaged_to_the_bank_stays_out_of_his_hands() {
+    // 押给银行的地不是「他的」了 —— 押到手那笔钱还在原主钱包里，债不该跟着地走。
+    // 「资产与负债一起过户」是 P9 变卖池的账，不在这里开个头
+    let (mut app, p0) = land_deity_ready(Some(God::LandDeity));
+    own(&mut app, RENT_LAND, Some(1), 2, true);
+    assert!(
+        mortgage_of(&app, RENT_LAND).is_some(),
+        "前置：这块地真的押着"
+    );
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), RENT_TILE, "前置：他要真的踩到那块地");
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND).0,
+        Some(1),
+        "押着的地不该被拿走"
+    );
+    assert!(
+        !ledger(&app).iter().any(|line| line.starts_with("Take(")),
+        "没办成就不该有一条过户凭据：{:?}",
+        ledger(&app)
+    );
+}
+
+#[test]
+fn a_sealed_plot_still_changes_hands() {
+    // 与天使那条**相反**的读法，而且是故意的：查封那一条子挡的是施工与收租
+    // （`can_upgrade` 与 `calculate_rent` 各读一次），而土地公收的是这块地本身。
+    // 两条合成一张「查封中什么都不许做」的表，就会把这条设计抹平
+    let (mut app, p0) = land_deity_ready(Some(God::LandDeity));
+    own(&mut app, RENT_LAND, Some(1), 2, false);
+    stamp(&mut app, RENT_LAND, LandStatus::Sealed, 5);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), RENT_TILE, "前置：他要真的踩到那块地");
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND).0,
+        Some(0),
+        "查封中的地照样被直接占有"
+    );
+    assert!(
+        ledger(&app).iter().any(|line| line == "Take(P0:L0←P1)"),
+        "{:?}",
+        ledger(&app)
+    );
+}
+
+#[test]
+fn the_other_eleven_gods_just_pay_the_rent() {
+    // 反例的反例：同一块地、同一个落点，换一位神就只是**付租**，地还是别人的。
+    // 少了这一格，「过户」可以被写成「任何人踩到任何地都归他」而全绿
+    let (mut app, p0) = land_deity_ready(Some(God::BigFortune));
+    let owner = other_of(&mut app, p0);
+    own(&mut app, RENT_LAND, Some(1), 2, false);
+    flat_rent(&mut app, RENT_LAND, 5_000);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), RENT_TILE, "前置：他要真的踩到那块地");
+    assert_eq!(plot_state(&mut app, RENT_LAND).0, Some(1), "地还是原主的");
+    assert_eq!(cash_of(&mut app, owner), 25_000, "租照收");
+    assert!(
+        !ledger(&app).iter().any(|line| line.starts_with("Take(")),
+        "{:?}",
+        ledger(&app)
     );
 }

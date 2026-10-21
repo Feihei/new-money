@@ -59,8 +59,15 @@ pub fn settle_property_landing(
             );
         }
         None => {
-            pending.offer(player, Pending::Buy(land));
-            offers.write(BuyOffered { player, land });
+            // 土地公踩到无主地**不问价**（判据在 `Books::takes_landing`，过户由排在后面的
+            // `settle_land_deity_landing_system` 做）。这一句必须问在弹窗口之前：先弹一张
+            // 「是否购买此地」、答完才发现地已经归他，那是一个答完就失效的窗口
+            if books.takes_landing(player) {
+                debug!("无主地 L{} 不问价：他身上是土地公", land.0);
+            } else {
+                pending.offer(player, Pending::Buy(land));
+                offers.write(BuyOffered { player, land });
+            }
         }
         // 自己的地 → 只在真能升级时提问（Godot 的 `can_upgrade` 分支）。
         // 报价走管线，所以模态上那个 `cost` 与买家按下「升级」时扣掉的数是同一个。

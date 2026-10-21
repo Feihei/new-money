@@ -205,6 +205,19 @@ pub struct LandBought {
     pub price: i64,
 }
 
+/// 土地公直接占有（P6c）：`land` 归 `player`，`from` 是他从谁手里拿走的
+/// （`None` = 那块地本来无主）。
+///
+/// 与 [`LandBought`] 分两条是刻意的：那条说「有人付了这笔钱」，而这一条**没有付款**——
+/// 过路费是另一笔账（由 `settle_property_landing` 照原样收，见 PLAN §三「过路费照付原主」），
+/// 合成一条就会让人以为「神帮他免了那一笔」，而事实正好相反：他付了钱，只是地也归了他。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandTaken {
+    pub player: Entity,
+    pub land: LandId,
+    pub from: Option<Entity>,
+}
+
 /// 自有垄断地的升级报价（`cost` 是这一级要付的钱）。
 ///
 /// §4.4 的消息表里没有这条：Godot 用 `upgrade_decision_requested` 表达同一事实，

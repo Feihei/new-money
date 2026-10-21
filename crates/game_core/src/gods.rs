@@ -53,11 +53,14 @@ use crate::board::{BoardDef, TileIndex};
 use crate::charge::{
     Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, Scope, Source,
 };
+use crate::damage::LandDamage;
 use crate::deck::{CardId, Shelf};
 use crate::hand::{Hand, card_notice, deal_to};
+use crate::land::LandId;
+use crate::landing::{Landed, Landing, LandingDomain};
 use crate::msg::{
     CardGained, CardLost, CardNotice, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed,
-    PlayerArrived,
+    LandTaken, PlayerArrived, TileStepped,
 };
 use crate::occupancy::{Occupancy, OccupancyAt, OccupancyKind, place};
 use crate::player::PlayerId;
@@ -479,15 +482,15 @@ pub fn resists(god: God) -> bool {
 
 /// 这位神在场时，落到 bearer 头上的**厄运天数**乘几。
 ///
-/// 同样是穷尽表。今天只有大衰神一位说话（PLAN §三「衰神＝…厄运天数加倍」），
-/// 而 PLAN §三 被绑架那一行还写着「恶魔／死神附身会延长」—— 那两位现在填的是**中性值 1**，
-/// 意思是「今天不延长」，不是「没想过」：**恶魔那一格 P6c 落地时必须回到这张表改一个数**，
-/// 而不是在某个调用点旁边补一句 `if`；死神那一格不用改 —— 10-21 拍板他今天不装配
-/// （三条上限叠在一起就是必死，理由与捡回来的条件写在 PLAN §七 末行）。小衰神按「小的那一半
+/// 同样是穷尽表。两位说话（P6c）：**大衰神**＝PLAN §三 衰神那格的「厄运天数加倍」，
+/// **恶魔**＝§三 被绑架那格的「恶魔／死神附身会延长」。两位都填 2 而不是给恶魔另开一档，
+/// 因为这张表回答的是「落下来的这件事持续多久」，而那件事在三处（拘留／停留／乌龟）
+/// 用的是同一把尺 —— 要为恶魔写 1.5 就得先回答「半格天数是什么」，那是伪精度。
+/// 死神那一格不用改：10-21 拍板他今天不装配（PLAN §七 末行）。小衰神按「小的那一半
 /// 只动钱」读（与 P6b① 那条「抢钱是大穷神独有」同一个分法）。
 pub fn doom_multiplier(god: God) -> u32 {
     match god {
-        God::BigDoom => 2,
+        God::BigDoom | God::Devil => 2,
         God::SmallDoom
         | God::BigFortune
         | God::SmallFortune
@@ -496,7 +499,6 @@ pub fn doom_multiplier(god: God) -> u32 {
         | God::BigPoor
         | God::SmallPoor
         | God::Angel
-        | God::Devil
         | God::LandDeity
         | God::Death => 1,
     }
@@ -604,6 +606,42 @@ pub fn drain_cards(
         gone += 1;
     }
     gone
+}
+
+/// 附身的人**走路**时，脚下每一格动一次什么（P6c）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkEffect {
+    /// 什么都不动（十二位里的九位）
+    Nothing,
+    /// 加盖一层：不分敌我、无主地也盖、不收钱（天使）
+    Bless,
+    /// 降一级：复用 P2 的建筑损害阶梯，空地不拆那条写在 [`crate::damage::strike`] 里（恶魔）
+    Blight,
+}
+
+/// 这位神让附身的人**所经**之地长出什么／塌掉什么。
+///
+/// PLAN §三 在这里用了两个不同的词，而那个区别就是这条表存在的全部理由：
+/// 天使与恶魔是「**所经**一律加盖／降一级」——一次 6 点的掷骰最多动六格；
+/// 土地公是「**所到**之地直接占有」——只有停下那一格（见 [`takes_landing`]）。
+/// 合成一张表就会把「走一圈」变成「拆一圈」，那是两件不同的事。
+pub fn walk_effect(god: God) -> WalkEffect {
+    match god {
+        God::Angel => WalkEffect::Bless,
+        God::Devil => WalkEffect::Blight,
+        God::BigRich | God::SmallRich | God::BigFortune | God::SmallFortune => WalkEffect::Nothing,
+        God::BigPoor | God::SmallPoor | God::BigDoom | God::SmallDoom => WalkEffect::Nothing,
+        // 土地公改的是归属，但它改在「落脚」那一格，不在路上
+        God::LandDeity | God::Death => WalkEffect::Nothing,
+    }
+}
+
+/// 这位神让附身的人**踩到**的那块地归谁（P6c 的土地公）。
+///
+/// 与 [`walk_effect`] 分开两张表：一个是「每经过一格」，一个是「停下那一格」，
+/// 而它们的读点根本不同（`TileStepped` 的 reader 对 `Landed` 链里的一块结算）。
+pub fn takes_landing(god: God) -> bool {
+    matches!(god, God::LandDeity)
 }
 
 /// 附身与它的一次性效果要动的全部东西。收成参数包是房规（§六 坑 8），
@@ -716,6 +754,107 @@ pub fn settle_god_landing_system(
         attach(&mut desk, player, god, tile);
         // 它已经变成他身上的那位；路上的实体就此消失，那一格的槽位同时空出来
         desk.commands.entity(entity).despawn();
+    }
+}
+
+// ===== 走路时 =====
+
+/// 天使与恶魔：附身的人**走过**的每一格都动一次房子（PLAN §三「所经」）。
+///
+/// 读 [`TileStepped`] 而不是 `PlayerArrived` —— 「所经」那两个字就是这条系统的形状：
+/// 一次 6 点的掷骰最多动六格，绕别人那条街盖（拆）一圈，正是那句话的分量。土地公不在这里，
+/// 它读的是落脚那一格（见 [`takes_landing`] 与 `settle_land_deity_landing_system`）。
+///
+/// 注册形状照 `bank.rs` 的 `grant_atm_access_system`（同为 `TileStepped` 的 core 侧 reader），
+/// 包括那两条连带决定：**不挂阶段闸门** —— 挂在 `Walking` 上会漏掉最后一步，那一条
+/// `TileStepped` 是行走收尾那一帧写的、要到下一帧才读得到，而那时候状态已经是 `Landed`；
+/// **也不闸暂停** —— 暂停期间根本没有新消息，加了只会漏掉恢复行走那一帧的那一步。
+pub fn walk_effect_system(mut steps: MessageReader<TileStepped>, mut books: Books<'_, '_>) {
+    for step in steps.read() {
+        let Some(held) = books.god_of(step.player) else {
+            continue;
+        };
+        let effect = walk_effect(held.god);
+        if effect == WalkEffect::Nothing {
+            continue;
+        }
+        // 先把「这一格上那块地」抄出来：`books.active` 是 `books` 的借用，不能与下面
+        // 那次 `&mut books` 同时活着（P5 的炸弹在同一处踩过，写法照它）
+        let Some(land) = books
+            .active
+            .def
+            .tile(step.tile.0 as i64)
+            .and_then(|t| t.land_id)
+            .map(LandId)
+        else {
+            continue;
+        };
+        match effect {
+            WalkEffect::Bless => {
+                if let Some(level) = books.bless(land) {
+                    debug!("天使经过 格{}：L{} 加盖到 Lv{level}", step.tile.0, land.0);
+                }
+            }
+            // 与定时炸弹共用同一段写组件的 code path（`damage_lands` 而不是 `damage`）：
+            // 范围已经由「他踩到了哪一格」算完，这里只剩一块地，不必再走一次 `area_of`。
+            // 日志只在**真的有一层被拆掉**时打：空地也是 `hit`，照着 `hit` 念会刷出一串
+            // 「拆到 Lv0」，而那句话既没拆什么也读不出这条效果有没有生效
+            WalkEffect::Blight => {
+                let before = books.view(land).map_or(0, |view| view.level);
+                books.damage_lands(&[land], LandDamage::Degrade { levels: 1 });
+                if before > 0 {
+                    let after = books.view(land).map_or(0, |view| view.level);
+                    debug!(
+                        "恶魔经过 格{}：L{} 从 Lv{before} 拆到 Lv{after}",
+                        step.tile.0, land.0
+                    );
+                }
+            }
+            WalkEffect::Nothing => {}
+        }
+    }
+}
+
+/// 土地公：他踩到的那块地**直接归他**（PLAN §三「所到之地直接占有，过路费照付原主」）。
+///
+/// 排在 `settle_property_landing` **之后**（`lib.rs` 的 `Landed` 链），而那个先后就是这句话的
+/// 后半句：先让地产结算照原样把过路费收掉（此刻原主还是原主），再把地过户给他。反过来写的结果是
+/// 「他踩上去、地成他的、租金付给自己」—— 那笔钱就凭空消失了。PLAN §三 特意留着「照付原主」
+/// 四个字，要的正是那份荒诞：地都被抢了，这一趟的租还是照交的。
+///
+/// 无主那一支的**报价**由 `property.rs` 负责不出（它问 [`Books::takes_landing`]），否则玩家
+/// 先被问一句「是否购买此地」，答完才看见地已经归他 —— 那是一个答完就失效的窗口。
+pub fn settle_land_deity_landing_system(
+    mut books: Books<'_, '_>,
+    landing: Res<Landing>,
+    mut taken: MessageWriter<LandTaken>,
+) {
+    let Some(Landed {
+        player,
+        tile,
+        land: Some(land),
+        domain: LandingDomain::Property,
+        ..
+    }) = landing.0
+    else {
+        return;
+    };
+    if !books.takes_landing(player) {
+        return;
+    }
+    // 原主先抄下来：`take_land` 要 `&mut books`，而凭据要说的是「从谁手里拿的」
+    let from = books
+        .view(land)
+        .and_then(|view| view.owner)
+        .and_then(|pid| books.holder(pid));
+    if books.take_land(player, land) {
+        debug!(
+            "土地公落脚 格{}：L{} 归 {}",
+            tile.0,
+            land.0,
+            from.map_or_else(|| "无主".to_string(), |owner| format!("{owner:?}"))
+        );
+        taken.write(LandTaken { player, land, from });
     }
 }
 

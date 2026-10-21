@@ -78,11 +78,12 @@ pub mod prelude {
     };
     pub use crate::economy::LandView;
     pub use crate::gods::{
-        God, GodDesk, MAX_ON_BOARD, Possession, Presence, Rival, STARTING_GODS, age_possession,
-        attach, cards_lost_per_turn, denies_acquire, detach, doom_days, doom_multiplier,
-        drain_cards, extra_levels, grant_effects, land_deity_succession_system, money_corrections,
-        presence_of, resists, revoke_effects, settle_god_landing_system, spawn_starting_gods,
-        top_up_gods_system, wander_gods_system,
+        God, GodDesk, MAX_ON_BOARD, Possession, Presence, Rival, STARTING_GODS, WalkEffect,
+        age_possession, attach, cards_lost_per_turn, denies_acquire, detach, doom_days,
+        doom_multiplier, drain_cards, extra_levels, grant_effects, land_deity_succession_system,
+        money_corrections, presence_of, resists, revoke_effects, settle_god_landing_system,
+        settle_land_deity_landing_system, spawn_starting_gods, takes_landing, top_up_gods_system,
+        walk_effect, walk_effect_system, wander_gods_system,
     };
     pub use crate::hand::{CardAim, Hand, PlayWindow, card_notice, deal_to, play_card_system};
     pub use crate::items::{Inventory, ItemKind};
@@ -105,13 +106,13 @@ pub mod prelude {
         BuyOffered, CardDrawn, CardGained, CardLost, CardNotice, CardPlayed, CashChanged,
         ChargeWaived, ChestOpened, Decision, DecisionChosen, DetentionLifted, DetentionSkipped,
         DiceRolled, EffectOutcome, GameOver, GiftGiven, GiftsGiven, GodAppeared, GodDeed, GodExit,
-        GodLeft, GodPossessed, ItemPlaced, LandBought, LandUpgraded, MortgageDone, MortgageOp,
-        MortgageRequested, MountChanged, MoveCapped, PlaceItemRequested, PlayCardRequested,
-        PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported,
-        PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll,
-        RequestStay, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged,
-        StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded,
-        TurnStarted, UpgradeOffered, WalkHalted, WalkStarted,
+        GodLeft, GodPossessed, ItemPlaced, LandBought, LandTaken, LandUpgraded, MortgageDone,
+        MortgageOp, MortgageRequested, MountChanged, MoveCapped, PlaceItemRequested,
+        PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
+        PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
+        RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped,
+        StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide,
+        TurnEnded, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted,
     };
     pub use crate::occupancy::{
         BOMB_HOSPITAL_DAYS, BOMB_STEPS, HaltCause, MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt,
@@ -148,7 +149,7 @@ use prelude::{
     ChargeWaived, ChestOpened, Corrections, CouponBoxes, DecisionChosen, DetentionLifted,
     DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed, GameSetup,
     GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, ItemPlaced,
-    JsonAssetLoader, LandBought, LandUpgraded, Landing, MarketClock, MortgageDone,
+    JsonAssetLoader, LandBought, LandTaken, LandUpgraded, Landing, MarketClock, MortgageDone,
     MortgageRequested, MountChanged, MoveCapped, Paused, PendingDecision, PlaceItemRequested,
     PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
     PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
@@ -160,7 +161,7 @@ use prelude::{
     grant_atm_access_system, land_deity_succession_system, market_tick_on_turn_end_system,
     mortgage_op_system, place_item_system, play_card_system, resolve_halt_system,
     settle_god_landing_system, settle_landing_occupancy_system, shop_op_system, top_up_gods_system,
-    trade_request_system, walk_step_system, wander_gods_system,
+    trade_request_system, walk_effect_system, walk_step_system, wander_gods_system,
 };
 use turn::{
     begin_turn_system, end_turn_system, game_over_system, not_paused, remote_dice_system,
@@ -237,6 +238,8 @@ impl Plugin for CoreGamePlugin {
             .add_message::<BuyOffered>()
             .add_message::<UpgradeOffered>()
             .add_message::<LandBought>()
+            // 土地公的过户（P6c）。与 `LandBought` 分两条：那条说「有人付了这笔钱」，这条没有
+            .add_message::<LandTaken>()
             .add_message::<LandUpgraded>()
             .add_message::<RentDue>()
             // 一次性修正生效那一笔（免费卡花掉了）。不注册的话 `Books` 的 writer
@@ -359,6 +362,13 @@ impl Plugin for CoreGamePlugin {
             // 而装配前的那些帧还没有这个资源 —— 别的 `Books` 用户都躲在状态门禁后面，
             // 这一只没有，所以漏一条就是每帧一次「Resource does not exist」。
             .add_systems(Update, grant_atm_access_system)
+            // 天使与恶魔：同一条 `TileStepped` 的 core 侧 reader，注册形状照上面那条 ATM
+            // （不设阶段闸门，理由见 `walk_effect_system` 的注）。它带 `Books`，
+            // 所以要 `resource_exists` 挡装配前与回菜单之后的那些帧
+            .add_systems(
+                Update,
+                walk_effect_system.run_if(resource_exists::<ActiveBoard>),
+            )
             .add_systems(
                 Update,
                 (
@@ -407,6 +417,9 @@ impl Plugin for CoreGamePlugin {
                     // （顶掉旧神、挂修正、腾对位）比「给一件道具」重一个数量级
                     settle_god_landing_system,
                     property::settle_property_landing,
+                    // 土地公：踩到的地直接归他。**排在地产结算之后**是那句「过路费照付原主」
+                    // 的实现 —— 先照原样把这一趟的租收掉，再过户（理由见那个函数的注）
+                    gods::settle_land_deity_landing_system,
                     bank::settle_bank_landing,
                     market::settle_market_landing,
                     deck::settle_card_landing,

@@ -753,8 +753,8 @@ impl<'w, 's> Books<'w, 's> {
         Some(economy::redeem_cost(principal, &self.rules))
     }
 
-    /// 买地：扣**实付**地价 → 归属落到买家 → 等级置 1（`property_registry.gd:29-33` 的
-    /// `set_owner_by_key` 顺带把空地升到 1 级）。
+    /// 买地：扣**实付**地价 → 归属落到买家 → 等级**至少** 1（`property_registry.gd:29-33` 的
+    /// `set_owner_by_key` 顺带把空地升到 1 级；本来就更高的地保留它已有的层，见下面那行注）。
     /// 付不起或已有人持有 → `None`，什么都不动。
     ///
     /// 价过一遍管线（物价指数 + 小福神「买地免费」那一类 `Cancel`），所以这里返回的
@@ -766,7 +766,10 @@ impl<'w, 's> Books<'w, 's> {
         self.debit(player, price).ok()?;
         let (_, _, mut owner, mut level, _) = self.plots.get_mut(entity).ok()?;
         owner.0 = pid;
-        level.0 = 1;
+        // **下限 1 而不是置 1**：无主地平时就是 Lv0，两条写法到今天为止结果一样，
+        // 而 P6c 的天使会先在无主地上盖出几层 —— 那时「置 1」就是把别人的楼抹平。
+        // PLAN §三 拍卖行那句「建筑随土地一起过户」说的就是这件事：过户的是这块地现在的样子
+        level.0 = level.0.max(1);
         Some(price)
     }
 
@@ -839,6 +842,70 @@ impl<'w, 's> Books<'w, 's> {
         let (_, _, _, mut level, _) = self.plots.get_mut(entity).ok()?;
         // 封顶那一位上多出来的那一层少掉，不是缺陷：4 代也没有「盖穿顶」这件事
         level.0 = level.0.saturating_add(1 + extra).min(max);
+        Some(level.0)
+    }
+
+    /// 土地公那一格：**直接占有**这块地（P6c）。返回是否办成。
+    ///
+    /// 与 [`Self::buy`] 分开写，理由与 [`Self::bless`] 同一条：买地那一整套（报价、物价、
+    /// 修正、扣款、`LandBought`）说的都是「一笔交易成立」，而这里根本没有交易 —— 他踩上去，
+    /// 地就归他。**过路费不在这里收**，由 `settle_property_landing` 照原样收
+    /// （PLAN §三 那句「过路费照付原主」），所以这条只动归属那一半。
+    ///
+    /// 三种办不成，各有各的理由：
+    /// - 棋盘上没这块地 / 已经是他的：无事可做（也不发凭据，免得顶栏播一句「他拿走了自己的地」）；
+    /// - **押给银行的地不给占**：押到手那笔钱在原主钱包里，债不该跟着地走 ——
+    ///   「资产与负债一起过户」是 P9 变卖池的账，不在这里开个头；
+    /// - 查封中**照样能占**：那条子挡的是施工与收租（见 `can_upgrade` 与 `calculate_rent`），
+    ///   而土地公收的是这块地本身。
+    pub fn take_land(&mut self, player: Entity, land: LandId) -> bool {
+        let (Some(view), Some(pid)) = (self.view(land), self.id_of(player)) else {
+            return false;
+        };
+        if view.owner == Some(pid) || view.mortgaged {
+            return false;
+        }
+        let Some(entity) = self.land_entity(land) else {
+            return false;
+        };
+        let Ok((_, _, mut owner, _, _)) = self.plots.get_mut(entity) else {
+            return false;
+        };
+        owner.0 = Some(pid);
+        true
+    }
+
+    /// 他身上那位神是不是「踩到的地直接归他」（土地公）。唯一读点，与 [`Self::acquire_denied`]
+    /// 同一条纪律：判据在 [`crate::gods::takes_landing`] 那张表上，这里只把它接到账本上 ——
+    /// 于是「弹不弹那张购买报价」与「过户不过户」不可能一个说行一个说不行。
+    pub fn takes_landing(&self, player: Entity) -> bool {
+        self.god_of(player)
+            .is_some_and(|held| crate::gods::takes_landing(held.god))
+    }
+
+    /// 天使那一格：给这块地**白加一层楼**（P6c）。返回加完之后的等级，`None` = 没加成。
+    ///
+    /// 与 [`Self::upgrade`] 分开写，而不是给它加一个 `force: bool`：`upgrade` 那五道结构判定
+    /// （业主本人、未抵押、未满级、垄断、组内最低层）加一次扣款，合起来是**一笔交易**的成立
+    /// 条件，而祝福根本不是一笔交易 —— 它没有付款人，也不该有。共用一个函数迟早要为塞进管线
+    /// 给某道判定开一个「例外」口子，而那条口子就是玩家白拿一层楼的入口（与 P6b② 那条
+    /// 「必败不能写成 `Cancel`」是同一种「别把两件事塞进同一条判定」）。
+    ///
+    /// 只保留两道，且都不是「谁买得起」那种：
+    /// - **封顶**（`max_building_level`）：与 `upgrade` 同一条理由，没有「盖穿顶」这件事；
+    /// - **查封**：法院贴着条子的地不许施工，读的是 `can_upgrade` 里那同一条。
+    ///
+    /// **抵押不挡**：天使不给任何人发钱，也不替任何人解押 —— 押给银行的地长高一层，
+    /// 债还是原额，那是原主的账，不是这次祝福的分支。
+    pub fn bless(&mut self, land: LandId) -> Option<u8> {
+        let view = self.view(land)?;
+        if view.status == Some(LandStatus::Sealed) {
+            return None;
+        }
+        let entity = self.land_entity(land)?;
+        let max = self.rules.max_building_level;
+        let (_, _, _, mut level, _) = self.plots.get_mut(entity).ok()?;
+        level.0 = level.0.saturating_add(1).min(max);
         Some(level.0)
     }
 
