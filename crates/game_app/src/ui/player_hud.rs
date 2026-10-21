@@ -12,7 +12,7 @@
 use bevy::prelude::*;
 use game_core::prelude::{
     Bankrupt, Detention, Heading, Inventory, LandId, Mount, MoveCap, Owner, PlayerColor, PlayerId,
-    PlayerName, Points, StaySentence, TurnOrder, Wallet,
+    PlayerName, Points, Possession, StaySentence, TurnOrder, Wallet,
 };
 
 use super::theme::{col, layout, size};
@@ -206,6 +206,10 @@ type HudPlayer<'w> = (
     &'w Mount,
     Option<&'w MoveCap>,
     &'w Inventory,
+    // P6e②：身上那位神。它与 `MoveCap` 同一族（都是「挂在人身上一段时间」的状态），但
+    // 天数是**天**不是回合 —— 拘留期间照算，所以这一格读的是 core 那个 `days_left`，
+    // 面板不许自己数回合
+    Option<&'w Possession>,
 );
 
 /// 每帧从世界状态重算五段文案，只在真的变了才写文本（反复赋同一个字符串会让排版重来）。
@@ -248,6 +252,7 @@ pub(crate) fn refresh_player_hud(
             mount,
             cap,
             inventory,
+            held,
         )) = players.get(card.player)
         else {
             continue;
@@ -270,6 +275,11 @@ pub(crate) fn refresh_player_hud(
         // P5 起这一段还读两个**不动位置**的状态：乌龟卡的夹步与载具 —— 前者解释
         // 「骰了 5 点为什么只走 1 格」，后者解释「为什么能选 2/3 颗骰」
         let mut flags = vec![status];
+        // 神名放在这一族最前面：它是这一段里唯一「会自己变没」的东西（期满／被顶走／被送走），
+        // 玩家回头翻截图时第一个要对齐的就是「那一回合我身上是谁」
+        if let Some(held) = held {
+            flags.push(format!("{}剩{}", held.god.label(), held.days_left));
+        }
         if *heading == Heading::Backward {
             flags.push("逆向".to_string());
         }

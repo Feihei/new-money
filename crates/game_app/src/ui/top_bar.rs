@@ -12,8 +12,9 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, AtmAccess, BankOpDone, BankVisited, BombTransferred, CardPlayed, ChargeWaived,
-    ChestOpened, DetentionLifted, DetentionSkipped, GameOver, GameSession, ItemPlaced, MarketClock,
+    ActiveBoard, AtmAccess, BankOpDone, BankVisited, BombTransferred, CardLost, CardPlayed,
+    ChargeWaived, ChestOpened, DetentionLifted, DetentionSkipped, GameOver, GameSession,
+    GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, ItemPlaced, LandTaken, MarketClock,
     MortgageDone, MortgageOp, MountChanged, MoveCapped, Paused, PendingDecision, PlayerBailed,
     PlayerBankrupt, PlayerName, PointsChanged, RemoteDiceUsed, ShopOpDone, StayLifted,
     StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide, TurnOrder,
@@ -420,6 +421,23 @@ pub(crate) struct Notices<'w, 's> {
     /// 出牌的结果。手牌面板随手牌重建，把一次性结果烤进去下一次就没了 ——
     /// 持久的读数只有这一行（与点券那一条同一个道理）
     played: MessageReader<'w, 's, CardPlayed>,
+    // ===== 神明（P6e①）=====
+    // 这六条排在 `played` **之前**：请神符那句 `describe` 已经说了「请来哪位、他从哪一格
+    // 过来」，再让 `GodPossessed` 盖上去就是同一件事说两遍；而**走路踩到神**时根本没有
+    // `CardPlayed`，这几条照样播得出来。两条路各说一句，不互相覆盖。
+    /// 一位神上路。它不吃鼠标、不弹模态，除了这一行没有任何出口（dump 那一栏要开面板才看得见）
+    god_appeared: MessageReader<'w, 's, GodAppeared>,
+    /// 上身。`days` 由这条带着，所以这一行与 HUD 那句「还剩几天」读的是同一个数
+    god_possessed: MessageReader<'w, 's, GodPossessed>,
+    /// 离场。三种走法三句话（`GodExit::label`），而它们共用一条凭据
+    god_left: MessageReader<'w, 's, GodLeft>,
+    /// 上身那一刻当场做的那件事（给钱／收钱／抢钱／送卡）。它排在 `god_possessed` 之后：
+    /// 「附身」是状态，HUD 会一直显示；「给了 3,521 元」是这一帧刚发生的事，顶栏该说后者
+    god_deed: MessageReader<'w, 's, GodDeed>,
+    /// 卡**离开手牌但不是被打出**。玩家问的是「我那张卡去哪了」，只有这条答得出
+    card_lost: MessageReader<'w, 's, CardLost>,
+    /// 土地公把一块地直接拿走。它与「有人付钱买地」是两条凭据，那条带付款、这条不带
+    land_taken: MessageReader<'w, 's, LandTaken>,
     /// 一次性修正生效那一笔（免费卡花掉了）。**没有对应的 `CashChanged`**：钱一分没动而
     /// 卡没了，玩家能看见的只有这一行
     waived: MessageReader<'w, 's, ChargeWaived>,
@@ -589,6 +607,54 @@ pub(crate) fn hint_from_events(
             source_word(m.via)
         ));
     }
+    // ===== P6e①：神明 =====
+    // 六句话各抽成一个纯函数：顶栏只有一行，而「这句话怎么说」与名字怎么解析无关
+    // （与 `op_verb`／`source_word` 同一条分工）。抽出来还有一层用处 —— 那六条分支里
+    // 有五条是「带不带某个尾巴」的形状，不抽出来就只能靠截图去撞它们
+    for m in notices.god_appeared.read() {
+        line = Some(god_appeared_word(m.god.label(), &tile_word(&board, m.tile)));
+    }
+    for m in notices.god_left.read() {
+        line = Some(god_left_word(
+            &name(&names, m.player),
+            m.god.label(),
+            m.reason,
+        ));
+    }
+    for m in notices.card_lost.read() {
+        line = Some(card_lost_word(
+            m.by.label(),
+            &name(&names, m.player),
+            &m.card.title,
+        ));
+    }
+    for m in notices.land_taken.read() {
+        let plot = board
+            .as_ref()
+            .and_then(|b| b.def.land(m.land.0))
+            .map_or("？", |l| l.name.as_str());
+        line = Some(land_taken_word(
+            &name(&names, m.player),
+            plot,
+            m.from.map(|prev| name(&names, prev)).as_deref(),
+        ));
+    }
+    for m in notices.god_possessed.read() {
+        line = Some(god_possessed_word(
+            &name(&names, m.player),
+            m.god.label(),
+            m.days,
+            m.replaced.map(|old| old.label()),
+        ));
+    }
+    for m in notices.god_deed.read() {
+        line = Some(god_deed_word(
+            m.god.label(),
+            &name(&names, m.player),
+            m.cash,
+            m.cards.len(),
+        ));
+    }
     // 出牌的结果必须在这儿说清楚，尤其要说「有没有生效」：一张陷害卡打在带护身的人头上
     // 是什么都没发生的，而手牌面板下一次重建就把那张卡的重置成了常态 —— 没有这一行，
     // 玩家只会看见「按了没反应」
@@ -691,6 +757,68 @@ pub(crate) fn hint_from_events(
     }
 }
 
+// ===== P6e①：神明那六句话 =====
+// 抽成纯函数的理由：顶栏只有一行，读回来要起一整个 App；而其中五条都带一个「有没有
+// 那个尾巴」的分叉（顶走了谁、原来在谁名下、有没有卡、钱是进还是出），不抽出来就只能
+// 靠截图去撞那些分支 —— 撞不上的那一条在验收里读起来和「没做」一样。
+
+/// 一位神上路。它不吃鼠标、不弹模态，顶栏这一行是唯一的出口（dump 那一栏要开面板才看得见）
+fn god_appeared_word(god: &str, tile: &str) -> String {
+    format!("{god} 上了路，站在 {tile}")
+}
+
+/// 三种走法三句话。core 那个 `label` 是「期满／顶走／送走」三个短动词，dump 与测试流水
+/// 用它；这里要的是能独立读的一句人话，所以「被人弄走的」那两种要补一个「被」字 ——
+/// 「顶走走了」不是话
+fn god_left_word(who: &str, god: &str, reason: GodExit) -> String {
+    let verb = match reason {
+        GodExit::Expired => "期满走了",
+        GodExit::Replaced => "被顶走了",
+        GodExit::Banished => "被送走了",
+    };
+    format!("{who} 身上的{god}{verb}")
+}
+
+/// 上身。`days` 由这条凭据带着，所以这一行与 HUD 那句「还剩几天」读的是同一个数
+fn god_possessed_word(who: &str, god: &str, days: u32, replaced: Option<&str>) -> String {
+    let tail = replaced.map_or(String::new(), |old| format!("，顶走了{old}"));
+    format!("{who} 被{god}附身（{days} 天）{tail}")
+}
+
+/// 丢卡。主语是**哪位神**而不是「系统」：这条消息存在的全部理由就是说得出是谁干的
+fn card_lost_word(by: &str, who: &str, card: &str) -> String {
+    format!("{by} 从 {who} 手里弄走了「{card}」")
+}
+
+/// 土地公把一块地直接拿走。主语写死在他身上：`LandTaken` 今天唯一的发源处是
+/// `Books::take_land`，而它只被土地公那条落脚链调用。哪天另一位也能直接拿地，要回来给
+/// 这条凭据加一个 `god` 字段，不是在这里补一个 `if`。
+/// 「原来在谁名下」是这一句的全部信息量 —— 没有它，玩家只会看见地换了人
+fn land_taken_word(who: &str, plot: &str, from: Option<&str>) -> String {
+    let tail = from.map_or("这块地本来无主".to_string(), |prev| {
+        format!("原来在 {prev} 名下")
+    });
+    format!("土地公 替 {who} 拿下{plot}（{tail}）")
+}
+
+/// 上身那一刻当场做的那件事。「给了」与「拿走了」分两句而不是带符号报数：负数写在屏幕上
+/// 读起来像账算错了，而这里说的是一笔真的动过的钱（明细在 `CashChanged`，两边对得上）。
+/// `cards` 只在钱那一格为零时才被念出来 —— 大福神是「送 2 张卡」，不送钱
+fn god_deed_word(god: &str, who: &str, cash: i64, cards: usize) -> String {
+    let tail = if cards == 0 {
+        String::new()
+    } else {
+        format!("，还有 {cards} 张卡")
+    };
+    if cash > 0 {
+        format!("{god} 给了 {who} ${}{}", comma(cash), tail)
+    } else if cash < 0 {
+        format!("{god} 从 {who} 手里拿走 ${}{}", comma(-cash), tail)
+    } else {
+        format!("{god} 塞给 {who} {cards} 张卡")
+    }
+}
+
 /// 银行操作的中文动词。`BankOp` 在规则层是枚举，屏幕上要给人话，映射属于表现层
 /// （与 `tile_info::kind_name` 同一条分工）。
 fn op_verb(op: game_core::prelude::BankOp) -> &'static str {
@@ -745,7 +873,9 @@ fn tile_word(board: &Option<Res<ActiveBoard>>, tile: TileIndex) -> String {
 mod tests {
     use super::*;
     use bevy::state::app::StatesPlugin;
-    use game_core::prelude::{GameRules, PlayerId, StockId, TradeSide, TurnOrder};
+    use game_core::prelude::{
+        CardKind, CardNotice, GameRules, God, LandId, PlayerId, StockId, TradeSide, TurnOrder,
+    };
 
     /// 顶栏刷新只许动顶栏名下的按钮（§6.1 坑 31）。
     ///
@@ -835,6 +965,307 @@ mod tests {
         assert!(
             world.get::<Disabled>(panel_btn).is_some(),
             "浮层按钮又被顶栏动了"
+        );
+    }
+
+    /// 三种走法都得是一句能独立读的话。core 那个 `label` 是短动词（期满／顶走／送走），
+    /// 直接拼进「…走了」会得到「顶走走了」—— 而那正是照抄 label 时最容易写出来的一句
+    #[test]
+    fn the_three_exits_each_read_as_a_sentence() {
+        assert_eq!(
+            god_left_word("阿土伯", "大财神", GodExit::Expired),
+            "阿土伯 身上的大财神期满走了"
+        );
+        assert_eq!(
+            god_left_word("阿土伯", "小财神", GodExit::Replaced),
+            "阿土伯 身上的小财神被顶走了"
+        );
+        assert_eq!(
+            god_left_word("阿土伯", "小衰神", GodExit::Banished),
+            "阿土伯 身上的小衰神被送走了"
+        );
+    }
+
+    /// 附身那句的两个分支：身上原本没神 vs 顶走一位。少了后者，玩家不知道自己损失了谁
+    #[test]
+    fn possession_names_the_god_it_pushed_out() {
+        assert_eq!(
+            god_possessed_word("阿土伯", "大财神", 7, None),
+            "阿土伯 被大财神附身（7 天）"
+        );
+        assert_eq!(
+            god_possessed_word("阿土伯", "大财神", 7, Some("小财神")),
+            "阿土伯 被大财神附身（7 天），顶走了小财神"
+        );
+    }
+
+    /// 拿下那块地时「原来在谁名下」是这一句的全部信息量。写成 `None` 那一支也要有话说 ——
+    /// 无主地被拿走的画面与有人名下被拿走长得一模一样，而玩家会以为是系统 bug
+    #[test]
+    fn a_taken_plot_says_whose_it_was_or_that_it_was_nobody_s() {
+        assert_eq!(
+            land_taken_word("孙小美", "汉口路", Some("阿土伯")),
+            "土地公 替 孙小美 拿下汉口路（原来在 阿土伯 名下）"
+        );
+        assert_eq!(
+            land_taken_word("孙小美", "汉口路", None),
+            "土地公 替 孙小美 拿下汉口路（这块地本来无主）"
+        );
+    }
+
+    /// 钱那一格永不出现负号：`GodDeed.cash` 是**净值**（进为正出为负），照抄到屏幕上会得到
+    /// 「给了 -300」，读起来像账算错了而不是像被抢了
+    #[test]
+    fn a_deed_reads_the_direction_instead_of_the_sign() {
+        assert_eq!(
+            god_deed_word("大财神", "阿土伯", 3_521, 0),
+            "大财神 给了 阿土伯 $3,521"
+        );
+        let taken = god_deed_word("大穷神", "阿土伯", -300, 0);
+        assert_eq!(taken, "大穷神 从 阿土伯 手里拿走 $300");
+        assert!(!taken.contains('-'), "负号漏到屏幕上了：{taken}");
+    }
+
+    /// 只送卡的那一位（大福神 2 张、小福神 1 张）钱那一格是 0，那句必须说卡而不是「给了 0 元」
+    #[test]
+    fn a_card_only_deed_says_cards_not_zero_dollars() {
+        assert_eq!(
+            god_deed_word("大福神", "阿土伯", 0, 2),
+            "大福神 塞给 阿土伯 2 张卡"
+        );
+    }
+
+    /// 上路与丢卡两句各钉一个主语：前者的主语是神（没有人），后者的主语是**哪位神**
+    #[test]
+    fn appearances_and_losses_name_their_actor() {
+        assert_eq!(
+            god_appeared_word("大衰神", "南京路"),
+            "大衰神 上了路，站在 南京路"
+        );
+        assert_eq!(
+            card_lost_word("衰神", "阿土伯", "购地卡"),
+            "衰神 从 阿土伯 手里弄走了「购地卡」"
+        );
+    }
+
+    // ===== 那六条真的接到顶栏上（ wiring ）=====
+    // 上面那六条纯函数用例**测不到接线**：把某个 `for m in notices.xxx.read()` 整块删掉，
+    // 它们照样全绿，而屏幕上那一句从此永远不出现 —— 这正是「空跑的断言等于没断言」的
+    // 第六种形状。所以这里把消息真发一遍，读回顶栏那一行（0.20 的 `Text` 就是
+    // `bevy_ui::widget::text::Text(pub String)`，读得回来）
+
+    fn notices_app() -> (App, Entity, Entity, Entity) {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            // `Notices` 读几条就要注册几条 —— 少一条，参数校验直接 panic，
+            // 而不是安静地少播一句
+            .add_message::<DetentionSkipped>()
+            .add_message::<DetentionLifted>()
+            .add_message::<PlayerBailed>()
+            .add_message::<StaySkipped>()
+            .add_message::<StayLifted>()
+            .add_message::<PlayerBankrupt>()
+            .add_message::<BankVisited>()
+            .add_message::<BankOpDone>()
+            .add_message::<StockVisited>()
+            .add_message::<StockTraded>()
+            .add_message::<PointsChanged>()
+            .add_message::<ShopOpDone>()
+            .add_message::<MortgageDone>()
+            .add_message::<CardPlayed>()
+            .add_message::<GodAppeared>()
+            .add_message::<GodPossessed>()
+            .add_message::<GodLeft>()
+            .add_message::<GodDeed>()
+            .add_message::<CardLost>()
+            .add_message::<LandTaken>()
+            .add_message::<ChargeWaived>()
+            .add_message::<ItemPlaced>()
+            .add_message::<WalkHalted>()
+            .add_message::<BombTransferred>()
+            .add_message::<ChestOpened>()
+            .add_message::<RemoteDiceUsed>()
+            .add_message::<MoveCapped>()
+            .add_message::<MountChanged>()
+            .add_message::<GameOver>()
+            .add_systems(Update, hint_from_events);
+        let me = app.world_mut().spawn(PlayerName("阿土伯".into())).id();
+        let foe = app.world_mut().spawn(PlayerName("孙小美".into())).id();
+        let hint = app.world_mut().spawn((HintText, Text::new(""))).id();
+        (app, me, foe, hint)
+    }
+
+    fn send<M: bevy::ecs::message::Message + Clone + Send + Sync + 'static>(app: &mut App, m: M) {
+        app.world_mut().resource_mut::<Messages<M>>().write(m);
+    }
+
+    fn hint_of(app: &mut App, hint: Entity) -> String {
+        app.update();
+        app.world().get::<Text>(hint).expect("提示行在").0.clone()
+    }
+
+    fn notice(title: &str) -> CardNotice {
+        CardNotice {
+            id: "item_summon".into(),
+            kind: CardKind::Item,
+            title: title.into(),
+            desc: "测试".into(),
+            outcomes: vec![],
+        }
+    }
+
+    /// 六条各播一句。逐条单帧发，不混在一起 —— 混了就分不清是哪条 reader 读到的
+    #[test]
+    fn each_god_notice_reaches_the_top_bar_line() {
+        let (mut app, me, foe, hint) = notices_app();
+        send(
+            &mut app,
+            GodAppeared {
+                god: God::SmallDoom,
+                tile: TileIndex(3),
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).contains("小衰神 上了路"),
+            "上路那条没接到顶栏"
+        );
+
+        send(
+            &mut app,
+            GodPossessed {
+                player: me,
+                god: God::BigRich,
+                days: 7,
+                tile: TileIndex(1),
+                replaced: None,
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).contains("阿土伯 被大财神附身（7 天）"),
+            "附身那条没接到顶栏"
+        );
+
+        send(
+            &mut app,
+            GodLeft {
+                player: me,
+                god: God::BigRich,
+                reason: GodExit::Banished,
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).contains("大财神被送走了"),
+            "离场那条没接到顶栏"
+        );
+
+        send(
+            &mut app,
+            GodDeed {
+                player: me,
+                god: God::BigRich,
+                cash: 3_521,
+                cards: vec![],
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).contains("大财神 给了 阿土伯 $3,521"),
+            "当场那件事没接到顶栏"
+        );
+
+        send(
+            &mut app,
+            CardLost {
+                player: me,
+                card: notice("购地卡"),
+                by: God::SmallDoom,
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).contains("小衰神 从 阿土伯 手里弄走了「购地卡」"),
+            "丢卡那条没接到顶栏"
+        );
+
+        send(
+            &mut app,
+            LandTaken {
+                player: foe,
+                land: LandId(1),
+                from: Some(me),
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).contains("土地公 替 孙小美 拿下"),
+            "拿地那条没接到顶栏"
+        );
+        // 无主那一支走同一句的另一头：`from: None` 必须说「本来无主」而不是漏掉那半句
+        send(
+            &mut app,
+            LandTaken {
+                player: foe,
+                land: LandId(1),
+                from: None,
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).contains("这块地本来无主"),
+            "无主那一支没接到顶栏"
+        );
+    }
+
+    /// 顺序的两格：请神符那一帧同时有 `CardPlayed` 与 `GodPossessed`，留下的必须是出牌
+    /// 那句（它已经说了请来谁）；而走路踩到神那一帧只有 `GodPossessed` 与 `GodDeed`，
+    /// 留下的是当场那件事。两格各钉一头 —— 只钉一头的话，把整块挪到 `played` 之前
+    /// 或之后都不会红
+    #[test]
+    fn the_played_line_wins_over_the_possession_while_the_deed_wins_within_the_gods() {
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            GodPossessed {
+                player: me,
+                god: God::SmallRich,
+                days: 7,
+                tile: TileIndex(6),
+                replaced: None,
+            },
+        );
+        send(
+            &mut app,
+            CardPlayed {
+                player: me,
+                victim: me,
+                card: notice("请神符"),
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "阿土伯 使用了「请神符」",
+            "出牌那句被神的状态盖掉了"
+        );
+
+        send(
+            &mut app,
+            GodPossessed {
+                player: me,
+                god: God::SmallRich,
+                days: 7,
+                tile: TileIndex(6),
+                replaced: None,
+            },
+        );
+        send(
+            &mut app,
+            GodDeed {
+                player: me,
+                god: God::SmallRich,
+                cash: -300,
+                cards: vec![],
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "小财神 从 阿土伯 手里拿走 $300",
+            "同族里该留下更具体的那件事"
         );
     }
 }

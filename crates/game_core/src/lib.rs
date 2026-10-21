@@ -78,10 +78,10 @@ pub mod prelude {
     };
     pub use crate::economy::LandView;
     pub use crate::gods::{
-        BestowKit, GOD_REFUSES_BANISH, God, GodDesk, MAX_ON_BOARD, NO_GOD_ON_THE_ROAD,
-        NO_GOD_TO_BANISH, Possession, Presence, Rival, STARTING_GODS, WalkEffect, age_possession,
-        attach, banishable, cards_lost_per_turn, denies_acquire, detach, doom_days,
-        doom_multiplier, drain_cards, extra_levels, grant_effects, land_deity_succession_system,
+        BestowKit, God, GodDesk, MAX_ON_BOARD, NO_GOD_ON_THE_ROAD, NO_GOD_TO_BANISH, Possession,
+        Presence, Rival, STARTING_GODS, WalkEffect, acquire_denied_word, age_possession, attach,
+        banishable, cards_lost_per_turn, denies_acquire, detach, doom_days, doom_multiplier,
+        drain_cards, extra_levels, god_refuses_banish, grant_effects, land_deity_succession_system,
         money_corrections, nearest_god, presence_of, resists, revoke_effects,
         settle_god_landing_system, settle_land_deity_landing_system, spawn_starting_gods,
         takes_landing, top_up_gods_system, walk_effect, walk_effect_system, wander_gods_system,

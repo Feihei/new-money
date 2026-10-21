@@ -173,18 +173,14 @@ fn aim_is_legal(def: &CardDef, aim: Option<CardAim>, player: Entity, books: &Boo
 /// 判据只有一份，两处各调一次 `nearest_god` —— 面板查的是 `Occupancy`，而 `Books` 里没有
 /// 这一格，所以它自己开一条只读查询不算复制第二份真相（购地卡那次借 `buy_price` 是因为
 /// 真相在账本里，这里不在）。
-fn unmet_precondition(
-    def: &CardDef,
-    player: Entity,
-    sink: &CardSink<'_, '_>,
-) -> Option<&'static str> {
+fn unmet_precondition(def: &CardDef, player: Entity, sink: &CardSink<'_, '_>) -> Option<String> {
     for effect in &def.effects {
         let why = match effect {
             CardEffect::SummonGod => {
                 let (Ok(pos), Ok(heading)) =
                     (sink.positions.get(player), sink.headings.get(player))
                 else {
-                    return Some("说不清他在哪一格");
+                    return Some("说不清他在哪一格".to_string());
                 };
                 let gods = sink
                     .occupancies
@@ -195,12 +191,12 @@ fn unmet_precondition(
                     });
                 crate::gods::nearest_god(&sink.books.active.def, pos.tile, *heading, gods)
                     .is_none()
-                    .then_some(crate::gods::NO_GOD_ON_THE_ROAD)
+                    .then(|| crate::gods::NO_GOD_ON_THE_ROAD.to_string())
             }
             CardEffect::BanishGod => match sink.books.god_of(player) {
-                None => Some(crate::gods::NO_GOD_TO_BANISH),
+                None => Some(crate::gods::NO_GOD_TO_BANISH.to_string()),
                 Some(held) if !crate::gods::banishable(held.god) => {
-                    Some(crate::gods::GOD_REFUSES_BANISH)
+                    Some(crate::gods::god_refuses_banish(held.god))
                 }
                 Some(_) => None,
             },

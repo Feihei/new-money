@@ -670,13 +670,21 @@ pub fn banishable(god: God) -> bool {
     }
 }
 
-/// 「这一张此刻落空」的三句话。规则层拒掉出牌时把它写进日志，手牌面板把它写在灰按钮旁边。
+/// 「这一张此刻落空」的话。规则层拒掉出牌时把它写进日志，手牌面板把它写在灰按钮旁边。
 ///
 /// 放在 core 里由两边共读，而不是各写一遍：同一件事在两处措辞不同，玩家看到的与规则里跑的
 /// 就不是同一句，而对不上时没有任何一条测试会红。
 pub const NO_GOD_ON_THE_ROAD: &str = "路上现在没有一位神";
 pub const NO_GOD_TO_BANISH: &str = "身上没有神可送";
-pub const GOD_REFUSES_BANISH: &str = "那位神送不走";
+/// 这一句要带神名 —— 「那位神送不走」是把信息推给玩家去查，而今天整个游戏里只有一位
+/// 不吃这张符，说出名字那一格就白留了
+pub fn god_refuses_banish(god: God) -> String {
+    format!("{}不吃送神符", god.label())
+}
+/// 「置产这一族今天不给做」那一句，同样带神名。判据是 [`denies_acquire`]，这里只负责念出来
+pub fn acquire_denied_word(god: God) -> String {
+    format!("{}在，买地建屋必败", god.label())
+}
 
 /// 请神符的选法：路上**离我最近**那一位，回来 `(那位神, 他站的那一格, 离几步)`。
 ///
@@ -1516,5 +1524,23 @@ mod tests {
                 god.label()
             );
         }
+    }
+
+    /// 那两句「此刻办不成」必须说得出是**哪位**。P6d 那两句写的是「那位神」，等于把
+    /// 「去查你身上是谁」这一步推回给玩家 —— 而面板上并没有别的地方能查（HUD 那一格
+    /// 是 P6e② 才有的）。这两句与 `label` 共读一份，所以拼出来的名字不会与别处不一致
+    #[test]
+    fn the_two_refusals_name_the_god_they_blame() {
+        let banish = god_refuses_banish(God::Death);
+        assert_eq!(banish, "死神不吃送神符");
+        let acquire = acquire_denied_word(God::BigDoom);
+        assert!(
+            acquire.contains(God::BigDoom.label()),
+            "必败那句没带上是谁：{acquire}"
+        );
+        assert!(
+            acquire.contains("买地"),
+            "必败那句得说清是哪一族的事：{acquire}"
+        );
     }
 }

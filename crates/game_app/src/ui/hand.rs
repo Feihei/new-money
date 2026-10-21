@@ -12,10 +12,10 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, Bankrupt, Books, CardAim, CardDef, CardEffect, CardGained, CardId, CardKind,
-    CardTarget, GOD_REFUSES_BANISH, GameRules, God, Hand, Heading, Insulation, LandId,
-    NO_GOD_ON_THE_ROAD, NO_GOD_TO_BANISH, Occupancy, OccupancyKind, Paused, PendingDecision,
-    PlayerId, PlayerName, Possession, Shelf, TokenPosition, TurnOrder, TurnPhase, banishable,
-    deal_to, nearest_god, resists,
+    CardTarget, GameRules, God, Hand, Heading, Insulation, LandId, NO_GOD_ON_THE_ROAD,
+    NO_GOD_TO_BANISH, Occupancy, OccupancyKind, Paused, PendingDecision, PlayerId, PlayerName,
+    Possession, Shelf, TokenPosition, TurnOrder, TurnPhase, acquire_denied_word, banishable,
+    deal_to, god_refuses_banish, nearest_god, resists,
 };
 
 use super::theme::{col, layout, size};
@@ -165,7 +165,20 @@ pub(crate) struct PlayButton {
     pub aim: Option<CardAim>,
     /// 按不动时要说的话。**灰按钮必须自带一句为什么**，否则「按不动」与「坏了」在玩家
     /// 眼里是同一件事（§6.1 坑 27 的 UI 版）。
-    pub blocked: Option<&'static str>,
+    /// P6e③ 起是 `String`：那两句要说得出**是哪一位神**（「那位神送不走」等于把信息推给
+    /// 玩家去查），而名字是运行时的。
+    pub blocked: Option<String>,
+    /// 按得动时补的那句读数。今天只有请神符有 —— 它请哪位不由玩家挑，那就至少让他看见
+    /// 「按下去会请来谁、离几步」，把赌性从「不知道会发生什么」变成「知道，但没得选」
+    pub hint: Option<String>,
+}
+
+/// 这两张符此刻的样子。两个字段互斥（办不成才灰，灰了就没有读数可报），但形状上是两件事，
+/// 所以不合成一个 `Option<&str>` —— 合成就得靠「哪句算哪句」的口头约定。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Charm {
+    pub blocked: Option<String>,
+    pub hint: Option<String>,
 }
 
 /// 地块类卡的一颗候选按钮。`label` 由 [`sync_hand_panel`] 拼好（「谁的 + 地名」与「地名 +
@@ -176,22 +189,31 @@ pub(crate) struct LandPick {
     pub land: LandId,
 }
 
-/// 这张卡此刻办不成的那一句（`None` = 办得成）。今天只有 P6d 那两张符会落空，所以它只认
-/// 那两条效果，其余卡一律 `None`。
+/// 这两张符此刻办不办得成，以及办得成时那句读数。今天只有 P6d 那两张符会落空，所以它只认
+/// 那两条效果，其余卡一律空。
 ///
 /// 两句判据都住在 core（[`banishable`]／[`nearest_god`]），这里只把它们念成人话 ——
 /// 与 `denied` 那一格同一个分工。规则层拒的时候说的是同一句判据，所以「按钮亮着却办不成」
 /// 与「按下去没声音」两种形状都开不出来。
-fn charm_blocker(def: &CardDef, view: &HandView<'_, '_>, who: Entity) -> Option<&'static str> {
-    let banish = def
+fn charm_state(def: &CardDef, view: &HandView<'_, '_>, who: Entity) -> Charm {
+    if def
         .effects
         .iter()
-        .any(|e| matches!(e, CardEffect::BanishGod));
-    if banish {
+        .any(|e| matches!(e, CardEffect::BanishGod))
+    {
         return match view.possessions.get(who).ok().copied() {
-            None => Some(NO_GOD_TO_BANISH),
-            Some(held) if !banishable(held.god) => Some(GOD_REFUSES_BANISH),
-            Some(_) => None,
+            None => Charm {
+                blocked: Some(NO_GOD_TO_BANISH.to_string()),
+                hint: None,
+            },
+            Some(held) if !banishable(held.god) => Charm {
+                blocked: Some(god_refuses_banish(held.god)),
+                hint: None,
+            },
+            Some(held) => Charm {
+                blocked: None,
+                hint: Some(format!("送走的是{}", held.god.label())),
+            },
         };
     }
     if !def
@@ -199,21 +221,30 @@ fn charm_blocker(def: &CardDef, view: &HandView<'_, '_>, who: Entity) -> Option<
         .iter()
         .any(|e| matches!(e, CardEffect::SummonGod))
     {
-        return None;
+        return Charm::default();
     }
     // 菜单态没有棋盘：那时这块面板也不在（`UiSet::Live` 的门挡着），所以这里按「办得成」画，
     // 而不是写一句「路上没有神」—— 那是一句它读不出根据的话
-    let board = view.board.as_deref()?;
+    let Some(board) = view.board.as_deref() else {
+        return Charm::default();
+    };
     let (Ok(pos), Ok(head)) = (view.positions.get(who), view.headings.get(who)) else {
-        return None;
+        return Charm::default();
     };
     let gods = view.occupancies.iter().filter_map(|occ| match occ.kind {
         OccupancyKind::God(god) => occ.tile().map(|tile| (god, tile)),
         _ => None,
     });
-    nearest_god(&board.def, pos.tile, *head, gods)
-        .is_none()
-        .then_some(NO_GOD_ON_THE_ROAD)
+    match nearest_god(&board.def, pos.tile, *head, gods) {
+        None => Charm {
+            blocked: Some(NO_GOD_ON_THE_ROAD.to_string()),
+            hint: None,
+        },
+        Some((god, _, steps)) => Charm {
+            blocked: None,
+            hint: Some(format!("最近那位是{}，离 {steps} 步", god.label())),
+        },
+    }
 }
 
 /// 这张卡该长出哪几颗按钮。`opponents` 是「还活着的别人」（不含出牌人自己），
@@ -224,7 +255,8 @@ fn charm_blocker(def: &CardDef, view: &HandView<'_, '_>, who: Entity) -> Option<
 /// 写成对 `CardTarget` 的穷尽匹配、不留 `_`：新增一种目标时必须当场决定它长什么样，
 /// 而不是等截图时才发现有颗哑弹。
 /// `parcels` 是「此刻**买得下来**的无主地」（买不起的不在里面，同一句判据的另一半），
-/// `denied` 是「他身上有衰神／死神，置产这一族的事一件也办不成」（`Books::acquire_denied`）。
+/// `denied` 是「他身上有衰神／死神，置产这一族的事一件也办不成」那一句（`Books::acquire_denied`
+/// 的读数，P6e③ 起带神名所以是 `Option<String>` 而不是 `bool`）。
 /// 两者都能让那一排空掉，而玩家要听到的是一句不同的话：「没有买得起的无主地」在
 /// 必败那一位身上是一句**假话**——地是无主的、钱也是够的。
 pub(crate) fn play_buttons(
@@ -233,17 +265,20 @@ pub(crate) fn play_buttons(
     anyone: &[(Entity, String)],
     lands: &[LandPick],
     parcels: &[LandPick],
-    denied: bool,
-    unmet: Option<&'static str>,
+    denied: Option<String>,
+    charm: &Charm,
 ) -> Vec<PlayButton> {
+    let blocked = |why: &str| Some(why.to_string());
     match def.target {
-        // 「用」这颗按钮今天有两句话可说：请神符在路上没有一位神时落空、送神符在身上没有神
-        // （或那位送不走）时落空。两句都是**世界**的事实，所以由调用方查好了传进来 ——
+        // 「用」这颗按钮今天有两句话可说：办不成时那一句为什么（请神符在路上没有一位神时
+        // 落空、送神符在身上没有神或那位不吃这张符时落空），办得成时那一句读数（请来谁、
+        // 离几步）。两句都是**世界**的事实，所以由调用方查好了传进来 ——
         // 与 `lands`／`parcels` 那两排同一个分工：形状在这里，真相在规则层。
         CardTarget::SelfOnly => vec![PlayButton {
             text: "用".into(),
             aim: None,
-            blocked: unmet,
+            blocked: charm.blocked.clone(),
+            hint: charm.hint.clone(),
         }],
         CardTarget::Player if opponents.is_empty() => {
             // 其他人都离场了。这时候按下去规则层会静默拒绝（`aim_is_legal`），
@@ -251,7 +286,8 @@ pub(crate) fn play_buttons(
             vec![PlayButton {
                 text: "用".into(),
                 aim: None,
-                blocked: Some("场上没有别的人了"),
+                blocked: blocked("场上没有别的人了"),
+                hint: None,
             }]
         }
         CardTarget::Player => opponents
@@ -260,6 +296,7 @@ pub(crate) fn play_buttons(
                 text: format!("→ {name}"),
                 aim: Some(CardAim::Player(*target)),
                 blocked: None,
+                hint: None,
             })
             .collect(),
         // 「一个人，含自己」。这一排正常情况下至少有「自己」那颗，所以它没有灰按钮那一格；
@@ -267,7 +304,8 @@ pub(crate) fn play_buttons(
         CardTarget::Anybody if anyone.is_empty() => vec![PlayButton {
             text: "用".into(),
             aim: None,
-            blocked: Some("现在没有可行动的人"),
+            blocked: blocked("现在没有可行动的人"),
+            hint: None,
         }],
         CardTarget::Anybody => anyone
             .iter()
@@ -275,12 +313,14 @@ pub(crate) fn play_buttons(
                 text: format!("→ {name}"),
                 aim: Some(CardAim::Player(*target)),
                 blocked: None,
+                hint: None,
             })
             .collect(),
         CardTarget::Land if lands.is_empty() => vec![PlayButton {
             text: "用".into(),
             aim: None,
-            blocked: Some("还没有人有地"),
+            blocked: blocked("还没有人有地"),
+            hint: None,
         }],
         CardTarget::Land => lands
             .iter()
@@ -288,6 +328,7 @@ pub(crate) fn play_buttons(
                 text: format!("→ {}", pick.label),
                 aim: Some(CardAim::Land(pick.land)),
                 blocked: None,
+                hint: None,
             })
             .collect(),
         // 这句说的是「买得起的无主地」而不是「没有无主地」：候选排是账本筛出来的，
@@ -298,15 +339,17 @@ pub(crate) fn play_buttons(
         // （P6b② `Books::acquire_denied`）。两者在候选排上长得一模一样，所以那句
         // 为什么必须分开说 —— 对附身的人念「没有买得起的无主地」是句假话：
         // 地是无主的，钱也是够的，缺的是「这件事今天不给做」
-        CardTarget::UnownedLand if denied => vec![PlayButton {
+        CardTarget::UnownedLand if denied.is_some() => vec![PlayButton {
             text: "用".into(),
             aim: None,
-            blocked: Some("那位神让买地必败"),
+            blocked: denied,
+            hint: None,
         }],
         CardTarget::UnownedLand if parcels.is_empty() => vec![PlayButton {
             text: "用".into(),
             aim: None,
-            blocked: Some("没有买得起的无主地"),
+            blocked: blocked("没有买得起的无主地"),
+            hint: None,
         }],
         CardTarget::UnownedLand => parcels
             .iter()
@@ -314,6 +357,7 @@ pub(crate) fn play_buttons(
                 text: format!("→ {}", pick.label),
                 aim: Some(CardAim::Land(pick.land)),
                 blocked: None,
+                hint: None,
             })
             .collect(),
     }
@@ -396,9 +440,12 @@ pub(crate) fn sync_hand_panel(
         .and_then(|p| view.faces.get(p).ok())
         .map(|(_, pid, _, _)| *pid);
     // 「买不下来」有两个来源，而候选排只把两者都收成空排，所以这里单独问一句、
-    // 让灰按钮那句为什么说得准。读的仍是账本那一句判据（`Books::acquire_denied`），
-    // 面板不查 `Possession` —— 与 `buy_price` 那条「报价与成交共读一句」同一条纪律
-    let denied = player.is_some_and(|p| view.books.acquire_denied(p));
+    // 让灰按钮那句为什么说得准。判据仍然只读账本那一句（`Books::acquire_denied`），
+    // 神名只是把同一位再念一遍 —— 面板不查 `Possession` 那条纪律没动
+    let denied = player
+        .filter(|p| view.books.acquire_denied(*p))
+        .and_then(|p| view.books.god_of(p))
+        .map(|held| acquire_denied_word(held.god));
     if let Some(board) = view.board.as_deref() {
         for plot in view.books.views() {
             let Some(def) = board.def.land(plot.id.0) else {
@@ -460,12 +507,21 @@ pub(crate) fn sync_hand_panel(
     // 两张符那句「现在还办不成」也是可见位：它跟着「路上有没有一位神」「身上挂着哪位」变，
     // 签名里少了这一位，路上刚刷出一位神时那颗按钮还灰着，而要等别的原因重建面板才翻亮
     // （§6.1 坑 30 的同一条：可见位要有它的全部判据）
-    let charms: Vec<&'static str> = hand
+    let charms: Vec<String> = hand
         .iter()
         .filter_map(|id| view.shelf.get(CardKind::Item, *id))
         .map(|def| match player {
-            Some(who) => charm_blocker(def, &view, who).unwrap_or("-"),
-            None => "-",
+            Some(who) => {
+                // 两句都要进签名：灰那句跟着世界变，读数那句跟着「最近那位是谁、离几步」变，
+                // 漏掉后者就会出现「路上换了一位神而按钮旁边还写着旧的那位」
+                let charm = charm_state(def, &view, who);
+                format!(
+                    "{}/{}",
+                    charm.blocked.unwrap_or_default(),
+                    charm.hint.unwrap_or_default()
+                )
+            }
+            None => "-".to_string(),
         })
         .collect();
     let stamp = format!(
@@ -506,6 +562,11 @@ pub(crate) fn sync_hand_panel(
         .map(|id| (*id, view.shelf.get(CardKind::Item, *id)))
         .collect();
 
+    // 溢出这条欠账还挂着，两种解都试过、都记在 PLAN 的 P6e 记录里：
+    // **折列**（十张卡要三列 ≈ 1050 像素，面板盖住整张棋盘、列间还空出一大段，比
+    // 「上面那几张看不见」更糟）与 **滚动**（0.20 只有滚动的布局那一半 ——
+    // `ComputedNode::scroll_position` 在，没有任何输入去改它）。
+    // 今天的事实是：超过五张，最上面那几张就顶出窗口上沿。样例卡十张正是为了拍到这个
     let mut root = commands.spawn((
         BoardUi,
         HandPanel,
@@ -555,76 +616,115 @@ pub(crate) fn sync_hand_panel(
             p.spawn(label(&font.0, "手里没有卡", size::BODY, col::KEY));
         }
         for (card, def) in &rows {
+            // 每一行的宽度钉死在面板内沿：卡面那句话比面板宽，不钉住它就会画到面板边框
+            // 外面去（面板背景只有 330，那句话却有一百多像素悬在框外）
+            let col_w = Val::Px(layout::HAND_PANEL[0] - 32.0);
             let Some(def) = def else {
-                p.spawn(label(
-                    &font.0,
-                    format!("数据错误：货架上没有第 {} 张", card.0),
-                    size::ROW,
-                    col::BANKRUPT,
+                p.spawn((
+                    Node {
+                        width: col_w,
+                        ..default()
+                    },
+                    label(
+                        &font.0,
+                        format!("数据错误：货架上没有第 {} 张", card.0),
+                        size::ROW,
+                        col::BANKRUPT,
+                    ),
                 ));
                 continue;
             };
-            let unmet = player.and_then(|who| charm_blocker(def, &view, who));
-            let buttons = play_buttons(def, &opponents, &anyone, &lands, &parcels, denied, unmet);
-            // 三行分开：合成一行的话，两张卡名加两颗按钮在 1024 宽的屏上就顶到边了
-            let mut title = p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(8.0),
+            let charm = player.map_or_else(Charm::default, |who| charm_state(def, &view, who));
+            let buttons = play_buttons(
+                def,
+                &opponents,
+                &anyone,
+                &lands,
+                &parcels,
+                denied.clone(),
+                &charm,
+            );
+            // 一张卡包成一个节点：三行分开挂在面板上时，「这张卡到哪结束」在树上读不出来，
+            // 而将来无论做折叠还是滚动，断点都得落在卡与卡之间，不能落在一张卡中间
+            let mut card_node = p.spawn(Node {
+                width: col_w,
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(4.0),
                 ..default()
             });
-            title.with_children(|line| {
-                line.spawn((
+            card_node.with_children(|p| {
+                // 三行分开：合成一行的话，两张卡名加两颗按钮在 1024 宽的屏上就顶到边了
+                let mut title = p.spawn(Node {
+                    width: col_w,
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                });
+                title.with_children(|line| {
+                    line.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            ..default()
+                        },
+                        label(&font.0, def.title.clone(), size::NAME, col::HINT),
+                    ));
+                    line.spawn(label(&font.0, aim_text(def), size::ROW, col::KEY));
+                });
+                p.spawn((
                     Node {
-                        flex_grow: 1.0,
+                        width: col_w,
                         ..default()
                     },
-                    label(&font.0, def.title.clone(), size::NAME, col::HINT),
+                    label(&font.0, def.desc.clone(), size::ROW, col::MUTED),
                 ));
-                line.spawn(label(&font.0, aim_text(def), size::ROW, col::KEY));
-            });
-            p.spawn(label(&font.0, def.desc.clone(), size::ROW, col::MUTED));
-            let mut actions = p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                // 允许换行：地块卡在一盘后期能长出七八颗按钮（每块有主的地一颗），
-                // 不换行就会顶穿面板右边界，而那颗被切掉的按钮读起来像「没有这个功能」
-                flex_wrap: FlexWrap::Wrap,
-                column_gap: Val::Px(8.0),
-                row_gap: Val::Px(6.0),
-                align_items: AlignItems::Center,
-                ..default()
-            });
-            // 地块那颗按钮上要写「谁的 + 地名」或「地名 + 价」，比「用」与「→ 名字」长一截：
-            // 单独给它一个宽度与字号，而不是把三种形状挤进同一个 96 像素
-            let (box_size, box_font) =
-                if matches!(def.target, CardTarget::Land | CardTarget::UnownedLand) {
-                    (layout::LAND_BUTTON, size::ROW)
-                } else {
-                    (layout::CARD_BUTTON, size::BODY)
-                };
-            actions.with_children(|line| {
-                for pb in &buttons {
-                    button(
-                        line,
-                        &font.0,
-                        ButtonSpec {
-                            font: box_font,
-                            ..ButtonSpec::new(
-                                &pb.text,
-                                box_size,
-                                PRIMARY,
-                                UiAction::PlayCard {
-                                    card: *card,
-                                    aim: pb.aim,
-                                },
-                            )
-                        }
-                        .disabled(!playable || pb.blocked.is_some()),
-                    );
-                }
-                // 灰掉的话，那句话就写在按钮旁边 —— 面板上只有一处解释会读漏
-                if let Some(reason) = buttons.iter().find_map(|pb| pb.blocked) {
-                    line.spawn(label(&font.0, reason, size::ROW, col::JAILED));
-                }
+                let mut actions = p.spawn(Node {
+                    width: col_w,
+                    flex_direction: FlexDirection::Row,
+                    // 允许换行：地块卡在一盘后期能长出七八颗按钮（每块有主的地一颗），
+                    // 不换行就会顶穿面板右边界，而那颗被切掉的按钮读起来像「没有这个功能」
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: Val::Px(8.0),
+                    row_gap: Val::Px(6.0),
+                    align_items: AlignItems::Center,
+                    ..default()
+                });
+                // 地块那颗按钮上要写「谁的 + 地名」或「地名 + 价」，比「用」与「→ 名字」长一截：
+                // 单独给它一个宽度与字号，而不是把三种形状挤进同一个 96 像素
+                let (box_size, box_font) =
+                    if matches!(def.target, CardTarget::Land | CardTarget::UnownedLand) {
+                        (layout::LAND_BUTTON, size::ROW)
+                    } else {
+                        (layout::CARD_BUTTON, size::BODY)
+                    };
+                actions.with_children(|line| {
+                    for pb in &buttons {
+                        button(
+                            line,
+                            &font.0,
+                            ButtonSpec {
+                                font: box_font,
+                                ..ButtonSpec::new(
+                                    &pb.text,
+                                    box_size,
+                                    PRIMARY,
+                                    UiAction::PlayCard {
+                                        card: *card,
+                                        aim: pb.aim,
+                                    },
+                                )
+                            }
+                            .disabled(!playable || pb.blocked.is_some()),
+                        );
+                    }
+                    // 灰掉的话，那句话就写在按钮旁边 —— 面板上只有一处解释会读漏。
+                    // 按得动时同一格写那句**读数**（请神符：最近那位是谁、离几步），两种颜色
+                    // 分开：红色那族是「不给做」，灰色这一句是「可以做，但结果不由你挑」
+                    if let Some(reason) = buttons.iter().find_map(|pb| pb.blocked.clone()) {
+                        line.spawn(label(&font.0, &reason, size::ROW, col::JAILED));
+                    } else if let Some(hint) = buttons.iter().find_map(|pb| pb.hint.clone()) {
+                        line.spawn(label(&font.0, &hint, size::ROW, col::MUTED));
+                    }
+                });
             });
         }
         // 分隔线不是装饰：最后一张卡的「用」与「关闭」都是 96×32 的绿/灰按钮，
@@ -694,8 +794,8 @@ mod tests {
             &[foe(5, "自己"), foe(2, "孙小美")],
             &[pick("我的南京路", 0)],
             &[pick("外滩北 $1500", 2)],
-            false,
             None,
+            &Charm::default(),
         );
         assert_eq!(buttons.len(), 1, "给自己的卡不该长出「对谁」这一排按钮");
         assert_eq!(buttons[0].aim, None);
@@ -715,25 +815,44 @@ mod tests {
             NO_PEOPLE,
             NO_PLOTS,
             NO_PARCELS,
-            false,
-            Some("路上现在没有一位神"),
+            None,
+            &Charm {
+                blocked: Some("路上现在没有一位神".into()),
+                hint: None,
+            },
         );
         assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0].blocked, Some("路上现在没有一位神"));
+        assert_eq!(buttons[0].blocked, Some("路上现在没有一位神".to_string()));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
     }
 
     /// 反例的反例：同一张卡，前提成立时那颗按钮必须是亮的 ——
-    /// 一句写死的「路上现在没有一位神」与一个永远灰着的按钮，症状完全相同
+    /// 一句写死的「路上现在没有一位神」与一个永远灰着的按钮，症状完全相同。
+    /// P6e③ 起这颗亮的按钮还带一句读数（请神符：最近那位是谁、离几步），
+    /// 少了它，这张卡就还是「按下去才知道买了什么」
     #[test]
     fn the_same_charm_is_live_once_a_god_stands_on_the_road() {
         let mut card = def(CardTarget::SelfOnly);
         card.effects = vec![CardEffect::SummonGod];
         let buttons = play_buttons(
-            &card, NO_PEOPLE, NO_PEOPLE, NO_PLOTS, NO_PARCELS, false, None,
+            &card,
+            NO_PEOPLE,
+            NO_PEOPLE,
+            NO_PLOTS,
+            NO_PARCELS,
+            None,
+            &Charm {
+                blocked: None,
+                hint: Some("最近那位是大财神，离 3 步".into()),
+            },
         );
         assert_eq!(buttons[0].blocked, None);
         assert_eq!(buttons[0].text, "用");
+        assert_eq!(
+            buttons[0].hint.as_deref(),
+            Some("最近那位是大财神，离 3 步"),
+            "读数没跟上按钮，面板就还是在猜"
+        );
     }
 
     #[test]
@@ -745,8 +864,8 @@ mod tests {
             &[foe(5, "自己"), foe(2, "孙小美"), foe(3, "阿土伯")],
             NO_PLOTS,
             NO_PARCELS,
-            false,
             None,
+            &Charm::default(),
         );
         assert_eq!(buttons.len(), 2, "两个对手就该有两颗可选的按钮");
         // 目标烤在按钮里：按下去就是一个完整意图，规则层不必再挂「选目标」的待决
@@ -766,11 +885,11 @@ mod tests {
             NO_PEOPLE,
             NO_PLOTS,
             NO_PARCELS,
-            false,
             None,
+            &Charm::default(),
         );
         assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0].blocked, Some("场上没有别的人了"));
+        assert_eq!(buttons[0].blocked, Some("场上没有别的人了".to_string()));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
     }
 
@@ -784,8 +903,8 @@ mod tests {
             &[foe(5, "自己"), foe(2, "孙小美")],
             NO_PLOTS,
             NO_PARCELS,
-            false,
             None,
+            &Charm::default(),
         );
         assert_eq!(buttons.len(), 2, "自己 + 一名对手 = 两颗按钮");
         assert_eq!(
@@ -807,11 +926,11 @@ mod tests {
             NO_PEOPLE,
             NO_PLOTS,
             NO_PARCELS,
-            false,
             None,
+            &Charm::default(),
         );
         assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0].blocked, Some("现在没有可行动的人"));
+        assert_eq!(buttons[0].blocked, Some("现在没有可行动的人".to_string()));
         assert_eq!(buttons[0].aim, None);
     }
 
@@ -826,8 +945,8 @@ mod tests {
             NO_PEOPLE,
             &picks,
             &[pick("外滩北 $1500", 2)],
-            false,
             None,
+            &Charm::default(),
         );
         assert_eq!(buttons.len(), 2, "两块有主的地就该有两颗按钮");
         assert_eq!(
@@ -848,11 +967,11 @@ mod tests {
             NO_PEOPLE,
             NO_PLOTS,
             NO_PARCELS,
-            false,
             None,
+            &Charm::default(),
         );
         assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0].blocked, Some("还没有人有地"));
+        assert_eq!(buttons[0].blocked, Some("还没有人有地".to_string()));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
     }
 
@@ -867,8 +986,8 @@ mod tests {
             NO_PEOPLE,
             &[pick("我的南京路", 0)],
             &parcels,
-            false,
             None,
+            &Charm::default(),
         );
         assert_eq!(buttons.len(), 2, "两块买得下来的无主地就该有两颗按钮");
         assert_eq!(
@@ -890,11 +1009,11 @@ mod tests {
             NO_PEOPLE,
             NO_PLOTS,
             NO_PARCELS,
-            false,
             None,
+            &Charm::default(),
         );
         assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0].blocked, Some("没有买得起的无主地"));
+        assert_eq!(buttons[0].blocked, Some("没有买得起的无主地".to_string()));
         assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
     }
 
@@ -908,23 +1027,23 @@ mod tests {
             NO_PEOPLE,
             NO_PLOTS,
             NO_PARCELS,
-            true,
-            None,
+            Some("衰神在，买地建屋必败".into()),
+            &Charm::default(),
         );
         assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0].blocked, Some("那位神让买地必败"));
+        assert_eq!(buttons[0].blocked, Some("衰神在，买地建屋必败".to_string()));
         let again = play_buttons(
             &def(CardTarget::UnownedLand),
             &[],
             NO_PEOPLE,
             NO_PLOTS,
             NO_PARCELS,
-            false,
             None,
+            &Charm::default(),
         );
         assert_eq!(
             again[0].blocked,
-            Some("没有买得起的无主地"),
+            Some("没有买得起的无主地".to_string()),
             "没有神时仍要说钱那一头 —— 两句换成同一句就测不出判据分了叉"
         );
     }
