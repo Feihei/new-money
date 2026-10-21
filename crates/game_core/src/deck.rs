@@ -21,6 +21,7 @@ use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision, d
 use crate::msg::{
     CardDrawn, CardNotice, EffectOutcome, LandBought, PlayerDetained, PlayerTeleported,
 };
+use crate::occupancy::{Occupancy, OccupancyAt, OccupancyKind};
 use crate::player::{Heading, MoveCap, PlayerId, StaySentence, TokenPosition};
 use crate::rng::Rng;
 use crate::settle::Books;
@@ -216,6 +217,21 @@ pub struct CardSink<'w, 's> {
     /// 买地成交的流水。购地卡走的是 `Books::buy` 那条正路，所以它必须和「踩到无主地买下来」
     /// 发同一条凭据 —— 归属变了这件事只有一种说法，而顶栏与 dump 读的就是这一条。
     pub bought: MessageWriter<'w, LandBought>,
+    /// 路上站着的东西（P6d 的两张符要读它：请神符找最近那位、送神符带走身上那颗炸弹）。
+    ///
+    /// **只读**：请神符把那位神从路上抹掉走的是 `Commands`（与落脚那条
+    /// [`settle_god_landing_system`](crate::gods::settle_god_landing_system) 同一个形状），
+    /// 而出牌发生在 `WaitRoll`、路上没有任何东西在同一帧改这些实体 —— 要 `&mut` 只会让
+    /// 这张包与漫游／放置那几条 system 撞起来。
+    pub occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
+    /// 上身那一刻要动的非账本那几样（随机流、货架、手牌、四条凭据）。
+    ///
+    /// **为什么在 `CardSink` 上而不是让出牌那条 system 另拿一个 `GodDesk`**：`GodDesk` 带着
+    /// `Books` 与 `Commands`，与这张包里的同两格在参数建立期直接撞（P4② 那条同一个坑）。
+    /// P6d 的请神符要在出牌时上身，所以拆的是包不是判据 —— `attach` 收零件，谁凑谁的事。
+    /// 连带后果：`play_card_system` 与 `settle_card_landing` 不再自己拿 `hands`／`shelf`，
+    /// 它们读 `sink.kit` 的那两份（同一 system 里两条 `&mut Hand` 同样会撞）。
+    pub kit: crate::gods::BestowKit<'w, 's>,
 }
 
 /// 免费卡免的是哪几族钱（PLAN §三「**免费**抵 >2000×物价 的租金/罚金/税」）。
@@ -493,6 +509,86 @@ pub fn apply_card(
                 };
                 outcomes.push(EffectOutcome::Slowed { turns: left });
             }
+            CardEffect::SummonGod => {
+                // 选哪位**不由玩家挑**：那张表算的就是这张卡的赌性（见 `card.rs` 那条注）。
+                // 判据与手牌面板那句灰话读的是同一句 `nearest_god`，所以这里再算一次不会分叉
+                let (Ok(pos), Ok(heading)) =
+                    (sink.positions.get(victim), sink.headings.get(victim))
+                else {
+                    debug!("请神被跳过：那位玩家没有位置或朝向可数");
+                    continue;
+                };
+                let (at, heading) = (pos.tile, *heading);
+                // 名单先抄下来：`attach` 要 `&mut sink`，而那条借用了 `sink.occupancies` 的迭代
+                // 不能同时活着（P5 炸弹与 `bestow` 在同一处踩过）
+                let standing: Vec<(Entity, crate::gods::God, TileIndex)> = sink
+                    .occupancies
+                    .iter()
+                    .filter_map(|(entity, occ)| match occ.kind {
+                        OccupancyKind::God(god) => occ.tile().map(|tile| (entity, god, tile)),
+                        _ => None,
+                    })
+                    .collect();
+                let Some((god, from, steps)) = crate::gods::nearest_god(
+                    &sink.books.active.def,
+                    at,
+                    heading,
+                    standing.iter().map(|&(_, god, tile)| (god, tile)),
+                ) else {
+                    debug!("请神符没有可请的对象：路上现在一位神都没有");
+                    continue;
+                };
+                // 走的是与「踩到」同一个出口：请来的人与踩到的人是同一个人，只是来的路不同，
+                // 所以那一次性的那一笔（给钱／抢钱／送卡）照做
+                crate::gods::attach(
+                    &mut sink.commands,
+                    &mut sink.books,
+                    &mut sink.kit,
+                    victim,
+                    god,
+                    at,
+                );
+                // 他已经从路上「不在了」：留在原地会变成一位站着没人能再踩到的神，
+                // 而那一格的槽位也得腾出来（ADR-002 一格一件）
+                if let Some((entity, _, _)) = standing.iter().find(|(_, _, tile)| *tile == from) {
+                    sink.commands.entity(*entity).despawn();
+                }
+                outcomes.push(EffectOutcome::Summoned { god, from, steps });
+            }
+            CardEffect::BanishGod => {
+                let Some(held) = sink.books.god_of(victim) else {
+                    debug!("送神符没有可送的对象：那位身上没有神");
+                    continue;
+                };
+                if !crate::gods::banishable(held.god) {
+                    debug!("{} 不吃送神符", held.god.label());
+                    continue;
+                }
+                // 炸弹的账在 detach **之前**读：它读的是路上（携带中的）那件东西，
+                // 而 detach 要 `&mut sink`
+                let carried = sink.occupancies.iter().find_map(|(entity, occ)| {
+                    let bomb = matches!(occ.kind, OccupancyKind::TimeBomb);
+                    let mine = matches!(occ.at, OccupancyAt::Carried { by, .. } if by == victim);
+                    (bomb && mine).then_some(entity)
+                });
+                crate::gods::detach(
+                    &mut sink.commands,
+                    &mut sink.books.corrections,
+                    victim,
+                    held.god,
+                    crate::msg::GodExit::Banished,
+                    &mut sink.kit.left,
+                );
+                // PLAN §三 神明行那句「送神符连带送走身上定时炸弹」：同一张符办两件事，
+                // 而第二件事要说出来（`bomb` 那个 bool），否则玩家不知道自己顺手丢了什么
+                if let Some(entity) = carried {
+                    sink.commands.entity(entity).despawn();
+                }
+                outcomes.push(EffectOutcome::Banished {
+                    god: held.god,
+                    bomb: carried.is_some(),
+                });
+            }
         }
     }
     outcomes
@@ -546,7 +642,6 @@ fn doom_days_for(sink: &CardSink<'_, '_>, victim: Entity, days: u32) -> u32 {
 pub fn settle_card_landing(
     mut sink: CardSink,
     mut decks: Query<'_, '_, &'static mut Deck>,
-    mut rng: ResMut<'_, Rng>,
     shelf: Shelf<'_>,
     landing: Res<'_, Landing>,
     mut pending: ResMut<'_, PendingDecision>,
@@ -569,13 +664,16 @@ pub fn settle_card_landing(
         CardKind::Chance | CardKind::Fate => expect,
         CardKind::Item => return,
     };
+    // `shelf` 仍然是这条 system 自己的参数而不是 `sink.kit.shelf`：`Shelf` 读的是两份 `Res`，
+    // 共享读可以并存，而 `def` 要一路活到 `apply_card(&mut sink, ...)` 之后 —— 让它借在
+    // `sink` 里面就会与那次 `&mut sink` 撞掉。随机流没有这个问题（取完就放手），所以它走 kit。
     let Some(set) = shelf.set(kind) else {
         return;
     };
     let Some(mut deck) = decks.iter_mut().find(|d| d.kind == kind) else {
         return;
     };
-    let Some(drawn_id) = deck.draw(&mut rng) else {
+    let Some(drawn_id) = deck.draw(&mut sink.kit.rng) else {
         debug!("{kind:?} 牌堆是空的，本回合不抽卡");
         return;
     };

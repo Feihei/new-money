@@ -21,11 +21,12 @@ use std::collections::VecDeque;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::card::{CardDef, CardKind, CardTarget};
+use crate::card::{CardDef, CardEffect, CardKind, CardTarget};
 use crate::deck::{CardId, CardSink, Shelf, apply_card};
 use crate::land::LandId;
 use crate::landing::PendingDecision;
 use crate::msg::{CardGained, CardNotice, CardPlayed, PlayCardRequested};
+use crate::occupancy::OccupancyKind;
 use crate::player::PlayerId;
 use crate::settle::Books;
 use crate::turn::{TurnOrder, TurnPhase};
@@ -161,6 +162,70 @@ fn aim_is_legal(def: &CardDef, aim: Option<CardAim>, player: Entity, books: &Boo
     }
 }
 
+/// 出牌的第四道门：**这张卡的效果此刻有没有对象**。
+///
+/// 它与 [`aim_is_legal`] 分开，是因为问的不是「选的东西合不合法」而是「这件事有没有可做的
+/// 对象」。P6d 那两张符都没有 `aim`（请哪位由 `nearest_god` 算、送的是自己身上那位），
+/// 所以它们一句也进不了那张十五格表 —— 而它们恰恰是**会落空**的两张：路上可能一位神都没有，
+/// 身上可能没有神。落空时卡必须留在手里（判据分叉的形状从来不是钱少了，是「卡没了事没成」）。
+///
+/// 回来的是**办不成的那一句**：规则层拿它当拒绝的理由，手牌面板拿它当灰按钮的文案。
+/// 判据只有一份，两处各调一次 `nearest_god` —— 面板查的是 `Occupancy`，而 `Books` 里没有
+/// 这一格，所以它自己开一条只读查询不算复制第二份真相（购地卡那次借 `buy_price` 是因为
+/// 真相在账本里，这里不在）。
+fn unmet_precondition(
+    def: &CardDef,
+    player: Entity,
+    sink: &CardSink<'_, '_>,
+) -> Option<&'static str> {
+    for effect in &def.effects {
+        let why = match effect {
+            CardEffect::SummonGod => {
+                let (Ok(pos), Ok(heading)) =
+                    (sink.positions.get(player), sink.headings.get(player))
+                else {
+                    return Some("说不清他在哪一格");
+                };
+                let gods = sink
+                    .occupancies
+                    .iter()
+                    .filter_map(|(_, occ)| match occ.kind {
+                        OccupancyKind::God(god) => occ.tile().map(|tile| (god, tile)),
+                        _ => None,
+                    });
+                crate::gods::nearest_god(&sink.books.active.def, pos.tile, *heading, gods)
+                    .is_none()
+                    .then_some(crate::gods::NO_GOD_ON_THE_ROAD)
+            }
+            CardEffect::BanishGod => match sink.books.god_of(player) {
+                None => Some(crate::gods::NO_GOD_TO_BANISH),
+                Some(held) if !crate::gods::banishable(held.god) => {
+                    Some(crate::gods::GOD_REFUSES_BANISH)
+                }
+                Some(_) => None,
+            },
+            // 其余每一条效果都不需要「此刻有没有对象」这一问：免罪与免费是挂上去就等着，
+            // 拘留/停留/乌龟/转向打在谁身上都成立，地块类由 `aim_is_legal` 管。
+            // 穷尽而不是 `_ => None`：新加一条效果必须当场回答它会不会落空
+            CardEffect::AddCash { .. }
+            | CardEffect::DeductCash { .. }
+            | CardEffect::Detain { .. }
+            | CardEffect::MoveTo { .. }
+            | CardEffect::Insulate { .. }
+            | CardEffect::FreePass { .. }
+            | CardEffect::Reverse
+            | CardEffect::Stay { .. }
+            | CardEffect::MoveCap { .. }
+            | CardEffect::LandStatus { .. }
+            | CardEffect::BuyLand => None,
+        };
+        if why.is_some() {
+            return why;
+        }
+    }
+    None
+}
+
 /// 「现在能不能替谁出牌」的三份读数。打包成一个参数包是为了让出牌 system 留在
 /// clippy 的参数上限内，也因为这三份判据本来就是**一起成立或一起不成立**的：
 /// 阶段、轮转、待决事项，少看任何一份都会开出一条不该有的窗口。
@@ -189,7 +254,6 @@ impl<'w> PlayWindow<'w> {
 pub fn play_card_system(
     mut sink: CardSink,
     mut requests: MessageReader<PlayCardRequested>,
-    mut hands: Query<&mut Hand, With<PlayerId>>,
     window: PlayWindow<'_>,
     shelf: Shelf<'_>,
     mut played: MessageWriter<CardPlayed>,
@@ -208,7 +272,7 @@ pub fn play_card_system(
             debug!("出牌被拒：货架上没有 {:?}", request.card);
             continue;
         };
-        if !hand_holds(&hands, current, request.card) {
+        if !hand_holds(&sink.kit.hands, current, request.card) {
             debug!("出牌被拒：手里没有 {}", def.id);
             continue;
         }
@@ -225,8 +289,12 @@ pub fn play_card_system(
             debug!("出牌被拒：{} 找不到承受者", def.id);
             continue;
         };
+        if let Some(why) = unmet_precondition(def, victim, &sink) {
+            debug!("出牌被拒：{} —— {why}", def.id);
+            continue;
+        }
         // 先扣卡再结算：效果执行到一半崩了，也不该留下一张还能再打一次的卡
-        if let Ok(mut hand) = hands.get_mut(current) {
+        if let Ok(mut hand) = sink.kit.hands.get_mut(current) {
             hand.spend(request.card);
         }
         let outcomes = apply_card(&mut sink, victim, def, request.aim);

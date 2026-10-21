@@ -537,6 +537,21 @@ pub enum EffectOutcome {
     Slowed {
         turns: u32,
     },
+    /// 请神符请来了哪一位（P6d）。`from` 是他原来站着的格、`steps` 是离出牌人几步 ——
+    /// 这两个数就是「最近」那两个字的内容，玩家有权核对它是不是真的最近（而不是随机的一位）。
+    /// 神上身本身另有 [`GodPossessed`]，这条说的是「这张卡办成的那一件事」。
+    Summoned {
+        god: crate::gods::God,
+        from: TileIndex,
+        steps: u32,
+    },
+    /// 送神符送走了哪一位（P6d）。`bomb` 说那一趟**有没有连带带走**身上的定时炸弹 ——
+    /// 那是这张卡的第二件事，玩家有权知道自己是不是顺手把要命的东西也送了。
+    /// 离场本身另有 [`GodLeft`]（reason = `Banished`），这条与它是一对，不重复它。
+    Banished {
+        god: crate::gods::God,
+        bomb: bool,
+    },
 }
 
 /// 一条一次性修正**真的生效了**：`saved` 这笔账从这位身上免掉了，那张卡就此消失。

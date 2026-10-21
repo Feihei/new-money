@@ -1590,5 +1590,21 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
         EffectOutcome::Stayed { turns } => format!("原地停留（{turns} 回合）"),
         // 与停留是两句话：还在这条路上走，只是走不远
         EffectOutcome::Slowed { turns } => format!("接下来 {turns} 回合只走 1 格"),
+        // 请来的那位是谁、从哪一格、离几步 —— 三个都要写：这张卡的赌性就在「由不得你挑」，
+        // 而「最近」是玩家事后可以核对的一句话（不写格号就没法核对）
+        EffectOutcome::Summoned { god, from, steps } => format!(
+            "请来{}（他从 {} 号格、离你 {steps} 步的位置过来）",
+            god.label(),
+            from.0
+        ),
+        EffectOutcome::Banished { god, bomb } => {
+            let sent = format!("送走{}", god.label());
+            // 炸弹那一半不写就等于瞒着玩家：他刚把一样要命的东西和一位神一起丢了
+            if *bomb {
+                format!("{sent}，身上的定时炸弹也一起送走")
+            } else {
+                sent
+            }
+        }
     }
 }

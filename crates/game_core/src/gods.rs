@@ -63,7 +63,7 @@ use crate::msg::{
     LandTaken, PlayerArrived, TileStepped,
 };
 use crate::occupancy::{Occupancy, OccupancyAt, OccupancyKind, place};
-use crate::player::PlayerId;
+use crate::player::{Heading, PlayerId};
 use crate::rng::{Rng, four_digits};
 use crate::settle::Books;
 use crate::world::{ActiveBoard, Gameplay};
@@ -355,7 +355,13 @@ pub fn revoke_effects(corrections: &mut Corrections, bearer: Entity) -> usize {
 /// 钱全部走账本而不是直接写 `Wallet`：小财神那笔是**有名目的钱**，被收的人付不起就要当场
 /// 破产（[`Books::settle`] 是这类钱的唯一入口，见 settle.rs 模块头）。大财神那笔纯收入
 /// 走 [`Books::credit`] —— 它没有付款人，也就没有「付不起」。
-fn bestow(god: God, bearer: Entity, desk: &mut GodDesk<'_, '_>) {
+fn bestow(
+    god: God,
+    bearer: Entity,
+    commands: &mut Commands,
+    books: &mut Books<'_, '_>,
+    kit: &mut BestowKit<'_, '_>,
+) {
     let mut cash = 0i64;
     let mut cards = Vec::new();
     match god {
@@ -363,17 +369,16 @@ fn bestow(god: God, bearer: Entity, desk: &mut GodDesk<'_, '_>) {
         // 一次取完，是因为表现层的老虎机要逐位停（与春节红包同一台机器），
         // 而 PLAN §三 点名两者「共用同一个生成函数，别各写一套」
         God::BigRich => {
-            let leading = 1 + desk.rng.pick_god(0..=8);
-            let rest = [0u32; 3].map(|_| desk.rng.pick_god(0..=9));
+            let leading = 1 + kit.rng.pick_god(0..=8);
+            let rest = [0u32; 3].map(|_| kit.rng.pick_god(0..=9));
             let gift = four_digits(leading, rest);
-            desk.books.credit(bearer, gift);
+            books.credit(bearer, gift);
             cash = gift;
         }
         God::SmallRich => {
             // 名单先算好再去收：`settle` 会把付不起的人判破产，而那是**在改世界**，
             // 不能让它在一次迭代里改动自己正在读的名单
-            let victims: Vec<Entity> = desk
-                .books
+            let victims: Vec<Entity> = books
                 .solvent()
                 .into_iter()
                 .map(|(player, _)| player)
@@ -382,25 +387,25 @@ fn bestow(god: God, bearer: Entity, desk: &mut GodDesk<'_, '_>) {
             for victim in victims {
                 // 每人独立抽一位三位数：在场人数不同取数次数就不同，这是神自己那条流上的
                 // 事，不该回头去挪骰点（见 `Rng` 的注）
-                let base = 100 + desk.rng.pick_god(0..=899) as i64;
+                let base = 100 + kit.rng.pick_god(0..=899) as i64;
                 let charge = Charge::new(ChargeKind::God, Some(victim), Some(bearer), base);
-                let Ok(done) = desk.books.settle(&mut desk.commands, charge) else {
+                let Ok(done) = books.settle(commands, charge) else {
                     continue;
                 };
                 cash += done.amount;
             }
         }
-        God::BigFortune => cards = deal_god_cards(desk, bearer, god, 2),
-        God::SmallFortune => cards = deal_god_cards(desk, bearer, god, 1),
+        God::BigFortune => cards = deal_god_cards(god, bearer, 2, books, kit),
+        God::SmallFortune => cards = deal_god_cards(god, bearer, 1, books, kit),
         God::BigPoor => {
-            let divisor = i64::from(desk.books.rules.poor_cash_divisor.max(1));
-            let loss = desk.books.balance(bearer) / divisor;
+            let divisor = i64::from(books.rules.poor_cash_divisor.max(1));
+            let loss = books.balance(bearer) / divisor;
             if loss > 0 {
                 // 收款方是 `None` = 这笔钱离开游戏（进系统口袋），于是下一回合的物价指数
                 // 分子里少掉它 —— 「穷神把钱抢走了」在指数上留得下痕迹，这正是选
                 // 「过账本」而不是「`debit` 完事」的理由
                 let charge = Charge::new(ChargeKind::God, Some(bearer), None, loss);
-                let Ok(done) = desk.books.settle(&mut desk.commands, charge) else {
+                let Ok(done) = books.settle(commands, charge) else {
                     return;
                 };
                 cash = -done.amount;
@@ -412,7 +417,7 @@ fn bestow(god: God, bearer: Entity, desk: &mut GodDesk<'_, '_>) {
         God::Angel | God::Devil | God::LandDeity | God::Death => {}
     }
     if cash != 0 || !cards.is_empty() {
-        desk.deeds.write(GodDeed {
+        kit.deeds.write(GodDeed {
             player: bearer,
             god,
             cash,
@@ -425,33 +430,27 @@ fn bestow(god: God, bearer: Entity, desk: &mut GodDesk<'_, '_>) {
 /// （与圣诞礼物同一条理由，见 `calendar_fx::deliver_gifts`）。
 /// 上限与「满了挤掉最前面那张」全交给 [`deal_to`]，这里不复制第二条判据。
 fn deal_god_cards(
-    desk: &mut GodDesk<'_, '_>,
-    bearer: Entity,
     god: God,
+    bearer: Entity,
     want: usize,
+    books: &Books<'_, '_>,
+    kit: &mut BestowKit<'_, '_>,
 ) -> Vec<CardNotice> {
-    let pool = desk.shelf.items().len() as u32;
+    let pool = kit.shelf.items().len() as u32;
     if pool == 0 {
         // 数据缺道具池是一件要说得出来的事，不是「神什么也没给」
         warn!("{} 送卡没有可发的卡：道具池为空", god.label());
         return Vec::new();
     }
-    let limit = desk.books.rules.hand_limit;
+    let limit = books.rules.hand_limit;
     let mut given = Vec::new();
     for _ in 0..want {
-        let card = CardId(desk.rng.pick_god(0..=pool - 1));
-        let Ok(mut hand) = desk.hands.get_mut(bearer) else {
+        let card = CardId(kit.rng.pick_god(0..=pool - 1));
+        let Ok(mut hand) = kit.hands.get_mut(bearer) else {
             break;
         };
-        deal_to(
-            &mut hand,
-            limit,
-            card,
-            bearer,
-            &desk.shelf,
-            &mut desk.gained,
-        );
-        given.push(card_notice(&desk.shelf, card));
+        deal_to(&mut hand, limit, card, bearer, &kit.shelf, &mut kit.gained);
+        given.push(card_notice(&kit.shelf, card));
     }
     given
 }
@@ -644,24 +643,118 @@ pub fn takes_landing(god: God) -> bool {
     matches!(god, God::LandDeity)
 }
 
+/// 送神符送得走谁。**穷尽表，不许 `_`**（与 [`money_corrections`]／[`resists`] 同一条纪律：
+/// 加一位神必须当场回答「这张符管不管它」）。
+///
+/// 唯一说「不送」的是死神 —— PLAN §三 那句「送神符对死神无效」。他今天还不装配（既上不了街
+/// 也没有召唤路径），所以这条判据**现在走不到**，但表要先说对：P13 的女巫把人交给死神那一刻，
+/// 「摆脱不了」应当已经在规则里等着，而不是那时再回来补一格 `if`。
+///
+/// 读法上的那条边界也写在这里：**只能送自己身上的那位**。这张卡的主语是「（我身上）那位神」，
+/// 而对手身上的神不是我能单方面送走的东西 —— 那是一张攻击卡，与 P13 魔法屋的「按筛选条件点人」
+/// 同族，要来也该从那儿来。
+pub fn banishable(god: God) -> bool {
+    match god {
+        God::Death => false,
+        God::BigRich
+        | God::SmallRich
+        | God::BigFortune
+        | God::SmallFortune
+        | God::BigPoor
+        | God::SmallPoor
+        | God::BigDoom
+        | God::SmallDoom
+        | God::Angel
+        | God::Devil
+        | God::LandDeity => true,
+    }
+}
+
+/// 「这一张此刻落空」的三句话。规则层拒掉出牌时把它写进日志，手牌面板把它写在灰按钮旁边。
+///
+/// 放在 core 里由两边共读，而不是各写一遍：同一件事在两处措辞不同，玩家看到的与规则里跑的
+/// 就不是同一句，而对不上时没有任何一条测试会红。
+pub const NO_GOD_ON_THE_ROAD: &str = "路上现在没有一位神";
+pub const NO_GOD_TO_BANISH: &str = "身上没有神可送";
+pub const GOD_REFUSES_BANISH: &str = "那位神送不走";
+
+/// 请神符的选法：路上**离我最近**那一位，回来 `(那位神, 他站的那一格, 离几步)`。
+///
+/// 「最近」读的是双向最短（[`BoardDef::ring_distance`]）而不是「我走过去要几步」，这是刻意的：
+/// 后面那位如果沿行进方向最近，他下一回合本来就会踩到，这张卡就白买了一次走路。
+/// 与购地卡同一条理由 —— **这些卡卖的不是折扣，是「不必走到那一格」**。
+/// 同距的一对（环上关于起点对称的那两格）由行进方向决胜，所以一张转向卡会换掉请到的那位
+/// （[`BoardDef::steps_toward`]）。
+///
+/// 候选**只来自路上**：别人身上的那位不在这里（送神符只能送自己的，请神符也不能从别人身上
+/// 抢），而恶犬压根不是神（[`OccupancyKind::Dog`]）—— 它是土地公的对位，不是这张卡的对象。
+///
+/// 出牌那条 system 与手牌面板读的是**这一句**：面板要灰按钮那句「路上现在没有一位神」，
+/// 而它自己算一遍距离就等于把「最近」写两次（P3d④a 那条「面板不许自己开一条查询算判据」的
+/// 反面在这里不成立 —— 它查的是 `Occupancy`，而 `Books` 里根本没有这一格）。
+pub fn nearest_god(
+    def: &BoardDef,
+    at: TileIndex,
+    heading: Heading,
+    on_board: impl Iterator<Item = (God, TileIndex)>,
+) -> Option<(God, TileIndex, u32)> {
+    on_board
+        .map(|(god, tile)| {
+            (
+                god,
+                tile,
+                def.ring_distance(at, tile),
+                def.steps_toward(at, tile, heading),
+            )
+        })
+        .min_by_key(|(_, _, distance, ahead)| (*distance, *ahead))
+        .map(|(god, tile, distance, _)| (god, tile, distance))
+}
+
+/// 上身那一刻要动的**非账本**那几样：随机流、货架、手牌、四条凭据。
+///
+/// 它从 [`GodDesk`] 里独立出来，是因为 P6d 的请神符让**出牌那条 system 也要能上身**，
+/// 而 [`CardSink`](crate::deck::CardSink) 已经带着 `Books` 与 `Commands` —— 同一条 system
+/// 里再要一份 `GodDesk` 就是两个 `&mut Corrections`，参数建立期直接撞（与 [`detach`] 的
+/// 注释写的是同一条坑，那次是回合机，这次是出牌）。拆成两包之后 `attach` 的零件由调用方
+/// 凑齐：落脚那条凑 `GodDesk` 的三格，出牌那条凑 `CardSink` 的两格加这一包。
+#[derive(SystemParam)]
+pub struct BestowKit<'w, 's> {
+    pub rng: ResMut<'w, Rng>,
+    pub shelf: Shelf<'w>,
+    pub hands: Query<'w, 's, &'static mut Hand, With<PlayerId>>,
+    pub gained: MessageWriter<'w, CardGained>,
+    pub deeds: MessageWriter<'w, GodDeed>,
+    pub possessed: MessageWriter<'w, GodPossessed>,
+    pub left: MessageWriter<'w, GodLeft>,
+}
+
 /// 附身与它的一次性效果要动的全部东西。收成参数包是房规（§六 坑 8），
 /// 而这几样确实是同一件事：谁上身、挂哪几条修正、当场给／抢／送多少。
 ///
 /// ⚠️ **`corrections` 不单独成字段**：[`Books`] 已经带着 `ResMut<Corrections>`，
 /// 这里再要一份会在参数建立期撞成借用冲突（与 P4② 那条同一个坑）。
 /// 要写登记处就写 `desk.books.corrections`。
+///
+/// ⚠️ **`possessions` 也不在这里**：「他身上已经有谁」由 [`Books::god_of`] 读 —— 账本读得到
+/// 玩家身上的状态，而多带一条查询会让 [`CardSink`] 那条包与它撞在 `Possession` 上。
 #[derive(SystemParam)]
 pub struct GodDesk<'w, 's> {
     pub commands: Commands<'w, 's>,
     pub books: Books<'w, 's>,
-    pub rng: ResMut<'w, Rng>,
-    pub shelf: Shelf<'w>,
-    pub hands: Query<'w, 's, &'static mut Hand, With<PlayerId>>,
-    pub possessions: Query<'w, 's, &'static Possession, With<PlayerId>>,
-    pub gained: MessageWriter<'w, CardGained>,
-    pub deeds: MessageWriter<'w, GodDeed>,
-    pub possessed: MessageWriter<'w, GodPossessed>,
-    pub left: MessageWriter<'w, GodLeft>,
+    pub kit: BestowKit<'w, 's>,
+}
+
+impl<'w, 's> GodDesk<'w, 's> {
+    /// [`attach`] 的薄封装：这条 system 拿得到整个 desk，所以调用方不必自己拆三格。
+    pub fn attach(&mut self, player: Entity, god: God, tile: TileIndex) {
+        let Self {
+            commands,
+            books,
+            kit,
+        } = self;
+        attach(commands, books, kit, player, god, tile);
+    }
 }
 
 // ===== 上身与离场 =====
@@ -701,22 +794,33 @@ pub fn detach(
 /// 要看见这一条 —— 与 P3d③ 抵押那次「同帧押两遍钱」不是同一个形状。
 /// 修正登记处（[`grant_effects`]）却**必须**就地写：同一串 `Landed` 里排在后面的那块地产
 /// 结算就是它的读者。
-pub fn attach(desk: &mut GodDesk<'_, '_>, player: Entity, god: God, tile: TileIndex) {
-    let replaced = desk.possessions.get(player).ok().map(|held| held.god);
+///
+/// 零件签名（不是 `&mut GodDesk`）与 [`detach`] 同一条理由：**两个调用方凑不出同一个包**。
+/// 落脚那条 system 有整个 desk，出牌那条只有 [`CardSink`](crate::deck::CardSink) —— 让它改拿
+/// `GodDesk` 会撞在 `Books` 上，所以这里按最小需要收三格，谁凑谁的事。
+pub fn attach(
+    commands: &mut Commands,
+    books: &mut Books<'_, '_>,
+    kit: &mut BestowKit<'_, '_>,
+    player: Entity,
+    god: God,
+    tile: TileIndex,
+) {
+    let replaced = books.god_of(player).map(|held| held.god);
     if let Some(old) = replaced {
         detach(
-            &mut desk.commands,
-            &mut desk.books.corrections,
+            commands,
+            &mut books.corrections,
             player,
             old,
             GodExit::Replaced,
-            &mut desk.left,
+            &mut kit.left,
         );
     }
-    grant_effects(&mut desk.books.corrections, god, player);
-    desk.commands.entity(player).insert(Possession::new(god));
-    bestow(god, player, desk);
-    desk.possessed.write(GodPossessed {
+    grant_effects(&mut books.corrections, god, player);
+    commands.entity(player).insert(Possession::new(god));
+    bestow(god, player, commands, books, kit);
+    kit.possessed.write(GodPossessed {
         player,
         god,
         days: god.days(),
@@ -751,7 +855,7 @@ pub fn settle_god_landing_system(
         };
         let player = arrival.player;
         let tile = arrival.to;
-        attach(&mut desk, player, god, tile);
+        desk.attach(player, god, tile);
         // 它已经变成他身上的那位；路上的实体就此消失，那一格的槽位同时空出来
         desk.commands.entity(entity).despawn();
     }
@@ -1347,5 +1451,70 @@ mod tests {
 
         let dogs = Presence::observe([OccupancyKind::Dog].iter().copied(), [].iter().copied());
         assert!(dogs.dog);
+    }
+
+    /// 13 格的演示盘（环上算术要有真实的环长可数，而不是测试自己造一个数）。
+    fn ring() -> BoardDef {
+        BoardDef::from_json(include_str!("../../../assets/data/boards/prototype.json"))
+            .expect("prototype.json 应能解析")
+    }
+
+    #[test]
+    fn the_summon_buys_the_nearest_god_even_when_he_stands_behind_me() {
+        // 从 0 号起：6 号离 6 步，10 号离 3 步（倒着数）。请神符要请 10 号那一位，
+        // 而**沿行进方向他下一回合本来就会先踩到 6 号** —— 这张卡卖的不是「快点走到」，
+        // 是「不必走到那一格」（与购地卡同一条理由）
+        let two = [
+            (God::BigRich, TileIndex(6)),
+            (God::SmallRich, TileIndex(10)),
+        ];
+        assert_eq!(
+            nearest_god(&ring(), TileIndex(0), Heading::Forward, two.into_iter()),
+            Some((God::SmallRich, TileIndex(10), 3)),
+            "回来的第三个数是「离几步」—— 请神符的流水要说它"
+        );
+    }
+
+    #[test]
+    fn a_tie_on_the_ring_is_broken_by_which_way_he_is_facing() {
+        // 3 号与 10 号离 0 号都是 3 步：正向取前面那位，掉头之后就取另一位
+        let two = [(God::Angel, TileIndex(3)), (God::Devil, TileIndex(10))];
+        assert_eq!(
+            nearest_god(&ring(), TileIndex(0), Heading::Forward, two.into_iter()),
+            Some((God::Angel, TileIndex(3), 3))
+        );
+        assert_eq!(
+            nearest_god(&ring(), TileIndex(0), Heading::Backward, two.into_iter()),
+            Some((God::Devil, TileIndex(10), 3)),
+            "转向卡之后请到的该换一位 —— 否则这条决胜键与「按格号排」分不出来"
+        );
+    }
+
+    #[test]
+    fn nothing_on_the_road_means_nothing_to_summon() {
+        // 卡要能被拒（而且卡留在手里）：路上一个人都没有时，「请最近那位」没有所指
+        assert_eq!(
+            nearest_god(
+                &ring(),
+                TileIndex(0),
+                Heading::Forward,
+                std::iter::empty::<(God, TileIndex)>()
+            ),
+            None
+        );
+    }
+
+    /// 十二格逐位问一遍。这条用例的存在不是为了证明「十一位都能送」，
+    /// 而是为了让**新加的那一位必须在这里答一次**（漏答时它不红，才是这张表真正的代价）。
+    #[test]
+    fn only_death_refuses_the_banish_card() {
+        for god in God::ALL {
+            assert_eq!(
+                banishable(god),
+                god != God::Death,
+                "{} 在 `banishable` 那一格答错了",
+                god.label()
+            );
+        }
     }
 }

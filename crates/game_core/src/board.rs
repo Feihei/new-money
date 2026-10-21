@@ -8,6 +8,8 @@ use bevy::math::Vec3;
 use bevy::reflect::TypePath;
 use serde::Deserialize;
 
+use crate::player::Heading;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TileKind {
@@ -205,6 +207,50 @@ impl BoardDef {
         (1..=steps.abs())
             .map(|k| self.wrapped(from + k * dir))
             .collect()
+    }
+
+    /// 环上两格之间的**最短**步数（双向都数，同一格＝0）。
+    ///
+    /// 与 [`Self::walk_path`] 相反，这里不带方向：它回答的是「离我多远」，而「我走过去要几步」
+    /// 是另一个问题（[`Self::steps_toward`]）。请神符的「离自己最近」读的是这一条 ——
+    /// 那张卡买的就是**不必走到那一格**（与购地卡同一条理由，见 `gods::nearest_god`）。
+    pub fn ring_distance(&self, from: TileIndex, to: TileIndex) -> u32 {
+        let n = self.loop_len();
+        if n == 0 {
+            return 0;
+        }
+        let (a, b) = (from.0 % n, to.0 % n);
+        let forward = if b >= a { b - a } else { n - (a - b) };
+        forward.min(n - forward)
+    }
+
+    /// 沿 `heading` 走到那一格要几步（同一格＝0；倒着走就是倒着数）。
+    ///
+    /// 它存在的唯一理由是**并列要有个不 arbitrary 的决胜键**：环上两格可以与起点同距
+    /// （一前一后），而那时候「他接下来会先遇到谁」是唯一还有玩法意义的分法 ——
+    /// 一张转向卡会换掉这一位，而按格号大小决胜什么都换不掉。
+    pub fn steps_toward(&self, from: TileIndex, to: TileIndex, heading: Heading) -> u32 {
+        let n = self.loop_len();
+        if n == 0 {
+            return 0;
+        }
+        let (a, b) = (from.0 % n, to.0 % n);
+        match heading {
+            Heading::Forward => {
+                if b >= a {
+                    b - a
+                } else {
+                    n - (a - b)
+                }
+            }
+            Heading::Backward => {
+                if a >= b {
+                    a - b
+                } else {
+                    n - (b - a)
+                }
+            }
+        }
     }
 
     /// 网格坐标 → 世界坐标（y=0）。ADR-001：坐标一律推导，不手填 x/z。
@@ -493,6 +539,38 @@ mod tests {
         // wrapped() 与 tile() 必须同一套取模规则，否则棋子位置与看到的格子会错位
         assert_eq!(b.wrapped(-1), TileIndex(12));
         assert_eq!(b.wrapped(13), TileIndex(0));
+    }
+
+    /// 请神符（P6d）的「离自己最近」读的是这两句：先比双向最短，同距时比行进方向。
+    #[test]
+    fn ring_distance_counts_both_ways_while_the_heading_breaks_a_tie() {
+        let b = board(); // 13 格
+        assert_eq!(b.ring_distance(TileIndex(0), TileIndex(0)), 0);
+        assert_eq!(b.ring_distance(TileIndex(0), TileIndex(6)), 6);
+        assert_eq!(
+            b.ring_distance(TileIndex(0), TileIndex(7)),
+            6,
+            "顺着数 7 步的那一边，倒着数只有 6 步 —— 最近是 6"
+        );
+        assert_eq!(
+            b.ring_distance(TileIndex(11), TileIndex(1)),
+            3,
+            "跨过环尾与起点也要连着数，不能在此断开各数一半"
+        );
+        // 同距的一对（3 号与 10 号离 0 号都是 3 步）：正向取前面那位，掉头之后取另一位
+        assert_eq!(
+            b.steps_toward(TileIndex(0), TileIndex(3), Heading::Forward),
+            3
+        );
+        assert_eq!(
+            b.steps_toward(TileIndex(0), TileIndex(10), Heading::Forward),
+            10
+        );
+        assert_eq!(
+            b.steps_toward(TileIndex(0), TileIndex(10), Heading::Backward),
+            3,
+            "倒着走时 10 号才是前面那位"
+        );
     }
 
     #[test]

@@ -77,5 +77,21 @@
     "cost_points": 70,
     "target": "anybody",
     "effects": [{ "action": "move_cap", "turns": 3 }]
+  },
+  {
+    "id": "item_summon",
+    "type": "item",
+    "title": "请神符",
+    "desc": "把路上离自己最近的那位神请上身 —— 前后都算、好坏由不得你挑（请来的那位照做他上身那一刻该做的事）",
+    "cost_points": 50,
+    "effects": [{ "action": "summon_god" }]
+  },
+  {
+    "id": "item_banish",
+    "type": "item",
+    "title": "送神符",
+    "desc": "送走自己身上那位神（只能送自己的），身上带着的定时炸弹也一并送走",
+    "cost_points": 50,
+    "effects": [{ "action": "banish_god" }]
   }
 ]

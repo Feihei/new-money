@@ -11,9 +11,11 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, Bankrupt, Books, CardAim, CardDef, CardGained, CardId, CardKind, CardTarget,
-    GameRules, God, Hand, Insulation, LandId, Paused, PendingDecision, PlayerId, PlayerName,
-    Possession, Shelf, TurnOrder, TurnPhase, deal_to, resists,
+    ActiveBoard, Bankrupt, Books, CardAim, CardDef, CardEffect, CardGained, CardId, CardKind,
+    CardTarget, GOD_REFUSES_BANISH, GameRules, God, Hand, Heading, Insulation, LandId,
+    NO_GOD_ON_THE_ROAD, NO_GOD_TO_BANISH, Occupancy, OccupancyKind, Paused, PendingDecision,
+    PlayerId, PlayerName, Possession, Shelf, TokenPosition, TurnOrder, TurnPhase, banishable,
+    deal_to, nearest_god, resists,
 };
 
 use super::theme::{col, layout, size};
@@ -27,7 +29,7 @@ use crate::render::DevFont;
 pub(crate) struct HandPanelOpen(pub bool);
 
 impl HandPanelOpen {
-    /// `NM_HAND=1`：开面板，并由 [`dev_deal_sample`] 发五种形状的样例卡。
+    /// `NM_HAND=1`：开面板，并由 [`dev_deal_sample`] 发每种形状各一张的样例卡。
     /// 道具卡的正经来源是百货公司柜台（P3d②），而「踩到哪一格」「攒够点券没有」都不由
     /// 截图脚本控制 —— 没有这个旋钮，这块面板在截图里永远是空的，
     /// 「每个界面都得有一条不靠鼠标的入口」那条判据落不了地。
@@ -47,9 +49,10 @@ pub(crate) struct HandStamp(pub String);
 /// 样例卡。按 id 找而不是按数组位置：改数据顺序不该让这个旋钮发出别的卡。
 ///
 /// 每种出牌形状各一张：给自己（免罪）、存着待用（免费）、给对手（陷害）、给一条街
-/// （涨价 / 查封）、给一块无主地（购地）、给一个人含自己（转向、停留）。
+/// （涨价 / 查封）、给一块无主地（购地）、给一个人含自己（转向、停留），以及会落空的那两张符
+/// （请神、送神 —— 它们同属「给自己」那一格，但那颗「用」可以灰着自带一句话）。
 /// 少一种，那个形状的按钮排就永远拍不到 —— 而「拍不到」在验收里读起来和「没做」一样。
-const SAMPLE_CARDS: [&str; 8] = [
+const SAMPLE_CARDS: [&str; 10] = [
     "item_frame",
     "item_insulate",
     "item_hike",
@@ -58,6 +61,11 @@ const SAMPLE_CARDS: [&str; 8] = [
     "item_grab",
     "item_turn",
     "item_stay",
+    // P6d 那两张符：同一种形状里的**新状态** —— `self_only` 那颗「用」会灰着自带一句话
+    // （路上没有一位神／身上没有可送的那位）。不发来就拍不到，而「拍不到」在验收里
+    // 读起来和「没做」一样
+    "item_summon",
+    "item_banish",
 ];
 
 /// 开发用：给当前回合玩家发 [`SAMPLE_CARDS`] —— 一张要选对手、一张给自己，两种形状都要拍到。
@@ -124,6 +132,13 @@ pub(crate) struct HandView<'w, 's> {
     /// 身上挂着哪位神（P6b②）。护身那一行有**两个来源**，少读一个就会在玩家其实免疫的时候
     /// 只念出卡上的层数（§6.1 坑 30 同一条：可见位要有它的全部判据）。
     possessions: Query<'w, 's, &'static Possession>,
+    /// 路上站着什么 + 他在哪一格、朝哪边走。这三样只为**送神符与请神符**那两颗按钮读
+    /// （P6d）：一张问「身上有没有可送的那位」，一张问「路上还有没有一位」——
+    /// 两句都是世界的事实，而 `play_buttons` 只管形状。判据本身在 core
+    /// （[`nearest_god`]／[`banishable`]），这里只把它念成人话。
+    occupancies: Query<'w, 's, &'static Occupancy>,
+    positions: Query<'w, 's, &'static TokenPosition, With<PlayerId>>,
+    headings: Query<'w, 's, &'static Heading, With<PlayerId>>,
     /// 地块表 + 「这块无主地买得下来吗」的那句判据（[`Books::buy_price`]）。
     /// 按钮上的价不在这里另算：修正登记处（小福神买地免费那一类）与物价指数只住在账本
     /// 那一侧，抄一份就迟早分叉成「按钮写着 1,200、实际扣 2,400」。
@@ -161,6 +176,46 @@ pub(crate) struct LandPick {
     pub land: LandId,
 }
 
+/// 这张卡此刻办不成的那一句（`None` = 办得成）。今天只有 P6d 那两张符会落空，所以它只认
+/// 那两条效果，其余卡一律 `None`。
+///
+/// 两句判据都住在 core（[`banishable`]／[`nearest_god`]），这里只把它们念成人话 ——
+/// 与 `denied` 那一格同一个分工。规则层拒的时候说的是同一句判据，所以「按钮亮着却办不成」
+/// 与「按下去没声音」两种形状都开不出来。
+fn charm_blocker(def: &CardDef, view: &HandView<'_, '_>, who: Entity) -> Option<&'static str> {
+    let banish = def
+        .effects
+        .iter()
+        .any(|e| matches!(e, CardEffect::BanishGod));
+    if banish {
+        return match view.possessions.get(who).ok().copied() {
+            None => Some(NO_GOD_TO_BANISH),
+            Some(held) if !banishable(held.god) => Some(GOD_REFUSES_BANISH),
+            Some(_) => None,
+        };
+    }
+    if !def
+        .effects
+        .iter()
+        .any(|e| matches!(e, CardEffect::SummonGod))
+    {
+        return None;
+    }
+    // 菜单态没有棋盘：那时这块面板也不在（`UiSet::Live` 的门挡着），所以这里按「办得成」画，
+    // 而不是写一句「路上没有神」—— 那是一句它读不出根据的话
+    let board = view.board.as_deref()?;
+    let (Ok(pos), Ok(head)) = (view.positions.get(who), view.headings.get(who)) else {
+        return None;
+    };
+    let gods = view.occupancies.iter().filter_map(|occ| match occ.kind {
+        OccupancyKind::God(god) => occ.tile().map(|tile| (god, tile)),
+        _ => None,
+    });
+    nearest_god(&board.def, pos.tile, *head, gods)
+        .is_none()
+        .then_some(NO_GOD_ON_THE_ROAD)
+}
+
 /// 这张卡该长出哪几颗按钮。`opponents` 是「还活着的别人」（不含出牌人自己），
 /// `anyone` 是「还活着的人，含自己」（转向 / 停留这两张点的是人，不挑敌我），
 /// `lands` 是「此刻真有人持有的地块」（无主地不在里面 —— 规则层也不认，同一句判据），
@@ -179,12 +234,16 @@ pub(crate) fn play_buttons(
     lands: &[LandPick],
     parcels: &[LandPick],
     denied: bool,
+    unmet: Option<&'static str>,
 ) -> Vec<PlayButton> {
     match def.target {
+        // 「用」这颗按钮今天有两句话可说：请神符在路上没有一位神时落空、送神符在身上没有神
+        // （或那位送不走）时落空。两句都是**世界**的事实，所以由调用方查好了传进来 ——
+        // 与 `lands`／`parcels` 那两排同一个分工：形状在这里，真相在规则层。
         CardTarget::SelfOnly => vec![PlayButton {
             text: "用".into(),
             aim: None,
-            blocked: None,
+            blocked: unmet,
         }],
         CardTarget::Player if opponents.is_empty() => {
             // 其他人都离场了。这时候按下去规则层会静默拒绝（`aim_is_legal`），
@@ -398,8 +457,19 @@ pub(crate) fn sync_hand_panel(
     // （花过一笔钱、物价跳一格，候选排就变了）。
     // `anyone`（转向/停留那一排）不另开一位：它就是「自己 + opponents」，
     // 那两样已经分别是签名的第一段与第二段 —— 多写一位只会让签名有个没人读的字段
+    // 两张符那句「现在还办不成」也是可见位：它跟着「路上有没有一位神」「身上挂着哪位」变，
+    // 签名里少了这一位，路上刚刷出一位神时那颗按钮还灰着，而要等别的原因重建面板才翻亮
+    // （§6.1 坑 30 的同一条：可见位要有它的全部判据）
+    let charms: Vec<&'static str> = hand
+        .iter()
+        .filter_map(|id| view.shelf.get(CardKind::Item, *id))
+        .map(|def| match player {
+            Some(who) => charm_blocker(def, &view, who).unwrap_or("-"),
+            None => "-",
+        })
+        .collect();
     let stamp = format!(
-        "{}|{playable}|{}|{}|{}|{}|{}",
+        "{}|{playable}|{}|{}|{}|{}|{}|{}",
         player.map_or_else(|| "-".into(), |p| format!("{p:?}")),
         opponents
             .iter()
@@ -421,6 +491,7 @@ pub(crate) fn sync_hand_panel(
             .map(|p| p.label.as_str())
             .collect::<Vec<_>>()
             .join(","),
+        charms.join(","),
     );
     if shown.iter().next().is_some_and(|(_, _, s)| s.0 == stamp) {
         return;
@@ -493,7 +564,8 @@ pub(crate) fn sync_hand_panel(
                 ));
                 continue;
             };
-            let buttons = play_buttons(def, &opponents, &anyone, &lands, &parcels, denied);
+            let unmet = player.and_then(|who| charm_blocker(def, &view, who));
+            let buttons = play_buttons(def, &opponents, &anyone, &lands, &parcels, denied, unmet);
             // 三行分开：合成一行的话，两张卡名加两颗按钮在 1024 宽的屏上就顶到边了
             let mut title = p.spawn(Node {
                 flex_direction: FlexDirection::Row,
@@ -623,10 +695,45 @@ mod tests {
             &[pick("我的南京路", 0)],
             &[pick("外滩北 $1500", 2)],
             false,
+            None,
         );
         assert_eq!(buttons.len(), 1, "给自己的卡不该长出「对谁」这一排按钮");
         assert_eq!(buttons[0].aim, None);
         assert_eq!(buttons[0].blocked, None, "没有理由让它灰着");
+    }
+
+    /// P6d 那两张符都是 `self_only`，而它们是**会落空**的两张卡：路上可能一位神都没有，
+    /// 身上可能没有可送的那位。落空时那颗「用」必须灰着且自带一句为什么 ——
+    /// 否则玩家要按下去、什么也不发生，才知道这张卡此刻没用。
+    #[test]
+    fn a_charm_that_cannot_land_says_why_on_the_button() {
+        let mut card = def(CardTarget::SelfOnly);
+        card.effects = vec![CardEffect::SummonGod];
+        let buttons = play_buttons(
+            &card,
+            NO_PEOPLE,
+            NO_PEOPLE,
+            NO_PLOTS,
+            NO_PARCELS,
+            false,
+            Some("路上现在没有一位神"),
+        );
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].blocked, Some("路上现在没有一位神"));
+        assert_eq!(buttons[0].aim, None, "灰按钮不该带目标");
+    }
+
+    /// 反例的反例：同一张卡，前提成立时那颗按钮必须是亮的 ——
+    /// 一句写死的「路上现在没有一位神」与一个永远灰着的按钮，症状完全相同
+    #[test]
+    fn the_same_charm_is_live_once_a_god_stands_on_the_road() {
+        let mut card = def(CardTarget::SelfOnly);
+        card.effects = vec![CardEffect::SummonGod];
+        let buttons = play_buttons(
+            &card, NO_PEOPLE, NO_PEOPLE, NO_PLOTS, NO_PARCELS, false, None,
+        );
+        assert_eq!(buttons[0].blocked, None);
+        assert_eq!(buttons[0].text, "用");
     }
 
     #[test]
@@ -639,6 +746,7 @@ mod tests {
             NO_PLOTS,
             NO_PARCELS,
             false,
+            None,
         );
         assert_eq!(buttons.len(), 2, "两个对手就该有两颗可选的按钮");
         // 目标烤在按钮里：按下去就是一个完整意图，规则层不必再挂「选目标」的待决
@@ -659,6 +767,7 @@ mod tests {
             NO_PLOTS,
             NO_PARCELS,
             false,
+            None,
         );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("场上没有别的人了"));
@@ -676,6 +785,7 @@ mod tests {
             NO_PLOTS,
             NO_PARCELS,
             false,
+            None,
         );
         assert_eq!(buttons.len(), 2, "自己 + 一名对手 = 两颗按钮");
         assert_eq!(
@@ -698,6 +808,7 @@ mod tests {
             NO_PLOTS,
             NO_PARCELS,
             false,
+            None,
         );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("现在没有可行动的人"));
@@ -716,6 +827,7 @@ mod tests {
             &picks,
             &[pick("外滩北 $1500", 2)],
             false,
+            None,
         );
         assert_eq!(buttons.len(), 2, "两块有主的地就该有两颗按钮");
         assert_eq!(
@@ -737,6 +849,7 @@ mod tests {
             NO_PLOTS,
             NO_PARCELS,
             false,
+            None,
         );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("还没有人有地"));
@@ -755,6 +868,7 @@ mod tests {
             &[pick("我的南京路", 0)],
             &parcels,
             false,
+            None,
         );
         assert_eq!(buttons.len(), 2, "两块买得下来的无主地就该有两颗按钮");
         assert_eq!(
@@ -777,6 +891,7 @@ mod tests {
             NO_PLOTS,
             NO_PARCELS,
             false,
+            None,
         );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("没有买得起的无主地"));
@@ -794,6 +909,7 @@ mod tests {
             NO_PLOTS,
             NO_PARCELS,
             true,
+            None,
         );
         assert_eq!(buttons.len(), 1);
         assert_eq!(buttons[0].blocked, Some("那位神让买地必败"));
@@ -804,6 +920,7 @@ mod tests {
             NO_PLOTS,
             NO_PARCELS,
             false,
+            None,
         );
         assert_eq!(
             again[0].blocked,

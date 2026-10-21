@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, Detention, DetentionPlace, God, GodDesk, Inventory, ItemKind, Mount, MountChanged,
     Occupancy, OccupancyKind, Pending, PendingDecision, PlayerDetained, PlayerId, Points,
-    TileIndex, TokenPosition, TurnOrder, TurnPhase, attach, detain, place,
+    TileIndex, TokenPosition, TurnOrder, TurnPhase, detain, place,
 };
 
 pub struct DevPlugin;
@@ -509,7 +509,7 @@ fn force_god(
         .get(player)
         .map(|pos| pos.tile)
         .unwrap_or(TileIndex(0));
-    attach(&mut desk, player, god, at);
+    desk.attach(player, god, at);
     info!(
         "注入：当前玩家被{}附身（{} 天），他从 {} 号格起走",
         god.label(),

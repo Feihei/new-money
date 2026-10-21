@@ -28,11 +28,24 @@ winit 的游戏窗口反而排在后面。于是量到的是控制台的 960x480
 零点几秒就绪，所以点击相对游戏时间只会更早，不会落到截图之后。这是坑 27 第二半的解法：
 让脚本自己拉起游戏，两个钟就没有错位的可能。
 
+坑 27 的第五半（P6d 踩到）：**`SetForegroundWindow` 的抢焦点保护不是瞬态的，是持续的**。
+`-Route screen`（默认，`SetCursorPos` + `mouse_event`）送的是**屏幕坐标**，落在哪一层由前台
+与 Z 序决定。本机实测：脚本从 restore 到点击那一瞬共重试 1 秒 ×N 次（含 `SwitchToThisWindow`
+这条 Alt-Tab 路径），前台始终是别的窗口 —— `fg=NO(0x…)` 每次都印出来，而 `Raise-Game` 的
+ok 只在 restore 后出现过一次。系统只允许「当前前台进程」把前台让给别人，脚本从 PowerShell
+里拉起游戏时它自己不是前台，于是这条保护一直生效，不是撞上一次抢夺的窗口期。
+解法是 `-Route post`：`PostMessage` 把 `WM_MOUSEMOVE`/`WM_LBUTTONDOWN`/`WM_LBUTTONUP` 连同
+**客户区坐标**（`lparam = y<<16 | x`）直接塞进游戏窗口的消息队列，不经过前台与 Z 序。
+winit 的 WndProc 照常发 `CursorMoved`/`MouseInput`，bevy_picking 的 `PointerClick` 于是照走。
+代价是这条路**验不到「鼠标真的在那个位置上」这一层**（真设备的命中测试被绕过了）：
+它证明的是「按钮的动作是通的」，不是「真人点得到」。两条都要跑，只在 screen 那条被前台
+挡住时拿 post 兜底，并在验收里写清楚是哪条路。
+
 用法（`-File` 调用时 PowerShell 不按逗号拆数组，所以多个值用分号写在一个参数里）：
   powershell -File tools/mouse_smoke.ps1 `
     -Env 'NM_SCENE=board;NM_HAND=1' `
     -Click '2.5:960,38;4.0:1000,425' `
-    -Shot .tmp/shots/smoke_play.png -ShotAt 6.0
+    -Shot .tmp/shots/smoke_play.png -ShotAt 6.0 [-Route post]
 #>
 param(
     [string]$Exe = "target/debug/game_app.exe",
@@ -41,7 +54,9 @@ param(
     [string]$Shot = "",
     [double]$ShotAt = 4.5,
     [string]$Log = ".tmp/smoke_game.log",
-    [int]$WindowTimeoutSec = 30
+    [int]$WindowTimeoutSec = 30,
+    [ValidateSet("screen", "post")]
+    [string]$Route = "screen"
 )
 $ErrorActionPreference = "Stop"
 
@@ -62,6 +77,8 @@ public static class Win {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr h, bool fAltTab);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -69,6 +86,8 @@ public static class Win {
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
   [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr h);
   [DllImport("gdi32.dll")]  public static extern int GetDeviceCaps(IntPtr hdc, int idx);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern IntPtr PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
 }
 "@
 
@@ -138,9 +157,29 @@ while (((Get-Date) - $t0).TotalSeconds -lt $WindowTimeoutSec) {
 if ($null -eq $game) { throw "${WindowTimeoutSec}s 内没等到游戏窗口，先查 $logPath" }
 $h = $game.H
 
+# 「按了没反应」的第一问是**这一按到底送给了谁**。`SetForegroundWindow` 会被系统的
+# 抢焦点保护挡下来（调用方自己不是前台进程时静默失败，返回 false 而已），而截图走 GPU
+# 侧、不看遮挡，于是画面照样是游戏 —— 症状与「按钮是死的」完全相同。所以这里 raise 之后
+# 直接问一次 `GetForegroundWindow`，把答案打在输出里：`fg=NO` 时后面所有点击都不可信，
+# 该先去解决焦点，而不是去怀疑 UI
+function Raise-Game([IntPtr]$hwnd) {
+    # 最多重试 1 秒：抢焦点是**瞬态**的（游戏窗口自己创建时会抢一次，控制台随后又抢回去），
+    # 一次 `SetForegroundWindow` 正好落在那次抢夺之后就静默失败 —— 实测同一台机器上
+    # 「restore 之后是 ok，等 4.5 秒要按之前再 raise 就变成 NO」
+    for ($try = 0; $try -lt 20; $try++) {
+        [void][Win]::BringWindowToTop($hwnd)
+        [void][Win]::SetForegroundWindow($hwnd)
+        if ([Win]::GetForegroundWindow() -eq $hwnd) { return "ok" }
+        # 经典绕法：`SwitchToThisWindow` 走的是 Alt-Tab 那条路径，不受同一条保护限制
+        [Win]::SwitchToThisWindow($hwnd, $true)
+        if ([Win]::GetForegroundWindow() -eq $hwnd) { return "ok(switch)" }
+        Start-Sleep -Milliseconds 50
+    }
+    "NO(0x{0:X})" -f [Win]::GetForegroundWindow()
+}
+
 [void][Win]::ShowWindow($h, 9)          # SW_RESTORE：最小化时坐标全废
-[void][Win]::BringWindowToTop($h)
-[void][Win]::SetForegroundWindow($h)
+Write-Output ("raise after restore: fg={0}" -f (Raise-Game $h))
 
 # 把窗口钉到屏幕上一个固定位置（保留它自己的宽高，所以客户区仍是 1280x720）。
 # winit 每次启动按级联往下右挪二十几像素，于是「同一份点击脚本 + 同一个客户区坐标」在
@@ -184,13 +223,28 @@ foreach ($spec in ($Click -split ";" | Where-Object { $_ -ne "" })) {
     $sy = $origin.y + [int]$cy
     # 等待期间别的窗口可能抢到前台（那半秒里 IDE 只要被点了一下，合成点击就送给它）：
     # 每次按之前重新把游戏窗口提到最前，症状「图是对的、数字没变」的另一半就是这么来的
-    [void][Win]::BringWindowToTop($h)
-    [void][Win]::SetForegroundWindow($h)
-    [void][Win]::SetCursorPos($sx, $sy)
-    Start-Sleep -Milliseconds 40
-    [Win]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero) | Out-Null # LEFTDOWN
-    [Win]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) | Out-Null # LEFTUP
-    Write-Output ("click {0,5}s -> client ({1},{2}) screen ({3},{4})" -f $at, $cx, $cy, $sx, $sy)
+    $fg = Raise-Game $h
+    Write-Output ("raise before click: fg={0}" -f $fg)
+    if ($Route -eq "post") {
+        # 前台拿不到时 screen 那条路的点击是不可信的（fg=NO 已经印在上面）。post 这条路
+        # 根本不看前台，所以 fg 只是「screen 那条今天还能不能用」的探针，不再参与判据
+        $x = [int]$cx
+        $y = [int]$cy
+        # MAKELPARAM：低 16 位是 x、高 16 位是 y，都是**客户区**坐标，与 screen 那条的换算无关
+        $lp = [IntPtr]([int](($y -shl 16) -bor ($x -band 0xFFFF)))
+        [void][Win]::PostMessage($h, 0x0200, [IntPtr]::Zero, $lp) # WM_MOUSEMOVE
+        Start-Sleep -Milliseconds 40
+        [void][Win]::PostMessage($h, 0x0201, [IntPtr]::Zero, $lp) # WM_LBUTTONDOWN
+        Start-Sleep -Milliseconds 60
+        [void][Win]::PostMessage($h, 0x0202, [IntPtr]::Zero, $lp) # WM_LBUTTONUP
+        Write-Output ("click {0,5}s -> client ({1},{2}) posted" -f $at, $cx, $cy)
+    } else {
+        [void][Win]::SetCursorPos($sx, $sy)
+        Start-Sleep -Milliseconds 40
+        [Win]::mouse_event(2, 0, 0, 0, [IntPtr]::Zero) | Out-Null # LEFTDOWN
+        [Win]::mouse_event(4, 0, 0, 0, [IntPtr]::Zero) | Out-Null # LEFTUP
+        Write-Output ("click {0,5}s -> client ({1},{2}) screen ({3},{4})" -f $at, $cx, $cy, $sx, $sy)
+    }
 }
 
 # 游戏自己退出（NM_SHOT 落盘后再等 1s），不留下没人关的窗口进程。

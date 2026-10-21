@@ -140,6 +140,24 @@ pub enum CardEffect {
     MoveCap {
         turns: u32,
     },
+    /// 请神符（P6d）：把路上**离自己最近**那一位请到自己身上。
+    ///
+    /// **没有字段，也不进 `CardAim`** —— 选哪位不是玩家点的，是那张表算的
+    /// （[`nearest_god`](crate::gods::nearest_god)）。这不是省事，是这张卡的玩法本身：
+    /// 可以挑神的话它就退化成一张廉价的「指定大财神」，而 4 代那句「离自己最近」要的就是
+    /// 「你请到的可能是恶魔」。它请的也不限于好神、更不限于自己前面那位 ——
+    /// 后面那位才是这张卡值钱的地方（前面那位下一回合本来就会踩到）。
+    ///
+    /// 请过来走的是与「踩到」**同一个** [`attach`](crate::gods::attach) 出口，所以那一次性的
+    /// 一笔（大财神那四位数、大穷神抢的那 1/4、福神那两张卡）**照做**：请来的人与踩到的人
+    /// 是同一个人，只是来的路不同。
+    SummonGod,
+    /// 送神符（P6d）：送走自己身上那位，并**连带**送走身上带着的定时炸弹。
+    ///
+    /// 承受者只能是自己（`target` 缺省 `SelfOnly`）：这张卡的主语是「（我身上）那位神」。
+    /// 死神送不走（[`banishable`](crate::gods::banishable)），而那条判据与「身上没有神」
+    /// 都在出牌前挡掉 —— 卡不消耗，理由给面板当灰按钮的文案。
+    BanishGod,
 }
 
 const fn default_detention_turns() -> u32 {
@@ -278,6 +296,19 @@ impl CardSet {
                         // 同一条：0 回合的「走不远」什么都不做，而卡已经被打掉
                         if *turns == 0 {
                             errs.push(format!("卡牌 {} 的乌龟回合数为 0", c.id));
+                        }
+                    }
+                    CardEffect::SummonGod | CardEffect::BanishGod => {
+                        // 两张符都**没有** aim：请哪位由 `gods::nearest_god` 算，送的是自己身上
+                        // 那位。这里绑成「必须是 `self_only`」而不是干脆不校验 —— 数据若写成
+                        // `player`，面板会长出一排点人的按钮，而点谁都不改变办成的那件事：
+                        // 那是一排骗人的按钮。与 `LandStatus`／`BuyLand` 那两格同一条纪律，
+                        // 只是方向相反（那两张**必须**有 target，这两张**不能有**）
+                        if c.target != CardTarget::SelfOnly {
+                            errs.push(format!(
+                                "卡牌 {} 是神明符，它自己找对象，不该带 target",
+                                c.id
+                            ));
                         }
                     }
                 }
