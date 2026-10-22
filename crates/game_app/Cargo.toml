@@ -13,5 +13,8 @@ bevy = { workspace = true, features = [
 ] }
 bevy_egui = "0.43.1"
 game_core = { path = "../game_core" }
+# 游乐场（P7）那一手的布局随机：种子由规则层发下来，展开在这里 —— 表现层不碰规则层的流
+rand = { workspace = true }
+rand_chacha = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

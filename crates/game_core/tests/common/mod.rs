@@ -17,24 +17,24 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
-    ActiveBoard, Adjustment, AtmAccess, BailRequested, BankBalance, BankOp, BankOpDone,
+    ActiveBoard, Adjustment, ArcadeDeal, AtmAccess, BailRequested, BankBalance, BankOp, BankOpDone,
     BankOpRequested, BankVisited, BombTransferred, Books, BuildingLevel, BuyOffered, CardAim,
     CardDrawn, CardGained, CardId, CardKind, CardLost, CardPlayed, CardSet, CashChanged,
     ChargeKind, ChargeWaived, ChestOpened, Correction, Corrections, CouponBoxes, DamageTally,
     DataHandles, Date, Decision, DecisionChosen, Deck, Detention, DetentionLifted,
-    DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed, GameSession,
-    GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed, GodLeft, GodPossessed, Hand,
-    Insulation, Inventory, ItemKind, ItemPlaced, LandBought, LandDamage, LandId, LandStatus,
-    LandTaken, LandUpgraded, LandView, Market, MarketClock, MortgageDone, MortgageOp,
-    MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt,
-    OccupancyKind, Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
-    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported,
-    PlotArea, Points, PointsChanged, Possession, Presence, RedEnvelope, RemoteDiceUsed, RentDue,
-    RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, Shelf, ShopOpDone, ShopOpRequested,
-    ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged,
-    StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition,
-    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkHalted,
-    WalkStarted, Wallet, deal_to, grant_effects,
+    DetentionSkipped, DiceRolled, EpochOverride, GameKind, GameOver, GameRules, GameSeed,
+    GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed, GodLeft, GodPossessed,
+    Hand, Insulation, Inventory, ItemKind, ItemPlaced, LandBought, LandDamage, LandId, LandStatus,
+    LandTaken, LandUpgraded, LandView, Market, MarketClock, MinigameResult, MinigameScore,
+    MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap,
+    MoveCapped, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision,
+    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
+    PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, Possession,
+    Presence, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll, RequestStay,
+    Rng, Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted, StaySentence,
+    StaySkipped, StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
+    TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase,
+    TurnStarted, UpgradeOffered, WalkHalted, WalkStarted, Wallet, deal_to, grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -92,6 +92,12 @@ pub struct PlaceRequests(pub Vec<PlaceItemRequested>);
 #[derive(Resource, Default)]
 pub struct RemoteDiceRequests(pub Vec<RequestRemoteDice>);
 
+/// 测试侧的「一局小游戏打完，把成绩报上去」（P7）。同样走队列 → 真消息，于是
+/// 「窗口挂的是谁」「玩的是不是这一款」「`awarded` 那一格认不认」都被真走到 ——
+/// 直接塞一条 `MinigameScore` 会绕过整张表，而那张表正是这个阶段唯一难的地方。
+#[derive(Resource, Default)]
+pub struct Scores(pub Vec<MinigameResult>);
+
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
 /// 要测经济就换成 `AcceptAll`（买得起就买、能升就升）。
@@ -112,8 +118,10 @@ pub enum DecisionPolicy {
 /// 只在 `WaitDecision` 里跑，且只答 `PendingDecision` 里那位 —— 与真实 UI 的权限一样。
 fn auto_answer_system(
     policy: Res<DecisionPolicy>,
+    rules: Res<GameRules>,
     pending: Res<PendingDecision>,
     mut answers: MessageWriter<DecisionChosen>,
+    mut scores: MessageWriter<MinigameResult>,
 ) {
     if *policy == DecisionPolicy::Hold {
         return;
@@ -132,6 +140,18 @@ fn auto_answer_system(
         // 百货柜台与保释窗口同一条（P3d②/P4③）：环上真有一格百货，接入点真能被踩到 ——
         // 长跑用例不自动关掉它们就会整片停在 `WaitDecision`
         (Pending::BankTeller | Pending::Shop | Pending::Bail(_), _) => Decision::Acknowledge,
+        // 游乐场那一格（P7）**不是一句回答而是一份成绩**：自动玩家打出「满分的一半」。
+        // 报 0 分也能过关口，但那样一来长跑就永远走不到「成绩换点券」那条路上，
+        // 而这一格是点券的第二个来源（第一个是路上的箱子）
+        (Pending::Minigame(game), _) => {
+            scores.write(MinigameResult {
+                player,
+                game,
+                score: rules.minigames.of(game).perfect / 2,
+                awarded: true,
+            });
+            return;
+        }
         // `Hold` 在函数开头就返回了，这一支只为穷尽存在
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::Hold) => return,
     };
@@ -207,6 +227,9 @@ struct BookReaders<'w, 's> {
     /// 百货成交凭据（P3d②）。与 `gained` 分开记：买入那一次两件事各有一条流水，
     /// 「花了多少点券」与「卡进没进手牌」不是同一个断言。
     shop_ops: MessageReader<'w, 's, ShopOpDone>,
+    /// 游乐场那一份成绩的凭据（P7）。它排在 `shop_ops` 之后：两者都是「点券进账」的来源，
+    /// 而这一条带着「哪一款、几分」—— 断言要能读出成绩换点券那张表算出来的数
+    scores: MessageReader<'w, 's, MinigameScore>,
     /// 抵押柜台的成交凭据（P3d③）。与 `bank_ops` 分开记：那四条是「一个人 + 一个金额」，
     /// 这两件是「一个人 + 一块地」，而断言要的正是「哪块地、过手多少」。
     mortgages: MessageReader<'w, 's, MortgageDone>,
@@ -519,6 +542,21 @@ fn collect_books(
             m.points
         ));
     }
+    // 小游戏成绩（P7）。与 `points` 分开记：那条说「点券余额变成多少」，这条说的是
+    // 「哪一款、打了几分、换成几点券」—— 而「表算错了」与「账记错了」是两个不同的缺陷
+    for m in r.scores.read() {
+        log.0.push(format!(
+            "Arcade({}·{}·{}分→{})",
+            who(&players, m.player),
+            m.game.label(),
+            m.score,
+            if m.awarded {
+                format!("{}点券", m.points)
+            } else {
+                "练习不计".to_string()
+            }
+        ));
+    }
     for m in r.mortgages.read() {
         log.0.push(format!(
             "Mortgage({}{}{}·{})",
@@ -670,6 +708,7 @@ struct Pump<'w> {
     bails: ResMut<'w, BailRequests>,
     places: ResMut<'w, PlaceRequests>,
     remote: ResMut<'w, RemoteDiceRequests>,
+    scores: ResMut<'w, Scores>,
     rolls: MessageWriter<'w, RequestRoll>,
     stay_writes: MessageWriter<'w, RequestStay>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
@@ -680,6 +719,7 @@ struct Pump<'w> {
     bail_writes: MessageWriter<'w, BailRequested>,
     place_writes: MessageWriter<'w, PlaceItemRequested>,
     remote_writes: MessageWriter<'w, RequestRemoteDice>,
+    score_writes: MessageWriter<'w, MinigameResult>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
@@ -713,6 +753,9 @@ fn pump_inputs(mut pump: Pump<'_>) {
     for r in pump.remote.0.drain(..) {
         pump.remote_writes.write(r);
     }
+    for s in pump.scores.0.drain(..) {
+        pump.score_writes.write(s);
+    }
 }
 
 pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
@@ -738,6 +781,7 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<BailRequests>()
         .init_resource::<PlaceRequests>()
         .init_resource::<RemoteDiceRequests>()
+        .init_resource::<Scores>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -964,6 +1008,48 @@ pub fn boxes_taken(app: &App) -> usize {
     app.world().resource::<CouponBoxes>().taken()
 }
 
+/// 把某格改成游乐场（P7）。`game` 为 `None` 就是数据里那个「这一趟随机一款」的缺省形状，
+/// 于是「抽签走小游戏子流」与「写死了就照写的玩」两条路各有用例可走。
+/// 与 `coupon_tile` 同一手法：棋盘是资源里的一份快照，改它不必动 JSON。
+pub fn arcade_tile(app: &mut App, tile: usize, game: Option<GameKind>) {
+    let mut board = app.world_mut().resource_mut::<ActiveBoard>();
+    let t = &mut board.def.tiles[tile];
+    t.kind = game_core::prelude::TileKind::Arcade;
+    t.data.game = game;
+}
+
+/// 替玩家把一份成绩报上去（`awarded = true`：正经对局里那一趟）。
+/// 走 `Scores` 队列 → 真消息，所以「窗口挂的是谁」「玩的是不是这一款」两道门都被真走到。
+pub fn report_score(app: &mut App, player: Entity, game: GameKind, score: u32) {
+    report_score_awarded(app, player, game, score, true);
+}
+
+/// 同一件事，但把 `awarded` 那一格显式翻成 `false`（练习局那条路）。
+/// 单开一个函数而不是给上面那个加默认参数：这一格是 PLAN §四 P7 点名的验收，
+/// 用例里写着 `awarded: false` 才读得出「我在测那个开关」。
+pub fn report_score_awarded(
+    app: &mut App,
+    player: Entity,
+    game: GameKind,
+    score: u32,
+    awarded: bool,
+) {
+    app.world_mut()
+        .resource_mut::<Scores>()
+        .0
+        .push(MinigameResult {
+            player,
+            game,
+            score,
+            awarded,
+        });
+}
+
+/// 这一趟游乐场发下来的那一手布局种子（`ArcadeDeal`）。
+pub fn deal_of(app: &App) -> u64 {
+    app.world().resource::<ArcadeDeal>().seed
+}
+
 /// 把随机流退回「开局第一条」，下一次掷骰就又是 `seed_rolling_first` 那个点数。
 ///
 /// 冷却类用例要的是「同一个人再次踩到同一格」，而为此真跑六个回合会把别的账
@@ -1128,15 +1214,34 @@ pub fn seed_rolling_first(face: u32) -> GameSeed {
     panic!("一万颗种子里居然没掷出 {face}，骰子分布可疑");
 }
 
+/// 造第 `n` 颗（0 起）「第一掷恰好是 face」的种子。
+///
+/// [`seed_rolling_first`] 只给第一颗，而「这一趟随机一款」那条路（P7）要**跨几个种子**
+/// 才看得出它真在抽 —— 一颗种子上「抽到的恰好是打气球」与「写死了打气球」长得一模一样。
+pub fn nth_seed_rolling_first(face: u32, n: usize) -> GameSeed {
+    let mut found = 0usize;
+    for s in 0..200_000u64 {
+        if Rng::new(s).roll_die() == face {
+            if found == n {
+                return GameSeed(s);
+            }
+            found += 1;
+        }
+    }
+    panic!("二十万颗种子里只有 {found} 颗第一掷是 {face}，取不到第 {n} 颗");
+}
+
 /// 装配到「0 号玩家站在 `tile` 上、下一步就掷骰」的状态，但不替测试跑回合 ——
 /// 落格结算类用例的标准前置：控制「踩到哪一格」而不是碰运气等种子。
 /// 预置归属/现金要在拿到 app 之后做，然后自己 `play_turns(app, 1)`。
 pub fn ready_on(tile: u32, steps: u32, policy: DecisionPolicy) -> (App, Entity) {
-    let mut app = boot(
-        GameSetup::default(),
-        GameRules::instant(),
-        seed_rolling_first(steps),
-    );
+    ready_on_seeded(tile, policy, seed_rolling_first(steps))
+}
+
+/// 与 [`ready_on`] 同一件事，但种子由调用方给。随机类用例要的就是这一格：
+/// 同一份前置、换一颗种子，看世界是不是真的跟着变。
+pub fn ready_on_seeded(tile: u32, policy: DecisionPolicy, seed: GameSeed) -> (App, Entity) {
+    let mut app = boot(GameSetup::default(), GameRules::instant(), seed);
     app.insert_resource(policy);
     let p0 = boot_to_wait_roll(&mut app);
     place(&mut app, p0, tile);

@@ -10,6 +10,7 @@
   6. 土地格不得与道路格重叠
   7. 分支接入点（junction）存在，死胡同格不在主环上
   8. 点券格（coupon）必带正的 data.coupon 面额，且点券字段只属于点券格
+  9. data.game 只属于游乐场格（arcade）；那一格缺省合法，意思是「这一趟随机一款」
 """
 import json
 import sys
@@ -104,6 +105,14 @@ for t in loop:
     elif data.get("coupon") is not None or data.get("refresh") is not None:
         errors.append(f"loop[{t['id']}] 不是 coupon 格，却带了点券字段")
 
+# 9. 游乐场（P7，与 Rust 侧 `BoardDef::validate` 同一条不变式，两边都要响）。
+#    与点券那一组**方向相反**：点券格缺面额是错的（那颗箱子踩上去什么都不发），
+#    而游乐场格缺 game 是合法的 —— 它的意思是「这一趟随机一款」
+for t in loop:
+    data = t.get("data") or {}
+    if t["type"] != "arcade" and data.get("game") is not None:
+        errors.append(f"loop[{t['id']}] 不是 arcade 格，却带了 data.game")
+
 # 报告
 print(f"== 棋盘 '{board['board_name']}' 校验 ==")
 print(f"网格: {cols}x{rows}  cell_size={board['cell_size']}")
@@ -111,6 +120,9 @@ print(f"主环格数: {n}  对角路段: {diagonals}")
 print(f"土地数: {len(lands)}  分支接入点: {sum(1 for t in loop if 'branch' in t)}")
 print(f"property 道路格: {sum(1 for t in loop if t['type']=='property')}")
 print(f"点券格: {sum(1 for t in loop if t['type']=='coupon')}")
+arcades = [t for t in loop if t["type"] == "arcade"]
+print(f"游乐场格: {len(arcades)}  " + "、".join(
+    f"{t['id']}({(t.get('data') or {}).get('game') or '随机一款'})" for t in arcades))
 
 if warns:
     print("\n[警告]")

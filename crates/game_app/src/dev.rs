@@ -14,9 +14,10 @@ use std::collections::HashSet;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, Detention, DetentionPlace, God, GodDesk, Inventory, ItemKind, Mount, MountChanged,
-    Occupancy, OccupancyKind, Pending, PendingDecision, PlayerDetained, PlayerId, Points,
-    TileIndex, TokenPosition, TurnOrder, TurnPhase, detain, place,
+    ActiveBoard, ArcadeDeal, Detention, DetentionPlace, GameKind, GameSession, God, GodDesk,
+    Inventory, ItemKind, Mount, MountChanged, Occupancy, OccupancyKind, Pending, PendingDecision,
+    PlayerDetained, PlayerId, Points, TileIndex, TokenPosition, TurnOrder, TurnPhase, detain,
+    place,
 };
 
 pub struct DevPlugin;
@@ -29,12 +30,14 @@ pub fn install_if_requested(app: &mut App) {
     let mount = ForceMount::from_env();
     let places = ForcePlace::from_env();
     let god = ForceGod::from_env();
+    let minigame = ForceMinigame::from_env();
     if forced.0.is_none()
         && bail.0.is_none()
         && !items.0
         && mount.0.is_none()
         && places.0.is_empty()
         && god.0.is_none()
+        && minigame.0.is_none()
     {
         return;
     }
@@ -70,6 +73,12 @@ pub fn install_if_requested(app: &mut App) {
             "开发注入已开启（NM_GOD）：当前玩家将被{}附身（{} 天）",
             god.label(),
             god.days()
+        );
+    }
+    if let Some(game) = minigame.0 {
+        info!(
+            "开发注入已开启（NM_MINIGAME）：当前玩家面前挂出「{}」那一屏",
+            game.label()
         );
     }
     app.add_plugins(DevPlugin);
@@ -236,6 +245,34 @@ impl ForceGod {
     }
 }
 
+/// `NM_MINIGAME=pop_balloons|catch_treasure|penguin_dig`（中文名也认）。
+///
+/// 游乐场那一屏的正经入口是「踩到 13 号格」，而演示盘那一格在环尾，掷 1～2 点才踩得到 ——
+/// 三款里抽到哪一款又由随机子流说了算。三个玩法各要一张能看清局面的截图，靠骰子押不住
+/// （与 `NM_DETAIN`/`NM_GOD` 同一条理由：**进不了截图的状态等于没做完**）。
+///
+/// 它写的是**规则层那个窗口**（`Pending::Minigame` + 一手布局种子），不是 UI 侧的开关 ——
+/// 于是这一屏走的正是踩到那一格的同一条路，`sync_arcade` 不需要为旋钮单开一个入口。
+#[derive(Resource)]
+struct ForceMinigame(Option<GameKind>);
+
+impl ForceMinigame {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_MINIGAME") else {
+            return Self(None);
+        };
+        match GameKind::parse(raw.trim()) {
+            Some(game) => Self(Some(game)),
+            None => {
+                warn!(
+                    "NM_MINIGAME={raw} 不认识，应为 pop_balloons|catch_treasure|penguin_dig（或中文名）"
+                );
+                Self(None)
+            }
+        }
+    }
+}
+
 impl Plugin for DevPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Injected>()
@@ -245,6 +282,7 @@ impl Plugin for DevPlugin {
             .insert_resource(ForceMount::from_env())
             .insert_resource(ForcePlace::from_env())
             .insert_resource(ForceGod::from_env())
+            .insert_resource(ForceMinigame::from_env())
             // 回菜单时清掉「已经注入过」：`NM_DETAIN` 配 `NM_MENULOOP` 要能在第二局再注入一次，
             // 而留在 true 就等于「新局什么都没有」，看着像注入失效（跨局残留那类坑的反面）
             .add_systems(OnEnter(crate::scene::Scene::Menu), clear_injected)
@@ -260,6 +298,7 @@ impl Plugin for DevPlugin {
                     force_mount,
                     force_place,
                     force_god,
+                    force_minigame,
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
@@ -280,6 +319,7 @@ struct Injected {
     mount: bool,
     place: bool,
     god: bool,
+    minigame: bool,
 }
 
 fn clear_injected(mut done: ResMut<Injected>) {
@@ -518,10 +558,37 @@ fn force_god(
     );
 }
 
+/// `NM_MINIGAME` 的场景：窗口挂到当前玩家面前，一手布局种子一起发下去。
+///
+/// 种子取本局那个（`GameSession::seed`）而不是随手摇一个：配 `NM_SEED` 时同一张截图
+/// 要能重拍出一模一样的一手 —— 挖宝埋在哪几格是这一屏唯一由随机决定的东西。
+fn force_minigame(
+    force: Res<ForceMinigame>,
+    order: Res<TurnOrder>,
+    session: Option<Res<GameSession>>,
+    mut pending: ResMut<PendingDecision>,
+    mut deal: ResMut<ArcadeDeal>,
+    mut done: ResMut<Injected>,
+    mut next: ResMut<NextState<TurnPhase>>,
+) {
+    let (Some(game), false) = (force.0, done.minigame) else {
+        return;
+    };
+    let Some(player) = order.current() else {
+        return;
+    };
+    done.minigame = true;
+    deal.seed = session.map(|s| s.seed).unwrap_or(0);
+    pending.offer(player, Pending::Minigame(game));
+    // `WaitDecision` 是那个窗口在规则里的真实阶段（与 `force_bail` 同一条）
+    next.set(TurnPhase::WaitDecision);
+    info!("注入：当前玩家面前挂出「{}」那一屏", game.label());
+}
+
 #[cfg(test)]
 mod tests {
     use super::ForceGod;
-    use game_core::prelude::God;
+    use game_core::prelude::{GameKind, God};
 
     /// 每一位神都要能被两种写法点名 —— 这张穷尽表是旋钮唯一的名字来源，
     /// 谁把它换成手写 slug 对照，加一位神时就会漏掉一位（漏掉的那一位拍不到，
@@ -559,5 +626,21 @@ mod tests {
     fn an_unknown_name_injects_nothing() {
         assert_eq!(ForceGod::parse("土地婆"), None);
         assert_eq!(ForceGod::parse(""), None);
+    }
+
+    /// `NM_MINIGAME` 认的三个值必须真是那三款的数据名（`pop_balloons` 是写进
+    /// `prototype.json` 的那个串）。拼错的旋钮值不崩也不红，只会「注入没发生」，
+    /// 而那张截图看起来只是「这一格今天不是游乐场」—— 与 `nm_god_...` 同一种坑。
+    #[test]
+    fn nm_minigame_accepts_the_three_data_names() {
+        for (raw, want) in [
+            ("pop_balloons", GameKind::PopBalloons),
+            ("catch_treasure", GameKind::CatchTreasure),
+            ("penguin_dig", GameKind::PenguinDig),
+        ] {
+            assert_eq!(GameKind::parse(raw), Some(want), "旋钮值 {raw}");
+        }
+        assert_eq!(GameKind::parse("balloons"), None);
+        assert_eq!(GameKind::parse(""), None);
     }
 }

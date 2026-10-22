@@ -31,6 +31,29 @@ pub mod col {
     pub const BORDER_SHOP: Color = Color::srgba(0.85, 0.55, 0.65, 0.85);
     /// P5 道具栏。橙黄色与路障图标同族，一眼分得出这块面板管的是路上的东西
     pub const BORDER_ITEM: Color = Color::srgba(0.85, 0.65, 0.35, 0.85);
+    /// P7 游乐场。与 `palette::tile(TileKind::Arcade)` 那一档青柠同族：
+    /// 描边与地面格子对上，玩家才认得出这块屏是关于那一格的
+    pub const BORDER_ARCADE: Color = Color::srgba(0.75, 0.90, 0.35, 0.90);
+
+    // ===== 游乐场那一屏里的东西（P7）=====
+    /// 玩法区底色。比面板底再暗一档：飞起来的那些东西才读得出是前景
+    pub const FIELD: Color = Color::srgb(0.05, 0.06, 0.09);
+    /// 气球的那几档。刻意都是高明度：底色近黑，暗一档就看不出是气球还是脏像素
+    pub const BALLOONS: [Color; 5] = [
+        Color::srgb(0.95, 0.35, 0.45),
+        Color::srgb(0.98, 0.72, 0.25),
+        Color::srgb(0.40, 0.85, 0.55),
+        Color::srgb(0.40, 0.70, 0.98),
+        Color::srgb(0.80, 0.55, 0.98),
+    ];
+    /// 掉下来的财宝与石头。两档必须一眼分得开 —— 接错一件是倒扣分的
+    pub const TREASURE: Color = Color::srgb(1.00, 0.85, 0.30);
+    pub const ROCK: Color = Color::srgb(0.50, 0.50, 0.56);
+    pub const BASKET: Color = Color::srgb(0.62, 0.40, 0.22);
+    /// 挖宝：没铲的冰面、铲开的洞、洞里那件宝
+    pub const ICE: Color = Color::srgb(0.32, 0.52, 0.68);
+    pub const ICE_DUG: Color = Color::srgb(0.13, 0.16, 0.21);
+    pub const DUG_TREASURE: Color = Color::srgb(1.00, 0.85, 0.30);
 
     // ===== 文字 =====
     pub const TITLE_GOLD: Color = Color::srgb(1.00, 0.85, 0.30);
@@ -198,4 +221,25 @@ pub mod layout {
     pub const SHOP_BUTTON: [f32; 2] = [110.0, 34.0];
     /// 「买 / 卖」两排的标题行与行距
     pub const SHOP_ROW_GAP: f32 = 6.0;
+
+    // ===== P7：游乐场 =====
+    /// 那一屏的外壳：`[宽, 左上角相对屏幕中心的 x, y]`。高由内容撑开
+    /// （标题五行 ≈ 110 + 玩法区 380 + 底栏 40 + 间距与内边距 ≈ 90 → 约 620），
+    /// 在 1280×720 的窗口里上下各留 50。
+    ///
+    /// **宽度是算出来的，不是取的整数**：`ARCADE_FIELD[0] + PANEL_PAD_X * 2`。
+    /// 玩法区必须**恰好**横向居中 —— 接财宝的鼠标控制要把窗口横坐标换算进这一块，
+    /// 而那个换算只减一个常数（`(窗口宽 - 玩法区宽) / 2`）。宽出来的话定宽子节点在
+    /// `align_items: Stretch` 下会靠左，篮子就会比鼠标偏一截
+    pub const ARCADE_PANEL: [f32; 3] = [868.0, -434.0, -310.0];
+    /// 玩法区。三种游戏共用同一块地：气球升、财宝落、冰洞排，都在这个矩形里
+    pub const ARCADE_FIELD: [f32; 2] = [820.0, 380.0];
+    /// 挖宝的 4×4：格子边长与缝
+    pub const ARCADE_CELL: f32 = 84.0;
+    pub const ARCADE_CELL_GAP: f32 = 10.0;
+    /// 底栏那颗「提前收工」与结算屏那两颗
+    pub const ARCADE_BUTTON: [f32; 2] = [150.0, 40.0];
+    /// 主菜单那块「选一款练习」
+    pub const ARCADE_CHOICE: [f32; 3] = [600.0, -300.0, -190.0];
+    pub const ARCADE_CHOICE_BUTTON: [f32; 2] = [130.0, 38.0];
 }

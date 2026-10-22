@@ -9,8 +9,8 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, CoreSet, Corrections, CouponBoxes, GameSession, Gameplay, Landing, MarketClock,
-    PendingDecision, Rng, TurnOrder, TurnPhase, WalkClock,
+    ActiveBoard, ArcadeDeal, CoreSet, Corrections, CouponBoxes, GameSession, Gameplay, Landing,
+    MarketClock, PendingDecision, Rng, TurnOrder, TurnPhase, WalkClock,
 };
 
 use crate::ui::BoardUi;
@@ -163,6 +163,10 @@ fn clear_match(
     commands.insert_resource(PendingDecision::default());
     // 上一局捡空的点券箱必须在新局重新长出来，否则第二局一整盘都是冷却中
     commands.insert_resource(CouponBoxes::default());
+    // 上一局最后那一手游乐场布局也一起收走（P7）。它只在窗口开着时被读，所以留着不影响
+    // 规则；但 `NM_DUMP` 会把它打出来，而主菜单上写着「这一趟发的是企鹅挖宝」正是本文件头
+    // 那句「回菜单必须清场」要防的假象 —— 面板是查账工具，说这种话会把下一次排查带偏
+    commands.insert_resource(ArcadeDeal::default());
     // 修正登记处里那几条的主语是**上一局那些人**（`Corrections` 按 bearer 实体键）。
     // 槽位带世代，所以死人不会被活人复用成同一个人 —— 行为上无害，但 `NM_DUMP` 会在
     // 主菜单上写出「修正登记处：1 条」而那条指向一个已经 despawn 的实体。面板是查账

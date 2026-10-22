@@ -29,6 +29,7 @@ pub mod land;
 pub mod landing;
 pub mod loader;
 pub mod market;
+pub mod minigame;
 pub mod mortgage;
 pub mod msg;
 pub mod occupancy;
@@ -98,6 +99,9 @@ pub mod prelude {
         Market, MarketClock, market_tick_on_turn_end_system, settle_market_landing,
         trade_request_system,
     };
+    pub use crate::minigame::{
+        ArcadeDeal, GameKind, Payout, Payouts, minigame_score_system, settle_arcade_landing,
+    };
     pub use crate::mortgage::{
         MortgageDeny, MortgageFacts, counter_plots, mortgage_op_allowed, mortgage_op_system,
         read_facts,
@@ -107,13 +111,13 @@ pub mod prelude {
         BuyOffered, CardDrawn, CardGained, CardLost, CardNotice, CardPlayed, CashChanged,
         ChargeWaived, ChestOpened, Decision, DecisionChosen, DetentionLifted, DetentionSkipped,
         DiceRolled, EffectOutcome, GameOver, GiftGiven, GiftsGiven, GodAppeared, GodDeed, GodExit,
-        GodLeft, GodPossessed, ItemPlaced, LandBought, LandTaken, LandUpgraded, MortgageDone,
-        MortgageOp, MortgageRequested, MountChanged, MoveCapped, PlaceItemRequested,
-        PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
-        PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
-        RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped,
-        StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide,
-        TurnEnded, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted,
+        GodLeft, GodPossessed, ItemPlaced, LandBought, LandTaken, LandUpgraded, MinigameResult,
+        MinigameScore, MortgageDone, MortgageOp, MortgageRequested, MountChanged, MoveCapped,
+        PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
+        PlayerDetained, PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue,
+        RequestRemoteDice, RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, StayLifted,
+        StaySkipped, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
+        TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted,
     };
     pub use crate::occupancy::{
         BOMB_HOSPITAL_DAYS, BOMB_STEPS, HaltCause, MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt,
@@ -145,24 +149,25 @@ pub mod prelude {
 
 use bank::apply_month_end_interest_system;
 use prelude::{
-    ActiveBoard, AtmAccess, BailRequested, BankOpDone, BankOpRequested, BankVisited, BoardDef,
-    BombTransferred, BuyOffered, CardDrawn, CardGained, CardLost, CardPlayed, CardSet, CashChanged,
-    ChargeWaived, ChestOpened, Corrections, CouponBoxes, DecisionChosen, DetentionLifted,
-    DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed, GameSetup,
-    GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, ItemPlaced,
-    JsonAssetLoader, LandBought, LandTaken, LandUpgraded, Landing, MarketClock, MortgageDone,
-    MortgageRequested, MountChanged, MoveCapped, Paused, PendingDecision, PlaceItemRequested,
-    PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
-    PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
-    RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, ShopStock, StayLifted, StaySkipped,
-    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
-    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkHalt, WalkHalted,
-    WalkStarted, advance_walk_clock_system, bail_op_system, bank_op_system, begin_game_system,
-    decision_system, deliver_calendar_events_system, expire_land_status_system, finish_halt_system,
-    grant_atm_access_system, land_deity_succession_system, market_tick_on_turn_end_system,
-    mortgage_op_system, place_item_system, play_card_system, resolve_halt_system,
-    settle_god_landing_system, settle_landing_occupancy_system, shop_op_system, top_up_gods_system,
-    trade_request_system, walk_effect_system, walk_step_system, wander_gods_system,
+    ActiveBoard, ArcadeDeal, AtmAccess, BailRequested, BankOpDone, BankOpRequested, BankVisited,
+    BoardDef, BombTransferred, BuyOffered, CardDrawn, CardGained, CardLost, CardPlayed, CardSet,
+    CashChanged, ChargeWaived, ChestOpened, Corrections, CouponBoxes, DecisionChosen,
+    DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed,
+    GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, ItemPlaced,
+    JsonAssetLoader, LandBought, LandTaken, LandUpgraded, Landing, MarketClock, MinigameResult,
+    MinigameScore, MortgageDone, MortgageRequested, MountChanged, MoveCapped, Paused,
+    PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
+    PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed,
+    RentDue, RequestRemoteDice, RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, ShopStock,
+    StayLifted, StaySkipped, StockPriceChanged, StockSet, StockTradeRequested, StockTraded,
+    StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock,
+    WalkHalt, WalkHalted, WalkStarted, advance_walk_clock_system, bail_op_system, bank_op_system,
+    begin_game_system, decision_system, deliver_calendar_events_system, expire_land_status_system,
+    finish_halt_system, grant_atm_access_system, land_deity_succession_system,
+    market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system, place_item_system,
+    play_card_system, resolve_halt_system, settle_arcade_landing, settle_god_landing_system,
+    settle_landing_occupancy_system, shop_op_system, top_up_gods_system, trade_request_system,
+    walk_effect_system, walk_step_system, wander_gods_system,
 };
 use turn::{
     begin_turn_system, end_turn_system, game_over_system, not_paused, remote_dice_system,
@@ -212,6 +217,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<CouponBoxes>()
             .init_resource::<Corrections>()
             .init_resource::<ShopStock>()
+            .init_resource::<ArcadeDeal>()
             .init_resource::<WalkHalt>()
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
@@ -264,6 +270,11 @@ impl Plugin for CoreGamePlugin {
             // 漏一条就是 `Books` 那批参数整局不跑（症状见 ARCHITECTURE §六 的消息表注）
             .add_message::<ShopOpRequested>()
             .add_message::<ShopOpDone>()
+            // ===== 游乐场（P7）=====
+            // 成绩报上来那一条与结算完那一条。漏注册第一条的症状不是「少一行流水」，
+            // 而是 `minigame_score_system` 的参数校验直接失败 —— 回合机整个不跑
+            .add_message::<MinigameResult>()
+            .add_message::<MinigameScore>()
             // ===== 日历事件（P2b）=====
             .add_message::<GiftsGiven>()
             .add_message::<RedEnvelope>()
@@ -330,7 +341,12 @@ impl Plugin for CoreGamePlugin {
                     walk_step_system
                         .run_if(in_state(TurnPhase::Walking))
                         .run_if(not_paused),
-                    decision_system
+                    // 成绩结算（P7）与 `decision_system` 同一条窗口、同一份账本（都带 `Books`），
+                    // 所以显式 `chain` 而不是并排放进元组：两条并行会直接撞成调度期借用冲突。
+                    // 谁先跑都不改结果 —— 各认各的消息（`DecisionChosen` / `MinigameResult`），
+                    // 而两者都会把关着的窗口收掉
+                    (decision_system, minigame_score_system)
+                        .chain()
                         .run_if(in_state(TurnPhase::WaitDecision))
                         .run_if(not_paused),
                     // 证券交易的窗口就是「还没掷骰」这一段，与掷骰同态、同闸门
@@ -426,6 +442,10 @@ impl Plugin for CoreGamePlugin {
                     deck::settle_card_landing,
                     coupon::settle_coupon_landing,
                     shop::settle_shop_landing,
+                    // 游乐场（P7）：定下这一趟玩哪一款、发一手布局，再把窗口挂上。
+                    // 排在百货之后、保释之前 —— 它与前六个域互不相交（读的是格子数据与
+                    // 随机流），而保释那一条要在所有结算之后才问「要不要放人」
+                    settle_arcade_landing,
                     // 拘留场所接入点：踩上去开保释窗口（P4③）。排在最后一块结算之后 ——
                     // 演示盘的接入点同时是地产格，先办完买地/付租再问要不要放人
                     bail::settle_bail_landing_system,

@@ -15,10 +15,10 @@ use game_core::prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankVisited, BombTransferred, CardLost, CardPlayed,
     ChargeWaived, ChestOpened, DetentionLifted, DetentionSkipped, GameOver, GameSession,
     GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, ItemPlaced, LandTaken, MarketClock,
-    MortgageDone, MortgageOp, MountChanged, MoveCapped, Paused, PendingDecision, PlayerBailed,
-    PlayerBankrupt, PlayerName, PointsChanged, RemoteDiceUsed, ShopOpDone, StayLifted,
-    StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide, TurnOrder,
-    TurnPhase, WalkHalted,
+    MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, Paused, PendingDecision,
+    PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, RemoteDiceUsed, ShopOpDone,
+    StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide,
+    TurnOrder, TurnPhase, WalkHalted,
 };
 
 use super::finance::comma;
@@ -412,6 +412,9 @@ pub(crate) struct Notices<'w, 's> {
     stock: MessageReader<'w, 's, StockVisited>,
     traded: MessageReader<'w, 's, StockTraded>,
     points: MessageReader<'w, 's, PointsChanged>,
+    /// 游乐场那一局的成绩（P7）。排在 `points` 之后：换到点券的那一帧两条都会写，
+    /// 而这一条说得出「玩的是哪一款、拿了几分」—— 点券余数在 HUD 上一直看得见
+    minigame: MessageReader<'w, 's, MinigameScore>,
     /// 百货成交（P3d②）。排在 `points` 之后：同一帧里那笔点券变动与这张成交凭据说的
     /// 是同一件事，而带卡名的那条更能回答「我刚按下去发生了什么」
     shop: MessageReader<'w, 's, ShopOpDone>,
@@ -545,6 +548,27 @@ pub(crate) fn hint_from_events(
             amount,
             m.balance
         ));
+    }
+    // 游乐场（P7）：这一行要说得出「哪一款、几分、换了多少」，因为那一屏下一刻就收走了，
+    // 而点券余数在 HUD 上一直看得见。`awarded` 那一位也得说出来 —— 练习局报的分是 0 点券，
+    // 不写清楚就成了「玩了半天什么都没拿到」
+    for m in notices.minigame.read() {
+        line = Some(if !m.awarded {
+            format!(
+                "{} 玩「{}」得了 {} 分 —— 练习局，不计点券",
+                name(&names, m.player),
+                m.game.label(),
+                m.score
+            )
+        } else {
+            format!(
+                "{} 玩「{}」得了 {} 分，换 {} 点券",
+                name(&names, m.player),
+                m.game.label(),
+                m.score,
+                m.points
+            )
+        });
     }
     // 保释：这一行要同时说清「谁付」「付了多少」「放了谁」。它排在通用点券流水之后 ——
     // 同一帧两条说的是同一件事，而带对象与价目的这条更能回答「我刚按下去发生了什么」
@@ -874,7 +898,8 @@ mod tests {
     use super::*;
     use bevy::state::app::StatesPlugin;
     use game_core::prelude::{
-        CardKind, CardNotice, GameRules, God, LandId, PlayerId, StockId, TradeSide, TurnOrder,
+        CardKind, CardNotice, GameKind, GameRules, God, LandId, PlayerId, StockId, TradeSide,
+        TurnOrder,
     };
 
     /// 顶栏刷新只许动顶栏名下的按钮（§6.1 坑 31）。
@@ -1070,6 +1095,7 @@ mod tests {
             .add_message::<StockVisited>()
             .add_message::<StockTraded>()
             .add_message::<PointsChanged>()
+            .add_message::<MinigameScore>()
             .add_message::<ShopOpDone>()
             .add_message::<MortgageDone>()
             .add_message::<CardPlayed>()
@@ -1266,6 +1292,79 @@ mod tests {
             hint_of(&mut app, hint),
             "小财神 从 阿土伯 手里拿走 $300",
             "同族里该留下更具体的那件事"
+        );
+    }
+
+    /// 游乐场那一局（P7）：成绩行要说得出「哪一款、几分、换了多少」，而它排在通用点券
+    /// 流水**之后** —— 同一帧两条都会写，留下的该是更具体的那条（与百货、保释同一条分工）。
+    #[test]
+    fn an_arcade_score_wins_over_the_generic_points_line() {
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            PointsChanged {
+                player: me,
+                delta: 48,
+                balance: 148,
+            },
+        );
+        send(
+            &mut app,
+            MinigameScore {
+                player: me,
+                game: GameKind::PopBalloons,
+                score: 12,
+                points: 48,
+                awarded: true,
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "阿土伯 玩「打气球」得了 12 分，换 48 点券",
+            "点券那行盖住了成绩 —— 玩家看不出这 48 是玩出来的还是捡来的"
+        );
+    }
+
+    /// 0 分也得播：那一屏下一刻就收走了，而「玩了半天一分没换到」正是玩家最要一句解释的
+    /// 场合（沉默会被读成「按钮是死的」，§6.1 坑 27 那一族）。
+    #[test]
+    fn a_scoreless_round_still_says_so() {
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            MinigameScore {
+                player: me,
+                game: GameKind::PenguinDig,
+                score: 0,
+                points: 0,
+                awarded: true,
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "阿土伯 玩「企鹅挖宝」得了 0 分，换 0 点券"
+        );
+    }
+
+    /// `awarded` 那一位必须在顶栏上看得出来。练习局走的是 UI 本地那条路（不发这条凭据），
+    /// 但规则层这一支是真的、也被 `game_core/tests/minigame.rs` 钉着 —— 播报侧不能把它
+    /// 说得跟真给钱了一样，否则「不计点券」那句就只活在结算屏上
+    #[test]
+    fn an_unawarded_score_is_announced_as_practice() {
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            MinigameScore {
+                player: me,
+                game: GameKind::CatchTreasure,
+                score: 9,
+                points: 0,
+                awarded: false,
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "阿土伯 玩「接财宝」得了 9 分 —— 练习局，不计点券"
         );
     }
 }

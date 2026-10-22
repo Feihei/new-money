@@ -16,6 +16,7 @@ pub mod finance;
 pub mod hand;
 pub mod items;
 pub mod menu;
+pub mod minigame;
 pub mod pause;
 pub mod player_hud;
 pub mod theme;
@@ -25,10 +26,11 @@ pub mod top_bar;
 use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BailRequested, BankOp, BankOpRequested, CardAim, CardId, Decision,
-    DecisionChosen, GameSession, HolidaySet, ItemKind, LandId, MarketClock, MortgageOp,
-    MortgageRequested, Paused, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
-    RequestRemoteDice, RequestRoll, RequestStay, ShopOpRequested, StaySentence, StockId,
-    StockTradeRequested, TileIndex, TradeSide, TurnOrder, TurnPhase, bank_op_allowed, date_of,
+    DecisionChosen, GameKind, GameSession, HolidaySet, ItemKind, LandId, MarketClock,
+    MinigameResult, MortgageOp, MortgageRequested, Paused, Pending, PendingDecision,
+    PlaceItemRequested, PlayCardRequested, RequestRemoteDice, RequestRoll, RequestStay,
+    ShopOpRequested, StaySentence, StockId, StockTradeRequested, TileIndex, TradeSide, TurnOrder,
+    TurnPhase, bank_op_allowed, date_of,
 };
 
 use theme::{col, layout, size};
@@ -50,6 +52,13 @@ impl Plugin for UiPlugin {
             .insert_resource(finance::AtmPanelOpen::from_env())
             .insert_resource(hand::HandPanelOpen::from_env())
             .insert_resource(items::ItemsPanelOpen::from_env())
+            // 游乐场那四条（P7）常驻而不是 `insert_resource(from_env())`：这一屏**两个场景
+            // 都要用**（对局里踩到那一格、主菜单上练习），所以「开机时定」那一套不适用 ——
+            // 旋钮 `NM_MINIGAME` 走的是 core 的窗口（见 `dev.rs`），不从 UI 侧开门
+            .init_resource::<minigame::Arcade>()
+            .init_resource::<minigame::Practice>()
+            .init_resource::<minigame::PracticeRounds>()
+            .init_resource::<minigame::ArcadeChoiceOpen>()
             .add_systems(
                 Update,
                 (
@@ -79,6 +88,13 @@ impl Plugin for UiPlugin {
                     // （`resource_exists::<ActiveBoard>`），后果是菜单按钮点了没反应、
                     // 只能点窗口关闭——且 `NM_MENULOOP` 直改状态绕过了派发，B5 验收测不到。
                     // 依赖的资源全部常驻（见 `Gate`/`UiState`），菜单一帧不缺。
+                    //
+                    // 游乐场那三条同理，而且理由更硬：**练习局就开在主菜单上**（P7），
+                    // 那里连棋盘都没有。排在派发之前，所以「这一帧刚建好的那一屏」
+                    // 当帧就能被点到。
+                    minigame::sync_choice,
+                    minigame::sync_arcade,
+                    minigame::step_arcade,
                     dispatch_ui_actions,
                     hover_feedback,
                 )
@@ -230,6 +246,28 @@ pub enum UiAction {
     Bail {
         target: Entity,
     },
+    /// 点掉第 `slot` 只气球（P7 打气球）。槽位在建屏那一刻就烤进按钮里，
+    /// 而「这一下算不算」仍由那一局的状态说了算（收工了、槽位越界都不算）
+    Pop {
+        slot: u8,
+    },
+    /// 往第 `cell` 格下铲（P7 企鹅挖宝）。铲过的格子再点不算，那格自己也会挂 `Disabled`
+    Dig {
+        cell: u8,
+    },
+    /// 提前收工：把现在这个分数送去做结算。它**不提交成绩**，结算屏上那颗才算
+    ArcadeQuit,
+    /// 收下成绩：报一份 `MinigameResult` 给规则层。练习局没有可报的（见 `minigame::result_of`）
+    ArcadeCollect,
+    /// 练习局「再来一局」。只把开过几手加一，重建由 `sync_arcade` 的签名比较做
+    ArcadeReplay,
+    /// 练习局「离开」：清掉 `Practice`，这一屏随签名变化被收走
+    ArcadeLeave,
+    /// 开合主菜单那块「选一款练习」
+    ToggleArcadeChoice,
+    /// 在主菜单上开始一局练习。练习不给点券 —— 而这不是「菜单不发消息」，
+    /// 是结算屏上写出来的那半句（理由见 `minigame` 模块头）
+    Practice(GameKind),
 }
 
 /// 存在即禁用：着色变灰，且点击不派发。对应 Godot 的 `button.disabled = true`。
@@ -350,29 +388,45 @@ pub(crate) fn bank_op_subject(pending: &PendingDecision, atm: &AtmAccess) -> Opt
 /// - `SelectedTile` 留着 → 下一局凭空显示上一局那格的详情卡；
 /// - `RecentCard` 留着 → 下一局第一次抽到「无内容」的卡时，显示的是上一局那张的文案；
 /// - `AtmPanelOpen`/`StockPanelOpen` 留着 → 下一局第一帧就浮着两块上一局的账面板。
+/// - `Arcade`/`Practice` 留着 → 下一局第一帧就摆着上一局那一屏游乐场（P7）。它比其余几条
+///   更值得清：这一屏在**两个场景**都能出现，而练习那一半根本没有棋盘可依附。
 ///
 /// 三个「开机时定」的开关一律复原到 `from_env()` 而不是 `default()`：开机的菜单入场
 /// 就在这一条链上（`NM_SCENE=board` 时它先跑一次），清成 `default()` 会把开发旋钮
 /// 自己抹掉 —— 结果是 `NM_ATM`/`NM_STOCK`/`NM_PAUSE` 三张截图永远拍不到东西，
 /// 而「每个界面都得有一条不靠鼠标的入口」这条判据就形同虚设。真人没设环境变量，
-/// `from_env()` 就是 `default()`，行为不变。
-pub(crate) fn reset_ui_state(
-    mut commands: Commands,
-    mut memory: ResMut<dialog::RecentCard>,
-    mut selected: ResMut<tile_info::SelectedTile>,
-    mut atm: ResMut<finance::AtmPanelOpen>,
-    mut stock: ResMut<finance::StockPanelOpen>,
-    mut hand_open: ResMut<hand::HandPanelOpen>,
-    mut items_open: ResMut<items::ItemsPanelOpen>,
-) {
-    memory.0 = None;
-    selected.0 = None;
-    *atm = finance::AtmPanelOpen::from_env();
-    *stock = finance::StockPanelOpen::from_env();
-    *hand_open = hand::HandPanelOpen::from_env();
-    *items_open = items::ItemsPanelOpen::from_env();
+/// `from_env()` 就是 `default()`，行为不变。游乐场那四条**没有** `from_env()`：
+/// `NM_MINIGAME` 走的是 core 的窗口（`dev.rs`），不从 UI 侧开门，所以清成 `default()`。
+pub(crate) fn reset_ui_state(mut commands: Commands, mut kept: UiMemory) {
+    kept.recent_card.0 = None;
+    kept.selected.0 = None;
+    *kept.atm = finance::AtmPanelOpen::from_env();
+    *kept.stock = finance::StockPanelOpen::from_env();
+    *kept.hand_open = hand::HandPanelOpen::from_env();
+    *kept.items_open = items::ItemsPanelOpen::from_env();
+    kept.arcade.0 = None;
+    kept.practice.0 = None;
+    kept.practice_rounds.0 = 0;
+    kept.arcade_choice.0 = false;
     commands.insert_resource(pause::PauseMenuOpen::from_env());
     commands.insert_resource(Paused::default());
+}
+
+/// 回菜单要清掉的那十格 UI 记忆。打包是房规（§六 坑 8）：这一条清的东西随每块浮层增加，
+/// 十一位散装参数撞的是 `too_many_arguments`，而它们要说的其实只有一件事 ——
+/// 「哪些键活过了场景切换」。加一块浮层就在这里加一格，漏了的后果见上面那张清单。
+#[derive(SystemParam)]
+pub(crate) struct UiMemory<'w> {
+    recent_card: ResMut<'w, dialog::RecentCard>,
+    selected: ResMut<'w, tile_info::SelectedTile>,
+    atm: ResMut<'w, finance::AtmPanelOpen>,
+    stock: ResMut<'w, finance::StockPanelOpen>,
+    hand_open: ResMut<'w, hand::HandPanelOpen>,
+    items_open: ResMut<'w, items::ItemsPanelOpen>,
+    arcade: ResMut<'w, minigame::Arcade>,
+    practice: ResMut<'w, minigame::Practice>,
+    practice_rounds: ResMut<'w, minigame::PracticeRounds>,
+    arcade_choice: ResMut<'w, minigame::ArcadeChoiceOpen>,
 }
 
 /// 一个文本节点需要的三件套。包一层的理由是漏掉 `TextFont` 不会报错，
@@ -624,6 +678,7 @@ struct Sends<'w> {
     bails: MessageWriter<'w, BailRequested>,
     places: MessageWriter<'w, PlaceItemRequested>,
     remotes: MessageWriter<'w, RequestRemoteDice>,
+    scores: MessageWriter<'w, MinigameResult>,
     exit: MessageWriter<'w, AppExit>,
 }
 
@@ -636,6 +691,12 @@ struct UiState<'w> {
     stock: ResMut<'w, finance::StockPanelOpen>,
     hand: ResMut<'w, hand::HandPanelOpen>,
     items: ResMut<'w, items::ItemsPanelOpen>,
+    /// 游乐场那四格（P7）。`arcade` 是「现在开着的那一局」——派发要往里写分数与铲数，
+    /// 所以它是 `ResMut` 而不是只有 `sync_arcade` 能碰的私有状态
+    arcade: ResMut<'w, minigame::Arcade>,
+    practice: ResMut<'w, minigame::Practice>,
+    practice_rounds: ResMut<'w, minigame::PracticeRounds>,
+    arcade_choice: ResMut<'w, minigame::ArcadeChoiceOpen>,
 }
 
 /// 掷骰意图的唯一出口。`dice == 0` = 载具满载，与 [`UiAction::Roll`] 相同；
@@ -837,6 +898,49 @@ fn dispatch_ui_actions(
                     target: *target,
                 });
             }
+            // ===== 游乐场（P7）=====
+            // 玩法内的四颗一律先看暂停：暂停菜单压在 `ZIndex(6)`、游乐场在 5，
+            // 遮罩本来就点不穿；这一道挡的是「ESC 那一帧的点击已经排进队列」那种时序。
+            UiAction::Pop { slot } => {
+                if gate.paused.0 {
+                    continue;
+                }
+                minigame::pop(&mut ui.arcade, *slot);
+            }
+            UiAction::Dig { cell } => {
+                if gate.paused.0 {
+                    continue;
+                }
+                minigame::dig(&mut ui.arcade, *cell);
+            }
+            UiAction::ArcadeQuit => {
+                if gate.paused.0 {
+                    continue;
+                }
+                minigame::quit_early(&mut ui.arcade);
+            }
+            // 「收下」是唯一一处**从表现层往规则层报数**的地方：分数在这里数出来，
+            // 点券由 core 那张表算（`minigame_score_system`）。练习局 `result_of` 返回
+            // `None`，所以这一支在菜单上什么都不发 —— 而不是发一份 `awarded: false`：
+            // 菜单里没有 `ActiveBoard`，`Books` 建不出来，那条消息会躺到下一局的第一个
+            // 窗口打开时被读走（跨局残留，§6.1 坑 22/25 的一个新变种）
+            UiAction::ArcadeCollect => {
+                if gate.paused.0 {
+                    continue;
+                }
+                if let Some(result) = minigame::result_of(&ui.arcade) {
+                    sends.scores.write(result);
+                }
+            }
+            // 「再来一局」只加一那个计数：`sync_arcade` 拿它当签名的一部分，
+            // 于是连点两次会重开两手（并进 `Practice` 里就做不到 —— 那会被判成同一局）
+            UiAction::ArcadeReplay => ui.practice_rounds.0 += 1,
+            UiAction::ArcadeLeave => ui.practice.0 = None,
+            UiAction::ToggleArcadeChoice => ui.arcade_choice.0 = !ui.arcade_choice.0,
+            UiAction::Practice(game) => {
+                ui.practice.0 = Some(*game);
+                ui.arcade_choice.0 = false;
+            }
         }
     }
 }
@@ -904,8 +1008,8 @@ mod tests {
     use bevy::state::app::StatesPlugin;
     use bevy::window::WindowRef;
     use game_core::prelude::{
-        Date, Decision, GameRules, ItemKind, LandId, Pending, PlayerId, StaySentence, TileIndex,
-        TurnOrder,
+        Date, Decision, GameKind, GameRules, ItemKind, LandId, Pending, PlayerId, StaySentence,
+        TileIndex, TurnOrder,
     };
     use std::time::Duration;
 
@@ -1076,6 +1180,7 @@ mod tests {
                 .add_message::<BailRequested>()
                 .add_message::<PlaceItemRequested>()
                 .add_message::<RequestRemoteDice>()
+                .add_message::<MinigameResult>()
                 .add_message::<AppExit>()
                 .init_resource::<Seen>()
                 .init_resource::<tile_info::SelectedTile>()
@@ -1084,6 +1189,10 @@ mod tests {
                 .init_resource::<finance::StockPanelOpen>()
                 .init_resource::<hand::HandPanelOpen>()
                 .init_resource::<items::ItemsPanelOpen>()
+                .init_resource::<minigame::Arcade>()
+                .init_resource::<minigame::Practice>()
+                .init_resource::<minigame::PracticeRounds>()
+                .init_resource::<minigame::ArcadeChoiceOpen>()
                 .init_resource::<AtmAccess>()
                 .insert_resource(Paused(paused))
                 // 休市判据要读日历、锚点与节假日表，三者都由 core 常驻。
@@ -1686,6 +1795,9 @@ mod tests {
     fn wired() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
+            // `step_arcade` 要读键盘（接财宝的 ← →）。`MinimalPlugins` 不带 `InputPlugin`，
+            // 少了它不是「键盘那半条不灵」而是这条 system 整个建不出来 —— 与消息同一条坑
+            .add_plugins(bevy::input::InputPlugin)
             .add_plugins(StatesPlugin)
             .add_plugins(crate::scene::ScenePlugin)
             .add_plugins(UiPlugin)
@@ -1695,6 +1807,8 @@ mod tests {
             .insert_resource(Paused::default())
             .insert_resource(PendingDecision::default())
             .init_resource::<AtmAccess>()
+            // P7：`sync_arcade` 读那一手布局种子（对局里由 core 发下来）
+            .init_resource::<game_core::prelude::ArcadeDeal>()
             // P2④ 起派发要读日历判休市。这两条在真实应用里由 `CoreGamePlugin`
             // `init_resource` 常驻，菜单态也在 —— 少了它们崩的是测试，多的那条路径崩的会是玩家
             .init_resource::<MarketClock>()
@@ -1729,6 +1843,8 @@ mod tests {
             .add_message::<game_core::prelude::RemoteDiceUsed>()
             .add_message::<game_core::prelude::MoveCapped>()
             .add_message::<game_core::prelude::MountChanged>()
+            // P7：游乐场报成绩那一个出口（漏了它同样是「一片按钮全死」）
+            .add_message::<MinigameResult>()
             // P2b：日历事件的表现层读这两条（礼物一屏、红包老虎机）
             .add_message::<game_core::prelude::GiftsGiven>()
             .add_message::<game_core::prelude::RedEnvelope>()
@@ -1914,6 +2030,240 @@ mod tests {
             app.world().get::<BackgroundColor>(button).unwrap().0,
             normal,
             "光标离开后应复原"
+        );
+    }
+
+    /// 按动作找出那颗按钮。测试里没有 picking 后端，只能自己找实体再手拼点击。
+    fn find_action(app: &mut App, want: UiAction) -> Option<Entity> {
+        let mut query = app.world_mut().query::<(Entity, &UiAction)>();
+        query
+            .iter(app.world())
+            .find(|(_, action)| **action == want)
+            .map(|(entity, _)| entity)
+    }
+
+    fn action_entity(app: &mut App, want: UiAction) -> Entity {
+        find_action(app, want.clone()).unwrap_or_else(|| panic!("这一屏上没有 {want:?} 那颗按钮"))
+    }
+
+    fn click_real(app: &mut App, target: Entity) {
+        app.world_mut()
+            .resource_mut::<Messages<PointerClick>>()
+            .write(make_click(target));
+        app.update();
+    }
+
+    /// 派发写出去的成绩。用 `drain` 而不是 `iter_current_update_messages`：消息是在
+    /// `app.update()` **里面**写的，等它返回时那一帧的缓冲已经换过去了，而这里要的正是
+    /// 「刚才那一下点击报出了什么」。收走也无妨 —— 每颗按钮只点一次
+    /// 跑过第一帧的接线。`request_initial_scene` 是 `Startup`，它会把场景钉到菜单 ——
+    /// 所以任何「我要在棋盘上」的注入都得等那一帧跑完，否则它被覆盖掉，
+    /// 而症状只是「这一屏没建出来」
+    fn settled_app() -> App {
+        let mut app = wired();
+        app.update();
+        app
+    }
+
+    fn scores_seen(app: &mut App) -> Vec<MinigameResult> {
+        app.world_mut()
+            .resource_mut::<Messages<MinigameResult>>()
+            .drain()
+            .collect()
+    }
+
+    /// 从窗口到成绩那一条完整的路（P7）：`Pending::Minigame` 建屏 → 「提前收工」→
+    /// 「收下」报一份 `MinigameResult`，主语是**窗口挂着的那个人**，分数是这一局真数出来的。
+    ///
+    /// 走真实接线（`wired()`）而不是手搓 system：坑 23 那类「挂错门禁」只有在
+    /// `sync_arcade` 与派发同一份调度里才暴露得出来。挖宝那一局用它是因为它**不看秒数** ——
+    /// 限时两款要等 25 秒才收工，测试里等不起。
+    #[test]
+    fn the_collect_button_reports_the_round_it_was_built_from() {
+        let mut app = settled_app();
+        app.world_mut()
+            .resource_mut::<NextState<crate::scene::Scene>>()
+            .set(crate::scene::Scene::Board);
+        app.update();
+
+        let me = app.world_mut().spawn(PlayerId(0)).id();
+        app.world_mut()
+            .resource_mut::<PendingDecision>()
+            .offer(me, Pending::Minigame(GameKind::PenguinDig));
+        app.update();
+
+        let quit = action_entity(&mut app, UiAction::ArcadeQuit);
+        click_real(&mut app, quit);
+        app.update();
+        let collect = action_entity(&mut app, UiAction::ArcadeCollect);
+        click_real(&mut app, collect);
+
+        let scores = scores_seen(&mut app);
+        assert_eq!(scores.len(), 1, "「收下」没报成绩：{scores:?}");
+        assert_eq!(scores[0].player, me, "报的人不是窗口挂着的那位");
+        assert_eq!(scores[0].game, GameKind::PenguinDig);
+        assert!(scores[0].awarded, "对局里那一手必须计入点券");
+        assert_eq!(
+            scores[0].score, 0,
+            "一铲没下就报出了 {} 分 —— 分数不是从这一局数出来的",
+            scores[0].score
+        );
+    }
+
+    /// 练习局**根本没有「收下」那颗按钮** —— 于是「练习不给点券」不是靠某处返回 `None`
+    /// 兜住的，而是这一屏上没有报成绩的入口。它换上来的是「再来一局」与「离开」两颗。
+    ///
+    /// 这条比「发了消息但没人读」强得多：菜单里没有 `ActiveBoard`，而点券的唯一入口
+    /// `Books` 要它，硬发的那条消息会躺在队列里，等到下一局窗口第一次打开时被读走
+    /// （跨局残留，§6.1 坑 22/25 的一个新变种）。
+    #[test]
+    fn a_practice_round_has_no_collect_button_at_all() {
+        let mut app = settled_app();
+        // 注入必须在菜单入场之后：`reset_ui_state` 挂在 `OnEnter(Scene::Menu)` 上，
+        // 而开机那一次入场也走它（见它自己的文档注释）
+        app.insert_resource(minigame::Practice(Some(GameKind::PopBalloons)));
+        app.update();
+
+        let quit = action_entity(&mut app, UiAction::ArcadeQuit);
+        action_entity(&mut app, UiAction::ArcadeReplay);
+        action_entity(&mut app, UiAction::ArcadeLeave);
+        assert!(
+            find_action(&mut app, UiAction::ArcadeCollect).is_none(),
+            "练习局上摆着一颗「收下」"
+        );
+
+        // 收工之后也不长出来：结算屏那两颗是建屏那一刻就摆好的，不是收工时换的
+        click_real(&mut app, quit);
+        app.update();
+        assert!(
+            find_action(&mut app, UiAction::ArcadeCollect).is_none(),
+            "练习局的结算屏上长出了一颗「收下」"
+        );
+        assert!(
+            scores_seen(&mut app).is_empty(),
+            "练习局报出了成绩 —— 它会在下一局的第一个窗口被读走"
+        );
+    }
+
+    /// 回主菜单必须把游乐场那一屏一起收走（P7）。它比其余浮层更值得钉：这一屏在**两个
+    /// 场景**都能出现，而练习那一半根本没有棋盘可依附 —— 留着不清，下一局第一帧就摆着
+    /// 上一局那一手气球，不报错，只是分数是别人的（§6.1 坑 22 的同一家族）。
+    #[test]
+    fn going_back_to_the_menu_closes_the_arcade_too() {
+        let mut app = settled_app();
+        app.world_mut()
+            .resource_mut::<NextState<crate::scene::Scene>>()
+            .set(crate::scene::Scene::Board);
+        app.update();
+        let me = app.world_mut().spawn(PlayerId(0)).id();
+        app.world_mut()
+            .resource_mut::<PendingDecision>()
+            .offer(me, Pending::Minigame(GameKind::PopBalloons));
+        app.update();
+        assert!(
+            app.world().resource::<minigame::Arcade>().0.is_some(),
+            "前置：窗口挂着时这一屏该在"
+        );
+
+        app.world_mut()
+            .resource_mut::<NextState<crate::scene::Scene>>()
+            .set(crate::scene::Scene::Menu);
+        for _ in 0..3 {
+            app.update();
+        }
+
+        assert!(
+            app.world().resource::<minigame::Arcade>().0.is_none(),
+            "回主菜单没清掉上一局那一屏"
+        );
+        let mut panels_query = app
+            .world_mut()
+            .query_filtered::<Entity, With<minigame::ArcadePanel>>();
+        let panels = panels_query.iter(app.world()).count();
+        assert_eq!(panels, 0, "上一局那块游乐场面板还挂在场景里");
+    }
+
+    /// 菜单那一块的三颗按钮只动 UI 自己的状态。「再来一局」加的是那个**当签名用**的计数
+    /// （并进 `Practice` 里就做不到：连点两次会被判成同一局，而那正是玩家刚按下去的那颗）
+    #[test]
+    fn the_practice_buttons_move_ui_state_only() {
+        let mut h = Harness::new(TurnPhase::Boot, false, PendingDecision::default());
+        let replay = h.app.world_mut().spawn(UiAction::ArcadeReplay).id();
+        let leave = h.app.world_mut().spawn(UiAction::ArcadeLeave).id();
+        let choose = h.app.world_mut().spawn(UiAction::ToggleArcadeChoice).id();
+        h.app.world_mut().resource_mut::<minigame::Practice>().0 = Some(GameKind::CatchTreasure);
+
+        h.click(choose);
+        assert!(h.app.world().resource::<minigame::ArcadeChoiceOpen>().0);
+        h.click(replay);
+        h.click(replay);
+        assert_eq!(
+            h.app.world().resource::<minigame::PracticeRounds>().0,
+            2,
+            "连点两次「再来一局」只算一手"
+        );
+        assert!(
+            h.app.world().resource::<minigame::Practice>().0.is_some(),
+            "「再来一局」不该把人踢出练习局"
+        );
+        h.click(leave);
+        assert_eq!(h.app.world().resource::<minigame::Practice>().0, None);
+        assert!(
+            h.seen().rolls.is_empty() && h.seen().answers.is_empty(),
+            "菜单上那几颗不该往规则层发任何东西"
+        );
+    }
+
+    /// 暂停挡住玩法内的每一颗。遮罩本来压在 `ZIndex(6)` 上点不穿，这一道挡的是
+    /// 「ESC 那一帧的点击已经排进队列」那种时序。
+    ///
+    /// 牙在后半段：解开暂停之后**同一颗按钮**就报得出成绩。只断言「暂停时没报」的话，
+    /// 一条根本不会派发的接线也能过（空跑的断言）。
+    #[test]
+    fn pausing_blocks_the_arcade_and_unpausing_lets_it_through() {
+        let mut app = settled_app();
+        app.world_mut()
+            .resource_mut::<NextState<crate::scene::Scene>>()
+            .set(crate::scene::Scene::Board);
+        app.update();
+        let me = app.world_mut().spawn(PlayerId(0)).id();
+        app.world_mut()
+            .resource_mut::<PendingDecision>()
+            .offer(me, Pending::Minigame(GameKind::PenguinDig));
+        app.update();
+
+        app.insert_resource(Paused(true));
+        let dig = action_entity(&mut app, UiAction::Dig { cell: 0 });
+        click_real(&mut app, dig);
+        let quit = action_entity(&mut app, UiAction::ArcadeQuit);
+        click_real(&mut app, quit);
+        app.update();
+        let collect = action_entity(&mut app, UiAction::ArcadeCollect);
+        click_real(&mut app, collect);
+        assert!(scores_seen(&mut app).is_empty(), "暂停时还能收工并报出成绩");
+
+        app.insert_resource(Paused(false));
+        // 解开暂停之后铲一个**已知埋着宝**的格子：种子是 `ArcadeDeal::default()` 那个 0，
+        // 布局由 `dig_deal` 算得出来，而格号就是那张表的下标（`build_dig` 的 enumerate）
+        let buried = minigame::dig_deal(0)
+            .iter()
+            .position(|treasure| *treasure)
+            .expect("这一手得真埋着宝，否则下面那句断言是空跑") as u8;
+        let dig = action_entity(&mut app, UiAction::Dig { cell: buried });
+        click_real(&mut app, dig);
+        click_real(&mut app, quit);
+        app.update();
+        click_real(&mut app, collect);
+        let scores = scores_seen(&mut app);
+        assert_eq!(
+            scores.len(),
+            1,
+            "解开暂停之后同一颗按钮该报得出成绩：{scores:?}"
+        );
+        assert_eq!(scores[0].player, me);
+        assert_eq!(
+            scores[0].score, 1,
+            "暂停那一下铲子生效了（0 分），或解开之后那一铲没算分"
         );
     }
 }

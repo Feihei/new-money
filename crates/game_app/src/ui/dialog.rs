@@ -215,28 +215,44 @@ pub(crate) fn sync_modal(
     }
     if let Some((player, about)) = want {
         let stamp = stamp.clone();
+        // 返回值一律丢掉：每个 builder 自己把 `ModalRoot` 挂上去（见 `_modal_root`），
+        // 这里要的只是「建了哪一屏」这个副作用
         match about {
-            Pending::Buy(land) => buy_modal(&mut commands, &font, &books, player, land, stamp),
+            Pending::Buy(land) => {
+                buy_modal(&mut commands, &font, &books, player, land, stamp);
+            }
             Pending::Upgrade(land) => {
-                upgrade_modal(&mut commands, &font, &books, player, land, stamp)
+                upgrade_modal(&mut commands, &font, &books, player, land, stamp);
             }
             Pending::RentNotice(land) => {
-                rent_modal(&mut commands, &font, &books, &names, player, land, stamp)
+                rent_modal(&mut commands, &font, &books, &names, player, land, stamp);
             }
-            Pending::Card => card_modal(&mut commands, &font, &view.memory, player, stamp),
-            Pending::BankTeller => bank_modal(&mut commands, &font, &books, player, stamp, &plots),
-            Pending::Shop => shop_modal(
-                &mut commands,
-                &font,
-                &books,
-                &shop_rows(&books, &view.shelf, &view.stock, player, &held),
-                player,
-                stamp,
-            ),
+            Pending::Card => {
+                card_modal(&mut commands, &font, &view.memory, player, stamp);
+            }
+            Pending::BankTeller => {
+                bank_modal(&mut commands, &font, &books, player, stamp, &plots);
+            }
+            Pending::Shop => {
+                shop_modal(
+                    &mut commands,
+                    &font,
+                    &books,
+                    &shop_rows(&books, &view.shelf, &view.stock, player, &held),
+                    player,
+                    stamp,
+                );
+            }
             Pending::Bail(place) => {
-                bail_modal(&mut commands, &font, &books, player, place, &bails, stamp)
+                bail_modal(&mut commands, &font, &books, player, place, &bails, stamp);
             }
-        };
+            // 游乐场（P7）**不在这里建面板**：模态的内容是「弹出那一刻烤死」的，
+            // 而那一屏上有气球在飞、秒数在跳，每帧都要动 —— 那是 `ui/minigame.rs` 的活，
+            // 它读的同样是 `PendingDecision`。这一格存在的意义是「旧的模态要被收走」：
+            // 从百货柜台那一格走到游乐场，柜台不能还压在屏幕上（上面那个 despawn 循环
+            // 已经做完了），而这一屏由 `sync_arcade` 建、不由这里建
+            Pending::Minigame(_) => {}
+        }
     }
 }
 
@@ -305,6 +321,9 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
                 .collect::<Vec<_>>()
                 .join(",")
         ),
+        // 游乐场那一屏不由 `sync_modal` 建（见下面那个空分支），所以这里没有要签名的东西：
+        // 它的可见内容每帧都在动，由 `ui/minigame.rs` 自己就地改，不走「签名变了才重建」那条路
+        Pending::Minigame(_) => String::new(),
         // 报价与收据的内容弹出即定稿（买地面板上的「你的现金」是那一刻的现金，
         // 而回合停在那几帧里谁也花不了钱）
         Pending::Buy(_) | Pending::Upgrade(_) | Pending::RentNotice(_) | Pending::Card => {

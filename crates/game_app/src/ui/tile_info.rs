@@ -225,5 +225,6 @@ fn kind_name(kind: TileKind) -> &'static str {
         TileKind::Transport => "交通",
         TileKind::Coupon => "点券箱",
         TileKind::Shop => "百货公司",
+        TileKind::Arcade => "游乐场",
     }
 }

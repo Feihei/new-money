@@ -8,7 +8,8 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    Decision, DecisionChosen, Pending, PendingDecision, RequestRoll, TurnOrder, TurnPhase,
+    Decision, DecisionChosen, GameKind, GameRules, MinigameResult, Pending, PendingDecision,
+    RequestRoll, TurnOrder, TurnPhase,
 };
 
 pub struct AutopilotPlugin;
@@ -70,11 +71,42 @@ fn auto_roll(
     requests.write(RequestRoll { player, dice: 0 });
 }
 
+/// 自动玩家对一个待决事项的回答。单开一个类型而不是直接返回 `Decision`：
+/// 游乐场那一格（P7）要回的不是决策而是**一份成绩**，两种回答在类型上分开，
+/// 于是「新增一种窗口」时必须当场决定自动玩家怎么答它（与 `landing::domain_of` 同一条纪律）。
+enum AutoAnswer {
+    Decide(Decision),
+    Score { game: GameKind, score: u32 },
+}
+
+/// 报价类答「接受」，收据/卡面/两种柜台答「已阅」。这一分工不是讲究：柜台只认
+/// `Acknowledge`（`landing.rs` 的 match），一律发 `Accept` 的写法会让长跑的自动玩家
+/// 第一个踩到银行格（或百货格）的回合就永久停在 `WaitDecision` —— 而且不报错，只是不动了。
+///
+/// 游乐场报**满分的一半**而不是 0：报 0 的话长跑里「成绩换点券」这条路径一次都没被走过，
+/// 而它正是 P7 的验收项之一。
+fn answer_for(about: Pending, rules: &GameRules) -> AutoAnswer {
+    match about {
+        Pending::Buy(_) | Pending::Upgrade(_) => AutoAnswer::Decide(Decision::Accept),
+        Pending::Minigame(game) => AutoAnswer::Score {
+            game,
+            score: rules.minigames.of(game).perfect / 2,
+        },
+        Pending::RentNotice(_)
+        | Pending::Card
+        | Pending::BankTeller
+        | Pending::Shop
+        | Pending::Bail(_) => AutoAnswer::Decide(Decision::Acknowledge),
+    }
+}
+
 fn auto_answer(
     time: Res<Time>,
     pending: Res<PendingDecision>,
+    rules: Res<GameRules>,
     gap: Res<AutoGap>,
     mut answers: MessageWriter<DecisionChosen>,
+    mut scores: MessageWriter<MinigameResult>,
     mut due: Local<f32>,
 ) {
     let Some((player, about)) = pending.active() else {
@@ -84,16 +116,57 @@ fn auto_answer(
         return;
     }
     *due = time.elapsed_secs() + gap.0;
-    // 报价类答「接受」，收据/卡面/两种柜台答「已阅」。这一分工不是讲究：柜台只认
-    // `Acknowledge`（`landing.rs` 的 match），一律发 `Accept` 的写法会让长跑的自动玩家
-    // 第一个踩到银行格（或百货格）的回合就永久停在 `WaitDecision` —— 而且不报错，只是不动了。
-    let action = match about {
-        Pending::Buy(_) | Pending::Upgrade(_) => Decision::Accept,
-        Pending::RentNotice(_)
-        | Pending::Card
-        | Pending::BankTeller
-        | Pending::Shop
-        | Pending::Bail(_) => Decision::Acknowledge,
-    };
-    answers.write(DecisionChosen { player, action });
+    // 游乐场那一格（P7）同样会卡死长跑：它只认 `MinigameResult`，`Acknowledge` 在那里的
+    // 意思是「空手离开」。`awarded: true`：自动玩家跑的是真对局，不是练习。
+    match answer_for(about, &rules) {
+        AutoAnswer::Decide(action) => {
+            answers.write(DecisionChosen { player, action });
+        }
+        AutoAnswer::Score { game, score } => {
+            scores.write(MinigameResult {
+                player,
+                game,
+                score,
+                awarded: true,
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AutoAnswer, answer_for};
+    use game_core::prelude::{Decision, GameKind, GameRules, LandId, Pending};
+
+    /// 每一种窗口都要有自动玩家的答案，而游乐场那一份必须是**带分的**：
+    /// 答成 `Acknowledge` 的话长跑会在第一个游乐场格永久停住，且不报错、只是不动了。
+    #[test]
+    fn every_window_has_an_answer_and_the_arcade_one_scores() {
+        let rules = GameRules::default();
+        for game in GameKind::ALL {
+            match answer_for(Pending::Minigame(game), &rules) {
+                AutoAnswer::Score { game: g, score } => {
+                    assert_eq!(g, game);
+                    assert_eq!(
+                        score,
+                        rules.minigames.of(game).perfect / 2,
+                        "{} 的自动成绩不是满分的一半",
+                        game.label()
+                    );
+                    assert!(score > 0, "报 0 分等于长跑里从没走过换点券那条路");
+                }
+                AutoAnswer::Decide(action) => {
+                    panic!("游乐场被答成了 {action:?} —— 长跑会停在那一格")
+                }
+            }
+        }
+        assert!(matches!(
+            answer_for(Pending::Buy(LandId(0)), &rules),
+            AutoAnswer::Decide(Decision::Accept)
+        ));
+        assert!(matches!(
+            answer_for(Pending::Shop, &rules),
+            AutoAnswer::Decide(Decision::Acknowledge)
+        ));
+    }
 }

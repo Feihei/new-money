@@ -453,7 +453,11 @@ fn a_god_that_walks_onto_a_player_does_not_possess_him() {
     }
 
     let mut overlapped = false;
-    for turn in 2..=60 {
+    // 上限给到 400 而不是 60：那位神是**随机游走**（每回合各半概率往两边挪一格），
+    // 而路上还挤着补刷进来的其它神、挤不进去就原地站一回合 —— 环长从 13 变成 14（P7 追加
+    // 游乐场那一格）之后，这一趟实测走到第 132 回合才踩到有人那格。上限放宽不影响这条
+    // 用例的牙：下面那句 `overlapped` 断的就是「真的撞上过」，撞不上就红（空跑的断言等于没断言）。
+    for turn in 2..=400 {
         play_turns(&mut app, turn);
         if gods_on_board(&mut app)
             .iter()
@@ -470,7 +474,7 @@ fn a_god_that_walks_onto_a_player_does_not_possess_him() {
     }
     assert!(
         overlapped,
-        "60 个回合里那位神没走到有人站着的那一格，用例白跑"
+        "400 个回合里那位神没走到有人站着的那一格，用例白跑"
     );
     assert!(
         in_play(&mut app, God::BigFortune),

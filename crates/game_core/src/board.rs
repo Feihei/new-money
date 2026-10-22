@@ -31,6 +31,11 @@ pub enum TileKind {
     /// 百货公司：踩上去开柜台窗口，点券买卡 / 卖回打 9 折（PLAN §三「百货公司」行，
     /// 实现见 `shop.rs`）。路过不给任何资格 —— 这一格的玩法就是「停下来逛」。
     Shop,
+    /// 游乐场：踩上去开一局小游戏，成绩换点券（PLAN §五「小游戏格」，实现见 `minigame.rs`）。
+    ///
+    /// **三种游戏共用这一个格类型**，靠 `data.game` 分流 —— 不各开一个 `TileKind`，
+    /// 否则格类型的数量会被美术资产的数量牵着走。`data.game` 缺省 = 这一趟随机一款。
+    Arcade,
 }
 
 impl TileKind {
@@ -79,7 +84,7 @@ impl GridPos {
     }
 }
 
-/// 格子附加数据。点券格用 `coupon`/`refresh`，其余格为 `{}`。
+/// 格子附加数据。点券格用 `coupon`/`refresh`，游乐场用 `game`，其余格为 `{}`。
 ///
 /// 拘留格**不带天数与罚金**：天数只来自卡面（P4④ 拍板），`turns`/`fine` 那份
 /// Godot 残留数据已删 —— 留着就是第二份真相。
@@ -93,6 +98,13 @@ pub struct TileData {
     /// 写 `0` 是数据错误（等于每次踩都发，「一次性」这条规则白写），由 `validate` 拦下。
     #[serde(default)]
     pub refresh: Option<u32>,
+    /// 游乐场这一格固定玩哪一款（P7）。
+    ///
+    /// **缺省是「这一趟随机一款」而不是数据错误** —— 与点券面额那条相反，这里没有梯度要保：
+    /// 三档成绩的点券上限被 `minigame::Payouts` 压在同一个量级，所以「踩到哪一种」不是抽奖。
+    /// 真棋盘（P10）一格写死一款，演示盘那一格留空让三种都轮得到。
+    #[serde(default)]
+    pub game: Option<crate::minigame::GameKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -416,6 +428,15 @@ impl BoardDef {
                     t.kind, t.id, t.name
                 ));
             }
+            // `game` 只能住在游乐场格上（与上面那组同一条理由：数据写歪了要在加载期响，
+            // 而不是让玩家用一局的时间去发现「这一格踩上去什么都不发生」）。
+            // 缺省是合法的 —— 那一格的意思是「这一趟随机一款」，见 `TileData::game`
+            if t.kind != TileKind::Arcade && t.data.game.is_some() {
+                errs.push(format!(
+                    "{:?} 格 {}({}) 不该带 game 字段",
+                    t.kind, t.id, t.name
+                ));
+            }
         }
 
         let mut land_cells = std::collections::HashSet::new();
@@ -516,7 +537,7 @@ mod tests {
     fn prototype_parses_and_validates() {
         let b = board();
         assert_eq!(b.board_name, "prototype");
-        assert_eq!(b.loop_len(), 13);
+        assert_eq!(b.loop_len(), 14);
         assert_eq!(b.lands.len(), 6);
         assert!(
             b.validate().is_ok(),
@@ -528,58 +549,66 @@ mod tests {
     #[test]
     fn ring_wraps_both_directions() {
         let b = board();
-        // 12 号（百货公司）是 P3d② 追加在环尾的一格：它不改任何既有格的编号，
-        // 只把「回绕」那一跳从 11→0 挪成 12→0。
+        // 12 号（百货公司）与 13 号（游乐场）是 P3d②/P7 先后追加在环尾的两格：
+        // 都不改任何既有格的编号，只把「回绕」那一跳一路往后挪（11→0 变 12→0 再变 13→0）。
         assert_eq!(b.destination(11, 1), 12);
-        assert_eq!(b.destination(12, 1), 0, "环尾下一步该回到起点");
-        assert_eq!(b.destination(0, -1), 12);
-        assert_eq!(b.destination(5, 13), 5);
-        assert_eq!(b.tile(-1).unwrap().id, 12);
-        assert_eq!(b.tile(13).unwrap().id, 0);
+        assert_eq!(b.destination(12, 1), 13);
+        assert_eq!(b.destination(13, 1), 0, "环尾下一步该回到起点");
+        assert_eq!(b.destination(0, -1), 13);
+        assert_eq!(b.destination(5, 14), 5, "整整一圈回到原地");
+        assert_eq!(b.tile(-1).unwrap().id, 13);
+        assert_eq!(b.tile(14).unwrap().id, 0);
         // wrapped() 与 tile() 必须同一套取模规则，否则棋子位置与看到的格子会错位
-        assert_eq!(b.wrapped(-1), TileIndex(12));
-        assert_eq!(b.wrapped(13), TileIndex(0));
+        assert_eq!(b.wrapped(-1), TileIndex(13));
+        assert_eq!(b.wrapped(14), TileIndex(0));
     }
 
     /// 请神符（P6d）的「离自己最近」读的是这两句：先比双向最短，同距时比行进方向。
     #[test]
     fn ring_distance_counts_both_ways_while_the_heading_breaks_a_tie() {
-        let b = board(); // 13 格
+        let b = board(); // 14 格
         assert_eq!(b.ring_distance(TileIndex(0), TileIndex(0)), 0);
         assert_eq!(b.ring_distance(TileIndex(0), TileIndex(6)), 6);
         assert_eq!(
-            b.ring_distance(TileIndex(0), TileIndex(7)),
+            b.ring_distance(TileIndex(0), TileIndex(8)),
             6,
-            "顺着数 7 步的那一边，倒着数只有 6 步 —— 最近是 6"
+            "顺着数 8 步的那一边，倒着数只有 6 步 —— 最近是 6"
+        );
+        assert_eq!(
+            b.ring_distance(TileIndex(0), TileIndex(7)),
+            7,
+            "偶数格环上正对面那一格两个方向一样远"
         );
         assert_eq!(
             b.ring_distance(TileIndex(11), TileIndex(1)),
-            3,
+            4,
             "跨过环尾与起点也要连着数，不能在此断开各数一半"
         );
-        // 同距的一对（3 号与 10 号离 0 号都是 3 步）：正向取前面那位，掉头之后取另一位
+        // 同距的一对（3 号与 11 号离 0 号都是 3 步）：正向取前面那位，掉头之后取另一位。
+        // 这一对是「决胜键真的有牙」的全部依据 —— 14 格环上 7 号是唯一与自己同距的格，
+        // 两个方向都数出 7，用它当用例的话 `Heading` 那一格永远测不到
         assert_eq!(
             b.steps_toward(TileIndex(0), TileIndex(3), Heading::Forward),
             3
         );
         assert_eq!(
-            b.steps_toward(TileIndex(0), TileIndex(10), Heading::Forward),
-            10
+            b.steps_toward(TileIndex(0), TileIndex(11), Heading::Forward),
+            11
         );
         assert_eq!(
-            b.steps_toward(TileIndex(0), TileIndex(10), Heading::Backward),
+            b.steps_toward(TileIndex(0), TileIndex(11), Heading::Backward),
             3,
-            "倒着走时 10 号才是前面那位"
+            "倒着走时 11 号才是前面那位"
         );
     }
 
     #[test]
     fn walk_path_wraps_past_the_start_tile() {
         let b = board();
-        // 从 12 号走 2 步：先踏过 0 号起点再落到 1 号 —— 「绕回起点经过」
-        assert_eq!(b.walk_path(12, 2), vec![TileIndex(0), TileIndex(1)]);
-        // 从倒数第二格走 2 步：先经过百货格再踏过起点，回绕在第二步上
-        assert_eq!(b.walk_path(11, 2), vec![TileIndex(12), TileIndex(0)]);
+        // 从环尾走 2 步：先踏过 0 号起点再落到 1 号 —— 「绕回起点经过」
+        assert_eq!(b.walk_path(13, 2), vec![TileIndex(0), TileIndex(1)]);
+        // 从倒数第二格走 2 步：先经过游乐场再踏过起点，回绕在第二步上
+        assert_eq!(b.walk_path(12, 2), vec![TileIndex(13), TileIndex(0)]);
         assert_eq!(b.walk_path(0, 1), vec![TileIndex(1)]);
         assert!(b.walk_path(3, 0).is_empty(), "0 步不该有路径");
     }
@@ -595,15 +624,15 @@ mod tests {
             vec![TileIndex(4), TileIndex(3), TileIndex(2)],
             "倒着走是下标递减，不是把路径整个反过来念"
         );
-        // 从 1 号倒着越过起点：0 → 12（环尾）→ 11。回绕在负方向上同样成立，
-        // 而这条路径正是「被转向卡送去百货公司」的那条路
+        // 从 1 号倒着越过起点：0 → 13（游乐场）→ 12（百货）。回绕在负方向上同样成立，
+        // 而这条路径正是「被转向卡送去环尾那两格」的那条路
         assert_eq!(
             b.walk_path(1, -3),
-            vec![TileIndex(0), TileIndex(12), TileIndex(11)]
+            vec![TileIndex(0), TileIndex(13), TileIndex(12)]
         );
         // 方向不改变走了几步：正负三步都是三格，而倒着走满一圈回到出发那一格
-        assert_eq!(b.walk_path(2, -13).len(), 13);
-        assert_eq!(b.walk_path(2, -13).last(), Some(&TileIndex(2)));
+        assert_eq!(b.walk_path(2, -14).len(), 14);
+        assert_eq!(b.walk_path(2, -14).last(), Some(&TileIndex(2)));
     }
 
     #[test]
@@ -618,8 +647,8 @@ mod tests {
             vec![TileIndex(2), TileIndex(3), TileIndex(4)]
         );
         assert_eq!(b.walk_path(2, 1), vec![TileIndex(3)]);
-        // 整整一圈也恰好 13 步：分支不是环的一部分
-        assert_eq!(b.walk_path(2, 13).len(), 13);
+        // 整整一圈也恰好 14 步：分支不是环的一部分
+        assert_eq!(b.walk_path(2, 14).len(), 14);
     }
 
     #[test]
@@ -639,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn diagonal_segments_count_is_three() {
+    fn diagonal_segments_count_is_four() {
         // 设计意图（ADR-001）：斜向街道要能渲染成对角路面
         let b = board();
         let diag: Vec<u32> = (0..b.loop_len())
@@ -648,9 +677,11 @@ mod tests {
             .collect();
         // 2→3（汉口路→命运）与 9→10（王府井→点券箱）是原盘就有的两段；
         // 11→12 是 P3d② 追加百货格时新长的第三段 —— 那一格贴在左上角 (0,1)，
-        // 从西单 (1,2) 只能斜着过去。对角段只被「报告」不被禁止（validate 允许 Δ≤1），
-        // 所以这一串数的意义是：路面渲染与斜段特性仍然有真东西可画。
-        assert_eq!(diag, vec![2, 9, 11], "非对角段被误判: {diag:?}");
+        // 从西单 (1,2) 只能斜着过去；13→0 是 P7 追加游乐场格时新长的第四段 ——
+        // 它贴在角上 (0,0)，回起点 (1,1) 同样只能斜着走。
+        // 对角段只被「报告」不被禁止（validate 允许 Δ≤1），所以这一串数的意义是：
+        // 路面渲染与斜段特性仍然有真东西可画，而「追加一格」的代价一直是「多一条斜段」。
+        assert_eq!(diag, vec![2, 9, 11, 13], "非对角段被误判: {diag:?}");
     }
 
     /// 百货公司在演示盘上真有一格，而且踩得到（P3d② 验收第一条）。
@@ -668,6 +699,48 @@ mod tests {
         // 它关于一块地吗？不该 —— 百货是事件格，`validate` 也会替这条把关
         assert_eq!(b.tiles[12].land_id, None);
         assert_eq!(b.tiles[12].name, "百货公司");
+    }
+
+    /// 演示盘上那一格游乐场（P7）。`tests/minigame.rs` 钉着同一个编号，两处一起改才不会
+    /// 悄悄错位 —— 而「机制在演示盘上真能踩到」是这一格存在的理由（12 百货掷 1 点即到，
+    /// 11 西单掷 2 点即到）。
+    ///
+    /// **`data` 是空的，那是「这一趟随机一款」**：三种游戏在演示盘上只有一格的余量，
+    /// 写死一款就等于另外两种只能靠 `NM_MINIGAME` 才看得见。真棋盘（P10）一格写死一款。
+    #[test]
+    fn prototype_carries_an_arcade_the_player_can_step_on() {
+        let b = board();
+        let arcades: Vec<u32> = b
+            .tiles
+            .iter()
+            .filter(|t| t.kind == TileKind::Arcade)
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(arcades, vec![13], "演示盘该恰好一格游乐场");
+        assert_eq!(b.tiles[13].land_id, None, "游乐场是事件格，不关于一块地");
+        assert_eq!(b.tiles[13].name, "游乐场");
+        assert_eq!(b.tiles[13].data.game, None, "缺省＝随机一款");
+    }
+
+    /// `game` 只能住在游乐场格上，与点券字段那一组同一条不变式：数据写歪了要在加载期响，
+    /// 而不是让玩家用一局的时间去发现「这一格踩上去什么都不发生」。
+    #[test]
+    fn a_game_field_on_any_other_tile_is_a_load_error() {
+        let mut b = board();
+        b.tiles[1].data.game = Some(crate::minigame::GameKind::PopBalloons);
+        let errs = b.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("不该带 game 字段")),
+            "地产格上写了 game 却没被拦下：{errs:?}"
+        );
+
+        let mut b = board();
+        b.tiles[13].data.game = Some(crate::minigame::GameKind::PenguinDig);
+        assert!(
+            b.validate().is_ok(),
+            "游乐场格上写死一款是合法的：{:?}",
+            b.validate().err()
+        );
     }
 
     #[test]

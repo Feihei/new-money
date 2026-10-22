@@ -91,10 +91,12 @@ fn a_reversed_player_walks_the_same_ring_backwards_and_the_die_stays_positive() 
 
 #[test]
 fn walking_backwards_wraps_past_the_start_to_the_other_end_of_the_ring() {
-    // 从 1 号倒着走三步：0（起点）→ 12（百货公司）→ 11（西单）。回绕用的是同一个
-    // `rem_euclid`，而「倒着越过起点」不发薪水（`domain_of(Start) = Nothing` 早就拍板过），
-    // 所以这里没有「反复擦过起点捞一笔」的套利
-    let (mut app, p0, _p1) = standing_at(1, 3);
+    // 从 1 号倒着走四步：0（起点）→ 13（游乐场）→ 12（百货公司）→ 11（西单）。回绕用的是
+    // 同一个 `rem_euclid`，而「倒着越过起点」不发薪水（`domain_of(Start) = Nothing` 早就拍板过），
+    // 所以这里没有「反复擦过起点捞一笔」的套利。
+    // 四步而不是三步（P7 之前是三步、落在环尾那一格）：环尾现在是游乐场，倒着**踩**到它
+    // 会开出一局小游戏的窗口，那条窗口属于 `tests/minigame.rs`，不该混进这条只问「绕不绕得回去」
+    let (mut app, p0, _p1) = standing_at(1, 4);
     turn_around(&mut app, p0, p0);
     play_turns(&mut app, 1);
 

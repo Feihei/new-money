@@ -5,8 +5,8 @@
 //! 假种子函数（缺陷 #6）。这里整局共用一个种子，于是「同种子 → 同对局」变成一条
 //! 可以断言的性质 —— 回放与失败复现都从这里长出来。
 //!
-//! **同一个种子分成十条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
-//! 宝箱位置 / 宝箱掉落 / 神明）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
+//! **同一个种子分成十一条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
+//! 宝箱位置 / 宝箱掉落 / 神明 / 小游戏）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
 //! 取随机数就会把 `turn_flow` 里「对局骰点 == 独立掷出的骰点」那批回归网整片打翻，
 //! 回放也对不齐；分流之后每域的随机性各自稳定，加内容不互相扰动。
 //!
@@ -43,6 +43,13 @@ const LOOT_TAG: u64 = 0x1007_0000_0000_0008;
 /// 于是它是这条流上唯一一个「随回合稳定增加取数次数」的来源；把它并进骰子流，
 /// 第 30 回合之后的骰点就会随「前面几位神各晃了几步」漂移，回放当场对不齐。
 const GOD_TAG: u64 = 0x60D0_0000_0000_0009;
+/// P7：游乐场这一趟玩哪一款、以及那一局的布局种子。
+///
+/// 单独一条的理由与百货、神明那两条同形：**「这一局进过几次游乐场」不该改变下一张机会牌
+/// 是谁，也不该改变下一手骰点**。而布局种子那一半更要紧 —— 挖宝的 16 格里埋着几格宝
+/// 直接决定得分、得分换点券、点券是账，所以它必须是可复现的（同一个 `NM_SEED` 走到同一格
+/// 摆出同一局），同时又不能去挪动别的流。
+const MINIGAME_TAG: u64 = 0xA4CA_D000_0000_000A;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +77,7 @@ pub struct Rng {
     spawn: ChaCha8Rng,
     loot: ChaCha8Rng,
     god: ChaCha8Rng,
+    minigame: ChaCha8Rng,
 }
 
 impl Rng {
@@ -87,7 +95,22 @@ impl Rng {
             spawn: ChaCha8Rng::seed_from_u64(seed ^ SPAWN_TAG),
             loot: ChaCha8Rng::seed_from_u64(seed ^ LOOT_TAG),
             god: ChaCha8Rng::seed_from_u64(seed ^ GOD_TAG),
+            minigame: ChaCha8Rng::seed_from_u64(seed ^ MINIGAME_TAG),
         }
+    }
+
+    /// 游乐场那一条流（P7）：这一趟玩哪一款，以及那一局的布局种子。
+    pub fn pick_minigame(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.minigame.random_range(span)
+    }
+
+    /// 一整局小游戏的布局种子（64 位）。
+    ///
+    /// 为什么发一个**种子**而不是把布局抽好：布局长什么样是玩法本体的事（4×4 的冰洞、
+    /// 气球从哪儿升起来），规则层刻意不知道（PLAN §五「core 不实现玩法本体」）。
+    /// 发种子既保住了「同一 `NM_SEED` 走到同一格摆出同一局」，又没让 core 学会数格子。
+    pub fn arcade_seed(&mut self) -> u64 {
+        self.minigame.random::<u64>()
     }
 
     /// 神明那一条流（P6）：刷哪位神、落在哪一格、往哪边走、神给的那位数。
@@ -363,6 +386,44 @@ mod tests {
         assert_eq!(series(5), series(5), "同种子必须复现同一条刷神序列");
         assert_ne!(series(5), series(6));
         assert!(series(5).iter().all(|v| (0..=10).contains(v)));
+    }
+
+    /// P7 的第十一条流。游乐场是这条流上唯一一个「一次取数就取走 64 位」的来源
+    /// （布局种子），所以它尤其不能挪动骰点、牌序、货架与神明。
+    #[test]
+    fn an_arcade_visit_shifts_nothing() {
+        let draws = |seed: u64, busy: bool| {
+            let mut r = Rng::new(seed);
+            if busy {
+                for _ in 0..40 {
+                    r.pick_minigame(0..=2);
+                    r.arcade_seed();
+                }
+            }
+            (
+                (0..6).map(|_| r.roll_die()).collect::<Vec<_>>(),
+                (0..6).map(|_| r.pick(0..=9)).collect::<Vec<_>>(),
+                (0..6).map(|_| r.pick_shop(0..=9)).collect::<Vec<_>>(),
+                (0..6).map(|_| r.pick_god(1..=12)).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            draws(41, true),
+            draws(41, false),
+            "小游戏流污染了骰子/牌堆/百货/神明流"
+        );
+    }
+
+    /// 布局种子要真的散开：三局全是同一个数的话，「随机一款 + 随机布局」那一半是假的
+    /// （而症状只是「每次挖宝的宝都在同几格」，不报错、也不红）。
+    #[test]
+    fn arcade_seeds_spread_out() {
+        let mut r = Rng::new(23);
+        let seeds: Vec<u64> = (0..32).map(|_| r.arcade_seed()).collect();
+        let mut uniq = seeds.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), seeds.len(), "布局种子撞车了：{seeds:?}");
     }
 
     /// 财神与红包共用的那一句（PLAN §三 神明行点名的「别各写一套」）。

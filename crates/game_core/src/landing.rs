@@ -63,6 +63,12 @@ pub enum LandingDomain {
     Coupon,
     /// 百货公司柜台：点券买卡 / 卖回（`shop::settle_shop_landing`）。
     Shop,
+    /// 游乐场：踩上去开一局小游戏，成绩换点券（P7，`minigame::settle_arcade_landing`）。
+    ///
+    /// 「玩哪一款」不在这一格里 —— 那是格子数据（`TileData.game`，缺省＝随机一款）与
+    /// [`Pending::Minigame`] 的事，而 `domain_of` 只是「格类型 → 谁结算」的一张表，
+    /// 它读不到格子数据（`const fn`，且刻意不碰世界）。
+    Arcade,
     /// 拘留场所的接入点：踩上去可以花点券保释关在里面的人（P4③，`bail::settle_bail_landing`）。
     /// 带的是**这个入口管哪一处** —— 监狱门口放不出医院里的人。
     Bail(DetentionPlace),
@@ -85,6 +91,7 @@ pub const fn domain_of(kind: TileKind) -> LandingDomain {
         TileKind::Fate => D::Card(CardKind::Fate),
         TileKind::Coupon => D::Coupon,
         TileKind::Shop => D::Shop,
+        TileKind::Arcade => D::Arcade,
         // 拘留场所的**接入点**（P4③）：踩上去是保释入口，不是被抓 ——
         // 「没有任何踩到某格就被关的规则」是 10-20 拍板的另一半
         TileKind::Jail => D::Bail(DetentionPlace::Jail),
@@ -165,6 +172,18 @@ pub enum Pending {
     /// 进来，一次可以放不止一个人），所以对 `Accept`/`Decline` 不认，只认「离开」。
     /// 与 P3a「出牌不挂 Pending」相反：这里规则层确实要停下来问「要不要保」。
     Bail(DetentionPlace),
+    /// 踩到游乐场：这一趟玩哪一款小游戏（P7）。
+    ///
+    /// 它也是**窗口**，但关掉它的那把钥匙与另外三个不同：柜台按「离开」就算办完，
+    /// 而这一格的正经出口是 [`crate::msg::MinigameResult`]（玩完把成绩报上来，
+    /// 由 `minigame::minigame_score_system` 换点券、清窗口、交还回合）。
+    /// `Acknowledge` 在这里的意思是**空手离开**（不玩、或玩了不报成绩）—— 它必须存在，
+    /// 否则一个不想玩的人会把回合机永久停在 `WaitDecision`，而长跑的自动玩家也过不去。
+    ///
+    /// 带的那一款是**这一趟定下来的**：格子数据写了就是它，没写则由 `Rng` 的小游戏子流抽
+    /// （见 `minigame::settle_arcade_landing`）。挂在待决事项上而不是让 UI 自己去查格子，
+    /// 是因为「随机抽到了哪一款」是这一局的事实，得跟着回合机走、也得进存档（P15）。
+    Minigame(crate::minigame::GameKind),
 }
 
 /// 系统状态：现在正等谁的什么回答。
@@ -267,10 +286,16 @@ pub fn decision_system(
         // 这里若也认 `Accept`，就成了一条消息既办业务又关窗口 —— 两个语义挤一个动作，
         // 而面板上根本没有「接受」这个按钮可对上。
         // 百货柜台与保释窗口同一条理由（`ShopOpRequested`/`BailRequested` 逐笔办），
-        // 所以并在一起：三个窗口对 `Accept`/`Decline` 一律不认，谁新增第三种窗口都要来这一格表态。
-        (Pending::BankTeller | Pending::Shop | Pending::Bail(_), Decision::Acknowledge) => {}
+        // 游乐场也在这组里（成绩走 `MinigameResult` 报上来）：四个窗口对 `Accept`/`Decline`
+        // 一律不认，谁新增第五种窗口都要来这一格表态。
+        // ⚠️ 游乐场那一格的 `Acknowledge` 语义与另外三个不同：柜台是「办完了」，
+        //    它是「不玩了／空手离开」（成绩另有一条路）。见 `Pending::Minigame` 的注。
         (
-            Pending::BankTeller | Pending::Shop | Pending::Bail(_),
+            Pending::BankTeller | Pending::Shop | Pending::Bail(_) | Pending::Minigame(_),
+            Decision::Acknowledge,
+        ) => {}
+        (
+            Pending::BankTeller | Pending::Shop | Pending::Bail(_) | Pending::Minigame(_),
             Decision::Accept | Decision::Decline,
         ) => return,
         // 收据与卡面没有「可拒绝」的选项：钱已经扣了、效果已经结算了。
@@ -380,7 +405,7 @@ mod tests {
     /// 分派表的全部条目。这张清单与 `domain_of` 一一对着写：新增 `TileKind` 时
     /// `domain_of` 会先编译失败，所以这里唯一可能过期的是「加了格类型没加进清单」——
     /// 下面那条 `每格都有归宿` 的用例把两种过期分开钉住了。
-    const ALL_KINDS: [TileKind; 15] = [
+    const ALL_KINDS: [TileKind; 16] = [
         TileKind::Start,
         TileKind::Property,
         TileKind::Bank,
@@ -396,6 +421,7 @@ mod tests {
         TileKind::Transport,
         TileKind::Coupon,
         TileKind::Shop,
+        TileKind::Arcade,
     ];
 
     #[test]
@@ -409,6 +435,7 @@ mod tests {
             (TileKind::Fate, D::Card(CardKind::Fate)),
             (TileKind::Coupon, D::Coupon),
             (TileKind::Shop, D::Shop),
+            (TileKind::Arcade, D::Arcade),
             // P4③：拘留场所的接入点 = 保释入口（没人可保时安静收摊）
             (TileKind::Jail, D::Bail(DetentionPlace::Jail)),
             (TileKind::Hospital, D::Bail(DetentionPlace::Hospital)),
@@ -481,6 +508,7 @@ mod tests {
             Pending::BankTeller,
             Pending::Shop,
             Pending::Bail(DetentionPlace::Jail),
+            Pending::Minigame(crate::minigame::GameKind::PenguinDig),
         ] {
             let mut pending = PendingDecision::default();
             pending.offer(e, about);

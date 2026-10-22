@@ -51,6 +51,10 @@ pub fn spawn_menu(mut commands: Commands, font: Res<DevFont>) {
                     stack.spawn(label(&font.0, "New Money", size::BODY, col::MUTED));
                     stack.spawn(separator());
                     menu_button(stack, &font.0, "新游戏", UiAction::NewGame);
+                    // 游乐场练习（P7）：三款小游戏各玩一手，**不给点券**。挂在菜单上而不是
+                    // 对局里，是为了让「这三个玩法本身好不好玩」能被单独评 —— 而它不给点券
+                    // 这件事写在结算屏上，不是「菜单忘了发消息」（见 `ui/minigame.rs` 模块头）
+                    menu_button(stack, &font.0, "游乐场练习", UiAction::ToggleArcadeChoice);
                     // 读档与设置在 Godot 端只 print 一句未实现（main_menu.gd:23-30）。
                     // 这里照摆但灰掉：能点却什么都不做的按钮比没有按钮更糟。
                     stub_button(stack, &font.0, "读档");

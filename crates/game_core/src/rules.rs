@@ -88,6 +88,11 @@ pub struct GameRules {
     /// 4 是设计值（4 代只说「损失现金」，没给数）。读它的那一处夹成**至少 1**：
     /// 这个数一旦从存档或设置里读进来，`0` 就是一次当场崩掉的除法，而它换来的只是「不抢钱」。
     pub poor_cash_divisor: u32,
+    /// 三种小游戏的成绩→点券表（P7）。**三种各配「满分」与「每分几点券」，放在同一个
+    /// 结构体里**，理由与 [`bail_points`] 那条同族：这三个游戏的平衡是这个功能唯一真正
+    /// 难的地方，参数散在三个玩法文件里就没法横向比较（「踩到哪一格」不该是抽一张
+    /// 大小不同的奖）。表本身的数与理由见 [`crate::minigame::Payouts`]。
+    pub minigames: crate::minigame::Payouts,
 }
 
 impl Default for GameRules {
@@ -113,6 +118,7 @@ impl Default for GameRules {
             redeem_percent: 110,
             bail_points: 30,
             poor_cash_divisor: 4,
+            minigames: crate::minigame::Payouts::default(),
         }
     }
 }

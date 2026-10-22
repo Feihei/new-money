@@ -802,3 +802,40 @@ pub struct GodDeed {
     /// 送到手上的卡（大福神 2 张、小福神 1 张，其余为空）。
     pub cards: Vec<CardNotice>,
 }
+
+/// 一局小游戏的成绩（P7，表现层 → 规则层的意图）。
+///
+/// 规则层不实现玩法本体（PLAN §五），所以这一条是那个接口**唯一**的入口：玩成什么样由
+/// `game_app/src/ui/minigame.rs` 说了算，它把结果报上来，换多少点券由
+/// [`crate::minigame::Payouts`] 那张表算 —— 表现层不参与定价。
+///
+/// `awarded` 是那一格**显式的奖励开关**：主菜单的练习局报 `false`，规则层照样记一条
+/// [`MinigameScore`]、但一分不发。不靠「练习局不发消息」来实现，是因为隐式的奖励开关
+/// 最难查 —— 症状是「点券莫名其妙多了」，而那条路径上没有任何一行代码提到练习。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinigameResult {
+    pub player: Entity,
+    pub game: crate::minigame::GameKind,
+    /// 这一局打出的成绩。单位由那一款自己定（气球几只、财宝几件、挖到几格宝），
+    /// 规则层只把它喂进那张表。
+    pub score: u32,
+    pub awarded: bool,
+}
+
+/// 一份成绩已经结算（P7 的凭据）。
+///
+/// 与 [`MinigameResult`] 分成两条而不是复用一条：那条是「玩家报上来的数」，这条是
+/// 「规则层认了、并且换成了点券」。多出来的 `points` 正是这一条存在的理由 ——
+/// 顶栏那句「得分 21 → 84 点券」要能与 HUD 上点券的变化对得上账。
+///
+/// 它**不产生**一条 `CashChanged`：点券是另一套账（PLAN §一「永不通兑」），
+/// 所以这一笔在现金审计里看不见，只出现在点券审计里。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinigameScore {
+    pub player: Entity,
+    pub game: crate::minigame::GameKind,
+    pub score: u32,
+    /// 真正发下去的点券。练习局（`awarded == false`）恒为 0。
+    pub points: u32,
+    pub awarded: bool,
+}

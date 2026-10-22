@@ -49,11 +49,12 @@
 | `land_id` | int? | **仅 property 道路格**有；指向 `lands[]` 的土地 |
 | `branch` | object? | **可选**；存在即为分支接入点 |
 
-**道路格 `type` 取值**：`start` / `road` / `chance` / `fate` / `bank` / `stock` / `coupon` / `transport` / `property` / `jail`(接入点) / `hospital`(接入点) ……
+**道路格 `type` 取值**：`start` / `road` / `chance` / `fate` / `bank` / `stock` / `coupon` / `shop` / `arcade` / `transport` / `property` / `jail`(接入点) / `hospital`(接入点) ……
 - `property` 道路格：**必带 `land_id`**，落到此格经 `land_id` 触发土地的购买/收租/升级。
 - 拐角格必须是 `fate`/`bank`/`news` 等特殊类型，**不绑土地**（无 `land_id`）。
 - `jail` / `hospital` 作为**分支尽头格**时只是地址，不是触发器：踩不到（`walk_path` 从不进分支），人被关着时棋子停在那里（10-20 拍板，P4④）。作为**主环格**时它是保释入口：踩上去开保释窗口，花 `GameRules::bail_points`（30）点券把关在对应分支里的人放出来，没人可保就与路面一样收摊（P4③）。
 - 演示盘把拘留分支挂在地产格上（2 汉口路 / 7 徐家汇），所以「走到监狱门口」表现为先结算地产、再弹保释窗口；将来的真棋盘可以把 `type: jail` 直接放在主环上，两条入口共用同一张窗口。
+- `arcade`（游乐场，P7）：踩上去开一局小游戏，成绩按 `GameRules::minigames` 那张表换点券。**三种游戏共用这一个 `type`**，靠 `data.game` 分流（`pop_balloons` / `catch_treasure` / `penguin_dig`）—— 不各开一个 `type`，否则格类型的数量会被美术资产的数量牵着走。
 - 其余类型按各自事件处理，无 `land_id`。
 
 ### `data` 的字段与归属（P1 起）
@@ -62,6 +63,7 @@
 |------|------|------|------|
 | `coupon` | int? | **仅 `coupon`** | 点券面额，**必须为正**（三档 10/30/50 由数据决定，不随机抽，见 PLAN §五） |
 | `refresh` | int? | **仅 `coupon`** | 取走后多少回合重新出现；缺省走 `GameRules::coupon_refresh_turns`（6）。写 `0` 等于每次踩都发，与「一次性」矛盾 |
+| `game` | string? | **仅 `arcade`** | 这一格固定玩哪一款：`pop_balloons` / `catch_treasure` / `penguin_dig`。**缺省合法**，意思是「这一趟随机一款」（抽法走 `Rng` 的小游戏子流）。写错的值不是被忽略而是**加载期报错**（serde 枚举） |
 
 > 拘留格**没有** `turns` / `fine`：拘留天数只来自卡面（10-20 拍板，P4④ 把字段与数据一起删了），而保释不动现金（P4③）。写回 `data.turns`/`data.fine` 会被 serde 忽略，而 `board.rs` 有一条断言钉住那两格的数据必须为空。
 
@@ -69,6 +71,8 @@
 - `coupon` 格的 `data.coupon` 缺失或为 0 → 加载期报错。「踩上去什么都不发生」必须是数据错误而不是运行时的静默。
 - 非 `coupon` 格带 `coupon`/`refresh` → 报错（与「非 property 格不该带 `land_id`」同一条理由）。
 - `coupon` 格不绑土地：它是一次性拾取点，没有归属、等级、租金。
+- 非 `arcade` 格带 `data.game` → 报错（与上面那条同一条理由：写歪了要在加载期响）。反方向**不报**：`arcade` 格缺 `game` 是「随机一款」，与「`coupon` 格缺面额」不同 —— 后者踩上去什么都不发，前者照样开一局。
+- `arcade` 格不绑土地：它是一个窗口，没有归属、等级、租金。
 
 ### 对角判定
 相邻 `loop` 元素若 `abs(dcol)==1 && abs(drow)==1`，该段为**对角路**（斜向街道），渲染与移动均按斜线处理。

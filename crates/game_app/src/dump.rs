@@ -16,11 +16,12 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
-    ActiveBoard, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind, Corrections,
-    CouponBoxes, Deck, DeckOrder, Detention, GameSeed, GameSession, Hand, Heading, HolidaySet,
-    Insulation, Inventory, LandId, LandStatus, Landing, MarketClock, Mortgaged, Mount, MoveCap,
-    Occupancy, OccupancyAt, Owner, Paused, PendingDecision, PlayerId, PlayerName, Points,
-    Possession, Shelf, ShopStock, StaySentence, Timed, TurnOrder, TurnPhase, Wallet, resists,
+    ActiveBoard, ArcadeDeal, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind,
+    Corrections, CouponBoxes, Deck, DeckOrder, Detention, GameSeed, GameSession, Hand, Heading,
+    HolidaySet, Insulation, Inventory, LandId, LandStatus, Landing, MarketClock, Mortgaged, Mount,
+    MoveCap, Occupancy, OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName,
+    Points, Possession, Shelf, ShopStock, StaySentence, Timed, TurnOrder, TurnPhase, Wallet,
+    resists,
 };
 
 use crate::asset_root;
@@ -151,6 +152,9 @@ pub struct DumpView<'w, 's> {
     holidays: Res<'w, HolidaySet>,
     landing: Res<'w, Landing>,
     pending: Res<'w, PendingDecision>,
+    /// 游乐场那一手的布局种子（P7）。它是「这一屏为什么埋在那几格」的唯一答案，
+    /// 而挖宝那一格的分是账上的事 —— 查「他怎么就挖到了六件」时要能看见种子
+    deal: Res<'w, ArcadeDeal>,
     atm: Res<'w, AtmAccess>,
     boxes: Res<'w, CouponBoxes>,
     corrections: Res<'w, Corrections>,
@@ -259,6 +263,10 @@ fn format_landing(view: &DumpView) -> String {
 
 fn format_pending(view: &DumpView) -> String {
     match view.pending.active() {
+        // 游乐场那个窗口多带一个数：布局种子决定了挖宝埋在哪几格（P7）
+        Some((player, about @ Pending::Minigame(_))) => {
+            format!("{about:?} ← {player:?} · 布局种子 {}", view.deal.seed)
+        }
         Some((player, about)) => format!("{about:?} ← {player:?}"),
         None => "没人挂着待决事项".to_string(),
     }

@@ -349,6 +349,8 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 
 
 33. **同一个 system 里两条查询都读 `Transform` 会以 B0001 panic，即使它们碰的是天然不相交的两批实体**（P5 的道路图标第一次上屏时踩到）。`sync_occupancy_visuals` 一条查图标（`&mut Transform`）、一条查棋子（`&Transform`），实体集合一个来自 occupancy、一个来自 token，肉眼绝不会相交；但 Bevy 0.20 的冲突检查只看**组件类型与过滤器**，不看实体从哪来，参数建立期直接 panic：`error[B0001]: Query<(&TokenVisual, &Transform)> ... accesses component(s) Transform in a way that conflicts with a previous system parameter`。修法：给其中一条加 `Without<另一批的标记组件>`（本项目是 `shown: Query<..., Without<TokenVisual>>`），把「它们不是同一批实体」写成调度器看得见的条件，而不是写成注释。判据：**同一个 system 里出现两条读写同一组件的查询时，必须用 `With<T>`/`Without<T>` 证明互不相交**；`ParamSet` 是另一条路，但它会强迫两条查询顺序借用，能拆开时优先拆开。
+34. **bevy_ui 默认不裁子节点：绝对定位的孩子画出父盒之外，一声不响**（P7 游乐场第一张冒烟图）。气球从底部进场时 `bottom` 是负的、财宝落到地面以下时也是，于是那几只画在玩法区外面、压在 HUD 与底栏上 —— 不报错、不警告，只是「图上多了两个球」。修法：容器节点写 `overflow: Overflow::clip()`。**判据：任何「东西从边界外进场/退场」的玩法区都要裁**；反过来，若哪天某个绝对定位的孩子「该露出来却不见了」，先查它祖先有没有这一位。
+35. **`Node` 的 `flex_direction` 默认是 `Row`，而「一列一列往下排」是大多数面板想要的**（P7 挖宝第一张图：4×4 的 16 格排成**一行**横着溢出，被上一条的 clip 切成两半，症状像「格子数不对」而不是「方向不对」）。绝对定位的孩子不受这一位影响，所以同一块玩法区里只有 flex 排的那一种露馅 —— **混用绝对定位与 flex 的容器，方向错了只有一半孩子报错形状**。修法：建容器时显式写 `flex_direction: FlexDirection::Column`，别靠默认。
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
