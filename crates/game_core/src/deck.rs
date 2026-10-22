@@ -251,8 +251,16 @@ const FREE_PASS_DOMAINS: &[ChargeDomain] = &[ChargeDomain::Rent, ChargeDomain::P
 /// - **`move_to` 不连锁结算新格子**：Godot 端踩到「回到起点」也不会领过路费奖金，
 ///   这里照做。连锁会引入「卡牌把玩家送到卡牌格」这类环，属于设计而非移植。
 /// - **`go_to_jail` 先过护身**（P3a）：被抵消的那次不会留下半条入狱流水。
+///
+/// 为什么同时带 `player` 与 `victim` 两个人：绝大多数效果只用得到其中一个（抽卡那条路
+/// 两者就是同一个人），而 [`crate::card::CardEffect::Auction`]（P9）的**主语与承受者天生
+/// 不是同一个人** —— 开槌的是出牌人（他不参与竞价、拍出的钱归他），被拍的是别人手里的地。
+/// 为它一个去给 `CardSink` 加「当前回合玩家」之类的位置参数是把判据塞错地方：
+/// 出牌人与回合玩家在两处判据里本来就可能不一致（P3a 那条「主语只认当前回合玩家」写在
+/// `play_card_system`，不在这里）。
 pub fn apply_card(
     sink: &mut CardSink,
+    player: Entity,
     victim: Entity,
     def: &CardDef,
     aim: Option<crate::hand::CardAim>,
@@ -430,6 +438,18 @@ pub fn apply_card(
                     // 不是玩家能遇到的处境，所以报给日志而不是编一条永远看不见的凭据
                     None => warn!("{} 打出去了却没买下这块地：出牌判据与账本分叉了", def.id),
                 }
+            }
+            CardEffect::Auction => {
+                // 拍哪块地同样来自**请求**，不在卡面上（与 `BuyLand` 同一条理由）。
+                // 出牌那道门已经问过 `can_open`（`unmet_precondition`），所以走到这里
+                // 只剩「把这一槌许下去」—— 真正开场由 `auction::auction_hold_system` 做，
+                // 因为它才拿得到座位序（`TurnOrder`），而「先问谁」是拍卖机的事不是这张卡的事
+                let Some(crate::hand::CardAim::Land(land)) = aim else {
+                    debug!("{} 要拍卖地，但这次没有地块目标", def.id);
+                    continue;
+                };
+                sink.books.auction.requested = Some((land, player));
+                outcomes.push(EffectOutcome::Auctioned { land });
             }
             CardEffect::Reverse => {
                 // 与入狱同一条形状：它先过护身。被抵消的那次不该留下半个掉头 ——
@@ -683,7 +703,8 @@ pub fn settle_card_landing(
 
     // 抽到的卡没有目标可选（`aim: None`）：两副事件池的效果都是打在抽卡人自己身上的，
     // 而带 `target` 的道具卡压根不在池里（`settle_card_landing` 对 `Item` 直接 return）
-    let outcomes = apply_card(&mut sink, player, def, None);
+    // 抽卡这条路没有「别人」：主语与承受者是同一个人（见 `apply_card` 的文档注）
+    let outcomes = apply_card(&mut sink, player, player, def, None);
 
     drawn.write(CardDrawn {
         player,

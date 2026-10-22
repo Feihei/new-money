@@ -10,6 +10,7 @@ use bevy::state::app::StatesPlugin;
 use bevy::time::TimePlugin;
 
 pub mod afflict;
+pub mod auction;
 pub mod bail;
 pub mod bank;
 pub mod board;
@@ -49,6 +50,11 @@ pub mod world;
 
 pub mod prelude {
     pub use crate::afflict::{AfflictDomain, Affliction, Insulation};
+    pub use crate::auction::{
+        Auction, AuctionDesk, BidDeny, BidFacts, LiquidationPlan, Listing, Lot, OpenDeny,
+        auction_hold_system, auction_move_system, bid_allowed, bidders, can_open, close_if_done,
+        open, record_raise, record_withdraw, seat_order, step_of,
+    };
     pub use crate::bail::{
         BailDeny, BailFacts, bail_op_allowed, bail_op_system, branch_place,
         settle_bail_landing_system, someone_held,
@@ -112,7 +118,8 @@ pub mod prelude {
         read_facts,
     };
     pub use crate::msg::{
-        BailRequested, BankOp, BankOpDone, BankOpRequested, BankVisited, BombTransferred,
+        AuctionFailed, AuctionMove, AuctionStarted, AuctionWon, BailRequested, BankOp, BankOpDone,
+        BankOpRequested, BankVisited, BidMove, BidPlaced, BidWithdrawn, BombTransferred,
         BuyOffered, BuyTicketRequested, CardDrawn, CardGained, CardLost, CardNotice, CardPlayed,
         CashChanged, ChargeWaived, ChestOpened, Decision, DecisionChosen, DetentionLifted,
         DetentionSkipped, DiceRolled, EffectOutcome, GameOver, GiftGiven, GiftsGiven, GodAppeared,
@@ -156,21 +163,22 @@ pub mod prelude {
 
 use bank::apply_month_end_interest_system;
 use prelude::{
-    ActiveBoard, ArcadeDeal, AtmAccess, BailRequested, BankOpDone, BankOpRequested, BankVisited,
-    BoardDef, BombTransferred, BuyOffered, BuyTicketRequested, CardDrawn, CardGained, CardLost,
-    CardPlayed, CardSet, CashChanged, ChargeWaived, ChestOpened, Corrections, CouponBoxes,
-    DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, GameOver,
-    GameRules, GameSeed, GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed,
-    HolidaySet, ItemPlaced, JackpotChanged, JsonAssetLoader, LandBought, LandTaken, LandUpgraded,
-    Landing, LotteryBought, LotteryDrawn, LotteryWon, MarketClock, MinigameResult, MinigameScore,
-    MortgageDone, MortgageRequested, MountChanged, MoveCapped, Paused, PendingDecision,
-    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
-    PlayerDetained, PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue,
-    RequestRemoteDice, RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, ShopStock,
-    StayLifted, StaySkipped, StockPriceChanged, StockSet, StockTradeRequested, StockTraded,
-    StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock,
-    WalkHalt, WalkHalted, WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system,
-    bail_op_system, bank_op_system, begin_game_system, decision_system,
+    ActiveBoard, ArcadeDeal, AtmAccess, AuctionFailed, AuctionMove, AuctionStarted, AuctionWon,
+    BailRequested, BankOpDone, BankOpRequested, BankVisited, BidPlaced, BidWithdrawn, BoardDef,
+    BombTransferred, BuyOffered, BuyTicketRequested, CardDrawn, CardGained, CardLost, CardPlayed,
+    CardSet, CashChanged, ChargeWaived, ChestOpened, Corrections, CouponBoxes, DecisionChosen,
+    DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed,
+    GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, ItemPlaced,
+    JackpotChanged, JsonAssetLoader, LandBought, LandTaken, LandUpgraded, Landing, LotteryBought,
+    LotteryDrawn, LotteryWon, MarketClock, MinigameResult, MinigameScore, MortgageDone,
+    MortgageRequested, MountChanged, MoveCapped, Paused, PendingDecision, PlaceItemRequested,
+    PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
+    PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
+    RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, ShopStock, StayLifted, StaySkipped,
+    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
+    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkHalt, WalkHalted,
+    WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system, auction_hold_system,
+    auction_move_system, bail_op_system, bank_op_system, begin_game_system, decision_system,
     deliver_calendar_events_system, draw_lottery_system, expire_land_status_system,
     finish_halt_system, grant_atm_access_system, land_deity_succession_system, lottery_op_system,
     market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system, place_item_system,
@@ -228,6 +236,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<ShopStock>()
             .init_resource::<ArcadeDeal>()
             .init_resource::<lottery::Jackpot>()
+            .init_resource::<auction::Auction>()
             .init_resource::<WalkHalt>()
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
@@ -293,6 +302,16 @@ impl Plugin for CoreGamePlugin {
             .add_message::<LotteryDrawn>()
             .add_message::<LotteryWon>()
             .add_message::<JackpotChanged>()
+            // ===== 拍卖（P9）=====
+            // 一条意图（`AuctionMove`，两个动作共用它）+ 一条开场 + 四条结果。
+            // 漏注册任何一条都不是「少一行字」，而是相应 system 的参数建不出来 ——
+            // 整条拍卖机不跑，回合停在「等着问下一个人」的地方
+            .add_message::<AuctionMove>()
+            .add_message::<AuctionStarted>()
+            .add_message::<BidPlaced>()
+            .add_message::<BidWithdrawn>()
+            .add_message::<AuctionWon>()
+            .add_message::<AuctionFailed>()
             // ===== 日历事件（P2b）=====
             .add_message::<GiftsGiven>()
             .add_message::<RedEnvelope>()
@@ -372,6 +391,25 @@ impl Plugin for CoreGamePlugin {
                         .chain()
                         .run_if(in_state(TurnPhase::WaitDecision))
                         .run_if(not_paused),
+                    // 拍卖机（P9）。两组都要 `next.set(...)`，而**同一帧最后一次写赢**，
+                    // 所以这条顺序是它自己要求的：拍卖要排在 `decision_system` **之后**。
+                    // 反过来的那一帧，`decision_system` 会因为「上一个窗口被回答了」把回合
+                    // 推向 `TurnEnd`，而拍卖机还在等下一个人喊 —— 症状是拍卖停在半空，
+                    // 面板上谁都不该被问、却谁都不动。
+                    //
+                    // 它自己那一组内部也是 `chain`：`auction_move_system` 办完动作、落下槌，
+                    // `auction_hold_system` 才知道该散场还是该接着开下一块 —— 一处清算有三块地，
+                    // 「散场同帧接着开下一场」是常态而不是边界。
+                    //
+                    // 这道门与上面那组不同：**不能** gate 在 `WaitDecision` 上。拍卖卡是
+                    // 掷骰前（`WaitRoll`）打的，而破产发生在落格结算里 —— 它必须在任何阶段
+                    // 都转得起来，否则那一槌永远开不了场（`resource_exists::<ActiveBoard>`
+                    // 是因为它带 `Books`，装配之前那个资源还没有，与 `land_deity_succession_system`
+                    // 同一条理由）。
+                    (auction_move_system, auction_hold_system)
+                        .chain()
+                        .run_if(not_paused)
+                        .run_if(resource_exists::<ActiveBoard>),
                     // 证券交易的窗口就是「还没掷骰」这一段，与掷骰同态、同闸门
                     trade_request_system
                         .run_if(in_state(TurnPhase::WaitRoll))

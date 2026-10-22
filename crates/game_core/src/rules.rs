@@ -111,6 +111,17 @@ pub struct GameRules {
     /// （0.10）低一档：池子不该比把钱正经存进银行更划算，否则「买券等息」成了无风险的
     /// 存钱姿势，而乐透本该是一个负期望的赌局。
     pub jackpot_rate: f32,
+    /// 一处破产清算**拍几块地**（10-22 拍板：从他名下地产里随机抽三处逐项拍卖，其余归无主）。
+    ///
+    /// 它是「抽多少个」而不是「抽哪几个」：哪几个由 [`crate::rng::Rng::pick_auction`] 决定，
+    /// 而块数是一个玩法判断 —— 全拍会把一局拖成一场清仓展销，一块又让「破产」在玩家眼里
+    /// 等于「什么也没发生」。真棋盘的地多了，这个数要重看，所以它住在这里而不是 `auction.rs`。
+    pub liquidation_lots: u32,
+    /// 拍卖一档加多少：起拍价的百分之几（`auction::step_of` 还夹一个 50 元的下限）。
+    ///
+    /// 与 [`liquidation_lots`] 一起是拍卖的两个数：一个决定拍几场，一个决定每场喊多久。
+    /// 台阶太窄（1%）会让一场拍卖变成几十次点击，太宽（25%）则第一个敢喊的人就吓退全场。
+    pub auction_step_percent: u32,
 }
 
 impl Default for GameRules {
@@ -140,6 +151,8 @@ impl Default for GameRules {
             lottery_numbers: 36,
             ticket_price: 1_000,
             jackpot_rate: 0.05,
+            liquidation_lots: 3,
+            auction_step_percent: 10,
         }
     }
 }

@@ -14,10 +14,10 @@ use std::collections::HashSet;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, ArcadeDeal, BuyTicketRequested, Detention, DetentionPlace, GameKind, GameRules,
-    GameSession, God, GodDesk, Inventory, ItemKind, Mount, MountChanged, Occupancy, OccupancyKind,
-    Pending, PendingDecision, PlayerDetained, PlayerId, Points, Rng, TileIndex, TokenPosition,
-    TurnOrder, TurnPhase, detain, place,
+    ActiveBoard, ArcadeDeal, Auction, BuildingLevel, BuyTicketRequested, Detention, DetentionPlace,
+    GameKind, GameRules, GameSession, God, GodDesk, Inventory, ItemKind, LandId, Mount,
+    MountChanged, Occupancy, OccupancyKind, Owner, Pending, PendingDecision, PlayerDetained,
+    PlayerId, Points, Rng, TileIndex, TokenPosition, TurnOrder, TurnPhase, detain, place,
 };
 
 pub struct DevPlugin;
@@ -32,6 +32,8 @@ pub fn install_if_requested(app: &mut App) {
     let god = ForceGod::from_env();
     let minigame = ForceMinigame::from_env();
     let lottery = ForceLottery::from_env();
+    let auction = ForceAuction::from_env();
+    let house = ForceHouse::from_env();
     if forced.0.is_none()
         && bail.0.is_none()
         && !items.0
@@ -40,6 +42,8 @@ pub fn install_if_requested(app: &mut App) {
         && god.0.is_none()
         && minigame.0.is_none()
         && lottery.0.is_none()
+        && auction.0.is_none()
+        && house.0.is_none()
     {
         return;
     }
@@ -90,6 +94,16 @@ pub fn install_if_requested(app: &mut App) {
                 LotteryWanted::Number(n) => n.to_string(),
                 LotteryWanted::Auto => "本期开奖号（auto）".to_string(),
             }
+        );
+    }
+    if let Some(land) = auction.0 {
+        info!(
+            "开发注入已开启（NM_AUCTION）：地块 {land} 将被挂上拍卖台（配 NM_PLOTS=<n> 让它有主人）"
+        );
+    }
+    if let Some((land, level)) = house.0 {
+        info!(
+            "开发注入已开启（NM_HOUSE）：地块 {land} 将被盖上 Lv{level}（归属与钱都不动，配 NM_DECISION=buy 拍那块地的报价）"
         );
     }
     app.add_plugins(DevPlugin);
@@ -295,6 +309,8 @@ impl Plugin for DevPlugin {
             .insert_resource(ForceGod::from_env())
             .insert_resource(ForceMinigame::from_env())
             .insert_resource(ForceLottery::from_env())
+            .insert_resource(ForceAuction::from_env())
+            .insert_resource(ForceHouse::from_env())
             // 回菜单时清掉「已经注入过」：`NM_DETAIN` 配 `NM_MENULOOP` 要能在第二局再注入一次，
             // 而留在 true 就等于「新局什么都没有」，看着像注入失效（跨局残留那类坑的反面）
             .add_systems(OnEnter(crate::scene::Scene::Menu), clear_injected)
@@ -312,6 +328,8 @@ impl Plugin for DevPlugin {
                     force_god,
                     force_minigame,
                     force_lottery,
+                    force_auction,
+                    force_house,
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
@@ -334,6 +352,8 @@ struct Injected {
     god: bool,
     minigame: bool,
     lottery: bool,
+    auction: bool,
+    house: bool,
 }
 
 fn clear_injected(mut done: ResMut<Injected>) {
@@ -694,6 +714,143 @@ fn force_lottery(
     }
 }
 
+/// `NM_AUCTION=<地块号>`：把那块地挂上拍卖台。`None` = 没开。
+///
+/// 它写的不是窗口而是**那张愿望单**（`Auction::requested`）—— 与拍卖卡落下的那一槌同一格。
+/// 开场、排队、把窗口挂到「此刻该出价的那一位」身上，全部由规则层那两条 system 自己做，
+/// 于是这个旋钮走的是真路径：面板与 `NM_AUTOROLL` 跑出来的那一屏是同一块面板。
+///
+/// 为什么非要有它：拍卖的正经入口有两个（拍卖卡在手 + 有人破产），一个要抽到那张卡，
+/// 一个要输掉一局 —— 两者都押不住截图时刻（同 `NM_DETAIN` 那一条理由，第四次付学费）。
+///
+/// 开槌的人取**座位序里第一个不是那块地业主的玩家**：使用者不参与拍卖（10-22 拍板），
+/// 而这样一轮到的第一位正好是当前回合玩家（`NM_PLOTS` 把地划给他），鼠标冒烟就点得动那颗
+/// 「加到 N」。反过来若让当前玩家开槌，他站在自己的地前面，那条 `OwnLand` 会当场把这一槌挡掉。
+#[derive(Resource)]
+struct ForceAuction(Option<u32>);
+
+impl ForceAuction {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_AUCTION") else {
+            return Self(None);
+        };
+        match raw.trim().parse::<u32>() {
+            Ok(land) => Self(Some(land)),
+            Err(_) => {
+                warn!("NM_AUCTION={raw} 不认识，应为地块编号（prototype 是 0..=5）");
+                Self(None)
+            }
+        }
+    }
+}
+
+/// 那一槌要写的两样 + 要读的三样。`Books` 刻意**不**进来：它怀里揣着一条
+/// `ResMut<Auction>`，与这里的 `auction` 参数会在参数建立期撞成同资源两条可变借用
+/// （`auction::AuctionDesk` 上面那段纪律，本旋钮正是那句话的第二个用户）。
+#[derive(SystemParam)]
+struct HammerWriters<'w, 's> {
+    active: Res<'w, ActiveBoard>,
+    order: Res<'w, TurnOrder>,
+    owners: Query<'w, 's, &'static Owner>,
+    identities: Query<'w, 's, &'static PlayerId>,
+    auction: ResMut<'w, Auction>,
+    done: ResMut<'w, Injected>,
+}
+fn force_auction(force: Res<ForceAuction>, mut desk: HammerWriters<'_, '_>) {
+    let (Some(land), false) = (force.0, desk.done.auction) else {
+        return;
+    };
+    let id = LandId(land);
+    // 注入名额**一次就消耗**，无论这一槌落不落得下：旋钮值是启动时定的，落不下的话
+    // 每一帧都重试就变成每一帧一句 `warn!`（长跑日志被刷满那条，同 `NM_LOTTERY` 的号码池）
+    desk.done.auction = true;
+    let Some(&plot) = desk.active.lands.get(&id) else {
+        warn!("NM_AUCTION={land} 这块地不在这一局的盘上");
+        return;
+    };
+    let owner = desk.owners.get(plot).ok().and_then(|held| held.0);
+    let Some(owner) = owner else {
+        warn!("NM_AUCTION={land} 这块地还没有主人 —— 拍卖开不了场（配 NM_PLOTS=<n> 先划几块地）");
+        return;
+    };
+    let Some(founder) = desk
+        .order
+        .order
+        .iter()
+        .find(|e| desk.identities.get(**e).ok().copied() != Some(owner))
+        .copied()
+    else {
+        warn!("NM_AUCTION={land} 场上没有不是这块地主人的玩家，没人能敲这一槌");
+        return;
+    };
+    desk.auction.requested = Some((id, founder));
+    info!("注入：地块 {land} 挂上拍卖台，开槌的是 {founder:?}（他不参与竞价）");
+}
+
+/// `NM_HOUSE=<地块号>:<层数>`：给那块地盖上指定层数，**不动归属、不动钱**。
+///
+/// 为什么要有它（10-22 实报之后新增的那种状态）：「无主而立着楼」现在是真状态 ——
+/// 破产剩下的那些地就是这一种，而它的两个来源都押不住截图时刻：破产要输掉一局，
+/// 天使那几层要连踩几次同一格且都由骰子说了算。买地模态上那个「买价」（地价 + 已盖的每一层）
+/// 是这一阶段唯一要肉眼核对的报价，拍不到就等于没验（`NM_DETAIN` 那条理由，第五次付学费）。
+///
+/// 它写的是**世界状态**而不是窗口，且**就地写而不是 `Commands`**：延迟到下一次同步点才落地，
+/// 而 `sync_modal` 可能就在本帧把面板建好 —— 那会拍出一张写着旧价的图（签名里带层数那一格
+/// 已经补上了这道防线，但注入自己也不该晚一帧）。与 `NM_PLOTS` 同一条纪律：这是前置，
+/// 不是一笔交易，所以它不发 `LandBought`、不动现金，硬套交易入口会让现金审计多出一笔
+/// 没花出去的钱。
+#[derive(Resource)]
+struct ForceHouse(Option<(u32, u8)>);
+
+impl ForceHouse {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_HOUSE") else {
+            return Self(None);
+        };
+        match Self::parse(&raw) {
+            Some(land) => Self(Some(land)),
+            None => {
+                warn!("NM_HOUSE={raw} 不认识，应为 地块号:层数（如 3:3）");
+                Self(None)
+            }
+        }
+    }
+
+    /// 拆成纯函数是为了能被测到（与 [`ForceGod::parse`]／[`LotteryWanted::parse`] 同一条理由）：
+    /// 一个拼错的旋钮值不崩也不红，只会「注入没发生」，而那张截图看着像「今天没有楼」。
+    fn parse(raw: &str) -> Option<(u32, u8)> {
+        let (land, level) = raw.trim().split_once(':')?;
+        Some((
+            land.trim().parse::<u32>().ok()?,
+            level.trim().parse::<u8>().ok()?,
+        ))
+    }
+}
+
+fn force_house(
+    force: Res<ForceHouse>,
+    active: Res<ActiveBoard>,
+    mut plots: Query<&mut BuildingLevel, With<LandId>>,
+    mut done: ResMut<Injected>,
+) {
+    let (Some((land, level)), false) = (force.0, done.house) else {
+        return;
+    };
+    // 名额一次就消耗，无论这块地在不在盘上：旋钮值是启动时定的，落不下还每帧重试就成了
+    // 每帧一句 `warn!`（长跑日志被刷满那一条，同 `NM_AUCTION`／`NM_LOTTERY`）
+    done.house = true;
+    let Some(&plot) = active.lands.get(&LandId(land)) else {
+        warn!("NM_HOUSE={land} 这块地不在这一局的盘上");
+        return;
+    };
+    let Ok(mut now) = plots.get_mut(plot) else {
+        warn!("NM_HOUSE={land} 这块地没有建筑等级组件，什么都没注入");
+        return;
+    };
+    now.0 = level;
+    info!("注入：地块 {land} 现在是 Lv{level}（归属与钱都没动）");
+}
+
 #[cfg(test)]
 mod tests {
     use super::ForceGod;
@@ -751,6 +908,27 @@ mod tests {
         }
         assert_eq!(GameKind::parse("balloons"), None);
         assert_eq!(GameKind::parse(""), None);
+    }
+
+    /// `NM_HOUSE` 的那个串要认「地块号:层数」，而拼错时必须被说不认识而不是静默什么都不做：
+    /// 这个旋钮存在的意义就是「拍得到那块带楼的无主地」，静默失败会让那张图看着像
+    /// 「今天没有楼」，而同一条坑在 `nm_god_...`／`nm_minigame_...` 上各付过一次学费。
+    /// 层数 0 是**合法**的字面（拆平那块地，拍 Lv0 的对照图用），挡的是读不出来的那一类。
+    #[test]
+    fn nm_house_takes_a_plot_and_a_storey_count() {
+        use super::ForceHouse;
+        assert_eq!(ForceHouse::parse("3:3"), Some((3, 3)));
+        assert_eq!(
+            ForceHouse::parse(" 5 : 1 "),
+            Some((5, 1)),
+            "环境变量里带空格是常事"
+        );
+        assert_eq!(ForceHouse::parse("0:0"), Some((0, 0)), "拆平也是一种注入");
+        assert_eq!(ForceHouse::parse("3"), None, "少了层数就不知道该盖几层");
+        assert_eq!(ForceHouse::parse("3:"), None);
+        assert_eq!(ForceHouse::parse("西单:3"), None, "地块号不认名字");
+        assert_eq!(ForceHouse::parse("3:三层"), None);
+        assert_eq!(ForceHouse::parse(""), None);
     }
 
     /// `NM_LOTTERY` 两种写法都要认：点名的号，与 `auto`（买「这一局第一次会开出的那个号」）。

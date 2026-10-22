@@ -286,6 +286,10 @@ fn mortgaging_shrinks_the_borrowing_base_but_not_the_debt_already_owed() {
 
 /// 人离场时，押着的地与那笔债一起清 —— 无主地上留着抵押等于替一个不存在的主人挡租金，
 /// 而一笔没人还的债留在指数里等于凭空通缩。
+///
+/// **楼不在一起清的那一半里**（10-22 实报）：摘掉的只有归属与抵押，那块地上 Lv1 的那一栋
+/// 照样立着，等下一位走到那一格的人**连楼一起付**（`tests/settle.rs` 钉的是那一半）。
+/// 旧版在这里断的是 `(None, 0, false)`，而那条断言正是「先清零、成交再还」那一趟的产物。
 #[test]
 fn bankruptcy_takes_the_mortgage_off_the_deed() {
     let (mut app, p0) = desk();
@@ -313,8 +317,8 @@ fn bankruptcy_takes_the_mortgage_off_the_deed() {
     );
     assert_eq!(
         plot_state(&mut app, 0),
-        (None, 0, false),
-        "人走了，地还替一个不存在的债主挡着租金"
+        (None, 1, false),
+        "人走了，地不该替一个不存在的债主挡租金 —— 但楼是他的遗产，留在地上"
     );
     assert_eq!(mortgage_of(&app, 0), None, "抵押本金没跟着清掉");
     // 两人盘上打破产一个就是终局（`game_over_system` 那条），所以这里要的是「停得干净」

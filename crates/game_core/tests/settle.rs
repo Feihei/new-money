@@ -81,6 +81,36 @@ fn accepting_the_offer_takes_ownership_at_level_one() {
     assert_cash_audit(&mut app, 20_000);
 }
 
+/// 无主而带楼的地：**一次买下地 + 上面的建筑**（10-22 实报，那条消息的前半句是
+/// 「破产后剩下的地变成无主，但上面建筑也是保留的」，这一条接的是后半句）。
+///
+/// 价 = 地价 + 已盖的每一层加盖费（南京路 1500 + 2×800 = 3100），拿到的等级是那三层的楼
+/// 而不是被抹平成一级。这两半各一条断言：只断钱不断等级，「收了楼的钱再把楼拆掉」那种
+/// 形状就看不见；只断等级不断钱，「按空地价卖一栋楼」那种形状也看不见。
+///
+/// 前置用 `own(…, None, 3, …)` 而不是先打破产一局：破产那一趟留下的形状已由
+/// `cant_pay_rent_bankrupts_the_payer_and_frees_their_lands` 与 `tests/auction.rs` 钉住，
+/// 这里要问的是「走到那一格的人付多少」，而那是同一份世界状态的下一件事。
+#[test]
+fn an_unowned_plot_with_a_house_on_it_is_bought_with_the_house() {
+    let (mut app, p0) = ready_on(0, 1, DecisionPolicy::AcceptAll);
+    own(&mut app, 0, None, 3, false); // 无主的南京路，立着一栋三层的楼
+    land(&mut app);
+
+    let led = ledger(&app);
+    assert!(
+        led.contains(&"Bought(P0@0$3100)".to_string()),
+        "报价要含那两层加盖费（地价 1500 + 2×800）：{led:?}"
+    );
+    assert_eq!(
+        plot(&mut app, 0),
+        (Some(0), 3),
+        "买家拿到的是那栋三层的楼，不是一块被抹平的空地"
+    );
+    assert_eq!(cash_of(&mut app, p0), 16_900, "20000 - 3100");
+    assert_cash_audit(&mut app, 20_000);
+}
+
 #[test]
 fn a_buy_anyone_cannot_afford_changes_nothing() {
     let (mut app, p0) = ready_on(0, 1, DecisionPolicy::AcceptAll);
@@ -148,6 +178,10 @@ fn mortgaged_land_charges_nothing_and_opens_no_dialog() {
 }
 
 /// 缺陷 #3 那一族 + 「破产者名下的地该放回市场」这条修正的联合回归。
+///
+/// 回归的是**归属**那一半：Godot 只清玩家自己的列表、registry 里还写着死者。
+/// 楼不在清掉的里面（10-22 实报）—— 徐家汇那两层跟着地一起留在街上，
+/// 所以下面断的是 `(None, 2)` 而不是旧版的 `(None, 0)`。
 #[test]
 fn cant_pay_rent_bankrupts_the_payer_and_frees_their_lands() {
     let (mut app, p0) = ready_on(3, 6, DecisionPolicy::DeclineAll); // 3 → 9 王府井
@@ -174,8 +208,8 @@ fn cant_pay_rent_bankrupts_the_payer_and_frees_their_lands() {
     assert_eq!(cash_of(&mut app, owner), 20_000, "P1 没收到钱");
     assert_eq!(
         plot(&mut app, 3),
-        (None, 0),
-        "破产者名下的地块要放回市场（Godot 漏了这步，租金会永远打给鬼）"
+        (None, 2),
+        "破产者名下的地块要放回市场（Godot 漏了这步，租金会永远打给鬼），而楼留在地上"
     );
     assert_eq!(cash_of(&mut app, p0), 0);
     assert_no_negative_cash(&mut app);

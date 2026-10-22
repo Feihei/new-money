@@ -13,12 +13,13 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, AfflictDomain, BailDeny, BailFacts, BankOp, Books, BuildingLevel, CardDef,
-    CardDrawn, CardId, CardKind, CardNotice, Decision, DetentionPlace, EffectOutcome, Hand,
-    Jackpot, LandId, LandStatus, LandType, LotteryDeny, LotteryTickets, MortgageDeny, MortgageOp,
-    Owner, Pending, PendingDecision, PlayerId, PlayerName, Rng, Shelf, ShopDeny, ShopStock,
-    TradeSide, TurnOrder, bail_op_allowed, buy_allowed, buyback, counter_plots,
-    mortgage_op_allowed, read_facts, restock, shop_op_allowed,
+    ActiveBoard, AfflictDomain, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Books,
+    BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind, Decision,
+    DetentionPlace, EffectOutcome, Hand, Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny,
+    LotteryTickets, MortgageDeny, MortgageOp, Owner, Pending, PendingDecision, PlayerId,
+    PlayerName, Rng, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed,
+    bid_allowed, bidders, buy_allowed, buyback, counter_plots, mortgage_op_allowed, read_facts,
+    restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -209,6 +210,29 @@ pub(crate) fn sync_modal(
         }),
         _ => None,
     };
+    // 拍卖台（P9）的读数：只有窗口开着、而且机器里真的有一场时才填。
+    //
+    // 读的是 `books.auction` 而不是给 [`ModalView`] 另加一条 `Res<Auction>` —— `Books` 自己
+    // 就带着那一格（破产那一刻要就地记下待拍的料），同一参数里两条对同一资源的可变借用会在
+    // 参数建立期直接撞（`auction::AuctionDesk` 上面那段纪律，本轮踩过）。
+    //
+    // 窗口开着而 `lot` 是空的那一帧确实存在（散场时 `auction_hold_system` 先清窗口，
+    // 但两者之间隔着一次消息投递），所以这里当它可能没有 —— 不 unwrap。
+    let bid: Option<BidDesk> = match (want, books.auction.lot.clone()) {
+        (Some((player, Pending::Auction)), Some(lot)) => Some(BidDesk {
+            plot: books
+                .active
+                .def
+                .land(lot.land.0)
+                .map_or_else(|| "？".to_string(), |l| l.name.clone()),
+            cash: books.balance(player),
+            denied_by_god: books.acquire_denied(player),
+            queued: books.auction.standby.len() + books.auction.liquidation.len(),
+            eligible: bidders(&books, lot.by),
+            lot,
+        }),
+        _ => None,
+    };
     let stamp = want.map_or(String::new(), |(player, about)| {
         modal_stamp(
             about,
@@ -220,6 +244,7 @@ pub(crate) fn sync_modal(
                 plots: &plots,
                 bails: &bails,
                 lottery: lottery.as_ref(),
+                bid: bid.as_ref(),
             },
         )
     });
@@ -277,6 +302,15 @@ pub(crate) fn sync_modal(
                     lottery_modal(&mut commands, &font, &books, desk, player, stamp);
                 }
             }
+            // 拍卖台（P9）。它与彩票柜台同一条形状：一个窗口、两颗动作按钮。
+            // `bid` 在这一屏几乎必然是 `Some`（上面只在窗口开着且有 `lot` 时才填它），
+            // 但散场与下一场之间那一帧真的会是「窗口还没被清、机器已经空了」——
+            // 那种时候整块不重建，下一帧 `auction_hold_system` 自己会把窗口收走
+            Pending::Auction => {
+                if let Some(desk) = bid.as_ref() {
+                    auction_modal(&mut commands, &font, &names, desk, player, stamp);
+                }
+            }
             // 游乐场（P7）**不在这里建面板**：模态的内容是「弹出那一刻烤死」的，
             // 而那一屏上有气球在飞、秒数在跳，每帧都要动 —— 那是 `ui/minigame.rs` 的活，
             // 它读的同样是 `PendingDecision`。这一格存在的意义是「旧的模态要被收走」：
@@ -301,6 +335,9 @@ struct ModalExtra<'a> {
     /// 彩票柜台的读数（P8），奖池那笔账也在里面 —— 它是「这一屏上由判据决定的可见内容」
     /// 里唯一一块**不属于任何玩家**的账。`None` = 这一屏不是彩票柜台
     lottery: Option<&'a LotteryDesk>,
+    /// 拍卖台的读数（P9）：这一场喊到哪、还在争谁、后面还排着几块。
+    /// 「现在轮到谁」不在这里 —— 窗口挂在谁身上就是谁，由 `PendingDecision` 带
+    bid: Option<&'a BidDesk>,
 }
 
 fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<'_>) -> String {
@@ -373,14 +410,39 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
                 desk.map(|d| d.pot).unwrap_or(0),
             )
         }
+        // 拍卖台同一条：拍的是哪块地、喊到哪、名单上还剩谁、后面还排着几块、被问的这位
+        // 有多少钱。少任何一位都会出现「已经加过价，面板还停在上一档」——
+        // 而那一档正是让人按下第二次的形状
+        Pending::Auction => extra.bid.map_or(String::new(), |desk| {
+            format!(
+                "{}|{}|{}|{}|{}|{}|{}",
+                desk.lot.land.0,
+                desk.lot.high,
+                desk.lot.turn,
+                desk.lot.leader.map_or(0u64, |e| e.to_bits()),
+                desk.lot
+                    .pool
+                    .iter()
+                    .map(|e| e.to_bits().to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                desk.queued,
+                desk.cash,
+            )
+        }),
         // 游乐场那一屏不由 `sync_modal` 建（见下面那个空分支），所以这里没有要签名的东西：
         // 它的可见内容每帧都在动，由 `ui/minigame.rs` 自己就地改，不走「签名变了才重建」那条路
         Pending::Minigame(_) => String::new(),
         // 报价与收据的内容弹出即定稿（买地面板上的「你的现金」是那一刻的现金，
-        // 而回合停在那几帧里谁也花不了钱）
-        Pending::Buy(_) | Pending::Upgrade(_) | Pending::RentNotice(_) | Pending::Card => {
-            String::new()
-        }
+        // 而回合停在那几帧里谁也花不了钱）—— **只有买地那一屏例外，签名里带地块的层数**。
+        // 理由与它面板上那个数同源：10-22 之后无主地可以立着楼（破产留下的那一手），
+        // 于是「买价」不再只由地块数据决定，还由世界上此刻的 `BuildingLevel` 决定；
+        // 而那一格在报价挂出之后仍然可能被改写（天使盖的那一层、`NM_HOUSE` 那条注入晚到一帧）。
+        // 不带这一格就会出现「面板写着 3,000、收据写着 6,000」，而那正是这块屏存在的理由的反面
+        Pending::Buy(land) => books
+            .view(land)
+            .map_or(String::new(), |view| format!("Lv{}", view.level)),
+        Pending::Upgrade(_) | Pending::RentNotice(_) | Pending::Card => String::new(),
     }
 }
 
@@ -455,6 +517,15 @@ fn button_row(parent: &mut ChildSpawnerCommands, f: impl FnOnce(&mut ChildSpawne
         .with_children(|line| f(line));
 }
 
+/// 无主地的报价那一屏。
+///
+/// **面板上那个数就是 `Books::buy` 要扣的那一个**：基数取 `economy::estate_value`
+/// （地价 + 地上已有的每一层），再过一遍物价与修正，与 `buy_price`／`market_value` 同一条式子。
+/// 只写名义地价在这里曾经是安全的（无主地就是 Lv0），而 10-22 之后「无主却立着楼」是真状态 ——
+/// 破产留下的那一手、天使白给的那一层。那时按地价写就成了「写着 1,500、扣掉 3,100」，
+/// 而这一块屏是唯一让玩家决定掏不掏这笔钱的地方。
+/// 「地价」那一行照旧留着（它是这块地的固有属性，租金表按它排），多出来的那一截由
+/// 「楼上已有」与「买价」两行自己说清楚 —— 灰按钮带理由那条纪律在这儿的形式是**价带理由**。
 fn buy_modal(
     commands: &mut Commands,
     font: &DevFont,
@@ -471,7 +542,13 @@ fn buy_modal(
     } else {
         palette::group(&group)
     };
-    let price = def.map(|l| l.price).unwrap_or(0);
+    let nominal = def.map(|l| l.price).unwrap_or(0);
+    let view = books.view(land);
+    let storeys = view.as_ref().map_or(0, |v| v.level);
+    let base = view.as_ref().map_or(0, |v| {
+        game_core::economy::estate_value(&books.active.def, v)
+    });
+    let price = books.quoted(ChargeKind::BuyLand { land }, player, base);
     let rent: Vec<i64> = def.map(|l| l.rent.clone()).unwrap_or_default();
     let type_text = match def.map(|l| l.land_type) {
         Some(LandType::Commercial) => "商业用地",
@@ -481,7 +558,7 @@ fn buy_modal(
     let cash = books.balance(player);
     let affordable = cash >= price;
     let buy_text = if affordable {
-        format!("购买 (${price})")
+        format!("购买 (${})", comma(price))
     } else {
         "现金不足".to_string()
     };
@@ -517,10 +594,29 @@ fn buy_modal(
                     rows,
                     &font.0,
                     "地价",
-                    &format!("${price}"),
+                    &format!("${}", comma(nominal)),
                     col::COST,
                     key_w,
                 );
+                // 地上已经有楼：那两层不是赠品，而是买价里最贵的一截，必须自己占一行说话
+                if storeys >= 2 {
+                    info_row(
+                        rows,
+                        &font.0,
+                        "楼上已有",
+                        &format!("Lv{storeys} 的建筑，连地一起过户"),
+                        col::GAIN,
+                        key_w,
+                    );
+                    info_row(
+                        rows,
+                        &font.0,
+                        "买价",
+                        &format!("${}", comma(price)),
+                        col::COST,
+                        key_w,
+                    );
+                }
                 info_row(rows, &font.0, "类型", type_text, col::VALUE, key_w);
                 if !rent.is_empty() {
                     rows.spawn(label(&font.0, "租金表", size::SMALL, col::KEY));
@@ -1562,6 +1658,229 @@ fn lottery_modal(
     )
 }
 
+/// 拍卖这一屏的读数（P9）。与 [`LotteryDesk`] 同一条形状：判据要读的几样收在一块，
+/// 面板不许自己发明「能不能喊」。
+///
+/// 名字不叫 `AuctionDesk`：规则层已经有一个同名的参数包（`game_core::auction::AuctionDesk`），
+/// 而这一屏读的正是它怀里那个资源 —— 两个同名类型在同一份 import 列表里会互相遮蔽。
+pub(crate) struct BidDesk {
+    /// 正在进行的这一场（从 `books.auction.lot` 抄下来的一份，不是引用 —— 面板要在
+    /// 同一次读数里既看 `pool` 又看 `leader`，留着借用的话下面每一步判据都得再借一次）
+    pub lot: Lot,
+    /// 这块地叫什么。`LandId(3)` 玩家读不出声，而拍卖台上「拍的是哪块」是第一句话
+    pub plot: String,
+    /// 被问的这位现在有多少钱
+    pub cash: i64,
+    /// 他身上那位让置产必败（大衰神／小衰神）。判据走 `Books::acquire_denied`，
+    /// 与规则层拒绝他那一声时问的是**同一句**
+    pub denied_by_god: bool,
+    /// 这一场之外还排着几块（只有破产清算会有：死者名下通常不止一块）
+    pub queued: usize,
+    /// 有资格出价的全部人（含已经放弃的）。「谁退出了」由 `pool` 与这一份相减得到 ——
+    /// 场上没有第二处记着这件事，而面板该念出「已退出」而不是让那个人凭空消失
+    /// （消失了玩家会以为他破产离场了，那是另一条凭据会说的事）
+    pub eligible: Vec<Entity>,
+}
+
+impl BidDesk {
+    /// 下一档要多少。**只有这一句**：按钮上写的数与规则层扣的数出自同一个表达式
+    /// （`Lot::next_amount`），所以「按上去显示的」与「真付的」不可能分叉。
+    pub fn needed(&self) -> i64 {
+        self.lot.next_amount()
+    }
+
+    /// 这颗「加到 N」此刻按不按得动，连同它灰着的那句话。
+    ///
+    /// `at_lot` 与 `yours` 恒为 `true`：窗口就挂在这位身上（`auction_hold_system` 每一帧
+    /// 把 `lot.bidder()` 挂上去），所以这一屏上碰不到那两条 —— 它们在派发那一侧是真的
+    /// 会挡（见 `ui::mod` 的 `auction_customer`）。
+    fn deny(&self) -> Option<BidDeny> {
+        bid_allowed(&BidFacts {
+            at_lot: true,
+            yours: true,
+            denied_by_god: self.denied_by_god,
+            cash: self.cash,
+            needed: self.needed(),
+        })
+        .err()
+    }
+
+    /// 已经退出这一场的人。
+    fn out(&self) -> Vec<Entity> {
+        self.eligible
+            .iter()
+            .copied()
+            .filter(|e| !self.lot.pool.contains(e))
+            .collect()
+    }
+}
+
+/// 一个人的名字。查不到时给一个问号而不是空串 —— 拍卖台上每一行都在说「谁」，
+/// 空串读起来像这一位不存在。
+fn seat(names: &Query<&PlayerName>, player: Entity) -> String {
+    names
+        .get(player)
+        .map(|n| n.0.clone())
+        .unwrap_or_else(|_| "?".into())
+}
+
+/// 一排人写成「甲 · 乙 · 丙」。空名单写成 `None` 让调用方自己决定那句话怎么说 ——
+/// 「还在争：（空）」与「已经没有人还在争」是两句话。
+fn seats(names: &Query<&PlayerName>, list: &[Entity]) -> Option<String> {
+    (!list.is_empty()).then(|| {
+        list.iter()
+            .map(|e| seat(names, *e))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    })
+}
+
+/// 拍卖台（P9）：一处窗口、两颗按钮，而**主语每一帧都可能换人**。
+///
+/// 它与其余五个窗口的差别全写在 `Pending::Auction` 那段上：柜台从头到尾问的是踩格的
+/// 那个人，这里一圈一圈问不同的人 —— 所以这一屏的内容**不能**是「弹出那一刻烤死」的，
+/// 签名里带上了价钱与名单（见 [`modal_stamp`] 那一格）。
+///
+/// 两颗按钮而不是一排金额：英式拍卖里玩家要决定的从来不是「喊多少」而是「敢不敢再加一档」，
+/// 而任意喊价会把「同种子复现同一串拍卖」变成一件做不到的事。
+fn auction_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    names: &Query<&PlayerName>,
+    desk: &BidDesk,
+    player: Entity,
+    stamp: String,
+) -> Entity {
+    let lot = &desk.lot;
+    let blocked = desk.deny();
+    let fighting = seats(names, &lot.pool);
+    let quit = seats(names, &desk.out());
+    frame(
+        commands,
+        (player, Pending::Auction),
+        stamp,
+        layout::AUCTION_PANEL,
+        col::BORDER_AUCTION,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                "拍卖台",
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                format!(
+                    "{} — 起拍 {}，一档 {}",
+                    desk.plot,
+                    comma(lot.opening),
+                    comma(lot.step)
+                ),
+                size::ROW,
+                col::MUTED,
+            ));
+            // 槌是谁敲的、钱最后归谁：这两句在两种入口上是相反的，而玩家按下之前必须知道
+            // 自己是在替别人抬价还是在抢一块无主的地
+            p.spawn(center_label(
+                &font.0,
+                match lot.by {
+                    Some(founder) => format!(
+                        "{} 敲的槌 —— 他不能参与，而谁拍走那笔钱就归他",
+                        seat(names, founder)
+                    ),
+                    None => format!(
+                        "{} 破产变卖 —— 所得归银行，不发给任何玩家",
+                        lot.seller
+                            .map_or_else(|| "一块地".to_string(), |e| seat(names, e))
+                    ),
+                },
+                size::SMALL,
+                col::KEY,
+            ));
+            p.spawn(separator());
+            p.spawn(label(
+                &font.0,
+                match lot.leader {
+                    Some(leader) => {
+                        format!("已喊到 {}（{}）", comma(lot.high), seat(names, leader))
+                    }
+                    None => format!("还没人认价 —— 认下就是 {}", comma(lot.opening)),
+                },
+                size::ROW,
+                col::KEY,
+            ));
+            p.spawn(label(
+                &font.0,
+                fighting.map_or_else(
+                    || "已经没有人还在争".to_string(),
+                    |who| format!("还在争：{who}"),
+                ),
+                size::ROW,
+                col::MUTED,
+            ));
+            if let Some(who) = quit {
+                p.spawn(label(
+                    &font.0,
+                    format!("已退出：{who}"),
+                    size::SMALL,
+                    col::JAILED,
+                ));
+            }
+            if desk.queued > 0 {
+                // 一处清算通常不止一块。这句不是装饰：不说清楚，玩家会把这一场当成最后一场,
+                // 而散场之后回合还压在拍卖机上，看着像「拍完了却不动」
+                p.spawn(label(
+                    &font.0,
+                    format!("后面还排着 {} 块，一块拍完才轮到下一块", desk.queued),
+                    size::SMALL,
+                    col::MUTED,
+                ));
+            }
+            p.spawn(separator());
+            p.spawn(label(
+                &font.0,
+                format!("下一档 {} —— 现在轮到你出价", comma(desk.needed())),
+                size::ROW,
+                col::KEY,
+            ));
+            p.spawn(label(
+                &font.0,
+                format!("你的现金 {}", comma(desk.cash)),
+                size::SMALL,
+                col::MUTED,
+            ));
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        &format!("加到 {}", comma(desk.needed())),
+                        layout::AUCTION_BUTTON,
+                        super::PRIMARY,
+                        UiAction::Bid(BidMove::Raise),
+                    )
+                    .disabled(blocked.is_some()),
+                );
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "放弃这一场",
+                        layout::AUCTION_BUTTON,
+                        super::SECONDARY,
+                        UiAction::Bid(BidMove::Withdraw),
+                    ),
+                );
+            });
+            // 灰按钮必须自己说得出为什么（§6.1 坑 27）：这里只有一颗会灰，而它灰的原因
+            // 只有两种 —— 身上那位，或者钱不够那一档
+            if let Some(why) = blocked {
+                p.spawn(label(&font.0, why.label(), size::ROW, col::JAILED));
+            }
+        },
+    )
+}
+
 /// 保释窗口要读的那一排：这一处关着谁、这笔钱够不够。与规则层读同一份
 /// [`bail_op_allowed`]，所以「灰着按不动」与「按下去办不成」不会分叉。
 fn bail_rows(
@@ -1809,6 +2128,9 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
             format!("被关进{}（{turns} 回合）", place.label())
         }
         EffectOutcome::Teleported { name, .. } => format!("移动到「{name}」"),
+        // 拍卖卡的那一槌。卡面上不写价钱也不写谁会拍走 —— 那两个数在 `AuctionStarted`
+        // 与 `AuctionWon` 上，而这条凭据要说的是「这一槌敲下去了、拍的是哪块地」
+        EffectOutcome::Auctioned { land } => format!("把 L{} 强制上架", land.0),
         // 数据写了个棋盘上不存在的格名：如实报出来，别退成一句漂亮话把数据错误藏起来
         EffectOutcome::UnknownTile { name } => format!("数据错误：找不到「{name}」"),
         EffectOutcome::Blocked { domain } => {

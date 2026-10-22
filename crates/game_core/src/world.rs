@@ -192,6 +192,10 @@ pub fn begin_game_system(
     // （比货架那一格更贵，因为它发的是现金）。`last_draw` 一起清 —— 「这一局还没开过奖」
     // 与「上一期开的是几号」在面板上是两句话，混了就成了谎话。
     commands.insert_resource(crate::lottery::Jackpot::default());
+    // 拍卖机整台清空：`lot` 里那块地、`standby` 里排着的队、`liquidation` 里那位死者的料、
+    // `requested` 里许下的一槌、`resume` 里那个「散场后回哪一阶段」—— 没有一样属于下一局。
+    // 留着 `resume` 尤其贵：新局第一帧它会立刻把回合机推向上一局末尾那个阶段。
+    commands.insert_resource(crate::auction::Auction::default());
     next.set(TurnPhase::TurnStart);
 }
 

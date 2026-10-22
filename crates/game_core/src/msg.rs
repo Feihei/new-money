@@ -545,6 +545,15 @@ pub enum EffectOutcome {
         from: TileIndex,
         steps: u32,
     },
+    /// 把这块地强制上架（拍卖卡，P9）。它说的只是「槌敲下去了」——
+    /// 起拍多少、谁拍走、多少钱，都在 [`AuctionStarted`] 与 [`AuctionWon`] 那两条上，
+    /// 因为那是**世界**的读数而不是这张卡办成的那一件事。
+    ///
+    /// 为什么这条凭据非有不可：卡打出去而拍卖没开场（场上没有别人可出价）与拍卖开了又流标，
+    /// 在画面上是三件不同的事，玩家有权知道自己是哪一件。
+    Auctioned {
+        land: crate::land::LandId,
+    },
     /// 送神符送走了哪一位（P6d）。`bomb` 说那一趟**有没有连带带走**身上的定时炸弹 ——
     /// 那是这张卡的第二件事，玩家有权知道自己是不是顺手把要命的东西也送了。
     /// 离场本身另有 [`GodLeft`]（reason = `Banished`），这条与它是一对，不重复它。
@@ -919,4 +928,83 @@ pub struct LotteryWon {
     pub player: Entity,
     pub number: u8,
     pub amount: i64,
+}
+
+// ===== 拍卖（P9）=====
+
+/// 一次拍卖里的两个动作。**没有「出价多少」这一格**：金额由 [`crate::auction::Lot::next_amount`]
+/// 从「当前最高价 + 一档」算出来，请求侧只能表达「我要继续」或「我不玩了」。
+///
+/// 为什么不做成任意喊价：任意价会让面板必须给一个输入框（而这一屏是鼠标点的），
+/// 会让「同种子复现同一串拍卖」多一个来自客户端的自由变量，而英式拍卖里真正在玩的
+/// 从来不是「喊多少」而是「敢不敢再加一档」。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BidMove {
+    /// 加一档（没人认价时那一档就是起拍价本身）
+    Raise,
+    /// 放弃并退出这一场（之后不能再回来）
+    Withdraw,
+}
+
+/// 有人对正在进行的那一场做了一个动作（P9）。这是**意图**，不是结果 ——
+/// 与 `RequestStay`／`RollRequested` 同一条纪律：AI 与人类发同一条，判据只在规则层。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuctionMove {
+    pub player: Entity,
+    pub what: BidMove,
+}
+
+/// 开场那一句（P9）。`bidders` 是**有资格出价的人数**，而 `by == None` 说的是
+/// 「这是破产清算，没有开槌的人，所得归银行」—— 顶栏那句要区分这两件事，
+/// 否则玩家会以为某个玩家在卖自己的地。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuctionStarted {
+    pub land: LandId,
+    pub by: Option<Entity>,
+    pub seller: Option<Entity>,
+    pub opening: i64,
+    pub step: i64,
+    pub bidders: u32,
+}
+
+/// 有人喊了一个价（P9）。`amount` 是**他这一刻认下的数** —— 成交那条 [`AuctionWon`] 带的
+/// 是最终那个数，而顶栏要播的是这一条（每一次加价都得看得见，否则拍卖看起来像一次点击）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BidPlaced {
+    pub player: Entity,
+    pub land: LandId,
+    pub amount: i64,
+}
+
+/// 有人退出了这一场（P9）。他**不再被问**，所以面板上该把他念成「已放弃」而不是消失 ——
+/// 消失的话玩家会以为那个人离场了（`PlayerBankrupt` 是另一条凭据，会明说）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BidWithdrawn {
+    pub player: Entity,
+    pub land: LandId,
+}
+
+/// 落槌（P9）。`by == None` 时钱进了银行（没有人收到它），所以**不要**在这条之外
+/// 再假想一条「原主拿到补偿」—— 10-22 拍板：变卖所得不分配、拍卖卡所得归开槌的人。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuctionWon {
+    pub player: Entity,
+    pub land: LandId,
+    pub price: i64,
+    /// 谁开的槌（钱给他）。`None` = 破产清算。
+    pub by: Option<Entity>,
+    /// 从谁手里拍走的
+    pub seller: Option<Entity>,
+}
+
+/// 流标（P9）。它带着 `price` 而不是只有「流标」两个字：玩家问的下一句就是「起拍多少都没人要」。
+///
+/// 两种流标在这一条上**不分叉**：没人出价，与有人喊到落槌却付不出（拍卖期间他仍能动 ATM）。
+/// 后者由 `warn!` 单独说清 —— 它是世界状态真的允许的路径，但不是另一种结果：地都没转手。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuctionFailed {
+    pub land: LandId,
+    pub by: Option<Entity>,
+    pub seller: Option<Entity>,
+    pub price: i64,
 }

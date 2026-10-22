@@ -17,25 +17,27 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
-    ActiveBoard, Adjustment, ArcadeDeal, AtmAccess, BailRequested, BankBalance, BankOp, BankOpDone,
-    BankOpRequested, BankVisited, BombTransferred, Books, BuildingLevel, BuyOffered,
-    BuyTicketRequested, CardAim, CardDrawn, CardGained, CardId, CardKind, CardLost, CardPlayed,
-    CardSet, CashChanged, ChargeKind, ChargeWaived, ChestOpened, Correction, Corrections,
-    CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen, Deck, Detention,
-    DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, GameKind, GameOver, GameRules,
-    GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed, GodLeft,
-    GodPossessed, Hand, Insulation, Inventory, ItemKind, ItemPlaced, Jackpot, JackpotChanged,
-    JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken, LandUpgraded, LandView,
-    LotteryBought, LotteryDrawn, LotteryTickets, LotteryWon, Market, MarketClock, MinigameResult,
-    MinigameScore, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged,
-    MoveCap, MoveCapped, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision,
-    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
-    PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, Possession,
-    Presence, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll, RequestStay,
-    Rng, Scope, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted, StaySentence,
-    StaySkipped, StockId, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
-    TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase,
-    TurnStarted, UpgradeOffered, WalkHalted, WalkStarted, Wallet, deal_to, grant_effects,
+    ActiveBoard, Adjustment, ArcadeDeal, AtmAccess, Auction, AuctionFailed, AuctionMove,
+    AuctionStarted, AuctionWon, BailRequested, BankBalance, BankOp, BankOpDone, BankOpRequested,
+    BankVisited, BidMove, BidPlaced, BidWithdrawn, BombTransferred, Books, BuildingLevel,
+    BuyOffered, BuyTicketRequested, CardAim, CardDrawn, CardGained, CardId, CardKind, CardLost,
+    CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived, ChestOpened, Correction,
+    Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen, Deck,
+    Detention, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, GameKind, GameOver,
+    GameRules, GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed,
+    GodLeft, GodPossessed, Hand, Insulation, Inventory, ItemKind, ItemPlaced, Jackpot,
+    JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken,
+    LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought, LotteryDrawn, LotteryTickets,
+    LotteryWon, Market, MarketClock, MinigameResult, MinigameScore, MortgageDone, MortgageOp,
+    MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt,
+    OccupancyKind, Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
+    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported,
+    PlotArea, Points, PointsChanged, Possession, Presence, RedEnvelope, RemoteDiceUsed, RentDue,
+    RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, Shelf, ShopOpDone, ShopOpRequested,
+    ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged,
+    StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition,
+    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkHalted,
+    WalkStarted, Wallet, deal_to, grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -105,6 +107,12 @@ pub struct Scores(pub Vec<MinigameResult>);
 #[derive(Resource, Default)]
 pub struct TicketRequests(pub Vec<BuyTicketRequested>);
 
+/// 测试侧的「按下拍卖面板上那两颗按钮之一」（P9）。同样走队列 → 真消息，于是
+/// 「不是他的回合要拒」「加不起这一档要拒」「放弃永远办得成」三道门都被真走到，
+/// 而不是被测试绕过。
+#[derive(Resource, Default)]
+pub struct AuctionRequests(pub Vec<AuctionMove>);
+
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
 /// 要测经济就换成 `AcceptAll`（买得起就买、能升就升）。
@@ -129,6 +137,7 @@ fn auto_answer_system(
     pending: Res<PendingDecision>,
     mut answers: MessageWriter<DecisionChosen>,
     mut scores: MessageWriter<MinigameResult>,
+    mut moves: MessageWriter<AuctionMove>,
 ) {
     if *policy == DecisionPolicy::Hold {
         return;
@@ -161,6 +170,19 @@ fn auto_answer_system(
                 game,
                 score: rules.minigames.of(game).perfect / 2,
                 awarded: true,
+            });
+            return;
+        }
+        // 拍卖（P9）同样**不是一句回答**：这台机器的窗口对三种 `Decision` 一律不认
+        // （理由写在 `decision_system` 那一格上），要办的事走 `AuctionMove`。
+        // 自动玩家一律放弃 —— 与彩票那一格「不买券」同一条理由：长跑用例的现金断言钉的是
+        // 「租金与地价」那几笔，多一笔拍地的钱会让几十条既有断言一起红；而**必须**答这一句，
+        // 否则任一处破产触发的清算会把整片长跑停在「等着问下一个人」的地方。
+        // 真拍地那条路由 `tests/auction.rs` 自己走（它把策略换成 `Hold`）。
+        (Pending::Auction, _) => {
+            moves.write(AuctionMove {
+                player,
+                what: BidMove::Withdraw,
             });
             return;
         }
@@ -285,6 +307,12 @@ struct BookReaders<'w, 's> {
     pot: MessageReader<'w, 's, JackpotChanged>,
     draws: MessageReader<'w, 's, LotteryDrawn>,
     wins: MessageReader<'w, 's, LotteryWon>,
+    // ===== 拍卖（P9）=====
+    auctions_started: MessageReader<'w, 's, AuctionStarted>,
+    bids: MessageReader<'w, 's, BidPlaced>,
+    passes: MessageReader<'w, 's, BidWithdrawn>,
+    sold: MessageReader<'w, 's, AuctionWon>,
+    unsold: MessageReader<'w, 's, AuctionFailed>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -736,6 +764,51 @@ fn collect_books(
             m.amount
         ));
     }
+    // ===== 拍卖（P9）=====
+    // 五条各一行，因为它们是**四个不同的问题**：开了哪一场（起拍与台阶）、谁喊到哪、
+    // 谁退出、成交给谁、有没有流标。「拍卖办成了」那句断言要能逐问回答，而不是只看最后一条。
+    for m in r.auctions_started.read() {
+        let founder =
+            m.by.map_or_else(|| "bank".to_string(), |e| who(&players, e));
+        let from = m
+            .seller
+            .map_or_else(|| "-".to_string(), |e| who(&players, e));
+        log.0.push(format!(
+            "Auction({}:by {founder},from {from},start {},step {},{}人)",
+            land(m.land),
+            m.opening,
+            m.step,
+            m.bidders
+        ));
+    }
+    for m in r.bids.read() {
+        log.0.push(format!(
+            "Bid({},{},{})",
+            who(&players, m.player),
+            land(m.land),
+            m.amount
+        ));
+    }
+    for m in r.passes.read() {
+        log.0.push(format!(
+            "Pass({}:{})",
+            who(&players, m.player),
+            land(m.land)
+        ));
+    }
+    for m in r.sold.read() {
+        let founder =
+            m.by.map_or_else(|| "bank".to_string(), |e| who(&players, e));
+        log.0.push(format!(
+            "Sold({}:{},{},to {founder})",
+            who(&players, m.player),
+            land(m.land),
+            m.price
+        ));
+    }
+    for m in r.unsold.read() {
+        log.0.push(format!("Unsold({},{})", land(m.land), m.price));
+    }
     for m in r.cash.read() {
         audit.0.push((m.player, m.delta, m.balance));
     }
@@ -766,6 +839,7 @@ struct Pump<'w> {
     remote: ResMut<'w, RemoteDiceRequests>,
     scores: ResMut<'w, Scores>,
     tickets: ResMut<'w, TicketRequests>,
+    auctions: ResMut<'w, AuctionRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
     stay_writes: MessageWriter<'w, RequestStay>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
@@ -778,6 +852,7 @@ struct Pump<'w> {
     remote_writes: MessageWriter<'w, RequestRemoteDice>,
     score_writes: MessageWriter<'w, MinigameResult>,
     ticket_writes: MessageWriter<'w, BuyTicketRequested>,
+    auction_writes: MessageWriter<'w, AuctionMove>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
@@ -817,6 +892,9 @@ fn pump_inputs(mut pump: Pump<'_>) {
     for t in pump.tickets.0.drain(..) {
         pump.ticket_writes.write(t);
     }
+    for a in pump.auctions.0.drain(..) {
+        pump.auction_writes.write(a);
+    }
 }
 
 pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
@@ -844,6 +922,7 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<RemoteDiceRequests>()
         .init_resource::<Scores>()
         .init_resource::<TicketRequests>()
+        .init_resource::<AuctionRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -1754,6 +1833,35 @@ pub fn lottery_ask(app: &mut App, player: Entity, number: u8) {
         .resource_mut::<TicketRequests>()
         .0
         .push(BuyTicketRequested { player, number });
+}
+
+/// 按下拍卖面板上的一颗按钮（P9）。`what` 是「加价」还是「放弃」。
+///
+/// 它后面跟一次 `settle`：这台机器的窗口挂在「此刻该出价的那一位」身上，而一次动作会把
+/// 轮转指针推给下一个人 —— 不等到下一帧，测试读不到新的那位。
+pub fn auction_ask(app: &mut App, player: Entity, what: BidMove) {
+    app.world_mut()
+        .resource_mut::<AuctionRequests>()
+        .0
+        .push(AuctionMove { player, what });
+    settle(app, 2);
+}
+
+/// 拍卖机现在的状态（P9）。断言「这一场排在第几块」「谁还在名单上」读的是这一份，
+/// 而不是面板上的字符串。
+pub fn auction_of(app: &App) -> Auction {
+    app.world().resource::<Auction>().clone()
+}
+
+/// 正在进行的这一场。`None` = 机器空着。
+pub fn lot_of(app: &App) -> Option<Lot> {
+    auction_of(app).lot
+}
+
+/// 死者留下的清算料（P9）。用它验「料记下了而没有漏拍、也没有多拍」——
+/// 那块数（三）是 `GameRules::liquidation_lots`，写死在断言里就会在改数时红得没道理。
+pub fn liquidation_of(app: &App) -> Vec<LiquidationPlan> {
+    auction_of(app).liquidation.clone()
 }
 
 /// 奖池现在有多少钱。

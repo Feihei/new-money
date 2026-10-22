@@ -47,6 +47,8 @@ fn grab(app: &mut App, player: Entity, land: u32) {
 /// prototype 盘上 L3（绑在 7 号格上）的名义地价 —— 用例里的数都从这条来，
 /// 改数据时这里先红，而不是让六条用例各猜一个数。
 const L3_PRICE: i64 = 3800;
+/// L3 加盖一层的名义费（同一份地块数据里的 `upgrade_cost`）。
+const L3_STOREY: i64 = 1900;
 
 #[test]
 fn buying_a_plot_from_the_other_side_of_the_ring_costs_exactly_a_normal_purchase() {
@@ -78,6 +80,35 @@ fn buying_a_plot_from_the_other_side_of_the_ring_costs_exactly_a_normal_purchase
     assert!(
         log.contains(&"Play(P0->P0:item_grab)".to_string()),
         "出牌也要留流水：{log:?}"
+    );
+    assert_cash_audit(&mut app, 20_000);
+}
+
+/// 无主而**立着楼**的地，购地卡也一样连楼收钱（10-22 实报：破产之后剩下的地归无主而建筑保留，
+/// 走到那一格的人要「一次买下地+上面的建筑」）。
+///
+/// 这条不是补一个边缘情况，而是堵住一张套利券：判据若退回「只看有没有主人 + 只按地价」，
+/// 那么「先打一槌拍卖把某人打成破产、再花 30 点券用购地卡白拿他三层的楼」就是全场最便宜的开发
+/// 路径，而 40 点券那张卡本来买的是「不必走到那一格」，不是折扣。
+/// 等级那一半同样要断：收了楼的钱却把楼钳回 Lv1，等于把买主刚付的那两层当场拆掉。
+#[test]
+fn a_grab_over_a_house_pays_for_the_house_and_keeps_it() {
+    let (mut app, p0, _p1) = two_players_before_the_roll();
+    own(&mut app, 3, None, 3, false); // 无主的徐家汇，立着三层
+
+    grab(&mut app, p0, 3);
+
+    assert_eq!(
+        plot_state(&mut app, 3),
+        (Some(0), 3, false),
+        "买到的是一栋三层的楼，不是一块被抹平的空地"
+    );
+    let want = L3_PRICE + 2 * L3_STOREY;
+    assert_eq!(cash_of(&mut app, p0), 20_000 - want, "地价 + 已盖的每一层");
+    assert!(
+        ledger(&app).contains(&format!("Bought(P0@3${want})")),
+        "收据上那个数得与扣的钱是同一个：{:?}",
+        ledger(&app)
     );
     assert_cash_audit(&mut app, 20_000);
 }

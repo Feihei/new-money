@@ -158,6 +158,18 @@ pub enum CardEffect {
     /// 死神送不走（[`banishable`](crate::gods::banishable)），而那条判据与「身上没有神」
     /// 都在出牌前挡掉 —— 卡不消耗，理由给面板当灰按钮的文案。
     BanishGod,
+    /// 把**别人手里**的一块地强制上架（拍卖卡，P9）。
+    ///
+    /// 卡面上既没有地块编号也没有价钱：哪块地来自出牌请求（与 [`Self::BuyLand`] 同一条），
+    /// 而起拍价由 [`crate::settle::Books::market_value`] 现算 —— 那块地此刻值多少，
+    /// 含它上面盖着的每一层楼。
+    ///
+    /// 这条效果与其余每一条的差别是**主语与承受者不是同一个人**：出牌人是开槌的那位
+    /// （他不参与竞价，拍出的钱归他 —— 10-22 拍板），承受者是那块地的业主（他会失去这块地，
+    /// 而拿不到那笔钱）。[`crate::hand::victim_of`] 给的是后者，所以
+    /// [`crate::deck::apply_card`] 为此多带一个「出牌人」参数 —— 那不是冗余，是这张卡的
+    /// 语义本来就有两个人。
+    Auction,
 }
 
 const fn default_detention_turns() -> u32 {
@@ -296,6 +308,17 @@ impl CardSet {
                         // 同一条：0 回合的「走不远」什么都不做，而卡已经被打掉
                         if *turns == 0 {
                             errs.push(format!("卡牌 {} 的乌龟回合数为 0", c.id));
+                        }
+                    }
+                    CardEffect::Auction => {
+                        // 与 `LandStatus`／`BuyLand` 同一条绑定：要拍哪块地来自出牌请求，不在卡面上。
+                        // 绑成 `land`（有主地）而不是 `unowned_land`，是因为这张卡卖的就是
+                        // 「别人手里那块地被迫上拍」—— 无主地本来谁都能买，拍它只是多绕一台机器
+                        if c.target != CardTarget::Land {
+                            errs.push(format!(
+                                "卡牌 {} 要拍卖地，但 target 不是 land（得有原主）",
+                                c.id
+                            ));
                         }
                     }
                     CardEffect::SummonGod | CardEffect::BanishGod => {

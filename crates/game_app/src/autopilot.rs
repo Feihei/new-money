@@ -9,8 +9,9 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    BuyTicketRequested, Decision, DecisionChosen, GameKind, GameRules, Jackpot, MinigameResult,
-    Pending, PendingDecision, RequestRoll, TurnOrder, TurnPhase,
+    Auction, AuctionMove, BidMove, BuyTicketRequested, Decision, DecisionChosen, GameKind,
+    GameRules, Jackpot, MinigameResult, Pending, PendingDecision, PlayerId, RequestRoll, TurnOrder,
+    TurnPhase, Wallet,
 };
 
 pub struct AutopilotPlugin;
@@ -85,6 +86,12 @@ enum AutoAnswer {
     /// 买一注。**买哪个号由派发那一侧决定**（见 [`auto_answer`]），因为号码池读的是奖池
     /// 而不是这张表 —— `answer_for` 是个纯函数，它拿不到世界状态。
     Ticket,
+    /// 拍卖台上的一个动作（P9）。同 `Ticket` 一条理由：**喊到哪一档、放不放手要读世界**
+    /// （当前最高价与这位的现金），而 `answer_for` 只有规则表。
+    ///
+    /// 这一格存在的最低代价是「让长跑转得动」：答成 `Acknowledge` 的话窗口不会被清掉
+    /// （`decision_system` 对拍卖三种回答一律不认），于是**第一个破产就把整局停住**。
+    Bid,
 }
 
 /// 报价类答「接受」，收据/卡面/三种柜台答「已阅」。这一分工不是讲究：柜台只认
@@ -97,6 +104,9 @@ enum AutoAnswer {
 /// 彩票柜台答「买一注」而不是「离开」：不买的话 `NM_AUTOROLL` 那种「跑完一局」的手段里
 /// 奖池永远是 0，而 P8 验收那句「每笔进池的钱都能从流水追溯」就只在单测里成立过。
 /// 买不起时规则层自己会拒（那张拒绝表与面板的灰按钮同源），这里不必先问现金。
+///
+/// 拍卖台答 `Bid` 而不是任何一种 `Decision`（P9）：那三种它一个都不认，答成任何一条都只是
+/// 让长跑停在第一个破产那儿 —— 而那正是 P9 这一阶段要拍的东西。
 fn answer_for(about: Pending, rules: &GameRules) -> AutoAnswer {
     match about {
         Pending::Buy(_) | Pending::Upgrade(_) => AutoAnswer::Decide(Decision::Accept),
@@ -105,6 +115,7 @@ fn answer_for(about: Pending, rules: &GameRules) -> AutoAnswer {
             score: rules.minigames.of(game).perfect / 2,
         },
         Pending::Lottery => AutoAnswer::Ticket,
+        Pending::Auction => AutoAnswer::Bid,
         Pending::RentNotice(_)
         | Pending::Card
         | Pending::BankTeller
@@ -114,21 +125,33 @@ fn answer_for(about: Pending, rules: &GameRules) -> AutoAnswer {
 }
 
 /// 自动玩家的「一只手」：它读得着的世界状态与写得出去的那几种消息。打包成参数包是房规
-/// （§六 坑 8）—— P8 加上买券之后这条 system 要写三种消息、读三样状态，散装就是九个参数，
-/// 而 `#[allow(clippy::too_many_arguments)]` 会把「一个 system 要动这么多」这个信号吃掉。
+/// （§六 坑 8）—— P8 加上买券、P9 加上拍卖之后这条 system 要写四种消息、读五样状态，
+/// 散装就是十一个参数，而 `#[allow(clippy::too_many_arguments)]` 会把
+/// 「一个 system 要动这么多」这个信号吃掉。
 #[derive(SystemParam)]
-struct AutoHand<'w> {
+struct AutoHand<'w, 's> {
     pending: Res<'w, PendingDecision>,
     rules: Res<'w, GameRules>,
     /// 上期开出的号。自动玩家就买**那个号** —— 「跟着上期买」是真玩家会做的事，
     /// 而这个选择不需要任何世界状态之外的东西
     jackpot: Res<'w, Jackpot>,
+    /// 拍卖机（P9）。读的是**资源**而不是 `Books`：`Books` 里已经揣着一条 `ResMut<Auction>`，
+    /// 而同一条 system 参数里两条对同一资源的可变借用会在参数建立期直接撞
+    auction: Res<'w, Auction>,
+    /// 各人的现金。自动玩家要问「这一档加不加得起」，而不必把整个账本借进来
+    wallets: Query<'w, 's, &'static Wallet, With<PlayerId>>,
     answers: MessageWriter<'w, DecisionChosen>,
     scores: MessageWriter<'w, MinigameResult>,
     tickets: MessageWriter<'w, BuyTicketRequested>,
+    bids: MessageWriter<'w, AuctionMove>,
 }
 
-fn auto_answer(time: Res<Time>, gap: Res<AutoGap>, mut hand: AutoHand<'_>, mut due: Local<f32>) {
+fn auto_answer(
+    time: Res<Time>,
+    gap: Res<AutoGap>,
+    mut hand: AutoHand<'_, '_>,
+    mut due: Local<f32>,
+) {
     let Some((player, about)) = hand.pending.active() else {
         return;
     };
@@ -167,6 +190,34 @@ fn auto_answer(time: Res<Time>, gap: Res<AutoGap>, mut hand: AutoHand<'_>, mut d
                 action: Decision::Acknowledge,
             });
         }
+        AutoAnswer::Bid => {
+            // **主语取机器而不是取窗口**：轮转指针与窗口在绝大多数帧上是同一个人，但它们由两条
+            // system 写（`auction_move_system` 改机器、`auction_hold_system` 挂窗口），
+            // 而这两条与本 system 之间没有排过序 —— 读到「新机器 + 旧窗口」那一帧是可能的。
+            // 不一致时这一帧什么都不发，下一帧自然一致：发一条注定被「还没轮到你」拒掉的
+            // 请求，除了把日志刷满什么也不换。
+            let Some(lot) = hand.auction.lot.as_ref() else {
+                return;
+            };
+            if lot.bidder() != Some(player) {
+                return;
+            }
+            let needed = lot.next_amount();
+            let cash = hand
+                .wallets
+                .get(player)
+                .map(|wallet| wallet.cash)
+                .unwrap_or_default();
+            // 加得起就一直加：这样长跑里**一定**会有拍卖成交，而不是每一场都因为「没人愿意喊」
+            // 流标。反过来一律放弃也能让机器转完，但那一局里 P9 的过户与所得两条路径
+            // 一次都没被走过，而那些正是截图与流水要念的东西。
+            let what = if cash >= needed {
+                BidMove::Raise
+            } else {
+                BidMove::Withdraw
+            };
+            hand.bids.write(AuctionMove { player, what });
+        }
     }
 }
 
@@ -196,6 +247,7 @@ mod tests {
                     panic!("游乐场被答成了 {action:?} —— 长跑会停在那一格")
                 }
                 AutoAnswer::Ticket => panic!("游乐场不该被当成买券"),
+                AutoAnswer::Bid => panic!("游乐场不该被当成出价"),
             }
         }
         assert!(matches!(
@@ -211,6 +263,13 @@ mod tests {
         assert!(matches!(
             answer_for(Pending::Lottery, &rules),
             AutoAnswer::Ticket
+        ));
+        // 拍卖台答成任何一种 `Decision` 都是**整局停住**：那三种回答 `decision_system` 对拍卖
+        // 一个都不认（窗口不清、回合不交还），于是第一个破产就把长跑钉死在那一格 ——
+        // 而且不报错，只是不动了。这一条与上面游乐场那条是同一个坑的第二次登记。
+        assert!(matches!(
+            answer_for(Pending::Auction, &rules),
+            AutoAnswer::Bid
         ));
     }
 }

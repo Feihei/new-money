@@ -93,5 +93,14 @@
     "desc": "送走自己身上那位神（只能送自己的），身上带着的定时炸弹也一并送走",
     "cost_points": 50,
     "effects": [{ "action": "banish_god" }]
+  },
+  {
+    "id": "item_auction",
+    "type": "item",
+    "title": "拍卖卡",
+    "desc": "把别人手里的一块地强制上架：起拍是它此刻的身价（连上面的楼一起），全场轮流喊价而你在旁边看着 —— 谁拍下来，那笔钱归你",
+    "cost_points": 40,
+    "target": "land",
+    "effects": [{ "action": "auction" }]
   }
 ]

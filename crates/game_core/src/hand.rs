@@ -173,12 +173,22 @@ fn aim_is_legal(def: &CardDef, aim: Option<CardAim>, player: Entity, books: &Boo
 /// 判据只有一份，两处各调一次 `nearest_god` —— 面板查的是 `Occupancy`，而 `Books` 里没有
 /// 这一格，所以它自己开一条只读查询不算复制第二份真相（购地卡那次借 `buy_price` 是因为
 /// 真相在账本里，这里不在）。
-fn unmet_precondition(def: &CardDef, player: Entity, sink: &CardSink<'_, '_>) -> Option<String> {
+///
+/// `opener` 与 `victim` 分开带，是 P9 的拍卖卡逼出来的：那张卡的**主语与承受者不是同一个人**
+/// （开槌的人不能拍自己的地），而「这块地上不了拍」的四条理由里有两条要问出牌人。
+/// 抽卡与自用的卡两者本来就是同一个人，由调用方各传一遍。
+fn unmet_precondition(
+    def: &CardDef,
+    opener: Entity,
+    victim: Entity,
+    aim: Option<CardAim>,
+    sink: &CardSink<'_, '_>,
+) -> Option<String> {
     for effect in &def.effects {
         let why = match effect {
             CardEffect::SummonGod => {
                 let (Ok(pos), Ok(heading)) =
-                    (sink.positions.get(player), sink.headings.get(player))
+                    (sink.positions.get(victim), sink.headings.get(victim))
                 else {
                     return Some("说不清他在哪一格".to_string());
                 };
@@ -193,13 +203,25 @@ fn unmet_precondition(def: &CardDef, player: Entity, sink: &CardSink<'_, '_>) ->
                     .is_none()
                     .then(|| crate::gods::NO_GOD_ON_THE_ROAD.to_string())
             }
-            CardEffect::BanishGod => match sink.books.god_of(player) {
+            CardEffect::BanishGod => match sink.books.god_of(victim) {
                 None => Some(crate::gods::NO_GOD_TO_BANISH.to_string()),
                 Some(held) if !crate::gods::banishable(held.god) => {
                     Some(crate::gods::god_refuses_banish(held.god))
                 }
                 Some(_) => None,
             },
+            CardEffect::Auction => {
+                // 这张卡**会落空**，而落空的四种样子在画面上长得一模一样（按钮按下去没声音）。
+                // 问的正是拍卖那一道唯一闸门 `can_open`：押着的地、查封中的地、自己的地、
+                // 场上没有别人可出价 —— 四条都从它回来，于是「面板说能拍」与「规则层肯开场」
+                // 不可能分叉（与 P6d 那两张符同一条纪律：**办不成时卡不消耗**）
+                let Some(CardAim::Land(land)) = aim else {
+                    return Some(crate::auction::OpenDeny::Unowned.label().to_string());
+                };
+                crate::auction::can_open(&sink.books, land, Some(opener), None)
+                    .err()
+                    .map(|why| why.label().to_string())
+            }
             // 其余每一条效果都不需要「此刻有没有对象」这一问：免罪与免费是挂上去就等着，
             // 拘留/停留/乌龟/转向打在谁身上都成立，地块类由 `aim_is_legal` 管。
             // 穷尽而不是 `_ => None`：新加一条效果必须当场回答它会不会落空
@@ -285,7 +307,7 @@ pub fn play_card_system(
             debug!("出牌被拒：{} 找不到承受者", def.id);
             continue;
         };
-        if let Some(why) = unmet_precondition(def, victim, &sink) {
+        if let Some(why) = unmet_precondition(def, current, victim, request.aim, &sink) {
             debug!("出牌被拒：{} —— {why}", def.id);
             continue;
         }
@@ -293,7 +315,7 @@ pub fn play_card_system(
         if let Ok(mut hand) = sink.kit.hands.get_mut(current) {
             hand.spend(request.card);
         }
-        let outcomes = apply_card(&mut sink, victim, def, request.aim);
+        let outcomes = apply_card(&mut sink, current, victim, def, request.aim);
         played.write(CardPlayed {
             player: current,
             victim,

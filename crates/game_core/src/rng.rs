@@ -56,6 +56,12 @@ const MINIGAME_TAG: u64 = 0xA4CA_D000_0000_000A;
 /// 并进骰子流，「这个月开了几号」就会挪动下一手骰点 —— 而乐透是一月一次、骰子是一回合
 /// 好几次，两者的取数节奏差着两个数量级，混在一条流上等于让月度事件去扰动逐回合的可复现性。
 const LOTTERY_TAG: u64 = 0x1077_0000_0000_000B;
+/// P9：一处破产清算里**拍哪几块地、按什么次序拍**。
+///
+/// 这条流单独开的原因与前面每一条同形，而 P9 多一层要防的东西：拍卖的次序是玩家会回头对的
+/// 事（「我那块地为什么是第二场」），若让它跟着「这一局进过几次店」或「刷过几次神」漂移，
+/// 同一颗种子的两次跑法会拍出两块不同的地 —— 那比拍哪几块更难查。
+const AUCTION_TAG: u64 = 0xA71C_0000_0000_000C;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +91,7 @@ pub struct Rng {
     god: ChaCha8Rng,
     minigame: ChaCha8Rng,
     lottery: ChaCha8Rng,
+    auction: ChaCha8Rng,
 }
 
 impl Rng {
@@ -104,12 +111,18 @@ impl Rng {
             god: ChaCha8Rng::seed_from_u64(seed ^ GOD_TAG),
             minigame: ChaCha8Rng::seed_from_u64(seed ^ MINIGAME_TAG),
             lottery: ChaCha8Rng::seed_from_u64(seed ^ LOTTERY_TAG),
+            auction: ChaCha8Rng::seed_from_u64(seed ^ AUCTION_TAG),
         }
     }
 
     /// 乐透那一条流（P8）：这个月开出几号。
     pub fn pick_lottery(&mut self, span: RangeInclusive<u32>) -> u32 {
         self.lottery.random_range(span)
+    }
+
+    /// 破产清算那一条流（P9）：从他名下的地里抽哪几块、按什么次序拍。
+    pub fn pick_auction(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.auction.random_range(span)
     }
 
     /// 游乐场那一条流（P7）：这一趟玩哪一款，以及那一局的布局种子。

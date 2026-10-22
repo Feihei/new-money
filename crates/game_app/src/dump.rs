@@ -16,7 +16,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
-    ActiveBoard, ArcadeDeal, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind,
+    ActiveBoard, ArcadeDeal, AtmAccess, Auction, BankBalance, Bankrupt, BuildingLevel, CardKind,
     Corrections, CouponBoxes, Deck, DeckOrder, Detention, GameRules, GameSeed, GameSession, Hand,
     Heading, HolidaySet, Insulation, Inventory, Jackpot, LandId, LandStatus, Landing,
     LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap, Occupancy, OccupancyAt, Owner, Paused,
@@ -185,6 +185,10 @@ pub struct DumpView<'w, 's> {
             &'static LotteryTickets,
         ),
     >,
+    /// 拍卖机（P9）。这台机器的状态**不在任何组件里**：正在拍哪块、喊到哪、还剩谁、后面排着几块，
+    /// 全在这一个资源上 —— 而面板每帧都在换主语（问的是下一个出价的人），
+    /// 顶栏那一行只活两三帧。查「拍卖为什么停在半空」只有这一条路。
+    auction: Res<'w, Auction>,
     /// 道路放置物（P5）。要同时看得见两种位置：落在哪一格、以及在谁身上剩几步 —
     /// 「炸弹在哪」是查一局为什么突然有人住院时最先要问的事
     occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
@@ -208,6 +212,7 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             row(ui, "牌堆", format_decks(&view));
             row(ui, "货架", format_stock(&view));
             row(ui, "奖池", format_jackpot(&view));
+            row(ui, "拍卖", format_auction(&view));
             ui.separator();
             for line in format_corrections(&view) {
                 ui.monospace(line);
@@ -425,6 +430,71 @@ fn format_jackpot(view: &DumpView) -> String {
             held.join(" ")
         }
     )
+}
+
+fn format_auction(view: &DumpView) -> String {
+    let machine = &view.auction;
+    let queued = machine.standby.len() + machine.liquidation.len();
+    let Some(lot) = machine.lot.as_ref() else {
+        return format!(
+            "没在拍{}",
+            if queued > 0 {
+                format!(" · 还排着 {queued} 块")
+            } else {
+                String::new()
+            }
+        );
+    };
+    // 「槌是谁敲的」与「从谁手里拍走」两句话把两种入口分开：破产清算没有开槌的人，
+    // 而这两种情况的钱去的是不同的地方（归那位玩家 / 归银行），省一句就分不清
+    let struck = lot.by.map_or_else(
+        || "破产变卖".to_string(),
+        |founder| format!("槌 {}", who_are(view, founder)),
+    );
+    let seller = lot
+        .seller
+        .map_or_else(|| "无主".to_string(), |former| who_are(view, former));
+    let leader = lot.leader.map_or_else(
+        || "还没人认价".to_string(),
+        |front| format!("最高 {}({})", lot.high, who_are(view, front)),
+    );
+    let fighting = lot
+        .pool
+        .iter()
+        .map(|e| who_are(view, *e))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{} · 从 {seller} 手里 · {struck} · {leader} · 该 {} · 还在争 {fighting}{}",
+        plot_of(view, lot.land),
+        lot.bidder()
+            .map_or_else(|| "没人".to_string(), |e| who_are(view, e)),
+        if queued > 0 {
+            format!(" · 后面排着 {queued} 块")
+        } else {
+            String::new()
+        },
+    )
+}
+
+/// 地块名。菜单态没有棋盘，所以每一处查名字都要走 `Option<Res<ActiveBoard>>` 这一层。
+fn plot_of(view: &DumpView, land: LandId) -> String {
+    view.active
+        .as_ref()
+        .and_then(|board| board.def.land(land.0))
+        .map_or_else(
+            || format!("L{}", land.0),
+            |plot| format!("L{} {}", plot.id, plot.name),
+        )
+}
+
+/// 一个 `Entity` 是谁。写成「P1孙小美」而不是只有名字：面板上四个玩家可能重名，
+/// 而 dump 是拿来对账的，编号才是别的路径上也查得到的那个键。
+fn who_are(view: &DumpView, player: Entity) -> String {
+    view.players
+        .get(player)
+        .map(|row| format!("P{}{}", row.1.0, row.2.0))
+        .unwrap_or_else(|_| "?".into())
 }
 
 fn format_players(view: &DumpView) -> Vec<String> {

@@ -193,6 +193,19 @@ pub enum Pending {
     /// （见 `minigame::settle_arcade_landing`）。挂在待决事项上而不是让 UI 自己去查格子，
     /// 是因为「随机抽到了哪一款」是这一局的事实，得跟着回合机走、也得进存档（P15）。
     Minigame(crate::minigame::GameKind),
+    /// 拍卖正在进行，而**现在轮到这个人喊价**（P9）。
+    ///
+    /// 它是第六种窗口，也是其中唯一一种「主语会变」的：柜台那五种从头到尾问的都是踩格的
+    /// 那个人，而拍卖一圈一圈地问不同的人 —— 窗口挂在谁身上，由
+    /// [`crate::auction::Auction`] 里的轮转指针决定，不由落格的人决定。
+    ///
+    /// 所以它**不带任何字段**：拍的是哪块地、当前最高价、还剩几个人没放弃，全在那一个资源里。
+    /// 这里再挂一份 `(Entity, LandId)` 就是第二份真相，而两份真相迟早会在「散场那一帧」分叉
+    /// （资源里的 `lot` 已经空了，而窗口还写着某块地）。
+    ///
+    /// 三种 `Decision` 对它一律不认（见 [`decision_system`] 里那一格）：它的两个动作走
+    /// [`crate::msg::AuctionMove`]，认了任何一条都会把窗口清掉，而拍卖机还在等下一个人。
+    Auction,
 }
 
 /// 系统状态：现在正等谁的什么回答。
@@ -224,8 +237,18 @@ impl PendingDecision {
 }
 
 /// 流水线最后一段：有人被挂着等回答就停在 `WaitDecision`，否则收摊。
-pub fn close_landing_system(pending: Res<PendingDecision>, mut next: ResMut<NextState<TurnPhase>>) {
-    next.set(if pending.active().is_some() {
+///
+/// 那句「没人等回答」问的不只是 `pending`：拍卖机（P9）占回合的方式是**换人问**，而一处清算
+/// 在两场之间存在 `pending` 已经交还、下一场还没挂上的那一帧；更直接的一手是破产恰好发生在
+/// 落格结算里 —— 本机与拍卖机在同一帧里写的是同一个 `NextState`。所以这里问一句
+/// [`Auction::holds_turn`](crate::auction::Auction::holds_turn)，而不是让两处各写一次、
+/// 再赌哪一条后写（那等于把回合机押在 `OnEnter(Landed)` 与 `Update` 的相对次序上）。
+pub fn close_landing_system(
+    pending: Res<PendingDecision>,
+    auction: Res<crate::auction::Auction>,
+    mut next: ResMut<NextState<TurnPhase>>,
+) {
+    next.set(if pending.active().is_some() || auction.holds_turn() {
         TurnPhase::WaitDecision
     } else {
         TurnPhase::TurnEnd
@@ -297,7 +320,8 @@ pub fn decision_system(
         // 百货柜台与保释窗口同一条理由（`ShopOpRequested`/`BailRequested` 逐笔办），
         // 游乐场也在这组里（成绩走 `MinigameResult` 报上来），彩票柜台同一形
         // （`BuyTicketRequested` 逐笔办）：**五个窗口**对 `Accept`/`Decline` 一律不认，
-        // 谁新增第六种窗口都要来这一格表态。
+        // 谁新增第六种窗口都要来这一格表态（P9 的 `Auction` 另起了一格 —— 它连
+        // `Acknowledge` 都不认，理由写在那一格上）。
         // ⚠️ 游乐场那一格的 `Acknowledge` 语义与另外四个不同：柜台是「办完了」，
         //    它是「不玩了／空手离开」（成绩另有一条路）。见 `Pending::Minigame` 的注。
         (
@@ -316,6 +340,11 @@ pub fn decision_system(
             | Pending::Minigame(_),
             Decision::Accept | Decision::Decline,
         ) => return,
+        // 拍卖：三种回答**都不认**。它的两个动作是「加价」与「放弃」，走
+        // `AuctionMove` 逐条进来办（与柜台同一形），而这里若认了 `Acknowledge`，
+        // 窗口就被清掉、回合被交还，而拍卖机还在等下一个人喊 —— 症状是拍卖停在
+        // 一个没人被问的地方，且一句错话也不说。
+        (Pending::Auction, _) => return,
         // 收据与卡面没有「可拒绝」的选项：钱已经扣了、效果已经结算了。
         // 任何回答都算「我看完了」—— 严格拒绝只会把 UI 的一次疏忽变成挂死。
         (Pending::RentNotice(_) | Pending::Card, _) => {}

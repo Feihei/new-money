@@ -12,13 +12,14 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, AtmAccess, BankOpDone, BankVisited, BombTransferred, CardLost, CardPlayed,
-    ChargeWaived, ChestOpened, DetentionLifted, DetentionSkipped, GameOver, GameSession,
-    GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, ItemPlaced, LandTaken, LotteryBought,
-    LotteryDrawn, LotteryWon, MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged,
-    MoveCapped, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged,
-    RemoteDiceUsed, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited,
-    TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
+    ActiveBoard, AtmAccess, AuctionFailed, AuctionStarted, AuctionWon, BankOpDone, BankVisited,
+    BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, ChargeWaived, ChestOpened,
+    DetentionLifted, DetentionSkipped, GameOver, GameSession, GodAppeared, GodDeed, GodExit,
+    GodLeft, GodPossessed, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn, LotteryWon,
+    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, Paused,
+    PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, RemoteDiceUsed,
+    ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex,
+    TradeSide, TurnOrder, TurnPhase, WalkHalted,
 };
 
 use super::finance::comma;
@@ -421,6 +422,18 @@ pub(crate) struct Notices<'w, 's> {
     ticket: MessageReader<'w, 's, LotteryBought>,
     drawn: MessageReader<'w, 's, LotteryDrawn>,
     won: MessageReader<'w, 's, LotteryWon>,
+    // ===== 拍卖（P9）=====
+    // 五条排在一起，顺序是**因果序**：开场 → 每一声喊价 → 某个人退出 → 落槌 → 流标。
+    // 同一帧里后写的盖掉前写的，于是玩家最后读到的是结果（谁拍走了、多少钱），
+    // 而一场拍卖在长跑里通常就压在同一帧上散场（自动玩家一帧喊一声）。
+    //
+    // 与乐透那三条同一个道理：拍卖没有持久的读数（面板随轮转每帧重建，下一帧问的就是
+    // 另一个人），所以顶栏是它唯一的出口。
+    auctions_started: MessageReader<'w, 's, AuctionStarted>,
+    bids: MessageReader<'w, 's, BidPlaced>,
+    passes: MessageReader<'w, 's, BidWithdrawn>,
+    sold: MessageReader<'w, 's, AuctionWon>,
+    unsold: MessageReader<'w, 's, AuctionFailed>,
     /// 百货成交（P3d②）。排在 `points` 之后：同一帧里那笔点券变动与这张成交凭据说的
     /// 是同一件事，而带卡名的那条更能回答「我刚按下去发生了什么」
     shop: MessageReader<'w, 's, ShopOpDone>,
@@ -606,6 +619,64 @@ pub(crate) fn hint_from_events(
             name(&names, m.player),
             m.number,
             m.amount
+        ));
+    }
+    // ===== 拍卖（P9）=====
+    // 「拍的是哪块地」每条都只带 `LandId`，所以这一族每条都要查一次地块名（同抵押那一条）。
+    let plot_of = |land: LandId| -> String {
+        board
+            .as_ref()
+            .and_then(|b| b.def.land(land.0))
+            .map_or_else(|| "？".to_string(), |l| l.name.clone())
+    };
+    for m in notices.auctions_started.read() {
+        // 「谁敲的槌」与「钱归谁」是同一句话的两半，而这两种入口在画面上长得一模一样：
+        // 不说清的话玩家会以为某个玩家在卖自己的地，而那块地其实是刚死的人留下的
+        let who = match m.by {
+            Some(founder) => format!("{} 敲槌拍卖{}", name(&names, founder), plot_of(m.land)),
+            None => format!("破产变卖：{} 挂拍", plot_of(m.land)),
+        };
+        line = Some(format!(
+            "{who} —— 起拍 {}，一档 {}，{} 人能喊",
+            comma(m.opening),
+            comma(m.step),
+            m.bidders
+        ));
+    }
+    for m in notices.bids.read() {
+        line = Some(format!(
+            "{} 喊到 {}（{}）",
+            name(&names, m.player),
+            comma(m.amount),
+            plot_of(m.land)
+        ));
+    }
+    for m in notices.passes.read() {
+        line = Some(format!(
+            "{} 放弃争{}",
+            name(&names, m.player),
+            plot_of(m.land)
+        ));
+    }
+    for m in notices.sold.read() {
+        // 钱去了哪儿必须说：两种入口两个答案，而这一句是这一场拍卖里唯一持久的读数
+        // （面板下一刻就在问下一个人了）
+        line = Some(format!(
+            "{} 以 {} 拍得{} —— 所得{}",
+            name(&names, m.player),
+            comma(m.price),
+            plot_of(m.land),
+            match m.by {
+                Some(founder) => format!("归 {}", name(&names, founder)),
+                None => "归银行".to_string(),
+            }
+        ));
+    }
+    for m in notices.unsold.read() {
+        line = Some(format!(
+            "{} 没人出价，流标（起拍 {}）",
+            plot_of(m.land),
+            comma(m.price)
         ));
     }
     // 保释：这一行要同时说清「谁付」「付了多少」「放了谁」。它排在通用点券流水之后 ——
@@ -1137,6 +1208,13 @@ mod tests {
             .add_message::<LotteryBought>()
             .add_message::<LotteryDrawn>()
             .add_message::<LotteryWon>()
+            // 拍卖那五条（P9）。同一条纪律：少注册一条不是少一行字，是 `Notices` 参数
+            // 校验直接 panic —— 而 panic 恰好是我们要的（它说明「接线」这件事真的被测着）
+            .add_message::<AuctionStarted>()
+            .add_message::<BidPlaced>()
+            .add_message::<BidWithdrawn>()
+            .add_message::<AuctionWon>()
+            .add_message::<AuctionFailed>()
             .add_message::<ShopOpDone>()
             .add_message::<MortgageDone>()
             .add_message::<CardPlayed>()
@@ -1483,6 +1561,126 @@ mod tests {
         assert_eq!(
             hint_of(&mut app, hint),
             "阿土伯 玩「接财宝」得了 9 分 —— 练习局，不计点券"
+        );
+    }
+
+    /// 开场那一句要分得清两种入口：一个是「某人敲的槌、钱归他」，一个是「破产变卖、钱归银行」。
+    /// 这两句在画面上长得一模一样（都是「一块地上拍」），而玩家下一步要不要抬价，
+    /// 读的就是这个区别 —— 合成一句就是谎话。
+    #[test]
+    fn an_opening_auction_says_who_struck_the_hammer() {
+        let (mut app, me, foe, hint) = notices_app();
+        send(
+            &mut app,
+            AuctionStarted {
+                land: LandId(3),
+                by: Some(me),
+                seller: Some(foe),
+                opening: 5_700,
+                step: 570,
+                bidders: 2,
+            },
+        );
+        let said = hint_of(&mut app, hint);
+        assert!(
+            said.contains("阿土伯 敲槌拍卖")
+                && said.contains("起拍 5,700")
+                && said.contains("2 人能喊"),
+            "开槌的那位与起拍、台阶、能喊的人数都要在：{said}"
+        );
+
+        send(
+            &mut app,
+            AuctionStarted {
+                land: LandId(3),
+                by: None,
+                seller: Some(foe),
+                opening: 7_600,
+                step: 760,
+                bidders: 2,
+            },
+        );
+        let said = hint_of(&mut app, hint);
+        assert!(
+            said.contains("破产变卖") && said.contains("起拍 7,600"),
+            "没有开槌的人时不许说成「某玩家在卖地」：{said}"
+        );
+    }
+
+    /// 每一声喊价都得看得见。拍卖面板问完一句就换人，顶栏是**唯一**留下「谁喊到哪」的地方 ——
+    /// 少接这一条，一场拍卖在屏幕上就与一次点击长得一样。
+    #[test]
+    fn every_shout_and_every_pass_reaches_the_line() {
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            BidPlaced {
+                player: me,
+                land: LandId(3),
+                amount: 6_270,
+            },
+        );
+        assert_eq!(hint_of(&mut app, hint), "阿土伯 喊到 6,270（？）");
+
+        send(
+            &mut app,
+            BidWithdrawn {
+                player: me,
+                land: LandId(3),
+            },
+        );
+        assert_eq!(hint_of(&mut app, hint), "阿土伯 放弃争？");
+    }
+
+    /// 落槌那一句必须带上**钱归谁**（两种入口两个答案），而流标那一句要念得出起拍价 ——
+    /// 玩家问的下一句就是「起拍多少都没人要」。
+    #[test]
+    fn the_hammer_says_where_the_money_went_and_a_pass_says_the_opening() {
+        let (mut app, me, foe, hint) = notices_app();
+        send(
+            &mut app,
+            AuctionWon {
+                player: me,
+                land: LandId(3),
+                price: 6_840,
+                by: Some(foe),
+                seller: None,
+            },
+        );
+        let said = hint_of(&mut app, hint);
+        assert!(
+            said.contains("阿土伯 以 6,840 拍得") && said.contains("所得归 孙小美"),
+            "拍款去向要说得出：{said}"
+        );
+
+        send(
+            &mut app,
+            AuctionWon {
+                player: me,
+                land: LandId(3),
+                price: 7_600,
+                by: None,
+                seller: Some(foe),
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).contains("所得归银行"),
+            "清算那一场不许让人以为某个玩家收到了钱"
+        );
+
+        send(
+            &mut app,
+            AuctionFailed {
+                land: LandId(3),
+                by: None,
+                seller: Some(foe),
+                price: 7_600,
+            },
+        );
+        let said = hint_of(&mut app, hint);
+        assert!(
+            said.contains("没人出价，流标") && said.contains("起拍 7,600"),
+            "流标那一句要念得出起拍价：{said}"
         );
     }
 }

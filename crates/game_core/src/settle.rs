@@ -84,6 +84,14 @@ pub struct Books<'w, 's> {
     /// 迟早会有一边忘了问 —— 而「衰神照样买到了地」这种错不会崩，只会在玩家眼里变成
     /// 「这神是假的」。与 `detained` 同一族：账本读得出，UI 才不必自己开第二份查询。
     possessions: Query<'w, 's, &'static crate::gods::Possession, With<PlayerId>>,
+    /// 拍卖机（P9）。账本必须读得到它，是因为**破产那一刻**要就地记下待拍的料 ——
+    /// 那几块地与其层数此刻还在死者名下，下一帧就查不到了（`render`/`Commands` 的延迟写
+    /// 会让同一帧两处破产各看到「还没记」，与 P3d③ 那条「同一帧押两遍钱」同一条坑）。
+    ///
+    /// 连带一条纪律：任何想同时碰账本与拍卖机的 system 必须**借这一格**，不能再拿一条
+    /// `ResMut<Auction>` —— 同一个 system 参数里两条对同一资源的可变借用，会在参数建立期
+    /// 直接撞（§6.1 坑 33 的同族，只是碰的是资源而不是查询）。
+    pub auction: ResMut<'w, crate::auction::Auction>,
     cash: MessageWriter<'w, CashChanged>,
     /// 一次性修正生效那一笔的凭据（免费卡免掉了多少）。与 `cash` 分开写，
     /// 因为这里没有钱动 —— 见 [`ChargeWaived`]。
@@ -424,6 +432,21 @@ impl<'w, 's> Books<'w, 's> {
 
     /// 破产清算：现金清零、存款负债归零、持仓清空、名下地块放回市场。
     ///
+    /// **楼留在地上**（10-22 实报）。摘掉的只有归属与那笔抵押债，所以街上留下的是
+    /// 「无主但立着楼」的地，而下一位走到那一格的人**连楼一起付**（[`Books::buy_price`]
+    /// 的基数含已盖的每一层）。同一条消息也定了「拍卖的那三格连着建筑一起拍」——
+    /// 两处读的是同一个世界状态，于是拍卖也不必再「先摘再还」：
+    /// 旧版在这里清零层数、由 `auction::Listing` 把被摘之前那个数带进起拍价、成交那一刻还回去，
+    /// 那一整趟的动机是「拍不走的地上不该留一栋凭空回来的楼」，而真正的答案是**根本别摘**。
+    ///
+    /// **放回去之前先留一份料**（P9）：他名下每一块地被记进
+    /// [`crate::auction::Auction::liquidation`]，由拍卖机挑 `liquidation_lots` 块逐块挂拍 ——
+    /// 10-22 拍板「破产时从持有地产中随机选 3 处逐项进行拍卖，其余归无主，股票归无主」。
+    /// 之所以是「记一份料」而不是「当场开场」：开场要座位序（`TurnOrder`）与随机流，
+    /// 而账本两条都不该拿（那会把每一条扣钱的路都变成拍卖机的借用冲突者）；
+    /// 也之所以在这里记**全部**而不是只记那三块：抽哪三块是抽出来的，先替它保留全集。
+    /// 记的是**地块号**而不是「地块号 + 层数」：层数此刻（以及此后）都还在世界上。
+    ///
     /// 与 Godot 的差别是刻意修的：`player_data.gd:84-91` 只清玩家自己的 `properties`
     /// 列表，`PropertyRegistry` 里的业主仍写着死者 —— 于是租金永远打给一个破产者、
     /// 同色组永远卡住别人的垄断与升级。这里把归属一并摘掉。
@@ -449,15 +472,30 @@ impl<'w, 's> Books<'w, 's> {
             holdings.0.clear();
         }
         if let Some(pid) = self.id_of(player) {
-            for (_, _, mut owner, mut level, mut mortgage) in self.plots.iter_mut() {
+            let mut held: Vec<LandId> = Vec::new();
+            for (_, id, mut owner, _, mut mortgage) in self.plots.iter_mut() {
                 if owner.0 == Some(pid) {
+                    held.push(*id);
                     owner.0 = None;
-                    level.0 = 0;
                     // 抵押跟着人走：人离场了，押在银行的地与那笔债一起清零
                     // （与 [`Self::damage`] 的夺地同一口径 —— 无主地上留着抵押等于替一个
                     // 不存在的主人挡租金）
                     mortgage.proceeds = 0;
                 }
+            }
+            // 待拍的料按地块号排一遍再交出去：`plots` 那条查询的**迭代顺序**是按实体行号，
+            // 而「哪一块排第一」是玩家会回头对的事（同一颗种子该拍出同一串拍卖）。
+            // 让迭代顺序冒充拍卖顺序，等于把可复现性押在 spawn 次序上。
+            held.sort_unstable_by_key(|land| land.0);
+            // 名下有地才留料：一处空的清算会让拍卖机白转一圈，而那一圈末尾那句 `warn!`
+            // 说的是「开不成场」—— 玩家听见的是假消息
+            if !held.is_empty() {
+                self.auction
+                    .liquidation
+                    .push(crate::auction::LiquidationPlan {
+                        dead: player,
+                        plots: held,
+                    });
             }
         }
         commands.entity(player).insert(Bankrupt);
@@ -471,7 +509,9 @@ impl<'w, 's> Books<'w, 's> {
     /// 打一次建筑损害（P2② 的「拆房 / 征收」动词，形状见 [`crate::damage`]）。
     ///
     /// 抵押本金只在**夺地**那一刻清：抵押中的地被 `Degrade` 或 `Clear{seize:false}` 打过
-    /// 之后仍然是他的、仍然欠着 —— 房子被拆不该让债主免单（那是 P9 变卖池才有的账）。
+    /// 之后仍然是他的、仍然欠着 —— 房子被拆不该让债主免单。P9 在另一头把这条收干净了：
+    /// **押着的地根本进不了拍卖**（`auction::OpenDeny::Mortgaged`），所以「债跟着地走」
+    /// 这种说法在这里从来没有成立过。
     /// 反过来若地都无主了还留着抵押，`economy` 那三处「抵押中」判定就会替一个不存在的主人
     /// 挡掉租金。
     ///
@@ -753,8 +793,9 @@ impl<'w, 's> Books<'w, 's> {
         Some(economy::redeem_cost(principal, &self.rules))
     }
 
-    /// 买地：扣**实付**地价 → 归属落到买家 → 等级**至少** 1（`property_registry.gd:29-33` 的
-    /// `set_owner_by_key` 顺带把空地升到 1 级；本来就更高的地保留它已有的层，见下面那行注）。
+    /// 买地：扣**实付**价（地价 + 地上已有的每一层，见 [`Self::buy_price`]）→ 归属落到买家 →
+    /// 等级**至少** 1（`property_registry.gd:29-33` 的 `set_owner_by_key` 顺带把空地升到 1 级；
+    /// 本来就更高的地保留它已有的层，见下面那行注）。
     /// 付不起或已有人持有 → `None`，什么都不动。
     ///
     /// 价过一遍管线（物价指数 + 小福神「买地免费」那一类 `Cancel`），所以这里返回的
@@ -766,9 +807,10 @@ impl<'w, 's> Books<'w, 's> {
         self.debit(player, price).ok()?;
         let (_, _, mut owner, mut level, _) = self.plots.get_mut(entity).ok()?;
         owner.0 = pid;
-        // **下限 1 而不是置 1**：无主地平时就是 Lv0，两条写法到今天为止结果一样，
-        // 而 P6c 的天使会先在无主地上盖出几层 —— 那时「置 1」就是把别人的楼抹平。
-        // PLAN §三 拍卖行那句「建筑随土地一起过户」说的就是这件事：过户的是这块地现在的样子
+        // **下限 1 而不是置 1**：无主地平时就是 Lv0，而「无主却带楼」从今天起是真状态 ——
+        // 破产留下的那一手（[`Self::bankrupt`] 只摘归属、不摘楼）与 P6c 天使白给的那一层。
+        // 「置 1」等于把那栋楼抹平，而买主刚刚为它付过钱（[`Self::buy_price`] 的基数含楼）。
+        // PLAN §三 那句「建筑随土地一起过户」说的就是这件事：过户的是这块地现在的样子
         level.0 = level.0.max(1);
         Some(price)
     }
@@ -806,13 +848,19 @@ impl<'w, 's> Books<'w, 's> {
     /// 唯一来源：手牌浮层那颗 `→ 南京路 $1,200` 的按钮与购地卡的合法性判据读的都是这一句，
     /// 「按钮亮着而规则层拒了」与「按钮上的价与实际扣的价不一样」在结构上不可能发生。
     /// 报价侧照旧不花钱（`quoted` 只算不调账本）。
+    ///
+    /// **基数含地上已有的楼**（10-22 实报：无主地也会立着楼 —— 破产留下的那一手、天使白给
+    /// 的那一层 —— 而「走到那格可以一次买下地+上面的建筑，地价和所有建筑升级费用相加」）。
+    /// 用的就是 [`Books::market_value`] 那个基数 `economy::estate_value`：Lv0/Lv1 的地
+    /// 它等于地价，所以普通空地的报价分文没动；差一层楼就差一笔加盖费，
+    /// 而这笔钱本来就被算进这块地的账面（抵押、资产、起拍价三处早已这么读）。
     pub fn buy_price(&self, player: Entity, land: LandId) -> Option<i64> {
         let view = self.view(land)?;
         // 「必败」问在算价之前：它不是折扣，是这件事根本不给做
         if self.acquire_denied(player) {
             return None;
         }
-        let base = economy::land_price(&self.active.def, &view)?;
+        let base = economy::estate_value(&self.active.def, &view);
         let price = self.quoted(ChargeKind::BuyLand { land }, player, base);
         economy::can_buy(&view, price, self.balance(player)).then_some(price)
     }
@@ -855,7 +903,8 @@ impl<'w, 's> Books<'w, 's> {
     /// 三种办不成，各有各的理由：
     /// - 棋盘上没这块地 / 已经是他的：无事可做（也不发凭据，免得顶栏播一句「他拿走了自己的地」）；
     /// - **押给银行的地不给占**：押到手那笔钱在原主钱包里，债不该跟着地走 ——
-    ///   「资产与负债一起过户」是 P9 变卖池的账，不在这里开个头；
+    ///   「资产与负债一起过户」这件事 P9 也没做（押着的地进不了拍卖，
+    ///   见 `auction::OpenDeny::Mortgaged`）—— 两条入口同一条口径，债从不跟着地走；
     /// - 查封中**照样能占**：那条子挡的是施工与收租（见 `can_upgrade` 与 `calculate_rent`），
     ///   而土地公收的是这块地本身。
     pub fn take_land(&mut self, player: Entity, land: LandId) -> bool {
@@ -873,6 +922,59 @@ impl<'w, 's> Books<'w, 's> {
         };
         owner.0 = Some(pid);
         true
+    }
+
+    /// 这块地**此刻值多少** —— 拍卖的起拍价（P9）。
+    ///
+    /// 与 [`Books::buy_price`] 是两句话。那一句问的是「**这位玩家**现在买它要付多少」，
+    /// 含他身上的神与卡；这一句问的是「这块地本身值多少」。拍卖里把地卖出去的是**对手**
+    /// 而不是系统，所以任何人的免费与折扣都不参与 —— 小福神在场时若按 `buy_price` 起拍，
+    /// 一场拍卖会从 0 元开始喊，而那句「起拍 $12,000」就成了假话。
+    ///
+    /// 实现上是把 `Charge` 的 payer 留 `None`：管线里 `bearer()` 读不到人，于是只有
+    /// 物价指数那一层乘得动（`charge::stage_and_spend` 里 `let Some(bearer) = ... else`
+    /// 那一格），这不是取巧，是「指数是全场事实、修正是个人的事」这条分工的现成出口。
+    ///
+    /// 基数与 [`Books::buy_price`] 是**同一条式子**（`economy::estate_value`：地价 +
+    /// 已盖的每一层），10-22 那句「起拍=买下它本来要付的钱」在代码里就落成两处读同一个函数。
+    /// 而它含楼在 10-22 之后有了第二个理由：破产只摘归属、不摘楼（[`Self::bankrupt`]），
+    /// 死者名下的楼会跟着地一起站在街上 —— 起拍价若不读世界上那几层，
+    /// 就有人按空地价拍走一栋三层楼。旧版在这里额外接一个 `level` 参数、把「被摘之前」
+    /// 那个数盖进只读快照，而那一格跟着「先清零再还」那一趟一起退掉了。
+    pub fn market_value(&self, land: LandId) -> Option<i64> {
+        let view = self.view(land)?;
+        let base = economy::estate_value(&self.active.def, &view);
+        Some(
+            self.staged(Charge::new(ChargeKind::BuyLand { land }, None, None, base))
+                .amount,
+        )
+    }
+
+    /// 拍卖落槌那一步：扣买家的钱、把归属换给他。**楼什么都不必做**（10-22）：
+    /// 破产只摘归属（[`Self::bankrupt`]），那块地上的楼从头到尾都立在世界上，
+    /// 所以「建筑随土地一起过户」在这里只需要改 `Owner` 这一格 ——
+    /// 旧版要在成交那一刻把 `Listing` 记着的层数还回去，那是上一版「先清零再还」
+    /// 自己给自己造的活。
+    ///
+    /// `None` 返回 = 付不出，于是这一场流标（与 [`Books::buy`] 那条「报价已经给过而付不起就
+    /// 什么也不发生」同一条口径 —— 而不是「先扣钱再退钱」那种两段式）。
+    ///
+    /// 刻意**不过结算管线**（理由见 [`crate::auction`] 模块头第三条）：价由竞价产生，
+    /// 不是账单，物价再乘一次等于把别人喊出的数改写。
+    ///
+    /// 抵押进不来：开场那道闸门（`OpenDeny::Mortgaged`）已经把它挡掉了，所以这里不必再判一次
+    /// —— 而 [`Self::take_land`] 那句「资产与负债一起过户是 P9 的账」到此有了答案：
+    /// **不一起过**，押着的地根本不上拍。
+    pub fn auction_sale(&mut self, buyer: Entity, land: LandId, price: i64) -> Option<i64> {
+        let pid = self.id_of(buyer)?;
+        self.debit(buyer, price).ok()?;
+        let Some(entity) = self.land_entity(land) else {
+            return Some(price);
+        };
+        if let Ok((_, _, mut owner, _, _)) = self.plots.get_mut(entity) {
+            owner.0 = Some(pid);
+        }
+        Some(price)
     }
 
     /// 他身上那位神是不是「踩到的地直接归他」（土地公）。唯一读点，与 [`Self::acquire_denied`]

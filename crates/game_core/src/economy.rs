@@ -792,6 +792,42 @@ mod tests {
         assert!(!can_buy(&taken, 1_500, 99_999), "已有人持有 → 不可买");
     }
 
+    /// 无主而带楼的地：买它要付的就是 `estate_value` 那一条式子（10-22 实报「地价和所有建筑
+    /// 升级费用相加」）。钉三件事，缺一条就会各错一种：
+    /// - **Lv0 与 Lv1 都是地价** —— 买地那一刻起就有一层（`settle::buy` 钳到 1），
+    ///   而那一层不是一笔加盖费。把它算进去等于给全场空地涨价一倍的第一档；
+    /// - **三层 = 地价 + 加盖两次**，与抵押账面、资产账面、拍卖起拍读的是同一个数；
+    /// - 够不够付按这个总价判，不是按地价判（`can_buy` 收的是**实付**那个数）。
+    ///
+    /// 放在纯函数层是因为 `Books::buy_price` 与 `Books::market_value` 共用这条式子，
+    /// 而「起拍=买下它本来要付的钱」那句拍板要在改数据时先红在这里，而不是红在某个集成用例的
+    /// 现金差值上（那里红了看不出是价错了还是钱走错了）。
+    #[test]
+    fn a_plot_with_a_house_on_it_is_worth_its_land_plus_every_storey() {
+        let def = board();
+        // prototype 的 0 号南京路：地价 1500、加盖一层 800
+        let bare = at(&world(&def, &[]), 0);
+        let first = at(&world(&def, &[(0, None, 1, false)]), 0);
+        let tall = at(&world(&def, &[(0, None, 3, false)]), 0);
+        assert_eq!(estate_value(&def, &bare), 1_500, "Lv0 无主地＝地价");
+        assert_eq!(
+            estate_value(&def, &first),
+            1_500,
+            "Lv1 也＝地价（那一层不是加盖费）"
+        );
+        assert_eq!(estate_value(&def, &tall), 3_100, "Lv3 = 1500 + 2×800");
+
+        assert!(can_buy(&tall, 3_100, 3_100), "刚好付得起那栋楼");
+        assert!(
+            !can_buy(&tall, 3_100, 3_099),
+            "差一块钱就付不起 —— 判据用的是含楼的价"
+        );
+        assert!(
+            can_buy(&tall, 1_500, 2_000),
+            "反例：只按地价判就会放行那一笔"
+        );
+    }
+
     /// 买地中性：按**缩放价**付钱、按**缩放价**计值，全场总财富不该动。
     ///
     /// 这条是物价指数不自毁的关键。地产若按名义价计值，物价 1.5 时每成交一笔全场
