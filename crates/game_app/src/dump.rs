@@ -17,11 +17,11 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
     ActiveBoard, ArcadeDeal, AtmAccess, BankBalance, Bankrupt, BuildingLevel, CardKind,
-    Corrections, CouponBoxes, Deck, DeckOrder, Detention, GameSeed, GameSession, Hand, Heading,
-    HolidaySet, Insulation, Inventory, LandId, LandStatus, Landing, MarketClock, Mortgaged, Mount,
-    MoveCap, Occupancy, OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName,
-    Points, Possession, Shelf, ShopStock, StaySentence, Timed, TurnOrder, TurnPhase, Wallet,
-    resists,
+    Corrections, CouponBoxes, Deck, DeckOrder, Detention, GameRules, GameSeed, GameSession, Hand,
+    Heading, HolidaySet, Insulation, Inventory, Jackpot, LandId, LandStatus, Landing,
+    LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap, Occupancy, OccupancyAt, Owner, Paused,
+    Pending, PendingDecision, PlayerId, PlayerName, Points, Possession, Shelf, ShopStock,
+    StaySentence, Timed, TurnOrder, TurnPhase, Wallet, resists,
 };
 
 use crate::asset_root;
@@ -168,6 +168,23 @@ pub struct DumpView<'w, 's> {
     /// 百货这一趟的货架（P3d②）。查「我买了卡却没拿到」时要能看见这一格摆过哪几张、
     /// 还剩哪几张 —— 那份事实只在这个资源里
     stock: Res<'w, ShopStock>,
+    /// 奖池（P8）。第三张账：它不是任何人的钱包，所以现金审计与 HUD 都读不到它，
+    /// 而「池子为什么是这个数」正是查乐透时要问的那一句
+    jackpot: Res<'w, Jackpot>,
+    /// 一注多少钱、号码池有多大（P8）。池子那两个数不在池里，而在规则里 ——
+    /// 查「买了一张怎么池子涨了 1000」要能看见这两个数
+    rules: Res<'w, GameRules>,
+    /// 谁手里有哪几个号（P8）。没并进 [`PlayerRow`] 是因为那张元组已经到 Bevy 的
+    /// `QueryData` 15 元上限（见它的注释），第 16 格会在编译期炸
+    tickets: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static PlayerName,
+            &'static LotteryTickets,
+        ),
+    >,
     /// 道路放置物（P5）。要同时看得见两种位置：落在哪一格、以及在谁身上剩几步 —
     /// 「炸弹在哪」是查一局为什么突然有人住院时最先要问的事
     occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
@@ -190,6 +207,7 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             row(ui, "资格", format_access(&view));
             row(ui, "牌堆", format_decks(&view));
             row(ui, "货架", format_stock(&view));
+            row(ui, "奖池", format_jackpot(&view));
             ui.separator();
             for line in format_corrections(&view) {
                 ui.monospace(line);
@@ -363,6 +381,50 @@ fn format_stock(view: &DumpView) -> String {
         })
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// 奖池那一栏（P8）：`池 3000 · 上期 7 号 · 一注 1000/36 号 · P0阿土伯[3,17]`。
+///
+/// 三个来源要写在一起，因为这一栏回答的是「池子为什么是这个数」：进池只有买券与月息
+/// 两条路（10-22 拍板），而这两条都在别处的流水里 —— 面板上只有把「谁持有什么」摊开，
+/// 玩家才对得上账。一个号都没人买时也照写「没人买」：那一行空着读起来像面板坏了。
+fn format_jackpot(view: &DumpView) -> String {
+    let drawn = match view.jackpot.last_draw {
+        Some(n) => format!("上期 {n} 号"),
+        None => "还没开过奖".to_string(),
+    };
+    let mut held: Vec<String> = view
+        .tickets
+        .iter()
+        .filter(|(.., tickets)| !tickets.numbers.is_empty())
+        .map(|(id, name, tickets)| {
+            format!(
+                "P{}{}[{}]",
+                id.0,
+                name.0,
+                tickets
+                    .numbers
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect();
+    // 按玩家序排：查询的迭代序是 archetype 里的行序，与 `P0/P1` 的编号无关，
+    // 不排就会在同一份世界上截出两种顺序（截图核对读不出差别，而人会以为世界变了）
+    held.sort();
+    format!(
+        "池 {} · {drawn} · 一注 {}/{} 号 · {}",
+        view.jackpot.pot,
+        view.rules.ticket_price,
+        view.rules.lottery_numbers,
+        if held.is_empty() {
+            "没人买".to_string()
+        } else {
+            held.join(" ")
+        }
+    )
 }
 
 fn format_players(view: &DumpView) -> Vec<String> {

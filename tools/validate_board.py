@@ -11,6 +11,7 @@
   7. 分支接入点（junction）存在，死胡同格不在主环上
   8. 点券格（coupon）必带正的 data.coupon 面额，且点券字段只属于点券格
   9. data.game 只属于游乐场格（arcade）；那一格缺省合法，意思是「这一趟随机一款」
+  10. land_id 只属于 property 格；彩票格（lottery）不带任何 data 字段（价与号码池都在 GameRules 里）
 """
 import json
 import sys
@@ -113,6 +114,18 @@ for t in loop:
     if t["type"] != "arcade" and data.get("game") is not None:
         errors.append(f"loop[{t['id']}] 不是 arcade 格，却带了 data.game")
 
+# 10. `land_id` 的归属，与彩票格（P8）。
+#     `land_id` 只有 `property` 用得上，而规则 4 只管到了「property 缺 land_id」这一半 ——
+#     别的格类型带上它，两边都不响，于是「这一格绑了地块」成了一个只有校验器看不见的字段。
+#     彩票格反过来：**格子上没有任何要读的数据**（票价、号码池、月息率都在 `GameRules` 里），
+#     所以它多写一个字段就是「写了没人读」那一类静默失效。
+for t in loop:
+    data = t.get("data") or {}
+    if t["type"] != "property" and "land_id" in t:
+        errors.append(f"loop[{t['id']}] 是 {t['type']} 格，却绑了 land_id")
+    if t["type"] == "lottery" and data:
+        errors.append(f"loop[{t['id']}] 是 lottery 格，但彩票没有格子级参数（都在 GameRules）")
+
 # 报告
 print(f"== 棋盘 '{board['board_name']}' 校验 ==")
 print(f"网格: {cols}x{rows}  cell_size={board['cell_size']}")
@@ -120,6 +133,7 @@ print(f"主环格数: {n}  对角路段: {diagonals}")
 print(f"土地数: {len(lands)}  分支接入点: {sum(1 for t in loop if 'branch' in t)}")
 print(f"property 道路格: {sum(1 for t in loop if t['type']=='property')}")
 print(f"点券格: {sum(1 for t in loop if t['type']=='coupon')}")
+print(f"彩票格: {sum(1 for t in loop if t['type']=='lottery')}")
 arcades = [t for t in loop if t["type"] == "arcade"]
 print(f"游乐场格: {len(arcades)}  " + "、".join(
     f"{t['id']}({(t.get('data') or {}).get('game') or '随机一款'})" for t in arcades))

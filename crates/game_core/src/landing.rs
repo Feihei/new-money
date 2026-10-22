@@ -69,6 +69,8 @@ pub enum LandingDomain {
     /// [`Pending::Minigame`] 的事，而 `domain_of` 只是「格类型 → 谁结算」的一张表，
     /// 它读不到格子数据（`const fn`，且刻意不碰世界）。
     Arcade,
+    /// 彩票中心：踩上去可以买一注（P8，`lottery::settle_lottery_landing`）。
+    Lottery,
     /// 拘留场所的接入点：踩上去可以花点券保释关在里面的人（P4③，`bail::settle_bail_landing`）。
     /// 带的是**这个入口管哪一处** —— 监狱门口放不出医院里的人。
     Bail(DetentionPlace),
@@ -92,17 +94,18 @@ pub const fn domain_of(kind: TileKind) -> LandingDomain {
         TileKind::Coupon => D::Coupon,
         TileKind::Shop => D::Shop,
         TileKind::Arcade => D::Arcade,
+        // 彩票中心（P8）：踩上去是买券窗口。它从下面那张「待办清单」里搬出来，
+        // 于是 `Unimplemented` 剩下的三格（神明／中立／交通）仍然点名可查
+        TileKind::Lottery => D::Lottery,
         // 拘留场所的**接入点**（P4③）：踩上去是保释入口，不是被抓 ——
         // 「没有任何踩到某格就被关的规则」是 10-20 拍板的另一半
         TileKind::Jail => D::Bail(DetentionPlace::Jail),
         TileKind::Hospital => D::Bail(DetentionPlace::Hospital),
         // 起点「什么都不发」是拍板过的规则（4 代没有过起点领薪水），不是没做完
         TileKind::Start | TileKind::Road => D::Nothing,
-        // ↓ 待办清单。神明等 P6、乐透等 P8、中立与交通根本没有对应玩法（PLAN §三）。
-        //   踩上去不再静默。
-        TileKind::Lottery | TileKind::GodDeity | TileKind::Neutral | TileKind::Transport => {
-            D::Unimplemented(kind)
-        }
+        // ↓ 待办清单。中立与交通根本没有对应玩法（PLAN §三），神明那条 P6 已经改走
+        //   路上刷出来的实体而不是踩格（ADR-002）。踩上去不再静默。
+        TileKind::GodDeity | TileKind::Neutral | TileKind::Transport => D::Unimplemented(kind),
     }
 }
 
@@ -166,6 +169,12 @@ pub enum Pending {
     /// 百货没有「路过」这一档 —— 逛店必须停下来。所以两者各占一个变体而不是
     /// `Pending::Counter { which }`：分开写，将来「柜台能办什么」那张表才不会被并错。
     Shop,
+    /// 踩到彩票中心：可以买一注乐透券（P8）。
+    ///
+    /// 它也是**窗口**（买券走 [`crate::msg::BuyTicketRequested`] 逐笔进来，一次可以买好几注），
+    /// 所以对 `Accept`/`Decline` 不认，只认「离开」—— 与 `Shop` 同一形：钱是现金、
+    /// 货是一张凭证，而「这一趟买几张」由玩家定。
+    Lottery,
     /// 踩到拘留场所的接入点：可以花点券保释关在里面的人（P4③）。
     ///
     /// 与 `BankTeller`/`Shop` 一样是**窗口**（保释请求走 [`crate::msg::BailRequested`] 逐笔
@@ -286,16 +295,25 @@ pub fn decision_system(
         // 这里若也认 `Accept`，就成了一条消息既办业务又关窗口 —— 两个语义挤一个动作，
         // 而面板上根本没有「接受」这个按钮可对上。
         // 百货柜台与保释窗口同一条理由（`ShopOpRequested`/`BailRequested` 逐笔办），
-        // 游乐场也在这组里（成绩走 `MinigameResult` 报上来）：四个窗口对 `Accept`/`Decline`
-        // 一律不认，谁新增第五种窗口都要来这一格表态。
-        // ⚠️ 游乐场那一格的 `Acknowledge` 语义与另外三个不同：柜台是「办完了」，
+        // 游乐场也在这组里（成绩走 `MinigameResult` 报上来），彩票柜台同一形
+        // （`BuyTicketRequested` 逐笔办）：**五个窗口**对 `Accept`/`Decline` 一律不认，
+        // 谁新增第六种窗口都要来这一格表态。
+        // ⚠️ 游乐场那一格的 `Acknowledge` 语义与另外四个不同：柜台是「办完了」，
         //    它是「不玩了／空手离开」（成绩另有一条路）。见 `Pending::Minigame` 的注。
         (
-            Pending::BankTeller | Pending::Shop | Pending::Bail(_) | Pending::Minigame(_),
+            Pending::BankTeller
+            | Pending::Shop
+            | Pending::Lottery
+            | Pending::Bail(_)
+            | Pending::Minigame(_),
             Decision::Acknowledge,
         ) => {}
         (
-            Pending::BankTeller | Pending::Shop | Pending::Bail(_) | Pending::Minigame(_),
+            Pending::BankTeller
+            | Pending::Shop
+            | Pending::Lottery
+            | Pending::Bail(_)
+            | Pending::Minigame(_),
             Decision::Accept | Decision::Decline,
         ) => return,
         // 收据与卡面没有「可拒绝」的选项：钱已经扣了、效果已经结算了。
@@ -442,9 +460,10 @@ mod tests {
             // 拍板过「什么都不发」的两格：不是待办
             (TileKind::Start, D::Nothing),
             (TileKind::Road, D::Nothing),
-            // 待办四格各自点名；将来某格实现了就从这一组挪走，
+            // P8：彩票中心 = 买券窗口（它从下面那组待办里挪出来，正是这条注释说的那件事）
+            (TileKind::Lottery, D::Lottery),
+            // 待办三格各自点名；将来某格实现了就从这一组挪走，
             // 于是「悄悄少了一个待办」也会在这里显形
-            (TileKind::Lottery, D::Unimplemented(TileKind::Lottery)),
             (TileKind::GodDeity, D::Unimplemented(TileKind::GodDeity)),
             (TileKind::Neutral, D::Unimplemented(TileKind::Neutral)),
             (TileKind::Transport, D::Unimplemented(TileKind::Transport)),
@@ -475,7 +494,6 @@ mod tests {
         assert_eq!(
             todos,
             vec![
-                &TileKind::Lottery,
                 &TileKind::GodDeity,
                 &TileKind::Neutral,
                 &TileKind::Transport,
@@ -507,6 +525,7 @@ mod tests {
             Pending::Card,
             Pending::BankTeller,
             Pending::Shop,
+            Pending::Lottery,
             Pending::Bail(DetentionPlace::Jail),
             Pending::Minigame(crate::minigame::GameKind::PenguinDig),
         ] {

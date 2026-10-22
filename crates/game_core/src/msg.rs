@@ -839,3 +839,84 @@ pub struct MinigameScore {
     pub points: u32,
     pub awarded: bool,
 }
+
+/// 有人要买一注（P8，表现层 → 规则层的意图）。**号码烤在请求里**（那颗「17」本身就是一整个
+/// 意图，与 `ShopOpRequested` 带的卡、`BailRequested` 带的人同一条形状），而价钱与「买不买得成」
+/// 由 [`crate::lottery::buy_allowed`] 判 —— 面板不许自己定价。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuyTicketRequested {
+    pub player: Entity,
+    pub number: u8,
+}
+
+/// 奖池动了（P8）。**奖池唯一的流水** —— PLAN §四 P8 那条验收「每笔进池的钱都能从流水
+/// 追溯」就是靠这一条，而不是靠读代码数加法。
+///
+/// 它**不是**一条 `CashChanged`：池子不是任何人的钱包（10-22 拍板：买券钱 + 月末利息滚存，
+/// 不从任何玩家的既有账上抽）。所以这一笔在现金审计里看不见，与点券那两套账同一条纪律。
+/// `balance` 是动完之后的余额，面板与 dump 直接念它，不必自己累加。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JackpotChanged {
+    /// 进为正、出为负。
+    pub delta: i64,
+    pub balance: i64,
+    pub why: JackpotWhy,
+}
+
+/// 这一笔为什么动。写成穷尽表（与 `landing::domain_of`、`charge::scales_with_price` 同一条
+/// 纪律）：将来给池子加第三条来源（比如「流局的那一期把某笔钱留在池里」）时，
+/// 必须在这里加一格，于是面板那句「这个数是怎么来的」不会静默地说不出口。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JackpotWhy {
+    /// 有人买了一注（全额进池，规则层不抽头）
+    Ticket,
+    /// 月末利息（`GameRules::jackpot_rate`，与储金结息同一条日子）
+    Interest,
+    /// 发奖出池
+    PaidOut,
+}
+
+impl JackpotWhy {
+    /// 面板与顶栏那句「这笔钱哪来的」。住在这里而不是散在 UI 里：规则层与面板要说同一句话。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ticket => "买券",
+            Self::Interest => "月息",
+            Self::PaidOut => "发奖",
+        }
+    }
+}
+
+/// 有人买了一注乐透券（P8）。`price` 是**实付**（过不了物价：买券是账面搬运，
+/// 不在结算管线上，理由见 `charge.rs` 模块头那句「管线的边界」）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LotteryBought {
+    pub player: Entity,
+    pub number: u8,
+    pub price: i64,
+}
+
+/// 开奖那一刻（P8）。`winners == 0` 就是**滚存**：这个月没人猜中，池子与所有人的券都留到
+/// 下月（PLAN §三「无人中奖则累积、号码留到下月」）。
+///
+/// 它带的不是「谁中了」而是「开了几号、池子里有多少、几个人分」—— 那三样在无人中奖时
+/// 仍然要说得出，所以不能只发 [`LotteryWon`]（那条一位中奖者都没有）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LotteryDrawn {
+    pub number: u8,
+    pub winners: u32,
+    /// 每人分到多少（整数除）。`winners == 0` 时为 0。
+    pub each: i64,
+    /// 开奖**之前**那一刻的池子。发奖那条 [`JackpotChanged`] 带的是出多少，这一句带的是
+    /// 「这一期总共攒了多少」—— 玩家问的是后者。
+    pub pot: i64,
+}
+
+/// 一位中奖者（P8）。带名字的那一条，顶栏念的是它；`amount` 与他那条 `CashChanged`
+/// 的 delta 必须相等（`tests/lottery.rs` 钉这一格）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LotteryWon {
+    pub player: Entity,
+    pub number: u8,
+    pub amount: i64,
+}

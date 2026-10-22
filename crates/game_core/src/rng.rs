@@ -5,8 +5,8 @@
 //! 假种子函数（缺陷 #6）。这里整局共用一个种子，于是「同种子 → 同对局」变成一条
 //! 可以断言的性质 —— 回放与失败复现都从这里长出来。
 //!
-//! **同一个种子分成十一条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
-//! 宝箱位置 / 宝箱掉落 / 神明 / 小游戏）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
+//! **同一个种子分成十二条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
+//! 宝箱位置 / 宝箱掉落 / 神明 / 小游戏 / 乐透）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
 //! 取随机数就会把 `turn_flow` 里「对局骰点 == 独立掷出的骰点」那批回归网整片打翻，
 //! 回放也对不齐；分流之后每域的随机性各自稳定，加内容不互相扰动。
 //!
@@ -50,6 +50,12 @@ const GOD_TAG: u64 = 0x60D0_0000_0000_0009;
 /// 直接决定得分、得分换点券、点券是账，所以它必须是可复现的（同一个 `NM_SEED` 走到同一格
 /// 摆出同一局），同时又不能去挪动别的流。
 const MINIGAME_TAG: u64 = 0xA4CA_D000_0000_000A;
+/// P8：乐透开出的那个号。
+///
+/// 单独一条的理由与前面每一条同形，而这里多一层：**开奖不该改变任何别的东西**。把开奖号
+/// 并进骰子流，「这个月开了几号」就会挪动下一手骰点 —— 而乐透是一月一次、骰子是一回合
+/// 好几次，两者的取数节奏差着两个数量级，混在一条流上等于让月度事件去扰动逐回合的可复现性。
+const LOTTERY_TAG: u64 = 0x1077_0000_0000_000B;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +84,7 @@ pub struct Rng {
     loot: ChaCha8Rng,
     god: ChaCha8Rng,
     minigame: ChaCha8Rng,
+    lottery: ChaCha8Rng,
 }
 
 impl Rng {
@@ -96,7 +103,13 @@ impl Rng {
             loot: ChaCha8Rng::seed_from_u64(seed ^ LOOT_TAG),
             god: ChaCha8Rng::seed_from_u64(seed ^ GOD_TAG),
             minigame: ChaCha8Rng::seed_from_u64(seed ^ MINIGAME_TAG),
+            lottery: ChaCha8Rng::seed_from_u64(seed ^ LOTTERY_TAG),
         }
+    }
+
+    /// 乐透那一条流（P8）：这个月开出几号。
+    pub fn pick_lottery(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.lottery.random_range(span)
     }
 
     /// 游乐场那一条流（P7）：这一趟玩哪一款，以及那一局的布局种子。

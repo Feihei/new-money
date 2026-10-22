@@ -537,7 +537,7 @@ mod tests {
     fn prototype_parses_and_validates() {
         let b = board();
         assert_eq!(b.board_name, "prototype");
-        assert_eq!(b.loop_len(), 14);
+        assert_eq!(b.loop_len(), 15);
         assert_eq!(b.lands.len(), 6);
         assert!(
             b.validate().is_ok(),
@@ -549,56 +549,53 @@ mod tests {
     #[test]
     fn ring_wraps_both_directions() {
         let b = board();
-        // 12 号（百货公司）与 13 号（游乐场）是 P3d②/P7 先后追加在环尾的两格：
-        // 都不改任何既有格的编号，只把「回绕」那一跳一路往后挪（11→0 变 12→0 再变 13→0）。
+        // 12（百货公司）、13（游乐场）、14（彩票中心）是 P3d②/P7/P8 先后追加在环尾的三格：
+        // 都不改任何既有格的编号，只把「回绕」那一跳一路往后挪（11→0 变 12→0、13→0 再变 14→0）。
         assert_eq!(b.destination(11, 1), 12);
         assert_eq!(b.destination(12, 1), 13);
-        assert_eq!(b.destination(13, 1), 0, "环尾下一步该回到起点");
-        assert_eq!(b.destination(0, -1), 13);
-        assert_eq!(b.destination(5, 14), 5, "整整一圈回到原地");
-        assert_eq!(b.tile(-1).unwrap().id, 13);
-        assert_eq!(b.tile(14).unwrap().id, 0);
+        assert_eq!(b.destination(13, 1), 14);
+        assert_eq!(b.destination(14, 1), 0, "环尾下一步该回到起点");
+        assert_eq!(b.destination(0, -1), 14);
+        assert_eq!(b.destination(5, 15), 5, "整整一圈回到原地");
+        assert_eq!(b.tile(-1).unwrap().id, 14);
+        assert_eq!(b.tile(15).unwrap().id, 0);
         // wrapped() 与 tile() 必须同一套取模规则，否则棋子位置与看到的格子会错位
-        assert_eq!(b.wrapped(-1), TileIndex(13));
-        assert_eq!(b.wrapped(14), TileIndex(0));
+        assert_eq!(b.wrapped(-1), TileIndex(14));
+        assert_eq!(b.wrapped(15), TileIndex(0));
     }
 
     /// 请神符（P6d）的「离自己最近」读的是这两句：先比双向最短，同距时比行进方向。
     #[test]
     fn ring_distance_counts_both_ways_while_the_heading_breaks_a_tie() {
-        let b = board(); // 14 格
+        let b = board(); // 15 格
         assert_eq!(b.ring_distance(TileIndex(0), TileIndex(0)), 0);
         assert_eq!(b.ring_distance(TileIndex(0), TileIndex(6)), 6);
         assert_eq!(
             b.ring_distance(TileIndex(0), TileIndex(8)),
-            6,
-            "顺着数 8 步的那一边，倒着数只有 6 步 —— 最近是 6"
-        );
-        assert_eq!(
-            b.ring_distance(TileIndex(0), TileIndex(7)),
             7,
-            "偶数格环上正对面那一格两个方向一样远"
+            "顺着数 8 步的那一边，倒着数只有 7 步 —— 最近是 7"
         );
         assert_eq!(
-            b.ring_distance(TileIndex(11), TileIndex(1)),
-            4,
+            b.ring_distance(TileIndex(0), TileIndex(14)),
+            1,
             "跨过环尾与起点也要连着数，不能在此断开各数一半"
         );
-        // 同距的一对（3 号与 11 号离 0 号都是 3 步）：正向取前面那位，掉头之后取另一位。
-        // 这一对是「决胜键真的有牙」的全部依据 —— 14 格环上 7 号是唯一与自己同距的格，
-        // 两个方向都数出 7，用它当用例的话 `Heading` 那一格永远测不到
+        // 同距的一对：15 格是**奇数**环，没有正对面那一格，远侧由两格夹出来 ——
+        // 7 号与 8 号离 0 号都是 7 步。正向取 7 号，掉头之后取 8 号。
+        // 这一对是「决胜键真的有牙」的全部依据：只用其中一位的话，`Heading` 那一格
+        // 永远测不到（另一个方向数出来是 8，本来就输）
         assert_eq!(
-            b.steps_toward(TileIndex(0), TileIndex(3), Heading::Forward),
-            3
+            b.steps_toward(TileIndex(0), TileIndex(7), Heading::Forward),
+            7
         );
         assert_eq!(
-            b.steps_toward(TileIndex(0), TileIndex(11), Heading::Forward),
-            11
+            b.steps_toward(TileIndex(0), TileIndex(8), Heading::Forward),
+            8
         );
         assert_eq!(
-            b.steps_toward(TileIndex(0), TileIndex(11), Heading::Backward),
-            3,
-            "倒着走时 11 号才是前面那位"
+            b.steps_toward(TileIndex(0), TileIndex(8), Heading::Backward),
+            7,
+            "倒着走时 8 号才是前面那位"
         );
     }
 
@@ -606,9 +603,9 @@ mod tests {
     fn walk_path_wraps_past_the_start_tile() {
         let b = board();
         // 从环尾走 2 步：先踏过 0 号起点再落到 1 号 —— 「绕回起点经过」
-        assert_eq!(b.walk_path(13, 2), vec![TileIndex(0), TileIndex(1)]);
-        // 从倒数第二格走 2 步：先经过游乐场再踏过起点，回绕在第二步上
-        assert_eq!(b.walk_path(12, 2), vec![TileIndex(13), TileIndex(0)]);
+        assert_eq!(b.walk_path(14, 2), vec![TileIndex(0), TileIndex(1)]);
+        // 从倒数第二格走 2 步：先经过彩票中心再踏过起点，回绕在第二步上
+        assert_eq!(b.walk_path(13, 2), vec![TileIndex(14), TileIndex(0)]);
         assert_eq!(b.walk_path(0, 1), vec![TileIndex(1)]);
         assert!(b.walk_path(3, 0).is_empty(), "0 步不该有路径");
     }
@@ -624,15 +621,15 @@ mod tests {
             vec![TileIndex(4), TileIndex(3), TileIndex(2)],
             "倒着走是下标递减，不是把路径整个反过来念"
         );
-        // 从 1 号倒着越过起点：0 → 13（游乐场）→ 12（百货）。回绕在负方向上同样成立，
-        // 而这条路径正是「被转向卡送去环尾那两格」的那条路
+        // 从 1 号倒着越过起点：0 → 14（彩票中心）→ 13（游乐场）。回绕在负方向上同样成立，
+        // 而这条路径正是「被转向卡送去环尾那几格」的那条路
         assert_eq!(
             b.walk_path(1, -3),
-            vec![TileIndex(0), TileIndex(13), TileIndex(12)]
+            vec![TileIndex(0), TileIndex(14), TileIndex(13)]
         );
         // 方向不改变走了几步：正负三步都是三格，而倒着走满一圈回到出发那一格
-        assert_eq!(b.walk_path(2, -14).len(), 14);
-        assert_eq!(b.walk_path(2, -14).last(), Some(&TileIndex(2)));
+        assert_eq!(b.walk_path(2, -15).len(), 15);
+        assert_eq!(b.walk_path(2, -15).last(), Some(&TileIndex(2)));
     }
 
     #[test]
@@ -647,8 +644,8 @@ mod tests {
             vec![TileIndex(2), TileIndex(3), TileIndex(4)]
         );
         assert_eq!(b.walk_path(2, 1), vec![TileIndex(3)]);
-        // 整整一圈也恰好 14 步：分支不是环的一部分
-        assert_eq!(b.walk_path(2, 14).len(), 14);
+        // 整整一圈也恰好 15 步：分支不是环的一部分
+        assert_eq!(b.walk_path(2, 15).len(), 15);
     }
 
     #[test]
@@ -668,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn diagonal_segments_count_is_four() {
+    fn diagonal_segments_count_is_three() {
         // 设计意图（ADR-001）：斜向街道要能渲染成对角路面
         let b = board();
         let diag: Vec<u32> = (0..b.loop_len())
@@ -677,11 +674,11 @@ mod tests {
             .collect();
         // 2→3（汉口路→命运）与 9→10（王府井→点券箱）是原盘就有的两段；
         // 11→12 是 P3d② 追加百货格时新长的第三段 —— 那一格贴在左上角 (0,1)，
-        // 从西单 (1,2) 只能斜着过去；13→0 是 P7 追加游乐场格时新长的第四段 ——
-        // 它贴在角上 (0,0)，回起点 (1,1) 同样只能斜着走。
-        // 对角段只被「报告」不被禁止（validate 允许 Δ≤1），所以这一串数的意义是：
-        // 路面渲染与斜段特性仍然有真东西可画，而「追加一格」的代价一直是「多一条斜段」。
-        assert_eq!(diag, vec![2, 9, 11, 13], "非对角段被误判: {diag:?}");
+        // 从西单 (1,2) 只能斜着过去。
+        // P7 追加游乐场 (0,0) 时长出过第四段（13→0 只能斜着回起点），而 P8 的彩票中心
+        // 摆在 (1,0) 把它**补掉了**：13→14→0 是两跳正交。所以「追加一格」的代价不总是
+        // 多一条斜段 —— 这一串数读的是「现在这张盘上有几段斜街可画」，不是「加了几格」。
+        assert_eq!(diag, vec![2, 9, 11], "非对角段被误判: {diag:?}");
     }
 
     /// 百货公司在演示盘上真有一格，而且踩得到（P3d② 验收第一条）。

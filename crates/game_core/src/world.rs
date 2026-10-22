@@ -188,6 +188,10 @@ pub fn begin_game_system(
     // 货架同理：上一局被买空的货位不属于这一局。它本来每次进店都重抽，所以漏掉这一条
     // **不会每次都错** —— 只在「新局第一次踩百货之前」那几帧里，面板能读到上一局剩下的货
     commands.insert_resource(ShopStock::default());
+    // 奖池也是**这一局**的账：上一局滚到月末的那笔钱若不清，新局第一次开奖就会凭空发出它
+    // （比货架那一格更贵，因为它发的是现金）。`last_draw` 一起清 —— 「这一局还没开过奖」
+    // 与「上一期开的是几号」在面板上是两句话，混了就成了谎话。
+    commands.insert_resource(crate::lottery::Jackpot::default());
     next.set(TurnPhase::TurnStart);
 }
 

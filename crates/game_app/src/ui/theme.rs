@@ -34,6 +34,9 @@ pub mod col {
     /// P7 游乐场。与 `palette::tile(TileKind::Arcade)` 那一档青柠同族：
     /// 描边与地面格子对上，玩家才认得出这块屏是关于那一格的
     pub const BORDER_ARCADE: Color = Color::srgba(0.75, 0.90, 0.35, 0.90);
+    /// P8 彩票中心。与 `palette::tile(TileKind::Lottery)` 那一档奶金同族（同一句话：
+    /// 描边对上地面那一格，玩家才认得出这块面板管的是哪一格）
+    pub const BORDER_LOTTERY: Color = Color::srgba(0.95, 0.85, 0.40, 0.85);
 
     // ===== 游乐场那一屏里的东西（P7）=====
     /// 玩法区底色。比面板底再暗一档：飞起来的那些东西才读得出是前景
@@ -242,4 +245,17 @@ pub mod layout {
     /// 主菜单那块「选一款练习」
     pub const ARCADE_CHOICE: [f32; 3] = [600.0, -300.0, -190.0];
     pub const ARCADE_CHOICE_BUTTON: [f32; 2] = [130.0, 38.0];
+
+    // ===== P8：彩票中心柜台 =====
+    /// 号码是 6×6 的方格阵，不是 36 行清单：一注 1000、36 个号，玩家在这块屏上做的事
+    /// 是「挑一个号」，读起来该像一张奖券而不是一张表。
+    /// 宽 = 6 × 号码按钮 + 5 × 缝 + 内边距 ×2 = 324 + 30 + 48 ≈ 400，取 420 留出描边。
+    /// 顶部偏移与百货同档（行数由内容撑开，底部别压住 HUD）。
+    pub const LOTTERY_PANEL: [f32; 3] = [420.0, -210.0, -230.0];
+    /// 一颗号按钮。字只有两位，但要够大到拇指点得着（32 高与道具那颗同行）
+    pub const LOTTERY_NUMBER_BUTTON: [f32; 2] = [50.0, 32.0];
+    pub const LOTTERY_CELL_GAP: f32 = 6.0;
+    /// 一行几颗。`lottery_numbers` 不是 6 的整数倍时最后一行不满 —— 面板照摆，
+    /// 不补空位（补了就成了「那里有个号，点不动」）
+    pub const LOTTERY_COLUMNS: usize = 6;
 }

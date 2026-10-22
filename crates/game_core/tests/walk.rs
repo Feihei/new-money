@@ -60,26 +60,26 @@ fn walking_wraps_past_the_start_tile() {
         seed_with_first_roll(2),
     );
     let p0 = boot_to_wait_roll(&mut app);
-    // 站在环尾那一格（13 游乐场，P7 追加在 12 百货之后）：走 2 步才会经过起点回绕。
-    // 站上去而不开出小游戏窗口，正是「落脚触发」与「经过触发」的区别（ADR-002 §6）——
+    // 站在环尾那一格（14 彩票中心，P8 追加在 13 游乐场之后）：走 2 步才会经过起点回绕。
+    // 站上去而不开出彩票柜台窗口，正是「落脚触发」与「经过触发」的区别（ADR-002 §6）——
     // 这一格是被 `place` 摆上去的，不是走到的
-    place(&mut app, p0, 13);
+    place(&mut app, p0, 14);
 
     play_turns(&mut app, 1);
 
     let ev = events(&app);
     assert!(
-        ev.contains(&"Roll(P0,2,13->1)".to_string())
-            && ev.contains(&"Walk(P0,2,13->1)".to_string()),
+        ev.contains(&"Roll(P0,2,14->1)".to_string())
+            && ev.contains(&"Walk(P0,2,14->1)".to_string()),
         "掷骰与行走意图都该带上回绕后的终点：{ev:?}"
     );
     assert_eq!(
         steps_of(&ev, "P0"),
         vec![0, 1],
-        "从 13 号走 2 步：先踏过 0 号起点，再落到 1 号 —— 「绕回起点经过」：{ev:?}"
+        "从 14 号走 2 步：先踏过 0 号起点，再落到 1 号 —— 「绕回起点经过」：{ev:?}"
     );
     assert!(
-        ev.contains(&"Arrive(P0,13->1)".to_string()),
+        ev.contains(&"Arrive(P0,14->1)".to_string()),
         "到站消息要带完整行程：{ev:?}"
     );
     assert_eq!(tile_of(&app, p0), 1);
@@ -180,9 +180,10 @@ fn paced_walking_steps_once_per_interval() {
     );
     let p0 = boot_to_wait_roll(&mut app);
     // 3 号格是命运格。这一条测的是**迈步的节奏**，到站之后抽到什么不该掺进来 ——
-    // 而定序之后命运第一张恰好是「直接入狱」（人会被搬走），所以就地把它换成一格什么都不做的
-    // 彩票格（与 `tests/coupon.rs` 的 `an_unimplemented_tile_still_closes_the_turn` 同一手法）
-    retile(&mut app, 3, TileKind::Lottery);
+    // 而定序之后命运第一张恰好是「直接入狱」（人会被搬走），所以就地把它换成一格路面：
+    // `domain_of(Road) = Nothing` 是「按设计什么都不做」那一档，落脚不搬人也不挂窗口。
+    // （P8 之前这里用的是彩票格，那时它确实什么都不做；现在它有买券窗口了，不能再当空壳用）
+    retile(&mut app, 3, TileKind::Road);
 
     roll(&mut app, p0);
     app.update(); // 掷骰帧：定路径、清零时钟

@@ -25,9 +25,9 @@ pub mod top_bar;
 
 use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
-    ActiveBoard, AtmAccess, BailRequested, BankOp, BankOpRequested, CardAim, CardId, Decision,
-    DecisionChosen, GameKind, GameSession, HolidaySet, ItemKind, LandId, MarketClock,
-    MinigameResult, MortgageOp, MortgageRequested, Paused, Pending, PendingDecision,
+    ActiveBoard, AtmAccess, BailRequested, BankOp, BankOpRequested, BuyTicketRequested, CardAim,
+    CardId, Decision, DecisionChosen, GameKind, GameSession, HolidaySet, ItemKind, LandId,
+    MarketClock, MinigameResult, MortgageOp, MortgageRequested, Paused, Pending, PendingDecision,
     PlaceItemRequested, PlayCardRequested, RequestRemoteDice, RequestRoll, RequestStay,
     ShopOpRequested, StaySentence, StockId, StockTradeRequested, TileIndex, TradeSide, TurnOrder,
     TurnPhase, bank_op_allowed, date_of,
@@ -246,6 +246,10 @@ pub enum UiAction {
     Bail {
         target: Entity,
     },
+    /// 在彩票柜台买一注（P8）。**号烤在按钮里**（那颗「17」本身就是一整个意图），
+    /// 而一注多少钱仍由规则层从 `GameRules::ticket_price` 算 —— 与 [`UiAction::ShopOp`]
+    /// 同一条分工：请求带意图，账由规则层算。主语也不在按钮里（派发时取柜台前那个人）。
+    BuyTicket(u8),
     /// 点掉第 `slot` 只气球（P7 打气球）。槽位在建屏那一刻就烤进按钮里，
     /// 而「这一下算不算」仍由那一局的状态说了算（收工了、槽位越界都不算）
     Pop {
@@ -337,6 +341,15 @@ pub(crate) fn counter_of(pending: &PendingDecision) -> Option<Entity> {
 pub(crate) fn shop_customer(pending: &PendingDecision) -> Option<Entity> {
     match pending.active() {
         Some((player, Pending::Shop)) => Some(player),
+        _ => None,
+    }
+}
+
+/// 彩票柜台前站着谁（P8）。与 [`shop_customer`] 同一条：窗口就是全部的判据，
+/// 这一格没有 ATM 那种「路过就长期有效」的资格。
+pub(crate) fn lottery_customer(pending: &PendingDecision) -> Option<Entity> {
+    match pending.active() {
+        Some((player, Pending::Lottery)) => Some(player),
         _ => None,
     }
 }
@@ -679,6 +692,7 @@ struct Sends<'w> {
     places: MessageWriter<'w, PlaceItemRequested>,
     remotes: MessageWriter<'w, RequestRemoteDice>,
     scores: MessageWriter<'w, MinigameResult>,
+    tickets: MessageWriter<'w, BuyTicketRequested>,
     exit: MessageWriter<'w, AppExit>,
 }
 
@@ -865,6 +879,21 @@ fn dispatch_ui_actions(
                     player,
                     side: *side,
                     card: *card,
+                });
+            }
+            // 买一注走的是**彩票柜台**那个人（P8），与百货同一条形状：暂停挡一下，
+            // 其余判据（号码在不在池里、同号第二张、现金够不够）全交给规则层那张
+            // `buy_allowed` —— 面板的灰按钮读的也是同一张表。
+            UiAction::BuyTicket(number) => {
+                if gate.paused.0 {
+                    continue;
+                }
+                let Some(player) = lottery_customer(&gate.pending) else {
+                    continue;
+                };
+                sends.tickets.write(BuyTicketRequested {
+                    player,
+                    number: *number,
                 });
             }
             // 抵押与赎回走的是**银行柜台**那个人（`counter_of`），与四种 `BankOp` 同一个窗口。
@@ -1081,6 +1110,8 @@ mod tests {
         mortgages: Vec<(Entity, LandId, MortgageOp)>,
         places: Vec<(Entity, ItemKind, TileIndex)>,
         remotes: Vec<(Entity, u32)>,
+        /// 彩票柜台买的那一注（P8）：`(谁, 号)`
+        tickets: Vec<(Entity, u8)>,
     }
 
     /// 派发出口的读者们。装成参数包而不是八个函数参数：这仓库遇到 `too_many_arguments`
@@ -1098,6 +1129,7 @@ mod tests {
         mortgages: MessageReader<'w, 's, MortgageRequested>,
         places: MessageReader<'w, 's, PlaceItemRequested>,
         remotes: MessageReader<'w, 's, RequestRemoteDice>,
+        tickets: MessageReader<'w, 's, BuyTicketRequested>,
     }
 
     fn collect(mut seen: ResMut<Seen>, mut r: Readers<'_, '_>) {
@@ -1125,6 +1157,8 @@ mod tests {
             .extend(r.places.read().map(|p| (p.player, p.item, p.tile)));
         seen.remotes
             .extend(r.remotes.read().map(|p| (p.player, p.steps)));
+        seen.tickets
+            .extend(r.tickets.read().map(|t| (t.player, t.number)));
     }
 
     /// 一套只装配到「能跑 UI 派发」的对局骨架：两名玩家、一颗掷骰按钮（文字是它的子节点）、
@@ -1148,6 +1182,9 @@ mod tests {
         insulate: Entity,
         /// 百货柜台上的一颗「买」按钮（P3d②）
         shop_buy: Entity,
+        /// 彩票柜台上的一颗「17 号」（P8）。与 `shop_buy` 同一条形状：号烤在按钮里，
+        /// 主语由 `PendingDecision` 给
+        ticket_seventeen: Entity,
         /// 银行柜台上的一颗「押」按钮（P3d③）
         mortgage_take: Entity,
         /// 道具面板上的两颗（P5）：放一个路障到 5 号格、用遥控骰子走 3 步
@@ -1181,6 +1218,7 @@ mod tests {
                 .add_message::<PlaceItemRequested>()
                 .add_message::<RequestRemoteDice>()
                 .add_message::<MinigameResult>()
+                .add_message::<BuyTicketRequested>()
                 .add_message::<AppExit>()
                 .init_resource::<Seen>()
                 .init_resource::<tile_info::SelectedTile>()
@@ -1267,6 +1305,8 @@ mod tests {
                     card: CardId(0),
                 })
                 .id();
+            // 彩票那颗「17 号」（P8）：与百货同一形 —— 号在按钮里，主语在 `PendingDecision` 里
+            let ticket_seventeen = app.world_mut().spawn(UiAction::BuyTicket(17)).id();
             let toggle_atm = app.world_mut().spawn(UiAction::ToggleAtm).id();
             // 柜台那颗「押 750」：与百货同一形 —— 主语在 `PendingDecision` 里，金额在规则层算
             let mortgage_take = app
@@ -1309,6 +1349,7 @@ mod tests {
                 frame,
                 insulate,
                 shop_buy,
+                ticket_seventeen,
                 mortgage_take,
                 place_rock,
                 remote_three,
@@ -1690,6 +1731,46 @@ mod tests {
         assert!(held.seen().shops.is_empty(), "暂停时还派发了买卖请求");
     }
 
+    /// 彩票柜台（P8）与百货同一条形状，但它守的是另一件事：**两个柜台共用一套派发**，
+    /// 要是 `lottery_customer` 错写成了 `shop_customer`，在百货柜台里按下一注就会
+    /// 花掉彩票的钱 —— 而两边的面板看着都正常，只有账对不上。
+    #[test]
+    fn a_ticket_names_the_lottery_customer_not_the_shop_one() {
+        let mut h = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        h.click(h.ticket_seventeen);
+        assert!(
+            h.seen().tickets.is_empty(),
+            "没有柜台也派发了买券请求 —— 凭空就能买一注"
+        );
+
+        let customer = h.player;
+        h.offer(customer, Pending::Lottery);
+        h.click(h.ticket_seventeen);
+        assert_eq!(
+            h.seen().tickets,
+            vec![(customer, 17)],
+            "柜台开着的那位才是这一注的主语"
+        );
+
+        // 百货柜台开着的时候按彩票那颗：不该办成（两条 customer 是两张不同的窗口）
+        let mut other_window =
+            Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let shopper = other_window.player;
+        other_window.offer(shopper, Pending::Shop);
+        other_window.click(other_window.ticket_seventeen);
+        assert!(
+            other_window.seen().tickets.is_empty(),
+            "站在百货柜台前的人不该能买彩票"
+        );
+
+        // 暂停挡住一切：与百货同一条
+        let mut paused = Harness::new(TurnPhase::WaitDecision, true, PendingDecision::default());
+        let buyer = paused.player;
+        paused.offer(buyer, Pending::Lottery);
+        paused.click(paused.ticket_seventeen);
+        assert!(paused.seen().tickets.is_empty(), "暂停时还派发了买券请求");
+    }
+
     /// 抵押与赎回走的是**银行**那个人（`counter_of`）。它与上面那条同形，但守的是另一件事：
     /// 两个柜台共用一个 `Pending` 家族，派发要是错用了 `shop_customer`，面板上按「押」
     /// 就会在百货柜台里办成银行的事。
@@ -1845,6 +1926,7 @@ mod tests {
             .add_message::<game_core::prelude::MountChanged>()
             // P7：游乐场报成绩那一个出口（漏了它同样是「一片按钮全死」）
             .add_message::<MinigameResult>()
+            .add_message::<BuyTicketRequested>()
             // P2b：日历事件的表现层读这两条（礼物一屏、红包老虎机）
             .add_message::<game_core::prelude::GiftsGiven>()
             .add_message::<game_core::prelude::RedEnvelope>()

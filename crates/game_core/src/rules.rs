@@ -93,6 +93,24 @@ pub struct GameRules {
     /// 难的地方，参数散在三个玩法文件里就没法横向比较（「踩到哪一格」不该是抽一张
     /// 大小不同的奖）。表本身的数与理由见 [`crate::minigame::Payouts`]。
     pub minigames: crate::minigame::Payouts,
+    /// 乐透的号码池大小（1 起，含）。开奖从 `1..=lottery_numbers` 抽一个。
+    ///
+    /// 36 是 4 代口径（PLAN §三「1–36 选 1 号」）。它同时决定了**中奖概率**，所以它与
+    /// [`ticket_price`]、[`jackpot_rate`] 是一对三的平衡三元组：号码越多，同样一注的期望
+    /// 回报越低，而奖池滚得越久。改这一个数之前先想那两个。
+    pub lottery_numbers: u32,
+    /// 一注乐透券的价钱（现金，**不是点券**）。4 代口径：1000 元/注。
+    ///
+    /// 全额进池（[`crate::lottery::Jackpot`] 的唯一常规来源），规则层不抽头 —— 一旦抽头，
+    /// 「奖池为什么是这个数」就多了一个只有代码知道的第三方，而 PLAN §四 P8 那条验收要的
+    /// 恰恰是「每笔进池的钱都能从流水追溯」。
+    pub ticket_price: i64,
+    /// 奖池的**月息**（与 [`deposit_rate`] 同一条日子：月末那一天结）。
+    ///
+    /// 这是奖池的第二条来源，也是「本月没人猜中」时池子仍然会长大的那件事。它比储金月息
+    /// （0.10）低一档：池子不该比把钱正经存进银行更划算，否则「买券等息」成了无风险的
+    /// 存钱姿势，而乐透本该是一个负期望的赌局。
+    pub jackpot_rate: f32,
 }
 
 impl Default for GameRules {
@@ -119,6 +137,9 @@ impl Default for GameRules {
             bail_points: 30,
             poor_cash_divisor: 4,
             minigames: crate::minigame::Payouts::default(),
+            lottery_numbers: 36,
+            ticket_price: 1_000,
+            jackpot_rate: 0.05,
         }
     }
 }

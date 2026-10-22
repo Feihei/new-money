@@ -14,10 +14,10 @@ use std::collections::HashSet;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, ArcadeDeal, Detention, DetentionPlace, GameKind, GameSession, God, GodDesk,
-    Inventory, ItemKind, Mount, MountChanged, Occupancy, OccupancyKind, Pending, PendingDecision,
-    PlayerDetained, PlayerId, Points, TileIndex, TokenPosition, TurnOrder, TurnPhase, detain,
-    place,
+    ActiveBoard, ArcadeDeal, BuyTicketRequested, Detention, DetentionPlace, GameKind, GameRules,
+    GameSession, God, GodDesk, Inventory, ItemKind, Mount, MountChanged, Occupancy, OccupancyKind,
+    Pending, PendingDecision, PlayerDetained, PlayerId, Points, Rng, TileIndex, TokenPosition,
+    TurnOrder, TurnPhase, detain, place,
 };
 
 pub struct DevPlugin;
@@ -31,6 +31,7 @@ pub fn install_if_requested(app: &mut App) {
     let places = ForcePlace::from_env();
     let god = ForceGod::from_env();
     let minigame = ForceMinigame::from_env();
+    let lottery = ForceLottery::from_env();
     if forced.0.is_none()
         && bail.0.is_none()
         && !items.0
@@ -38,6 +39,7 @@ pub fn install_if_requested(app: &mut App) {
         && places.0.is_empty()
         && god.0.is_none()
         && minigame.0.is_none()
+        && lottery.0.is_none()
     {
         return;
     }
@@ -79,6 +81,15 @@ pub fn install_if_requested(app: &mut App) {
         info!(
             "开发注入已开启（NM_MINIGAME）：当前玩家面前挂出「{}」那一屏",
             game.label()
+        );
+    }
+    if let Some(wanted) = lottery.0 {
+        info!(
+            "开发注入已开启（NM_LOTTERY）：当前玩家被摆到彩票柜台前，买下一注 {}",
+            match wanted {
+                LotteryWanted::Number(n) => n.to_string(),
+                LotteryWanted::Auto => "本期开奖号（auto）".to_string(),
+            }
         );
     }
     app.add_plugins(DevPlugin);
@@ -283,6 +294,7 @@ impl Plugin for DevPlugin {
             .insert_resource(ForcePlace::from_env())
             .insert_resource(ForceGod::from_env())
             .insert_resource(ForceMinigame::from_env())
+            .insert_resource(ForceLottery::from_env())
             // 回菜单时清掉「已经注入过」：`NM_DETAIN` 配 `NM_MENULOOP` 要能在第二局再注入一次，
             // 而留在 true 就等于「新局什么都没有」，看着像注入失效（跨局残留那类坑的反面）
             .add_systems(OnEnter(crate::scene::Scene::Menu), clear_injected)
@@ -299,6 +311,7 @@ impl Plugin for DevPlugin {
                     force_place,
                     force_god,
                     force_minigame,
+                    force_lottery,
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
@@ -320,6 +333,7 @@ struct Injected {
     place: bool,
     god: bool,
     minigame: bool,
+    lottery: bool,
 }
 
 fn clear_injected(mut done: ResMut<Injected>) {
@@ -585,6 +599,101 @@ fn force_minigame(
     info!("注入：当前玩家面前挂出「{}」那一屏", game.label());
 }
 
+/// `NM_LOTTERY` 要买的那一注：点名一个号，或 `auto` = 买「这一局第一次开奖会开出的那个号」。
+///
+/// `auto` 能从外面算，靠的是分流买来的一条性质：乐透那条子流只有 `draw_lottery_system`
+/// 会取，而开局装配一个数都不取它 —— 所以「第一个号是什么」是种子的纯函数，用同一颗种子
+/// 新建一个临时 `Rng` 取一次就读到了（`game_core/tests/lottery.rs` 用的是同一条性质）。
+/// 这里**不动对局里那条流**，只是提前读出它下一步要给什么数。
+///
+/// 反过来不做的事是给 `Jackpot` 加一个「强制开奖号」的位：那等于让规则层多认一条
+/// 生产环境永远不会设的分支。`EpochOverride` 与之不同 —— 开局锚点本来就是这一局的事实，
+/// 而「这个月开几号」按设计只能是随机流上的一个数。
+///
+/// 只对**第一次**开奖有效（第二次要再取一次流，而这里不取）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LotteryWanted {
+    Number(u8),
+    Auto,
+}
+
+impl LotteryWanted {
+    /// `NM_LOTTERY` 的那个值怎么读。单开一个纯函数而不是写在 `from_env` 里：
+    /// 读环境变量这件事没法在测试里安全地摆（与 `GameKind::parse` 同一条理由）。
+    fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        if raw == "auto" {
+            return Some(Self::Auto);
+        }
+        raw.parse::<u8>().ok().map(Self::Number)
+    }
+}
+
+/// `NM_LOTTERY=<号|auto>`：把当前玩家摆到彩票柜台前，并替他买下一注。`None` = 没开。
+#[derive(Resource)]
+struct ForceLottery(Option<LotteryWanted>);
+
+impl ForceLottery {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_LOTTERY") else {
+            return Self(None);
+        };
+        match LotteryWanted::parse(&raw) {
+            Some(wanted) => Self(Some(wanted)),
+            None => {
+                warn!("NM_LOTTERY={raw} 不认识，应为一注的号码（1..=号码池）或 auto");
+                Self(None)
+            }
+        }
+    }
+}
+
+/// 这一注要写的两样 + 要读的四样。打包而不是散装（§六 坑 8），而 `next` 留在函数参数上：
+/// 它是 `NextState`，装进参数包要把两个生命周期写死在一起，读起来比八个散装参数更难懂。
+#[derive(SystemParam)]
+struct LotteryDesk<'w> {
+    order: Res<'w, TurnOrder>,
+    rules: Res<'w, GameRules>,
+    session: Option<Res<'w, GameSession>>,
+    pending: ResMut<'w, PendingDecision>,
+    requests: MessageWriter<'w, BuyTicketRequested>,
+    done: ResMut<'w, Injected>,
+}
+
+fn force_lottery(
+    force: Res<ForceLottery>,
+    mut desk: LotteryDesk<'_>,
+    mut next: ResMut<NextState<TurnPhase>>,
+) {
+    let (Some(wanted), false) = (force.0, desk.done.lottery) else {
+        return;
+    };
+    let Some(player) = desk.order.current() else {
+        return;
+    };
+    // 号码池被配成 0 时夹成 1，与规则层 `draw_lottery_system` 同一条处理
+    let numbers = desk.rules.lottery_numbers.max(1);
+    let number = match wanted {
+        LotteryWanted::Number(n) => n,
+        LotteryWanted::Auto => {
+            let seed = desk.session.map(|s| s.seed).unwrap_or(0);
+            let mut probe = Rng::new(seed);
+            probe.pick_lottery(1..=numbers) as u8
+        }
+    };
+    desk.done.lottery = true;
+    desk.pending.offer(player, Pending::Lottery);
+    next.set(TurnPhase::WaitDecision);
+    if number == 0 || u32::from(number) > numbers {
+        // 窗口照样摆出来：拍不到「这一注买不成时面板长什么样」也是没做完
+        warn!("NM_LOTTERY={number} 不在 1..={numbers} 的号码池里，这一注不买");
+    } else {
+        // 走真消息：柜台前那个人买成这一注，判据与扣钱都由 `lottery_op_system` 办
+        desk.requests.write(BuyTicketRequested { player, number });
+        info!("注入：{player:?} 站在彩票柜台前，买下一注 {number} 号");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ForceGod;
@@ -642,5 +751,25 @@ mod tests {
         }
         assert_eq!(GameKind::parse("balloons"), None);
         assert_eq!(GameKind::parse(""), None);
+    }
+
+    /// `NM_LOTTERY` 两种写法都要认：点名的号，与 `auto`（买「这一局第一次会开出的那个号」）。
+    /// `auto` 是冒烟脚本唯一用得上的那种 —— 开奖号由种子决定，而没人能在 shell 里跑
+    /// ChaCha8 把它算出来。
+    #[test]
+    fn nm_lottery_takes_a_number_or_auto() {
+        use super::LotteryWanted;
+        assert_eq!(LotteryWanted::parse("7"), Some(LotteryWanted::Number(7)));
+        assert_eq!(
+            LotteryWanted::parse(" auto "),
+            Some(LotteryWanted::Auto),
+            "环境变量里带空格是常事"
+        );
+        assert_eq!(LotteryWanted::parse("0"), Some(LotteryWanted::Number(0)));
+        // 0 与超出号码池的那一种是**合法的字面**、非法的下注 —— 挡它的是 `force_lottery`
+        // 里那句 warn，不是解析层（解析层管不了规则里的 `lottery_numbers`）
+        assert_eq!(LotteryWanted::parse("99"), Some(LotteryWanted::Number(99)));
+        assert_eq!(LotteryWanted::parse(""), None);
+        assert_eq!(LotteryWanted::parse("256"), None, "u8 装不下就该说不认识");
     }
 }

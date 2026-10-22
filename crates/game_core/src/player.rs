@@ -346,6 +346,9 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
                     Mount::Foot,
                     BankBalance::default(),
                     crate::stock::StockHoldings::default(),
+                    // 乐透券开局为空。它是**一期**的凭证：开奖有人猜中就全场清空，
+                    // 没人猜中则留到下月（见 `crate::lottery` 模块头）
+                    crate::lottery::LotteryTickets::default(),
                     Gameplay,
                 ))
                 .id()

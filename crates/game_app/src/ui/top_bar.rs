@@ -14,11 +14,11 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, BankOpDone, BankVisited, BombTransferred, CardLost, CardPlayed,
     ChargeWaived, ChestOpened, DetentionLifted, DetentionSkipped, GameOver, GameSession,
-    GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, ItemPlaced, LandTaken, MarketClock,
-    MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, Paused, PendingDecision,
-    PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, RemoteDiceUsed, ShopOpDone,
-    StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide,
-    TurnOrder, TurnPhase, WalkHalted,
+    GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, ItemPlaced, LandTaken, LotteryBought,
+    LotteryDrawn, LotteryWon, MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged,
+    MoveCapped, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged,
+    RemoteDiceUsed, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited,
+    TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
 };
 
 use super::finance::comma;
@@ -415,6 +415,12 @@ pub(crate) struct Notices<'w, 's> {
     /// 游乐场那一局的成绩（P7）。排在 `points` 之后：换到点券的那一帧两条都会写，
     /// 而这一条说得出「玩的是哪一款、拿了几分」—— 点券余数在 HUD 上一直看得见
     minigame: MessageReader<'w, 's, MinigameScore>,
+    /// 乐透那三条（P8）。排在 `minigame` 之后，三条之间也是「买券 → 开奖 → 中奖」的因果序：
+    /// 同一帧里后写的盖掉前写的，于是玩家最后读到的是**结果**（谁领了多少钱），
+    /// 而流局那一句因为没有中奖凭据而留得住。
+    ticket: MessageReader<'w, 's, LotteryBought>,
+    drawn: MessageReader<'w, 's, LotteryDrawn>,
+    won: MessageReader<'w, 's, LotteryWon>,
     /// 百货成交（P3d②）。排在 `points` 之后：同一帧里那笔点券变动与这张成交凭据说的
     /// 是同一件事，而带卡名的那条更能回答「我刚按下去发生了什么」
     shop: MessageReader<'w, 's, ShopOpDone>,
@@ -569,6 +575,38 @@ pub(crate) fn hint_from_events(
                 m.points
             )
         });
+    }
+    // 乐透（P8）。买券那一句不带奖池余额（面板上一直看得见，而这行要说的是刚发生的事）；
+    // 开奖那一句**两种结果各一句话** —— 「没人猜中」是一条真消息，不是什么都没发生，
+    // 而滚存下去的那个数字是玩家下一期要不要再买一注的判断依据。
+    for m in notices.ticket.read() {
+        line = Some(format!(
+            "{} 花 {} 买下一注 {} 号",
+            name(&names, m.player),
+            m.price,
+            m.number
+        ));
+    }
+    for m in notices.drawn.read() {
+        line = Some(if m.winners == 0 {
+            format!(
+                "乐透开出 {} 号 —— 没人猜中，奖池 {} 滚到下月",
+                m.number, m.pot
+            )
+        } else {
+            format!(
+                "乐透开出 {} 号 —— {} 人猜中，各领 {}",
+                m.number, m.winners, m.each
+            )
+        });
+    }
+    for m in notices.won.read() {
+        line = Some(format!(
+            "{} 猜中 {} 号，领到 {}",
+            name(&names, m.player),
+            m.number,
+            m.amount
+        ));
     }
     // 保释：这一行要同时说清「谁付」「付了多少」「放了谁」。它排在通用点券流水之后 ——
     // 同一帧两条说的是同一件事，而带对象与价目的这条更能回答「我刚按下去发生了什么」
@@ -1096,6 +1134,9 @@ mod tests {
             .add_message::<StockTraded>()
             .add_message::<PointsChanged>()
             .add_message::<MinigameScore>()
+            .add_message::<LotteryBought>()
+            .add_message::<LotteryDrawn>()
+            .add_message::<LotteryWon>()
             .add_message::<ShopOpDone>()
             .add_message::<MortgageDone>()
             .add_message::<CardPlayed>()
@@ -1344,6 +1385,83 @@ mod tests {
             hint_of(&mut app, hint),
             "阿土伯 玩「企鹅挖宝」得了 0 分，换 0 点券"
         );
+    }
+
+    /// 乐透（P8）：开奖那一句要区分「有人猜中」与「流局」，因为流局不是一句「什么都没发生」——
+    /// 那一期的钱还躺在池里，而玩家下一期要不要再买一注读的就是这个数。
+    #[test]
+    fn a_draw_announces_both_outcomes() {
+        let (mut app, _me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            LotteryDrawn {
+                number: 7,
+                winners: 0,
+                each: 0,
+                pot: 3_000,
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "乐透开出 7 号 —— 没人猜中，奖池 3000 滚到下月"
+        );
+
+        let (mut app, _me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            LotteryDrawn {
+                number: 7,
+                winners: 2,
+                each: 1_500,
+                pot: 3_000,
+            },
+        );
+        let said = hint_of(&mut app, hint);
+        assert!(
+            said.contains("2 人猜中") && said.contains("各领 1500"),
+            "均分那一句得说得出人数与每人多少：{said}"
+        );
+    }
+
+    /// 中奖那一行盖在开奖那一行之上：同一帧两条都写，留下的该是「谁拿到了钱」——
+    /// 与百货/保释盖过通用点券流水同一条分工。
+    #[test]
+    fn the_winner_line_wins_over_the_draw_line() {
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            LotteryDrawn {
+                number: 11,
+                winners: 1,
+                each: 2_000,
+                pot: 2_000,
+            },
+        );
+        send(
+            &mut app,
+            LotteryWon {
+                player: me,
+                number: 11,
+                amount: 2_000,
+            },
+        );
+        assert_eq!(hint_of(&mut app, hint), "阿土伯 猜中 11 号，领到 2000");
+    }
+
+    /// 买券那一句在**没有开奖**的帧里也得留得住（一注买下去到开奖之间隔着几十回合，
+    /// 那几十回合里玩家回头要找的是「我到底买成过哪几注」）。
+    #[test]
+    fn a_ticket_purchase_says_which_number() {
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            LotteryBought {
+                player: me,
+                number: 23,
+                price: 1_000,
+            },
+        );
+        assert_eq!(hint_of(&mut app, hint), "阿土伯 花 1000 买下一注 23 号");
     }
 
     /// `awarded` 那一位必须在顶栏上看得出来。练习局走的是 UI 本地那条路（不发这条凭据），

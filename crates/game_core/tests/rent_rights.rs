@@ -168,6 +168,10 @@ fn a_player_the_ditch_sent_to_the_hospital_collects_no_rent() {
     rewind_dice(&mut app);
     make_current(&mut app, p1);
     place(&mut app, p1, 1);
+    // 掐**差值**而不是掐绝对余额：环 15 之后这一局里小财神真的附到了 P0 身上，他进场那一
+    // 刻就从 P1 钱包里抽走一笔（`GodDeed`），20 000 那个数不再干净。这条用例问的从来只有
+    // 「踩到住院那位的要不要付钱」，神的动静发生在快照之前，就不该混进断言里。
+    let before = (cash_of(&mut app, p1), cash_of(&mut app, p0));
     let next = app.world().resource::<GameSession>().turn_count + 1;
     play_turns(&mut app, next);
 
@@ -177,8 +181,8 @@ fn a_player_the_ditch_sent_to_the_hospital_collects_no_rent() {
         !led.iter().any(|l| l.starts_with("Rent(P1->P0@L1")),
         "住院那位名下的地这一趟不收钱：{led:?}"
     );
-    assert_eq!(cash_of(&mut app, p1), 20_000, "踩的人一分没付");
-    assert_eq!(cash_of(&mut app, p0), 20_000, "住院的人一分没进");
+    assert_eq!(cash_of(&mut app, p1), before.0, "踩的人一分没付");
+    assert_eq!(cash_of(&mut app, p0), before.1, "住院的人一分没进");
     assert_eq!(rent_of(&mut app, 1), 0);
 }
 

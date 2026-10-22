@@ -91,13 +91,18 @@ fn a_reversed_player_walks_the_same_ring_backwards_and_the_die_stays_positive() 
 
 #[test]
 fn walking_backwards_wraps_past_the_start_to_the_other_end_of_the_ring() {
-    // 从 1 号倒着走四步：0（起点）→ 13（游乐场）→ 12（百货公司）→ 11（西单）。回绕用的是
-    // 同一个 `rem_euclid`，而「倒着越过起点」不发薪水（`domain_of(Start) = Nothing` 早就拍板过），
+    // 从 1 号倒着走五步：0（起点）→ 14（彩票中心）→ 13（游乐场）→ 12（百货公司）→ 11（西单）。
+    // 回绕用的是同一个 `rem_euclid`，而「倒着越过起点」不发薪水（`domain_of(Start) = Nothing` 早就拍板过），
     // 所以这里没有「反复擦过起点捞一笔」的套利。
-    // 四步而不是三步（P7 之前是三步、落在环尾那一格）：环尾现在是游乐场，倒着**踩**到它
-    // 会开出一局小游戏的窗口，那条窗口属于 `tests/minigame.rs`，不该混进这条只问「绕不绕得回去」
-    let (mut app, p0, _p1) = standing_at(1, 4);
+    // 五步而不是四步（环每加一格就要重数一次）：四步落在 12 百货公司，那会开出柜台窗口；
+    // 三步落在 13 游乐场，开一局小游戏。两条窗口各属于 `tests/shop.rs`／`tests/minigame.rs`，
+    // 不该混进这条只问「绕不绕得回去」的用例里 —— 终点选在一块无主地产上，报价被 `DeclineAll` 拒掉。
+    let (mut app, p0, _p1) = standing_at(1, 5);
     turn_around(&mut app, p0, p0);
+    // 清场：装配随机刷在路上的神这一趟正好挡在他要经过的格上，附身那一刻小财神从别人钱包里
+    // 抽了一笔（`GodDeed`）。下面那句「一分钱都不发」断的是**移动**，不是背景事件 ——
+    // 补刷在回合末，所以他走路这一路上不会再有神。
+    clear_gods(&mut app);
     play_turns(&mut app, 1);
 
     assert_eq!(tile_of(&app, p0), 11, "倒着越过起点该绕到环尾，不是停在 0");

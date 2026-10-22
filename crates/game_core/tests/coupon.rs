@@ -131,10 +131,14 @@ fn the_cooldown_is_per_tile() {
 
 /// 分派表里被点名成「还没有实现」的格：不发钱、不挂决策，但回合必须收得掉。
 /// 这一条守的是缺陷 #8 的另一半 —— 静默可以是「什么都不做」，不能是「卡住」。
+///
+/// 用的是**神明格**而不是彩票格：彩票中心在 P8 有了结算（踩上去开买券窗口），
+/// 拿它当「什么都不做」的那一格，这条就悄悄变成在测「窗口会被自动答完」——
+/// 那是 `common` 夹具的行为，不是分派表待办那一半的行为。
 #[test]
 fn an_unimplemented_tile_still_closes_the_turn() {
     let (mut app, p0) = ready_on(0, 1, DecisionPolicy::DeclineAll);
-    retile(&mut app, 1, TileKind::Lottery);
+    retile(&mut app, 1, TileKind::GodDeity);
     land(&mut app);
 
     assert_eq!(points_of(&app, p0), 0);

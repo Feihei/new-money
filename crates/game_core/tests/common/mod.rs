@@ -18,16 +18,17 @@ use bevy::prelude::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
     ActiveBoard, Adjustment, ArcadeDeal, AtmAccess, BailRequested, BankBalance, BankOp, BankOpDone,
-    BankOpRequested, BankVisited, BombTransferred, Books, BuildingLevel, BuyOffered, CardAim,
-    CardDrawn, CardGained, CardId, CardKind, CardLost, CardPlayed, CardSet, CashChanged,
-    ChargeKind, ChargeWaived, ChestOpened, Correction, Corrections, CouponBoxes, DamageTally,
-    DataHandles, Date, Decision, DecisionChosen, Deck, Detention, DetentionLifted,
-    DetentionSkipped, DiceRolled, EpochOverride, GameKind, GameOver, GameRules, GameSeed,
-    GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed, GodLeft, GodPossessed,
-    Hand, Insulation, Inventory, ItemKind, ItemPlaced, LandBought, LandDamage, LandId, LandStatus,
-    LandTaken, LandUpgraded, LandView, Market, MarketClock, MinigameResult, MinigameScore,
-    MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap,
-    MoveCapped, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision,
+    BankOpRequested, BankVisited, BombTransferred, Books, BuildingLevel, BuyOffered,
+    BuyTicketRequested, CardAim, CardDrawn, CardGained, CardId, CardKind, CardLost, CardPlayed,
+    CardSet, CashChanged, ChargeKind, ChargeWaived, ChestOpened, Correction, Corrections,
+    CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen, Deck, Detention,
+    DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, GameKind, GameOver, GameRules,
+    GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed, GodLeft,
+    GodPossessed, Hand, Insulation, Inventory, ItemKind, ItemPlaced, Jackpot, JackpotChanged,
+    JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken, LandUpgraded, LandView,
+    LotteryBought, LotteryDrawn, LotteryTickets, LotteryWon, Market, MarketClock, MinigameResult,
+    MinigameScore, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged,
+    MoveCap, MoveCapped, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision,
     PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
     PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, Possession,
     Presence, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll, RequestStay,
@@ -98,6 +99,12 @@ pub struct RemoteDiceRequests(pub Vec<RequestRemoteDice>);
 #[derive(Resource, Default)]
 pub struct Scores(pub Vec<MinigameResult>);
 
+/// 测试侧的「点彩票柜台上那颗号按钮」（P8）。同样走队列 → 真消息，于是
+/// 「站在柜台前的人才买得成」「号码在不在池里」「同号第二张要拒」「钱不够要拒」
+/// 四道门都被真走到，而不是被测试绕过。
+#[derive(Resource, Default)]
+pub struct TicketRequests(pub Vec<BuyTicketRequested>);
+
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
 /// 要测经济就换成 `AcceptAll`（买得起就买、能升就升）。
@@ -139,7 +146,12 @@ fn auto_answer_system(
         // 百货柜台同一条（P3d②）：13 格环上真有一格百货，长跑用例一定会踩到它。
         // 百货柜台与保释窗口同一条（P3d②/P4③）：环上真有一格百货，接入点真能被踩到 ——
         // 长跑用例不自动关掉它们就会整片停在 `WaitDecision`
-        (Pending::BankTeller | Pending::Shop | Pending::Bail(_), _) => Decision::Acknowledge,
+        // 彩票柜台同一条（P8）：环上真有一格彩票中心，不自动关掉就会整片挂死。
+        // 它**不买券** —— 买券要花钱，而长跑用例的现金断言钉的是「租金与地价」那几笔，
+        // 多一笔买券钱会让几十条既有断言一起红。买券那条路由 `tests/lottery.rs` 自己走
+        (Pending::BankTeller | Pending::Shop | Pending::Bail(_) | Pending::Lottery, _) => {
+            Decision::Acknowledge
+        }
         // 游乐场那一格（P7）**不是一句回答而是一份成绩**：自动玩家打出「满分的一半」。
         // 报 0 分也能过关口，但那样一来长跑就永远走不到「成绩换点券」那条路上，
         // 而这一格是点券的第二个来源（第一个是路上的箱子）
@@ -177,6 +189,13 @@ pub struct CashAudit(pub Vec<(Entity, i64, i64)>);
 /// 点券的变动绝不能混进现金那一条去（PLAN §一 拍板永不通兑）。
 #[derive(Resource, Default, Debug)]
 pub struct PointsAudit(pub Vec<(Entity, i64, u32)>);
+
+/// 奖池流水 `(delta, 原因, 结算后池子)`。第三张账 —— 池子不是任何人的钱包，
+/// `CashAudit` 与 `PointsAudit` 都读不到它，而 PLAN §四 P8 的验收原话是
+/// 「每笔进池的钱都能从流水追溯」，所以它自己得有一张能被 Σ 的表：
+/// `池子 == Σ delta`，任何「改了池子没留流水」都会在这里显形。
+#[derive(Resource, Default, Debug)]
+pub struct JackpotAudit(pub Vec<(i64, game_core::prelude::JackpotWhy, i64)>);
 
 /// `MessageReader` 打包：流程域的 reader 们（0.20 的 reader 带 `'w`/`'s` 两个生命周期，见坑 13）。
 ///
@@ -258,6 +277,14 @@ struct BookReaders<'w, 's> {
     /// 衰神每回合弄走的卡（P6b②）。它与 `CardPlayed` 分开读：那条说出牌人，这条说的是
     /// 「我明明有卡，它去哪了」—— 而后者才是这条用例要能回答的那句话。
     cards_lost: MessageReader<'w, 's, CardLost>,
+    // ===== 乐透（P8）=====
+    tickets: MessageReader<'w, 's, LotteryBought>,
+    /// 池子动的每一步。它同时喂 `Ledger`（要说得出为什么动的）与 [`JackpotAudit`]
+    /// （要 Σ 得平），与 `cash`/`points` 那两条完全同形 —— 一条消息只能有一个 reader
+    /// 拿到这一帧的读取权，分成两个参数包反而是多余的。
+    pot: MessageReader<'w, 's, JackpotChanged>,
+    draws: MessageReader<'w, 's, LotteryDrawn>,
+    wins: MessageReader<'w, 's, LotteryWon>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -374,6 +401,7 @@ fn collect_books(
     mut log: ResMut<Ledger>,
     mut audit: ResMut<CashAudit>,
     mut points_audit: ResMut<PointsAudit>,
+    mut pot_audit: ResMut<JackpotAudit>,
     mut r: BookReaders,
     players: Query<&PlayerId>,
 ) {
@@ -680,6 +708,34 @@ fn collect_books(
             m.by.label()
         ));
     }
+    // ===== 乐透（P8）=====
+    for m in r.tickets.read() {
+        log.0.push(format!(
+            "Ticket({},{}号,{})",
+            who(&players, m.player),
+            m.number,
+            m.price
+        ));
+    }
+    for m in r.pot.read() {
+        log.0
+            .push(format!("Pot({}{:+}→{})", m.why.label(), m.delta, m.balance));
+        pot_audit.0.push((m.delta, m.why, m.balance));
+    }
+    for m in r.draws.read() {
+        log.0.push(format!(
+            "Draw({}号,{}人,各{},池{})",
+            m.number, m.winners, m.each, m.pot
+        ));
+    }
+    for m in r.wins.read() {
+        log.0.push(format!(
+            "Win({}:{}号,+{})",
+            who(&players, m.player),
+            m.number,
+            m.amount
+        ));
+    }
     for m in r.cash.read() {
         audit.0.push((m.player, m.delta, m.balance));
     }
@@ -694,8 +750,8 @@ fn collect_books(
     }
 }
 
-/// 六组「测试侧的点击」与六条对应的消息写出。装一个参数包而不是十二个函数参数，
-/// 与生产代码同一条房规（§六 坑 8），而且这六对本来就是同一件事：把队列排空成消息。
+/// 每一组「测试侧的点击」队列与它对应的消息写出。装一个参数包而不是二十几个函数参数，
+/// 与生产代码同一条房规（§六 坑 8），而且这些对子本来就是同一件事：把队列排空成消息。
 #[derive(SystemParam)]
 struct Pump<'w> {
     inputs: ResMut<'w, Inputs>,
@@ -709,6 +765,7 @@ struct Pump<'w> {
     places: ResMut<'w, PlaceRequests>,
     remote: ResMut<'w, RemoteDiceRequests>,
     scores: ResMut<'w, Scores>,
+    tickets: ResMut<'w, TicketRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
     stay_writes: MessageWriter<'w, RequestStay>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
@@ -720,6 +777,7 @@ struct Pump<'w> {
     place_writes: MessageWriter<'w, PlaceItemRequested>,
     remote_writes: MessageWriter<'w, RequestRemoteDice>,
     score_writes: MessageWriter<'w, MinigameResult>,
+    ticket_writes: MessageWriter<'w, BuyTicketRequested>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
@@ -756,6 +814,9 @@ fn pump_inputs(mut pump: Pump<'_>) {
     for s in pump.scores.0.drain(..) {
         pump.score_writes.write(s);
     }
+    for t in pump.tickets.0.drain(..) {
+        pump.ticket_writes.write(t);
+    }
 }
 
 pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
@@ -782,11 +843,13 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<PlaceRequests>()
         .init_resource::<RemoteDiceRequests>()
         .init_resource::<Scores>()
+        .init_resource::<TicketRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
         .init_resource::<CashAudit>()
         .init_resource::<PointsAudit>()
+        .init_resource::<JackpotAudit>()
         .add_systems(
             Startup,
             |mut commands: Commands, server: Res<AssetServer>| {
@@ -1683,6 +1746,59 @@ pub fn bail_ask(app: &mut App, player: Entity, target: Entity) {
         .push(BailRequested { player, target });
 }
 
+/// 替 `player` 按一次彩票柜台上那颗号按钮（P8）。与 [`bail_ask`]/[`shop_ask`] 同一条：
+/// 走队列 → 真消息，于是「站在柜台前的人才买得成」「号码在不在池里」「同号第二张要拒」
+/// 「钱不够要拒」四道门都被真走到。
+pub fn lottery_ask(app: &mut App, player: Entity, number: u8) {
+    app.world_mut()
+        .resource_mut::<TicketRequests>()
+        .0
+        .push(BuyTicketRequested { player, number });
+}
+
+/// 奖池现在有多少钱。
+pub fn pot_of(app: &App) -> i64 {
+    app.world().resource::<Jackpot>().pot
+}
+
+/// 最近开出的那个号（`None` = 这一局还没开过奖）。
+pub fn last_draw_of(app: &App) -> Option<u8> {
+    app.world().resource::<Jackpot>().last_draw
+}
+
+/// 某人名下的彩票号（升序，因为 [`LotteryTickets::add`] 就排好序 —— 面板直接念它）。
+pub fn tickets_of(app: &App, player: Entity) -> Vec<u8> {
+    app.world()
+        .entity(player)
+        .get::<LotteryTickets>()
+        .map(|tickets| tickets.numbers.clone())
+        .unwrap_or_default()
+}
+
+/// 奖池流水 `(delta, 原因, 结算后池子)` —— 第三张账的测试形态。
+pub fn pot_audit(app: &App) -> Vec<(i64, JackpotWhy, i64)> {
+    app.world().resource::<JackpotAudit>().0.clone()
+}
+
+/// 池子的账必须平：`Σ delta == 现在的池子`，而且每一条流水都说得出为什么动的。
+///
+/// 与 [`assert_cash_audit`] 同一条纪律，但**分开两条**：池子不是玩家，它的钱不该
+/// 出现在任何人的现金审计里（`CashChanged` 与 `JackpotChanged` 是两套账的第三套）。
+pub fn assert_pot_audit(app: &mut App, start: i64) {
+    let rows = app.world_mut().resource::<JackpotAudit>().0.clone();
+    let sum: i64 = rows.iter().map(|(delta, ..)| delta).sum();
+    let pot = app.world().resource::<Jackpot>().pot;
+    assert_eq!(
+        pot,
+        start + sum,
+        "奖池与流水对不上账：池子 {pot}，Σ delta = {sum}，流水 {rows:?}"
+    );
+    for (delta, why, balance) in &rows {
+        assert_ne!(*delta, 0, "{why:?} 写了一条 0 元流水：池子没说它为什么没动");
+        assert!(!why.label().is_empty(), "{why:?} 的文案是空的");
+        assert!(*balance >= 0, "池子出现了负数：{rows:?}");
+    }
+}
 /// 这块地押着多少本金（`None` = 没押）。读的是组件，所以它同时是「`Mortgaged` 到底写没写进去」
 /// 那条断言的探针。走 `ActiveBoard` 的索引拿实体，不必为一次读数开一条 query。
 pub fn mortgage_of(app: &App, land: u32) -> Option<i64> {
@@ -1883,6 +1999,38 @@ pub fn assert_cash_audit(app: &mut App, start_cash: i64) {
             "玩家 {player:?} 的流水余额 {balance} 与实际累计 {at} 不符（有变动没发 `CashChanged`）"
         );
     }
+}
+
+/// 某人**最后一条**现金流水 `(delta, 结算后余额)`，`None` = 他从头到尾一分没动。
+///
+/// 「钱真的到账了」这句话在测试里的形状之一。凭据消息（`LotteryWon`/`RentDue`/`BankOpDone`…）
+/// 与 `CashChanged` 是两条消息，只断言凭据会放过「发了凭据没加钱」，而 `assert_cash_audit`
+/// 也抓不住它 —— 那种世界里钱包与流水都一动没动，照样对得平。
+///
+/// 但它只在该玩家**之后没有别的现金变动**时才说得出话：长跑用例里命运牌与神还会陆续动他的
+/// 钱包，那时候要问的是「有没有这一笔」（[`paid_him`]），不是「最后一笔是不是它」。
+pub fn last_cash_move(app: &App, player: Entity) -> Option<(i64, i64)> {
+    app.world()
+        .resource::<CashAudit>()
+        .0
+        .iter()
+        .rev()
+        .find(|(who, ..)| *who == player)
+        .map(|(_, delta, balance)| (*delta, *balance))
+}
+
+/// 他的现金流水里有没有一笔正好是 `amount`。
+///
+/// 用在「跑了几十个回合，路上还有神与命运牌在动他的钱包」的场合：那时「最后一笔」
+/// 说的是运气，而「发奖那一步真的给某个人加了这么多钱」才是这条用例要问的事。
+/// 它与 `Win(...)` 那条凭据、与 [`assert_pot_audit`] 的池子对账是**三条不同的**证据，
+/// 合起来才说得出「奖金到账」这句人话。
+pub fn paid_him(app: &App, player: Entity, amount: i64) -> bool {
+    app.world()
+        .resource::<CashAudit>()
+        .0
+        .iter()
+        .any(|(who, delta, _)| *who == player && *delta == amount)
 }
 
 /// 银行/市场之外的对手方资金不需要对账，但现金为负是硬伤：任何时刻都不该出现。
