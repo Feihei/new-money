@@ -40,5 +40,47 @@
 		"desc": "播报者脚下那一整条街租金翻倍，5 个回合之后自己失效",
 		"scope": "around",
 		"effects": [{"action": "land_status", "status": "price_hike", "days": 5, "area": "street"}]
+	},
+	{
+		"id": "news_007",
+		"title": "地价税开征",
+		"desc": "每个在场玩家按名下地产现值的 5% 补缴地价税",
+		"scope": "everyone",
+		"effects": [{"action": "levy", "basis": "land_value", "percent": 5}]
+	},
+	{
+		"id": "news_008",
+		"title": "所得税申报",
+		"desc": "每个在场玩家按手上现金的 10% 缴所得税",
+		"scope": "everyone",
+		"effects": [{"action": "levy", "basis": "cash", "percent": 10}]
+	},
+	{
+		"id": "news_009",
+		"title": "表扬第一大地主",
+		"desc": "名下地产最多的一位领走 $3000 奖金；场上还没人买到地时，这一条谁都不点名",
+		"scope": {"one": "landlord"},
+		"effects": [{"action": "add_cash", "amount": 3000}]
+	},
+	{
+		"id": "news_010",
+		"title": "豪雨袭城",
+		"desc": "走路的那几位原地停留 1 回合 —— 开车的不受影响",
+		"scope": {"everyone_if": "on_foot"},
+		"effects": [{"action": "stay", "turns": 1}]
+	},
+	{
+		"id": "news_011",
+		"title": "交通堵塞",
+		"desc": "开车的那几位原地停留 1 回合 —— 走路的反而照常前进",
+		"scope": {"everyone_if": "riding"},
+		"effects": [{"action": "stay", "turns": 1}]
+	},
+	{
+		"id": "news_012",
+		"title": "医院传出好消息",
+		"desc": "所有住院的人立刻出院，从那条分支的接入点继续走",
+		"scope": {"everyone_if": {"detained": "hospital"}},
+		"effects": [{"action": "release", "place": "hospital"}]
 	}
 ]

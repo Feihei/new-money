@@ -14,15 +14,16 @@ use bevy::prelude::*;
 
 use crate::afflict::{AfflictDomain, Affliction, Insulation};
 use crate::board::TileIndex;
-use crate::card::{CardDef, CardEffect, CardKind, CardSet};
+use crate::card::{CardDef, CardEffect, CardKind, CardSet, LevyBasis};
 use crate::charge::{Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Scope, Source};
 use crate::data::DataHandles;
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision, detain, teleport};
 use crate::msg::{
-    CardDrawn, CardNotice, EffectOutcome, LandBought, PlayerDetained, PlayerTeleported,
+    CardDrawn, CardNotice, DetentionLifted, EffectOutcome, LandBought, PlayerDetained,
+    PlayerTeleported,
 };
 use crate::occupancy::{Occupancy, OccupancyAt, OccupancyKind};
-use crate::player::{Heading, MoveCap, PlayerId, StaySentence, TokenPosition};
+use crate::player::{Detention, Heading, Mount, MoveCap, PlayerId, StaySentence, TokenPosition};
 use crate::rng::Rng;
 use crate::settle::Books;
 
@@ -212,7 +213,17 @@ pub struct CardSink<'w, 's> {
     pub stays: Query<'w, 's, &'static mut StaySentence>,
     /// 乌龟卡的计时（P5）。与 `stays` 同样就地写：第二张要看得见第一张的剩余回合。
     pub caps: Query<'w, 's, &'static mut MoveCap>,
+    /// 他骑的是什么（P5）。**只读**，而且只有新闻那条路需要它：`NewsScope::EveryoneIf` 的
+    /// 「步行的人／有车的人」那一筛（P11b② 的豪雨与交通堵塞）。
+    ///
+    /// 为什么在 `CardSink` 上而不是塞进 `Books`：账本要读的是钱与地，「他今天开不开车」
+    /// 不参与任何一条结算判据（`Mount` 只决定摇几颗骰子）。塞进 `Books` 的话，
+    /// 「谁被关着」那一格就有个邻居要说不出为什么在这儿。
+    pub mounts: Query<'w, 's, &'static Mount, With<PlayerId>>,
     pub detained: MessageWriter<'w, PlayerDetained>,
+    /// 放人那一条（P11b② 的新闻「提前出院」）。与**期满同一条凭据**：世界效果那半
+    /// （摘组件 + 接入点）只有一份答案，差别只在谁开的门 —— 那条写在 `msg::EffectOutcome` 上。
+    pub released: MessageWriter<'w, crate::msg::DetentionLifted>,
     pub teleported: MessageWriter<'w, PlayerTeleported>,
     /// 买地成交的流水。购地卡走的是 `Books::buy` 那条正路，所以它必须和「踩到无主地买下来」
     /// 发同一条凭据 —— 归属变了这件事只有一种说法，而顶栏与 dump 读的就是这一条。
@@ -236,9 +247,10 @@ pub struct CardSink<'w, 's> {
 
 /// 免费卡免的是哪几族钱（PLAN §三「**免费**抵 >2000×物价 的租金/罚金/税」）。
 ///
-/// 税（地价税、所得税）今天还没出生，但它落在 `Penalty` 那一族 —— 那张卡不必等 P11 就
-/// 已经覆盖了三条里的两条，第三条来了也归这里。**不含 `Acquire`（买地、加盖）**：
-/// 「买地免费」是大福神的特权（PLAN §三 神明行），两张卡各自有价，合成一个域就分不开了。
+/// ✅ P11b② 那三条里的「税」真的来了（`ChargeKind::Levy`），而它落在 `Penalty` 那一族 ——
+/// 这张卡不必改一行就覆盖到它，正是当初把域写成 `Penalty` 而不是 `Fine` 的理由。
+/// **不含 `Acquire`（买地、加盖）**：「买地免费」是大福神的特权（PLAN §三 神明行），
+/// 两张卡各自有价，合成一个域就分不开了。
 const FREE_PASS_DOMAINS: &[ChargeDomain] = &[ChargeDomain::Rent, ChargeDomain::Penalty];
 
 /// 把一张卡的全部效果打在 `victim` 头上，返回每条效果的凭据给 UI 拼文案。
@@ -313,6 +325,30 @@ pub fn apply_effects(
                     }
                 }
             }
+            CardEffect::Levy { basis, percent } => {
+                // 基数是**此刻**的数（他手上有多少钱、名下那些地今天值多少），不是条目上的
+                // 名义数 —— 所以这条在「缩不缩物价」那一格填「不缩」：基数已经含今天的价，
+                // 再乘一次指数就成了「物价 2 倍时 10% 的税悄悄变 20%」（见 `charge::scales_with_price`）
+                let base = match basis {
+                    // 现金不会是负的（`debit` 挡在破产那一侧），`max(0)` 挡的是「负基数
+                    // 乘出一个负税率、于是税变成一笔收入」这种形状
+                    LevyBasis::Cash => sink.books.balance(victim).max(0),
+                    LevyBasis::LandValue => sink.books.land_value_of(victim),
+                };
+                let amount = base.saturating_mul(*percent as i64) / 100;
+                let charge = Charge::new(ChargeKind::Levy, Some(victim), None, amount);
+                match sink.books.settle(&mut sink.commands, charge) {
+                    // 0 元税照样留一条 `Lost(0)`：名下没地的人被抽地价税，「什么都没发生」与
+                    // 「这条新闻是空的」在玩家眼里是两件事，流水要说得出是前者
+                    Ok(done) => outcomes.push(EffectOutcome::Lost(done.amount)),
+                    Err(short) => {
+                        outcomes.push(EffectOutcome::CouldNotPay {
+                            needed: short.needed,
+                        });
+                        break;
+                    }
+                }
+            }
             CardEffect::Detain { place, turns } => {
                 let affliction = Affliction::new(AfflictDomain::Detention, victim);
                 if resist(sink, &affliction) {
@@ -351,6 +387,44 @@ pub fn apply_effects(
                 outcomes.push(EffectOutcome::Detained {
                     place: held.place,
                     turns: held.turns_left,
+                    junction,
+                });
+            }
+            CardEffect::Release { place } => {
+                // 只放「确实关在这一处」的人。读的是 `books.detained`（P4② 之后账本读得到
+                // 谁被关着），而作用域那一档已经按处筛过一遍（`news::mismatch` 拦的就是
+                // 「筛医院、放监狱」这种写法）—— 两道之间若哪天分叉，这里是不发凭据的那一道：
+                // 宁可这一条新闻看起来没放到人，也不要凭空把一个人从监狱里放出去
+                let Some(held) = sink.books.detained.get(victim).ok().copied() else {
+                    debug!("{} 要放人，可 {victim:?} 身上没有拘留计时", source);
+                    continue;
+                };
+                if held.place != *place {
+                    debug!(
+                        "{} 放的是「{}」，而他关在「{}」：两道判据分叉了",
+                        source,
+                        place.label(),
+                        held.place.label()
+                    );
+                    continue;
+                }
+                // 接入点 = 他此刻那一格。`detain` 早把他挪到了那条分支的接入点上，
+                // 所以这里不搬棋子、只报那一格（与期满同一条出口，见 `msg::DetentionLifted`）
+                let junction = sink
+                    .positions
+                    .get(victim)
+                    .map(|p| p.tile)
+                    .unwrap_or(TileIndex(0));
+                // 摘组件走 `Commands`（帧末生效）。同一帧连放好几个人是安全的：
+                // 名单在 `fire_news` 那里一次算完，而本帧内没有第二条路再读「他还关着吗」
+                sink.commands.entity(victim).remove::<Detention>();
+                sink.released.write(DetentionLifted {
+                    player: victim,
+                    place: held.place,
+                    junction,
+                });
+                outcomes.push(EffectOutcome::Released {
+                    place: held.place,
                     junction,
                 });
             }

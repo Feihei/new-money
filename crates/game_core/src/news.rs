@@ -43,6 +43,47 @@ pub enum PlayerPick {
     RandomOther,
     /// 手上现金最多的一位。
     Richest,
+    /// 名下地产最多的一位（「公开表扬第一大地主」，P11b②）。
+    ///
+    /// 先数**块数**再比现值：「大地主」那个词说的是地多，让屏幕上那句话读起来不必心算现值
+    /// （两块空地赢一块三层楼，这在玩家眼里是对的）。并列按座位序靠前那位 ——
+    /// 与 [`Self::Richest`] 同一条决胜纪律，否则同种子两次跑出两个人，回放当场对不齐。
+    ///
+    /// **一块地都没有时这一格是空的**（不点名任何人）：表扬一位零地主不是「这条新闻弱」，
+    /// 是这条新闻在本局这一刻没有答案，而空答案要说得出为什么空。
+    Landlord,
+}
+
+/// 「全场里的哪一类人」（P11b②）—— [`NewsScope::EveryoneIf`] 带的那一把筛子。
+///
+/// 为什么不并进 [`PlayerPick`]：那一格的答案**永远是一个人**，而这一格的答案是一个集合，
+/// 而且**可以是空集**（今天没人开车、没人住院）。并成一格的话，「一个都没筛到」与
+/// 「筛到一个」在类型上就分不开了，而前者是一句要说出口的人话（顶栏那句「场上没有步行的人」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldFilter {
+    /// 步行的人（豪雨：下雨天挨淋的是走路那几位，与 P4④ 之后的「按载具筛」同一条判据）
+    OnFoot,
+    /// 有载具的人（交通堵塞：机车与汽车都算，读 [`crate::player::Mount::is_vehicle`]）
+    Riding,
+    /// 关在某一处的人（「医院传出好消息」＝提前出院，P11b② 的 `Release` 配套那一格）
+    Detained(crate::player::DetentionPlace),
+}
+
+impl FieldFilter {
+    /// 人话。顶栏那句「一个都没筛到」与「全场 N 个 …」都要用它 —— 筛过之后再说「可点名的人」
+    /// 是一句假话，而那句假话比少一句话更贵（玩家以为自己按错了按钮）。
+    ///
+    /// 它返回 `String` 而不是其余 `label()` 那种 `&'static str`：`Detained` 那一格的话要拼
+    /// 地方的名字，而「地名 → 人话」那一条映射的归属在 [`crate::player::DetentionPlace`]，
+    /// 不在这里抄一份。
+    pub fn label(self) -> String {
+        match self {
+            Self::OnFoot => "步行的人".to_string(),
+            Self::Riding => "有车的人".to_string(),
+            Self::Detained(place) => format!("{}的人", place.held_phrase()),
+        }
+    }
 }
 
 /// 这条新闻打在谁头上。**不许出现 `_`**：新增一档时解析那条（[`audience`]）会编译失败，
@@ -55,6 +96,13 @@ pub enum NewsScope {
     Everyone,
     /// 点名一位。
     One(PlayerPick),
+    /// 全场里满足一把筛子的那些人（P11b②：豪雨按住走路的、堵塞按住开车的、
+    /// 好消息放出医院里的那位）。
+    ///
+    /// 为什么不写成 `Everyone` 外面挂一个「可选的筛子」字段：那样「筛子对 `One`／`Around`
+    /// 算什么」要由人记得去问，而类型不拦。这一档与 `Everyone` 共用取数那一段，
+    /// 区别只是末尾多一道 `filter`，且**答案可以是空集**（今天没人开车）。
+    EveryoneIf(FieldFilter),
     /// 这一带：以**播报者脚下那块地**为锚的一片地（P11b① 的天灾与路段新闻）。
     ///
     /// 锚为什么是「他站的地方」而不是随机一块地、也不是「最富那位的地」：新闻池说的是
@@ -87,7 +135,9 @@ const fn family_of(effect: &CardEffect) -> Family {
     match effect {
         CardEffect::AddCash { .. }
         | CardEffect::DeductCash { .. }
+        | CardEffect::Levy { .. }
         | CardEffect::Detain { .. }
+        | CardEffect::Release { .. }
         | CardEffect::MoveTo { .. }
         | CardEffect::Insulate { .. }
         | CardEffect::FreePass { .. }
@@ -113,12 +163,26 @@ const fn family_of(effect: &CardEffect) -> Family {
 /// 于是玩家看见顶栏播出一条标题、世界却没变。那种「说了没做」的形状与 P1 那条
 /// 「踩上去什么都不发生必须是数据错误」是同一条纪律。
 fn mismatch(scope: NewsScope, effect: &CardEffect) -> Option<&'static str> {
+    // 先问那一条**跨两档**的一致性：`Release` 自带的 `place` 必须与作用域筛的那一处对上。
+    // 它在族上是「打人」的，光看族放得过去，而「筛的是医院、放的是监狱」这一条新闻
+    // 是真写得出来的 —— 那种写法会真的把监狱里的人放出来，因为动词自己带着地点。
+    if let CardEffect::Release { place } = effect {
+        return match scope {
+            NewsScope::EveryoneIf(FieldFilter::Detained(there)) if there == *place => None,
+            NewsScope::EveryoneIf(FieldFilter::Detained(_)) => {
+                Some("它放的那一处与作用域筛的那一处不是同一个地方")
+            }
+            _ => Some("它放的是关在某一处的人，而这一条的作用域没筛那一处"),
+        };
+    }
     match scope {
-        NewsScope::Everyone | NewsScope::One(_) => match family_of(effect) {
-            Family::People => None,
-            Family::Ground => Some("它打在一块地上，而这一条的作用域是人"),
-            Family::Neither => Some("它要的是玩家当场挑一块地，新闻不替人挑"),
-        },
+        NewsScope::Everyone | NewsScope::One(_) | NewsScope::EveryoneIf(_) => {
+            match family_of(effect) {
+                Family::People => None,
+                Family::Ground => Some("它打在一块地上，而这一条的作用域是人"),
+                Family::Neither => Some("它要的是玩家当场挑一块地，新闻不替人挑"),
+            }
+        }
         NewsScope::Around => match family_of(effect) {
             Family::Ground => None,
             Family::People => Some("它打在一个人的身上，而这一条的作用域是一片地"),
@@ -199,6 +263,16 @@ impl NewsSet {
                             errs.push(format!("新闻 {} 的关押天数是 0", n.id));
                         }
                     }
+                    // 与卡池那一条同一个判据（`CardSet::validate`）：0% 是一条不收钱的新闻，
+                    // >100% 是「抽的比基数还多」，那该写成定额而不是百分比
+                    CardEffect::Levy { percent, .. } => {
+                        if *percent == 0 || *percent > 100 {
+                            errs.push(format!("新闻 {} 的税率是 {percent}%，要写 1..=100", n.id));
+                        }
+                    }
+                    // `Release` 的数只有 `place` 那一格，而它该与谁配 —— 那条一致性
+                    // 是作用域层面的事，住在 [`mismatch`] 里，不在这里重复一遍
+                    CardEffect::Release { .. } => {}
                     CardEffect::Stay { turns } | CardEffect::MoveCap { turns } => {
                         if *turns == 0 {
                             errs.push(format!("新闻 {} 的停走回合数是 0", n.id));
@@ -324,7 +398,60 @@ fn people(scope: NewsScope, actor: Entity, sink: &mut CardSink) -> Vec<Entity> {
                     }
                     best.map(|(_, p)| vec![p]).unwrap_or_default()
                 }
+                // 「第一大地主」：先数块、再比现值，两块都是 0 的人**不算地主** ——
+                // 于是「这一局还没人买到地」是一个空答案而不是一次勉强的点名
+                // （空答案要说得出为什么空，见 `ui::top_bar` 那句「场上没有地主」）
+                PlayerPick::Landlord => {
+                    let mut best: Option<(u32, i64, Entity)> = None;
+                    for (player, _) in field {
+                        let count = sink.books.land_count_of(player);
+                        if count == 0 {
+                            continue;
+                        }
+                        let value = sink.books.land_value_of(player);
+                        if best.is_none_or(|(c, v, _)| (count, value) > (c, v)) {
+                            best = Some((count, value, player));
+                        }
+                    }
+                    best.map(|(_, _, p)| vec![p]).unwrap_or_default()
+                }
             }
+        }
+        // 全场里筛一类人（P11b②）。名单一次算完再筛，而不是三条路各查一遍：
+        // 「谁还在牌桌上」这一问只有一个答案（破产者不算），它与筛子是两道独立的判据，
+        // 合成一次查询的话，将来加一把新筛子就要重新回答一次「破产者算不算」
+        NewsScope::EveryoneIf(filter) => {
+            // 按处筛人读的是账本那份名单（`Books::held`）：它同时拿着实体与「他关在哪」，
+            // 而这里要的正是这两样（P4 为保释面板建它的那条理由在这里一字不改）
+            let held: Vec<Entity> = match filter {
+                FieldFilter::Detained(place) => sink
+                    .books
+                    .held(place)
+                    .into_iter()
+                    .map(|(player, _)| player)
+                    .collect(),
+                FieldFilter::OnFoot | FieldFilter::Riding => Vec::new(),
+            };
+            sink.books
+                .solvent()
+                .into_iter()
+                .filter(|(player, _)| match filter {
+                    FieldFilter::OnFoot | FieldFilter::Riding => match sink.mounts.get(*player) {
+                        // 筛「有车」= 是，筛「步行」= 否。缺组件不是「步行」也不是「有车」：
+                        // `spawn_players` 漏挂是 bug，不是处境，所以两把筛子都把他挡在外面并响一声
+                        Ok(mount) => mount.is_vehicle() == matches!(filter, FieldFilter::Riding),
+                        Err(_) => {
+                            warn!(
+                                "{} 身上没有 Mount 组件，两把按载具的筛子都把他算成缺席",
+                                player
+                            );
+                            false
+                        }
+                    },
+                    FieldFilter::Detained(_) => held.contains(player),
+                })
+                .map(|(player, _)| player)
+                .collect()
         }
         // 地档没有「哪几个人」这一问：它的锚是一块地，答案在 [`ground_anchor`] 那里。
         // 这一格今天走不到（`fire_news` 先按作用域分开了两条路），写出来是为了
@@ -415,7 +542,7 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
     );
     let scope = def.scope;
     let audience = match scope {
-        NewsScope::Everyone | NewsScope::One(_) => {
+        NewsScope::Everyone | NewsScope::One(_) | NewsScope::EveryoneIf(_) => {
             let targets = people(scope, actor, &mut sink.card);
             let mut hits = Vec::with_capacity(targets.len());
             for target in targets {
@@ -501,7 +628,9 @@ fn verb_area(effect: &CardEffect) -> Option<crate::plot::PlotArea> {
         CardEffect::LandStatus { area, .. } | CardEffect::Damage { area, .. } => Some(*area),
         CardEffect::AddCash { .. }
         | CardEffect::DeductCash { .. }
+        | CardEffect::Levy { .. }
         | CardEffect::Detain { .. }
+        | CardEffect::Release { .. }
         | CardEffect::MoveTo { .. }
         | CardEffect::Insulate { .. }
         | CardEffect::FreePass { .. }
@@ -539,6 +668,7 @@ fn touched(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::player::DetentionPlace;
 
     #[test]
     fn an_empty_pool_is_a_data_error() {
@@ -691,6 +821,13 @@ mod tests {
                 place: DetentionPlace::Jail,
                 turns: 3,
             },
+            CardEffect::Release {
+                place: DetentionPlace::Hospital,
+            },
+            CardEffect::Levy {
+                basis: crate::card::LevyBasis::Cash,
+                percent: 10,
+            },
             CardEffect::MoveTo {
                 tile_name: "南京路".into(),
             },
@@ -713,6 +850,97 @@ mod tests {
             CardEffect::BanishGod,
             CardEffect::Auction,
         ]
+    }
+
+    #[test]
+    fn a_release_only_pairs_with_the_place_the_scope_filtered() {
+        // 「筛的是医院、放的是监狱」这一条新闻是真写得出来的（两个字段各写一半就会分叉），
+        // 而它的形状是「播了一条好消息、监狱里的人走出来了」—— 那既不是这条新闻说的话，
+        // 也不是任何人按下去的决定。
+        // 三格各问一次：同处过、异处拒、没筛拒 —— 「异处」那一格是这一条的存在理由，
+        // 只写「没筛就拒」的话，把两处写成一处也能骗过校验
+        let release = |scope, place| {
+            NewsSet(vec![news(
+                "news_release",
+                scope,
+                vec![CardEffect::Release { place }],
+            )])
+        };
+        let hospital = NewsScope::EveryoneIf(FieldFilter::Detained(DetentionPlace::Hospital));
+        let jail = NewsScope::EveryoneIf(FieldFilter::Detained(DetentionPlace::Jail));
+        assert!(
+            release(hospital, DetentionPlace::Hospital)
+                .validate()
+                .is_ok(),
+            "筛医院放医院该过：{:?}",
+            release(hospital, DetentionPlace::Hospital).validate()
+        );
+        for (scope, place, why) in [
+            (hospital, DetentionPlace::Jail, "不是同一个地方"),
+            (jail, DetentionPlace::Hospital, "不是同一个地方"),
+            (NewsScope::Everyone, DetentionPlace::Hospital, "没筛那一处"),
+            (
+                NewsScope::One(PlayerPick::Richest),
+                DetentionPlace::Hospital,
+                "没筛那一处",
+            ),
+        ] {
+            let errs = release(scope, place).validate().unwrap_err();
+            assert!(
+                errs.iter().any(|e| e.contains(why)),
+                "{scope:?} + 放{place:?} 该红在「{why}」上：{errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_filtered_scope_is_the_people_side() {
+        // 新档加在「打人」这一侧：地档动词配不上它，与 `Everyone` 同一条判据
+        let set = NewsSet(vec![news(
+            "news_rain",
+            NewsScope::EveryoneIf(FieldFilter::OnFoot),
+            vec![CardEffect::Damage {
+                depth: crate::damage::LandDamage::Clear { seize: false },
+                area: crate::plot::PlotArea::One,
+            }],
+        )]);
+        let errs = set.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("作用域是人")), "{errs:?}");
+    }
+
+    #[test]
+    fn a_tax_rate_must_be_between_one_and_a_hundred_percent() {
+        // 0% 是一条不收钱的新闻（它照样会播标题、留一条 0 元流水），>100% 是「抽的比基数
+        // 还多」—— 那该写成定额扣钱而不是百分比。100% 合法：那是「全部充公」，
+        // PLAN §四 第二批那条「强制征收」用的就是这个位置
+        for percent in [0, 101, 250] {
+            let set = NewsSet(vec![news(
+                "news_tax",
+                NewsScope::Everyone,
+                vec![CardEffect::Levy {
+                    basis: crate::card::LevyBasis::Cash,
+                    percent,
+                }],
+            )]);
+            let errs = set.validate().unwrap_err();
+            assert!(
+                errs.iter().any(|e| e.contains("要写 1..=100")),
+                "税率 {percent}% 居然过了校验：{errs:?}"
+            );
+        }
+        let whole = NewsSet(vec![news(
+            "news_seize",
+            NewsScope::Everyone,
+            vec![CardEffect::Levy {
+                basis: crate::card::LevyBasis::LandValue,
+                percent: 100,
+            }],
+        )]);
+        assert!(
+            whole.validate().is_ok(),
+            "100% 是全额：{:?}",
+            whole.validate()
+        );
     }
 
     #[test]

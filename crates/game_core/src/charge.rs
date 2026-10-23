@@ -47,6 +47,12 @@ pub enum ChargeKind {
     Build { land: LandId },
     /// 罚款：卡牌罚金、命运损失、交保释金
     Penalty,
+    /// 按「今天的数」抽的一成税（P11b② 的新闻）。它与 [`Self::Penalty`] 分开一格，
+    /// 不为语义而为**那一条表**：罚金的名义数写在条目上、要随物价乘，而税的基数是从世界里
+    /// 现读的（他手上的现金、名下地块的现值），再乘一次指数就成了「物价 2 倍时税率翻倍」。
+    /// 归域仍然归 [`ChargeDomain::Penalty`] —— 免费卡免得掉它、嫁祸卡转得出去，
+    /// 这两条与罚金同一条道理，不该为它另开一族修正。
+    Levy,
     /// 奖金：横财、小游戏得分、乐透
     Bonus,
     /// 神明造成的收支（P6 登记）。物价指数点名豁免这一类 —— 豁免要能写在表上才算规则，
@@ -78,7 +84,7 @@ pub const fn charge_domain_of(kind: ChargeKind) -> ChargeDomain {
         ChargeKind::BuyLand { .. } | ChargeKind::Upgrade { .. } | ChargeKind::Build { .. } => {
             ChargeDomain::Acquire
         }
-        ChargeKind::Penalty => ChargeDomain::Penalty,
+        ChargeKind::Penalty | ChargeKind::Levy => ChargeDomain::Penalty,
         ChargeKind::Bonus => ChargeDomain::Bonus,
         ChargeKind::God => ChargeDomain::God,
     }
@@ -94,6 +100,11 @@ pub const fn scales_with_price(kind: ChargeKind) -> bool {
         | ChargeKind::Upgrade { .. }
         | ChargeKind::Build { .. } => true,
         ChargeKind::Penalty | ChargeKind::Bonus => true,
+        // 基数是从世界里**现读**的（他手上的现金、名下地块的现值），今天的价格已经在数里了。
+        // 再乘一次指数等于物价 2 倍时把「10% 所得税」悄悄改成 20% —— 税率是新闻写死的，
+        // 不该被另一条规则放大。神明那一格同理不缩，但那是「固定数」的理由，这一格是
+        // 「已经缩过一遍」的理由，两句不同
+        ChargeKind::Levy => false,
         // PLAN §三 点名豁免神明金额：那是玩家记忆里的「固定数」，缩它等于改神明的剧本
         ChargeKind::God => false,
     }
@@ -102,9 +113,11 @@ pub const fn scales_with_price(kind: ChargeKind) -> bool {
 /// 允不允许转嫁给别人（嫁祸卡读这一位）。
 pub const fn transferable(kind: ChargeKind) -> bool {
     match kind {
-        // 只有「我欠的」能嫁祸出去：过路费、服务费与罚款。买地要的是地契，
+        // 只有「我欠的」能嫁祸出去：过路费、服务费、罚款与税。买地要的是地契，
         // 转给别人付钱不等于给别人地
-        ChargeKind::Rent { .. } | ChargeKind::Service | ChargeKind::Penalty => true,
+        ChargeKind::Rent { .. } | ChargeKind::Service | ChargeKind::Penalty | ChargeKind::Levy => {
+            true
+        }
         ChargeKind::BuyLand { .. }
         | ChargeKind::Upgrade { .. }
         | ChargeKind::Build { .. }

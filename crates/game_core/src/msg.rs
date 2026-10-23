@@ -628,6 +628,16 @@ pub enum EffectOutcome {
         turns: u32,
         junction: TileIndex,
     },
+    /// 从某一处被放出来（P11b② 的新闻「住院者提前出院」）。与 [`Self::Detained`] 正好是一对：
+    /// 那条说「他进去了、接入点在这格」，这条说「他出来了、从这一格继续走」。
+    ///
+    /// 它不复用 `Detained` 的某个 bool 位，也不与期满共用一条凭据 —— 期满是「刑满」，
+    /// 这条是「有人替他开了门」，两句话在顶栏上是两句不同的话（而世界效果那半确实是同一条：
+    /// 摘 `Detention` + 同一条 [`DetentionLifted`]，见 `deck::apply_effects` 那一支）。
+    Released {
+        place: DetentionPlace,
+        junction: TileIndex,
+    },
     Teleported {
         tile: TileIndex,
         name: String,

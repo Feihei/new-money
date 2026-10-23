@@ -108,6 +108,30 @@ pub enum CardEffect {
         depth: crate::damage::LandDamage,
         area: crate::plot::PlotArea,
     },
+    /// 按一条基数抽一成税（P11b② 的新闻：地价税、所得税）。
+    ///
+    /// 它与 [`Self::DeductCash`] 的分别是**金额从哪来**：那一条写在条目上，这一条从世界里现读
+    /// （他今天手上有多少钱、名下那些地今天值多少）。把「按 5% 抽」写成「抽 3000」的话，
+    /// 地主与穷光蛋交一样的钱 —— 而那正是这两条新闻要的区分。
+    ///
+    /// 它照样进结算管线（[`crate::charge::ChargeKind::Levy`]）：归 `Penalty` 域，所以免费卡
+    /// 免得掉、嫁祸卡转得出去；只有物价指数那一格填「不缩」，理由见 [`LevyBasis`]。
+    Levy {
+        basis: LevyBasis,
+        percent: u32,
+    },
+    /// 把某一处里的人放出来（P11b② 的新闻「医院传出好消息」）。
+    ///
+    /// `place` 是**必填**的，而作用域那一档也已经按处筛了人（[`crate::news::NewsScope`] 的
+    /// `EveryoneIf(Detained)`）—— 两处各写一半就会分叉成「筛的是医院、放的是监狱」，
+    /// 所以那条一致性由 `news::mismatch` 在加载期拦。
+    ///
+    /// 它走的是与**期满同一条出口**：同一条 [`crate::msg::DetentionLifted`] 凭据、同一个
+    /// 「摘组件 + 带接入点」的动作。表现层因此不必认识「新闻放人」这第三种走法，
+    /// 而那条死胡同格上的棋子该回哪一格也只需要有一份答案。
+    Release {
+        place: crate::player::DetentionPlace,
+    },
     /// 挂上一条**待用**的免付（免费卡，P3c②）。`floor` 是门槛的名义额：过完物价的实付
     /// 金额要**超过** `floor × 物价` 才免得掉，而且只免一次。
     ///
@@ -186,10 +210,24 @@ pub enum CardEffect {
     Auction,
 }
 
+/// 一条税按什么收（[`CardEffect::Levy`] 的那一格）。两格的共同点是**读的都是今天的数**，
+/// 所以 `ChargeKind::Levy` 在「缩不缩物价」那一格填「不缩」：基数已经是今天的价格，
+/// 再乘一次指数等于替税率偷偷涨价（物价 2 倍时「10% 所得税」会变成 20%）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LevyBasis {
+    /// 手上现金（所得税）。存款与贷款**不算**：那是另一套账（`BankBalance`），
+    /// 4 代那条新闻说的也是「现金的百分之几」。
+    Cash,
+    /// 名下地块的现值总和，含每一层楼（地价税）。读的是
+    /// [`crate::settle::Books::market_value`] —— 与拍卖起拍同一个表达式，
+    /// 于是「这块地今天值多少」在世界上只有一份答案。
+    LandValue,
+}
+
 const fn default_detention_turns() -> u32 {
     3
 }
-
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct CardDef {
     pub id: String,
@@ -294,6 +332,20 @@ impl CardSet {
                         if c.target != CardTarget::Land {
                             errs.push(format!("卡牌 {} 要打建筑损害，但 target 不是 land", c.id));
                         }
+                    }
+                    CardEffect::Levy { percent, .. } => {
+                        // 0% 是一条不收钱的新闻（而它照样会播出一条标题、留下一条 0 元流水），
+                        // >100% 是「抽的比基数还多」—— 那已经不是税而是另一条 `DeductCash`，
+                        // 该写成定额而不是百分比。两格都在加载期拦
+                        if *percent == 0 || *percent > 100 {
+                            errs.push(format!("卡牌 {} 的税率是 {percent}%，要写 1..=100", c.id));
+                        }
+                    }
+                    CardEffect::Release { .. } => {
+                        // 这一格今天**没有卡会用**（新闻专用）。写出来是为了那条穷尽表不许有 `_`：
+                        // 哪天有人做一张「交钱赎人」的卡，它要在这里回答「绑哪个 target」——
+                        // 而那一问有真答案（放人的受益者是被关的那位，不是掏钱的另一位，
+                        // 与保释同一条分叉），静默走 `self_only` 会做出「自己放自己」那张卡
                     }
                     CardEffect::FreePass { floor } => {
                         // 门槛写成 0（或负）的免费卡是「以后所有账一律免」，那不该是

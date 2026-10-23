@@ -222,11 +222,28 @@ fn unmet_precondition(
                     .err()
                     .map(|why| why.label().to_string())
             }
+            CardEffect::Release { place } => {
+                // 与「请神符找不到神」同一格形状：这一张要问「他此刻真的关在那一处吗」。
+                // 今天**没有卡带这条效果**（它是新闻专用的，而新闻不摆按钮），这一格不许省：
+                // 将来那张「交钱赎人」的卡若落到 `None`，症状就是卡被白扣而没人出来
+                match sink.books.detained.get(victim).ok() {
+                    Some(held) if held.place == *place => None,
+                    Some(held) => Some(format!(
+                        "他关在{}，不是{}",
+                        held.place.label(),
+                        place.label()
+                    )),
+                    None => Some(format!("他没有被关在{}", place.label())),
+                }
+            }
             // 其余每一条效果都不需要「此刻有没有对象」这一问：免罪与免费是挂上去就等着，
             // 拘留/停留/乌龟/转向打在谁身上都成立，地块类（涨价、查封、拆房）由 `aim_is_legal` 管。
+            // `Levy` 也在这群里：税打在谁身上都成立，**抽到 0 元也是一笔办成的税**（流水里那条
+            // `Lost(0)` 说的就是这件事），不是「没有对象」。
             // 穷尽而不是 `_ => None`：新加一条效果必须当场回答它会不会落空
             CardEffect::AddCash { .. }
             | CardEffect::DeductCash { .. }
+            | CardEffect::Levy { .. }
             | CardEffect::Detain { .. }
             | CardEffect::MoveTo { .. }
             | CardEffect::Insulate { .. }

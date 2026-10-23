@@ -1149,6 +1149,39 @@ impl<'w, 's> Books<'w, 's> {
         )
     }
 
+    /// 某人名下地块的**现值**总和（P11b②：地价税的基数，与「第一大地主」的比价那一半）。
+    ///
+    /// 逐块走 [`Self::market_value`] 而不是自己乘一遍物价：那条式子已经含楼、含指数，
+    /// 而「这块地今天值多少」在世界上只能有一份答案 —— 拍卖起拍、地价税、总资产三处各乘
+    /// 一次指数，早晚会分叉。也正因为它读的是**今天**的数，`ChargeKind::Levy` 那一格
+    /// 才填「不随物价缩」（见 `charge::scales_with_price`）：基数已经缩过一遍了。
+    ///
+    /// 抵押中的地**照算**。债不跟着地走（P9 那条），押出去的地仍然是他的产业 ——
+    /// 这里问的是「他有多少地」，与 `economy::property_value` 问的「这块地还能不能替你担保」
+    /// 是两个相反的答案，同一个 `mortgaged` 位回答两个问题那条老纪律在这里照样成立。
+    pub fn land_value_of(&self, player: Entity) -> i64 {
+        let Some(pid) = self.id_of(player) else {
+            return 0;
+        };
+        self.views()
+            .iter()
+            .filter(|l| l.owner == Some(pid))
+            .filter_map(|l| self.market_value(l.id))
+            .sum()
+    }
+
+    /// 某人名下的**地块数**（「第一大地主」先数地、再比价那一格）。
+    ///
+    /// 为什么块数排在价值前面：「大地主」那个词说的是地多，而一个握着五块空地的人
+    /// 在玩家眼里就是比一个只有一块商场地的人地主 —— 让它读起来是「谁的地多」，
+    /// 不必心算现值。并列时才比价值，再并列按座位序（与 `Richest` 同一条决胜纪律）。
+    pub fn land_count_of(&self, player: Entity) -> u32 {
+        let Some(pid) = self.id_of(player) else {
+            return 0;
+        };
+        self.views().iter().filter(|l| l.owner == Some(pid)).count() as u32
+    }
+
     /// 拍卖落槌那一步：扣买家的钱、把归属换给他。**楼什么都不必做**（10-22）：
     /// 破产只摘归属（[`Self::bankrupt`]），那块地上的楼从头到尾都立在世界上，
     /// 所以「建筑随土地一起过户」在这里只需要改 `Owner` 这一格 ——

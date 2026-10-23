@@ -19,10 +19,12 @@ mod common;
 use bevy::app::App;
 use bevy::asset::Assets;
 use bevy::ecs::entity::Entity;
+use bevy::ecs::query::With;
 use common::*;
 use game_core::prelude::{
-    ActiveBoard, Adjustment, CardEffect, ChargeDomain, Correction, DataHandles, GameSeed,
-    GameSession, ItemKind, LandStatus, NewsId, NewsSet, Scope, Source, TileKind, TurnPhase,
+    ActiveBoard, Adjustment, CardEffect, ChargeDomain, Correction, DataHandles, Date, Detention,
+    DetentionPlace, GameSeed, GameSession, ItemKind, LandStatus, Mount, NewsId, NewsSet, Scope,
+    Source, StaySentence, TileKind, TurnPhase,
 };
 
 /// 演示盘上的新闻中心（`prototype.json` 的 13 号格，`(0,4)`）。
@@ -75,17 +77,20 @@ fn named(hits: &str) -> Vec<String> {
         .collect()
 }
 
-/// 这一条是**地档**（第三段以 `地` 开头：`地L3[L2/L5][Razed { … }]`）而不是人档。
+/// 这一条流水里**有没有钱**（`Gained(`／`Lost(`／`CouldNotPay` 三种凭据之一）。
 ///
-/// 金额类断言一律先筛掉地档那几条：它们没有钱，而「一条新闻播出去、里面没有钱」正是
-/// P11b① 新增的那一档的形状。不筛的话红的是「补贴的数不对」，而真正该说的是「这条不归钱管」。
-fn is_ground(line: &str) -> bool {
-    parts(line).2.starts_with('地')
+/// 金额类断言一律先筛掉没有钱的那几条。两批新增各自带来一种「没有人挨钱」的形状：
+/// P11b① 的地档（`地L3[L2/L5][Razed { … }]`，身上根本没有钱），P11b② 的停走与放人
+/// （人档，但挨的是「原地停留 1 回合」不是钱）。用「有没有钱」当判据而不是「是不是地档」：
+/// 后者是前者的一个子集，而将来再来一种不打钱的动词时，按地档筛会漏。
+fn carries_money(line: &str) -> bool {
+    let hits = parts(line).2;
+    hits.contains("Gained(") || hits.contains("Lost(") || hits.contains("CouldNotPay")
 }
 
-/// 一串流水里的人档那几条。
-fn people_only(lines: &[String]) -> Vec<String> {
-    lines.iter().filter(|l| !is_ground(l)).cloned().collect()
+/// 一串流水里带钱的那几条。
+fn money_only(lines: &[String]) -> Vec<String> {
+    lines.iter().filter(|l| carries_money(l)).cloned().collect()
 }
 
 /// 地档那一段里的中心与清单：`地L3[L2/L5][…]` → `("L3", ["L2","L5"])`。
@@ -179,10 +184,10 @@ fn walk_onto_news(app: &mut App, p0: Entity, times: usize) -> Vec<String> {
 ///
 /// 金额类用例全走这一条，理由有两句：① P11b① 之后池子里有了地档（拆房、盖状态），
 /// 它们身上没有钱，混进「补贴的数对不对」的循环里只会红在错误的那一行上；② 钉住指数
-/// 之后「卡面那个数 == 钱包那个数」才说得出。`times` 给到 12 是因为池子已经六条 ——
+/// 之后「卡面那个数 == 钱包那个数」才说得出。`times` 给到 12 是因为池子已经十二条 ——
 /// 十二次里三种人档各得撞几次，那几条用例的「前置」断言才有牙（撞不到就是空跑的）。
 fn step_onto_money_news(app: &mut App, p0: Entity, times: usize, index: f32) -> Vec<String> {
-    people_only(&step_onto_news(app, p0, times, Some(index)))
+    money_only(&step_onto_news(app, p0, times, Some(index)))
 }
 
 /// 同一件事，但每轮把物价指数摆回 `index`（`Some` 那一条是金额类验收要的：
@@ -205,6 +210,8 @@ fn step_news_once(app: &mut App, p0: Entity, index: Option<f32>) {
 
 fn step_news_on(app: &mut App, p0: Entity, tile: u32, index: Option<f32>) {
     clear_occupancies(app);
+    release_grips(app);
+    pin_calendar(app);
     make_current(app, p0);
     place(app, p0, tile - 1);
     if let Some(at) = index {
@@ -224,12 +231,45 @@ fn step_news_on(app: &mut App, p0: Entity, tile: u32, index: Option<f32>) {
     );
 }
 
+/// 把每个人身上的「停留」计时摘掉 —— **夹具复位**，不是被测判据。
+///
+/// 为什么必要：P11b② 之后池子里有两条按载具筛人的停走新闻（豪雨袭城／交通堵塞），
+/// 它们写的正是 `StaySentence`，而身上挂着那一格的人，规则层会拒掉他的掷骰（P4④ 那颗
+/// 「停留」按钮）。于是这批用例下一轮走不动，症状是上面那句「遥控骰子被拒了？」——
+/// 与它要问的那件事（新闻播出去之后世界变成什么样）毫无关系。
+///
+/// 摘掉它不是绕过一条规则：「被按住的人要按哪颗按钮、按下去扣不扣」由 `tests/stay.rs` 钉，
+/// 那里才是这一格的战场。这条夹具只保证「新闻这一批用例的每一步都能真的走一步」。
+fn release_grips(app: &mut App) {
+    let held: Vec<Entity> = {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<Entity, With<StaySentence>>();
+        q.iter(world).collect()
+    };
+    for player in held {
+        app.world_mut().entity_mut(player).remove::<StaySentence>();
+    }
+}
+
+/// 把历法锚点钉在 2048-04-01 —— **夹具隔离**，不是被测判据。
+///
+/// 为什么必要：P2b 之后「今天是什么日子」由会话种子抽，而 P11b② 之后这批用例要跑几十轮
+/// 才撞得齐两种点名（池子 12 条了）。跑过正月初一那天，每个在场玩家领一个四位红包 ——
+/// 那是**凭空进钱包的一笔现金**，于是最后那句「钱包差额 == 新闻流水净额」会红在红包上，
+/// 而它问的是新闻。（实测：第 43 轮 `Envelope(P0$5216)`，差 5216。）
+///
+/// 钉在 4/1 之后，一百来轮里只会路过月末结息与月中分红，而这两笔在这个夹具里都是 0
+/// （没人存过钱、没人持有股票）。要问日历事件本身的是 `tests/calendar.rs` 那批用例。
+fn pin_calendar(app: &mut App) {
+    app.world_mut().resource_mut::<GameSession>().epoch = Date::new(2048, 4, 1);
+}
+
 /// 一直踩到 `want` 那一条播出来为止，返回那一条流水（最多 `tries` 次），
 /// 每轮先跑一次 `rearm` 把夹具摆回「被测那一播该有的样子」。
 ///
 /// 池子是「全池随机 + 同场不连重」，测试要问的是**某一条特定新闻**的行为（地档那几条），
 /// 所以不能靠「第 N 次恰好抽到它」—— 那是一条只有代码知道的隐藏状态。撞不到就 panic：
-/// 六条池子四十次还抽不出某一条，说明抽取偏了，那是比这条用例本身更响的红。
+/// 十二条池子四十次还抽不出某一条，说明抽取偏了，那是比这条用例本身更响的红。
 ///
 /// **只认 P0 播出去的那一条**：长跑里乙也会走路，她踩到新闻中心同样会抽中 `want`，
 /// 而她的锚点、她的现金与这条用例要问的那件事无关 —— 不筛主语，用例就会停在错误的那一播上。
@@ -282,11 +322,16 @@ fn index_of(app: &App, id: &str) -> u32 {
         .unwrap_or_else(|| panic!("流水里那条 {id} 不在池子里")) as u32
 }
 
-/// 那条新闻卡面上写的那个金额（绝对值）。
+/// 那条新闻卡面上写的那个金额（绝对值），**只在那个数是写死的**时候有答案。
 ///
 /// 从资产里读而不是在测试里再抄一遍 —— 「改一行 JSON 该让哪几条用例红」这件事，
 /// 只有从数据侧拿数才答得出来。
-fn carded(app: &App, id: &str) -> i64 {
+///
+/// `Option` 而不是 `panic`：P11b② 之后池子里有了两条**税**（`levy`），它们的数是从世界里
+/// 现读的（他手上有多少钱、名下那些地值多少），卡面上只有百分比。拿「卡面那个数」去问一条税
+/// 是问错了对象，而问错对象的症状不该是夹具崩掉 —— 调用方按 `None` 跳过，
+/// 各留一句自己的断言（税那一句是 [`a_tax_is_not_scaled_twice_and_a_landless_one_is_zero`]）。
+fn fixed_cash_of(app: &App, id: &str) -> Option<i64> {
     let set = app
         .world()
         .resource::<Assets<NewsSet>>()
@@ -298,12 +343,20 @@ fn carded(app: &App, id: &str) -> i64 {
         .find(|n| n.id == id)
         .expect("流水里那条在池子里");
     let [only] = def.effects.as_slice() else {
-        panic!("第一批三条各带一条效果");
+        panic!("第一批那三条各带一条效果");
     };
     match only {
-        CardEffect::AddCash { amount } | CardEffect::DeductCash { amount } => amount.abs(),
-        other => panic!("这一条只该动钱，读到 {other:?}"),
+        CardEffect::AddCash { amount } | CardEffect::DeductCash { amount } => Some(amount.abs()),
+        _ => None,
     }
+}
+
+/// 同一条，只问「卡面定额」那三条，问不到就响。
+///
+/// 保留这个硬版本是给那些**明知在问哪一条**的调用方（`carded(&app, "news_001")` 那几处）：
+/// 数据哪天把补贴改成税率，这里当场 panic，而不是让那几条用例静默地少问一件事。
+fn carded(app: &App, id: &str) -> i64 {
+    fixed_cash_of(app, id).unwrap_or_else(|| panic!("{id} 卡面上没有定额的数"))
 }
 
 ///
@@ -381,11 +434,16 @@ fn a_news_that_names_somebody_else_never_touches_the_broadcaster() {
     let before = (cash_of(&mut app, p0), cash_of(&mut app, p1));
     assert_eq!(before.1, 90_000, "前置：乙确实是全场最高");
 
-    let lines = step_onto_money_news(&mut app, p0, 12, 1.0);
+    let lines = step_onto_money_news(&mut app, p0, 24, 1.0);
     let mut paid_out = 0;
     for line in &lines {
         let (id, broadcaster, hits) = parts(line);
-        let each = carded(&app, &id);
+        // 两条税（`news_007`／`news_008`）跳过：它们打在**所有人**头上，包括开广播的那位，
+        // 而这一条问的是「点名 vs 全场」那两种形状。它们各自的形状由 P11b② 那几条钉，
+        // 而最后那两句钱包断言读的仍是全部 `lines`（不跳过）—— 跳过只是不问，不算数
+        let Some(each) = fixed_cash_of(&app, &id) else {
+            continue;
+        };
         assert_eq!(broadcaster, "P0", "P0 是唯一被摆到那一格的人：{line}");
         if id == "news_001" {
             // 全场类不含这层意思：他也在「全场」里（那句只在**点名**那一档成立）
@@ -424,7 +482,7 @@ fn a_news_that_names_somebody_else_never_touches_the_broadcaster() {
     }
     assert!(
         paid_out > 0,
-        "六条里没有一刀真的砍下去，那「被点名者金额变」是空跑的：{lines:?}"
+        "十二条里没有一刀真的砍下去，那「被点名者金额变」是空跑的：{lines:?}"
     );
     // 流水里的数与钱包里的数必须是同一个数。这两句是「金额变」的**下半句**：
     // 上面那些断言读的是凭据，凭据写了钱而钱包没动的话 `assert_cash_audit` 也报不出来
@@ -459,10 +517,10 @@ fn the_richest_pick_reads_wallets_not_seats() {
     set_cash(&mut app, p0, 90_000);
     let before = (cash_of(&mut app, p0), cash_of(&mut app, p1));
 
-    // 二十四次而不是十二次：这一条要**两种点名都撞到**（`richest` 砸自己、`random_other`
-    // 砸别人），而 6 条池子里 12 次播映只回来 7 条人档 —— 下面那句「各得撞一次」的
-    // 前置断言在 12 次时真的红过一次，这不是保险，是它该有的牙
-    let lines = step_onto_money_news(&mut app, p0, 24, 1.0);
+    // 四十八次而不是十二次：这一条要**两种点名都撞到**（`richest` 砸自己、`random_other`
+    // 砸别人），而 P11b② 之后池子十二条、其中只有两条是这两档 —— 十二次撞不齐，
+    // 二十四次也撞不齐（这一改的前置断言在 24 次时真的红过一次，那不是保险，是牙）
+    let lines = step_onto_money_news(&mut app, p0, 48, 1.0);
     let mut taxed = 0;
     let mut other = 0;
     for line in &lines {
@@ -490,7 +548,7 @@ fn the_richest_pick_reads_wallets_not_seats() {
     }
     assert!(
         taxed > 0 && other > 0,
-        "这二十四次里那两种点名各得撞一次，否则这两句是空跑的：{lines:?}"
+        "这四十八次里那两种点名各得撞一次，否则这两句是空跑的：{lines:?}"
     );
     assert_eq!(
         cash_of(&mut app, p0) - before.0,
@@ -565,9 +623,16 @@ fn the_carded_amount_is_scaled_by_the_price_index() {
 
     let lines = step_onto_money_news(&mut app, p0, 12, 2.0);
     assert!(lines.len() >= 2, "前置：这一串够长");
+    let mut asked = 0;
     for line in &lines {
         let (id, _broadcaster, hits) = parts(line);
-        let doubled = carded(&app, &id) * 2;
+        // 税不在这一串里问：它**刻意不随物价缩**（基数已经是今天的价），
+        // 那一条反着钉在 [`a_tax_is_not_scaled_twice_and_a_landless_one_is_zero`]
+        let Some(each) = fixed_cash_of(&app, &id) else {
+            continue;
+        };
+        asked += 1;
+        let doubled = each * 2;
         assert!(
             hits.contains(&format!("Gained({doubled})"))
                 || hits.contains(&format!("Lost({doubled})")),
@@ -581,6 +646,10 @@ fn the_carded_amount_is_scaled_by_the_price_index() {
             );
         }
     }
+    assert!(
+        asked >= 2,
+        "这一串里至少两条是卡面定额的，否则整条是空跑的：{lines:?}"
+    );
     assert_cash_audit(&mut app, START);
 }
 
@@ -601,9 +670,11 @@ fn no_two_broadcasts_in_a_row_are_the_same() {
 /// 换一颗种子就换一串新闻，而几颗种子加起来**每一条都露过面**。
 ///
 /// 这一条不能只在一种子上问：固定一条序列里「缺谁」都是可能的，那种红说的是种子而不是
-/// 算法。六颗种子各播五轮（30 次）还凑不齐池子，才说明抽取真的偏了。要覆盖的 id 名单
-/// 从资产里读（[`pool_ids`]）而不是在测试里抄一遍 —— 「往 JSON 里加一条新闻」该红的是
-/// 「新那条没被抽到」，而不是「测试里那三行字符串没改」。
+/// 算法。要覆盖的 id 名单从资产里读（[`pool_ids`]）而不是在测试里抄一遍 —— 「往 JSON 里加
+/// 一条新闻」该红的是「新那条没被抽到」，而不是「测试里那三行字符串没改」。
+///
+/// 每颗种子播「池子条数 × 2」轮而不是写死五次：凑齐全池要抽的次数随池子变大（期望是
+/// n·H(n) ≈ 12 条时要 37 次），写死一个数就是在赌池子不再长 —— 而 P11 正是那条池子还在长的阶段。
 ///
 /// 它同时也钉住「新闻流读的是会话种子」：有人把 `Rng::new` 的 tag 换成常量或忘了接子流，
 /// 这一条会红而 [`no_two_broadcasts_in_a_row_are_the_same`] 照绿。
@@ -611,14 +682,14 @@ fn no_two_broadcasts_in_a_row_are_the_same() {
 fn another_seed_broadcasts_another_show() {
     let mut firsts: Vec<String> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    let mut pool = Vec::new();
+    let mut pool: Vec<String> = Vec::new();
     for seed in 1..=6u64 {
         let (mut app, p0) =
             ready_on_seeded(NEWS - 1, DecisionPolicy::DeclineAll, GameSeed(seed * 7919));
         if pool.is_empty() {
             pool = pool_ids(&app);
         }
-        let lines = walk_onto_news(&mut app, p0, 5);
+        let lines = walk_onto_news(&mut app, p0, pool.len() * 2);
         firsts.push(parts(&lines[0]).0);
         seen.extend(lines.into_iter().map(|l| parts(&l).0));
     }
@@ -634,7 +705,8 @@ fn another_seed_broadcasts_another_show() {
     for want in &pool {
         assert!(
             seen.iter().any(|id| id == want),
-            "三十次播映里没念过 {want}，「全池随机」是假的：{seen:?}"
+            "{} 次播映里没念过 {want}，「全池随机」是假的",
+            pool.len() * 2 * 6
         );
     }
 }
@@ -714,7 +786,7 @@ fn a_named_fine_is_a_penalty_so_a_cancel_waives_it() {
     let field = lines.len() - fines.len();
     assert!(
         !fines.is_empty() && field > 0,
-        "六条里点名与全场各得有一条，否则这上下半句都是空跑的：{lines:?}"
+        "十二条里点名与全场各得有一条，否则这上下半句都是空跑的：{lines:?}"
     );
     for line in &fines {
         assert!(
@@ -770,21 +842,46 @@ fn a_one_shot_free_pass_waives_exactly_one_news_fine() {
         .collect();
     assert!(
         fines.len() >= 2,
-        "至少要挨两刀才问得出「只挡一次」，六条里不够：{lines:?}"
+        "至少要挨两刀才问得出「只挡一次」，十二条里不够：{lines:?}"
     );
     assert!(
         fines[0].contains("Lost(0)"),
         "第一刀该被那张卡挡下：{}",
         fines[0]
     );
+    let mut cut = 0;
     for line in &fines[1..] {
-        let each = carded(&app, &parts(line).0);
-        assert_eq!(
-            net_for(&parts(line).2, "P1"),
-            -each,
-            "卡烧掉之后的每一刀都要真的砍下去：{line}"
-        );
+        let hits = parts(line).2;
+        match fixed_cash_of(&app, &parts(line).0) {
+            Some(each) => {
+                cut += 1;
+                assert_eq!(
+                    net_for(&hits, "P1"),
+                    -each,
+                    "卡烧掉之后的每一刀都要真的砍下去：{line}"
+                );
+            }
+            // 一条税：数不在卡面上，但「不免」这件事照样问得出 —— P1 那一份必须真的扣了钱。
+            // （`ChargeKind::Levy` 归 `Penalty` 域，所以那张卡本来**挡得住**它 —— 挡不住
+            // 才是分叉：同一域里的两族钱不该有两种寿命）
+            None => {
+                let p0 = net_for(&hits, "P0");
+                let p1 = net_for(&hits, "P1");
+                if p0 == 0 {
+                    // 这一播的基数对全场都是 0（没人有地，地价税抽不出钱）。它既不能证明
+                    // 挡住了也不能证明砍下去 —— 问它等于空跑，跳过，但下面那句 `cut > 0`
+                    // 保证这一串里真的有过刀
+                    assert_eq!(p1, 0, "P0 那一档没挨税而 P1 挨了：{line}");
+                    continue;
+                }
+                assert!(p1 < 0, "卡烧掉之后税也该真的砍下去：{line}");
+            }
+        }
     }
+    assert!(
+        cut > 0,
+        "第二刀之后一条定额罚金都没撞到，那「后面的刀分文不免」是空跑的：{lines:?}"
+    );
     assert!(
         ledger(&app)
             .iter()
@@ -793,12 +890,17 @@ fn a_one_shot_free_pass_waives_exactly_one_news_fine() {
         ledger(&app)
     );
     assert_eq!(corrections_len(&app), 0, "一张卡就是只烧一张");
-    let subsidy = carded(&app, "news_001") * (lines.len() - fines.len()) as i64;
-    let paid: i64 = fines[1..].iter().map(|l| carded(&app, &parts(l).0)).sum();
+    // 钱包那一句读的是**整串流水的净额**而不是「卡面数之和」：P11b② 之后 fines 里
+    // 混着税，它的数是从世界里现读的，加不出一个卡面上的总数 —— 而这一句要问的从来
+    // 不是「等于哪个总数」，是「凭据里的数真的进了钱包」
     assert_eq!(
         cash_of(&mut app, p1) - before,
-        subsidy - paid,
+        net_over(&lines, "P1"),
         "补贴照领、第二刀照挨：{lines:?}"
+    );
+    assert!(
+        cash_of(&mut app, p1) < before,
+        "P1 的钱这一趟真的少了（否则上面那句相等是两边都一动没动）：{lines:?}"
     );
     assert_cash_audit(&mut app, START);
 }
@@ -967,5 +1069,253 @@ fn the_anchor_is_the_ground_under_the_broadcaster_not_the_tile_itself() {
         "3×3 以脚下为中心，中心那块必在清单里：{line}"
     );
     assert_eq!(plot_state(&mut app, 2).1, 0, "楼该被拆平：{line}");
+    assert_cash_audit(&mut app, START);
+}
+
+// ===== P11b②：按人筛的作用域、两条税、第一大地主、提前出院 =====
+//
+// 这一批的共同形状是**筛子**：作用域不再问「哪一位」或「全场」，而问「全场里哪一类人」。
+// 每一条都配一对：筛到的那一格 + 筛不到的那一格。只写成功那一格的话，
+// 「按载具筛」换成 `Everyone`、「按处筛」换成 `Everyone` 都照样绿 —— 那是一条空转的判据。
+
+/// 把某人摆成「关在某一处、站在第 `at` 格、还剩 `days` 天」——**夹具前置**，写的是组件本体。
+///
+/// 为什么不走真路径（踩命运格抽那张水沟牌）：那要押运气与回合数，而这一批问的是
+/// 「新闻放不放得出人、按处筛是不是真的在筛」，不是「住院怎么发生」（后者由
+/// `tests/detention.rs` 钉）。与 `own`／`set_mount` 同一类：这是世界状态的前置，
+/// 不是一笔交易，所以它不动现金、不发凭据。
+fn hold(app: &mut App, player: Entity, at: u32, room: DetentionPlace, days: u32) {
+    common::place(app, player, at);
+    app.world_mut().entity_mut(player).insert(Detention {
+        place: room,
+        turns_left: days,
+    });
+}
+
+/// 豪雨按住**走路的**那几位（P11b② 的第一条按载具筛人）。
+///
+/// 它落的是 `StaySentence` 而不是自己实现一套「跳过回合」—— P4④ 之后停留是 `WaitRoll`
+/// 上那颗按钮，所以新闻侧只写状态。这一条因此同时是「新闻不另建回合机」的证据。
+#[test]
+fn the_rain_news_holds_the_walkers_and_spares_the_drivers() {
+    let (mut app, p0) = step_onto_once();
+    let p1 = roster(&mut app)[1].0;
+    set_mount(&mut app, p1, Mount::Car);
+    let line = walk_until_rearmed(&mut app, p0, NEWS, "news_010", 60, |app| {
+        set_mount(app, p1, Mount::Car);
+    });
+    assert_eq!(
+        named(&parts(&line).2),
+        vec!["P0".to_string()],
+        "开车的那位不该在这条名单里：{line}"
+    );
+    assert_eq!(
+        stay_of(&app, p0),
+        Some(1),
+        "走路的那位被按住 1 回合（字面口径，P4④）：{line}"
+    );
+    assert_eq!(stay_of(&app, p1), None, "有车的人不受豪雨影响：{line}");
+    assert!(
+        line.contains("Stayed { turns: 1 }"),
+        "凭据要说得出按住几回合：{line}"
+    );
+    assert_cash_audit(&mut app, START);
+}
+
+/// 交通堵塞按住**有车的**那几位 —— 上面那条的反面，两位的角色对调。
+///
+/// 两条各钉一半：只有这两句同时成立，「按载具筛」才不是一句装饰。合成一条 `Everyone`
+/// 停走的话，上面那条照样绿（两人都被按住 → 名单里两个名字 → 红在名单上，但红在
+/// **这一条**才是它该有的红法）。
+#[test]
+fn the_traffic_jam_holds_the_drivers_and_spares_the_walkers() {
+    let (mut app, p0) = step_onto_once();
+    let p1 = roster(&mut app)[1].0;
+    set_mount(&mut app, p1, Mount::Bike);
+    let line = walk_until_rearmed(&mut app, p0, NEWS, "news_011", 60, |app| {
+        set_mount(app, p1, Mount::Bike);
+    });
+    assert_eq!(
+        named(&parts(&line).2),
+        vec!["P1".to_string()],
+        "机车也算有车，走路的这位不该在名单里：{line}"
+    );
+    assert_eq!(stay_of(&app, p1), Some(1), "她该被按住：{line}");
+    assert_eq!(stay_of(&app, p0), None, "步行的人反而照常前进：{line}");
+    assert_cash_audit(&mut app, START);
+}
+
+/// 所得税抽的是**手上的钱**，不是「钱 × 物价」。
+///
+/// 这一条钉的是 `ChargeKind::Levy` 在 `scales_with_price` 那一格填的那个「不」：
+/// 税的基数是从世界里现读的（他今天有多少钱），再乘一次指数就成了「物价 2 倍时
+/// 10% 的税悄悄变 20%」—— 税率是新闻写死的，不该被另一条规则放大。
+/// 与 [`a_land_tax_is_scaled_once_because_its_basis_is_todays_value`] 是一对：
+/// 那条说「缩一次」，这条说「不缩」，两句合起来才是「基数已经含今天的价」这一句。
+#[test]
+fn an_income_tax_is_a_share_of_cash_not_of_the_price_index() {
+    let probe = |index: f32| -> (i64, i64) {
+        let (mut app, p0) = step_onto_once();
+        let line = walk_until_rearmed(&mut app, p0, NEWS, "news_008", 60, |app| {
+            set_price_index(app, index);
+        });
+        let hits = parts(&line).2;
+        assert!(
+            hits.contains("P0[Lost(") && hits.contains("P1[Lost("),
+            "全场类的税该两个人都在名单里：{line}"
+        );
+        (-net_for(&hits, "P0"), cash_of(&mut app, p0))
+    };
+    for index in [1.0f32, 2.0] {
+        let (tax, after) = probe(index);
+        assert!(
+            tax > 0,
+            "物价 {index} 时这一播真的抽到了钱（否则下面那句是空跑的）"
+        );
+        // 抽完剩下的钱是税前的 90% ⟺ `after ∈ [9·tax, 9·tax + 9]`（税率 10%，整数向下取整
+        // 最多差 9）。这一句把三种错法全抓住：**再乘一次物价**（税=20% → after=4·tax）、
+        // **完全不缩**（基数读成名义钱数 → 物价 2.0 时税仍是 10% 但下面那句在 2.0 上照样对，
+        // 所以这一句真正钉的是前者）、以及**税率写错**（比例不对，band 直接不成立）
+        assert!(
+            after >= tax * 9 && after < tax * 9 + 10,
+            "物价 {index} 时所得税仍是「手上钱的 10%」，读到 tax={tax} 抽完之后={after}"
+        );
+    }
+}
+
+/// 地价税抽的是**名下地产的现值**，所以物价 2 倍时它恰好翻倍（一次，不是两次）。
+///
+/// A/B 两条而不是「等于某个写死的数」：夹具是同一份前置（同一块地、同一级楼），
+/// 只有指数不同。若实现**再**乘一次物价，2.0 那一次会是四倍；若它**完全不缩**
+/// （基数读成名义价），2.0 那一次与 1.0 相同。两种错法都被这一句抓住。
+///
+/// 顺带钉住「无地的那一位是 0 元税」：基数为零不是新闻落空，流水里那条 `Lost(0)`
+/// 说的就是「这一播轮到你了，而你没地」。
+#[test]
+fn a_land_tax_is_scaled_once_because_its_basis_is_todays_value() {
+    let tax_at = |index: f32| -> i64 {
+        let (mut app, p0) = step_onto_once();
+        own(&mut app, ANCHOR, Some(0), 3, false);
+        let line = walk_until_rearmed(&mut app, p0, NEWS, "news_007", 60, |app| {
+            own(app, ANCHOR, Some(0), 3, false);
+            set_price_index(app, index);
+        });
+        let hits = parts(&line).2;
+        assert_eq!(
+            net_for(&hits, "P1"),
+            0,
+            "乙一块地都没有，地价税该是 0 而不是缺席：{line}"
+        );
+        -net_for(&hits, "P0")
+    };
+    let flat = tax_at(1.0);
+    assert!(
+        flat > 0,
+        "前置：这一播真的抽到了钱（否则下面那句相等是两边都空跑）"
+    );
+    assert_eq!(
+        flat * 2,
+        tax_at(2.0),
+        "物价翻倍时地价税恰好翻倍（一次），不是四倍也不是一倍"
+    );
+}
+
+/// 「第一大地主」先数**块数**再比现值：两块空地赢一块三层楼。
+///
+/// 这一格是拍板过的（见 `PlayerPick::Landlord` 的注）：那个词说的是地多。
+/// 夹具让阿土伯拿一块三层楼（现值 5,600）、乙拿两块空地（现值 3,000）——
+/// 若实现按现值排，名单里会是 P0；按块数排才是 P1。
+#[test]
+fn the_landlord_award_goes_to_the_one_with_the_most_plots() {
+    let (mut app, p0) = step_onto_once();
+    let arm = |app: &mut App| {
+        own(app, ANCHOR, Some(0), 3, false);
+        own(app, 0, Some(1), 1, false);
+        own(app, 1, Some(1), 1, false);
+        set_price_index(app, 1.0);
+    };
+    let line = walk_until_rearmed(&mut app, p0, NEWS, "news_009", 60, arm);
+    assert_eq!(
+        named(&parts(&line).2),
+        vec!["P1".to_string()],
+        "两块空地该赢一块三层楼：{line}"
+    );
+    assert_eq!(
+        net_for(&parts(&line).2, "P1"),
+        carded(&app, "news_009"),
+        "奖金是卡面那个数（指数钉在 1.0）：{line}"
+    );
+    assert_eq!(
+        net_for(&parts(&line).2, "P0"),
+        0,
+        "不是地主就一分没有：{line}"
+    );
+    assert_cash_audit(&mut app, START);
+}
+
+/// 场上还没人买到地时，这一条**谁都不点名**。
+///
+/// 「表扬一位零地主」会把这条新闻变成「给当前回合的某个人发钱」，而那不是它说的话。
+/// 空名单要说得出为什么空（顶栏那句「场上没有可点名的人」由表现层那几条用例钉，
+/// 这一条钉的是规则层真的没点到人）。
+#[test]
+fn the_landlord_award_names_nobody_when_nobody_has_land() {
+    let (mut app, p0) = step_onto_once();
+    let line = walk_until_rearmed(&mut app, p0, NEWS, "news_009", 60, |_| {});
+    assert!(
+        parts(&line).2.is_empty(),
+        "没人有地时这一条该是空名单（而不是「那就表扬第一个在场的人」）：{line}"
+    );
+    assert!(!line.contains("Gained("), "空名单不许动钱：{line}");
+    assert_cash_audit(&mut app, START);
+}
+
+/// 医院那条新闻放出**关在医院**的人，走的是与期满同一条出口。
+///
+/// 它同时钉三件事：筛子真的在筛（下面那条反面）、组件真的被摘掉（不是把天数写成 0，
+/// 那会让「他还在不在牌桌上」读成两个答案）、以及凭据带回了接入点。
+#[test]
+fn the_hospital_news_releases_the_hospitalized() {
+    let (mut app, p0) = step_onto_once();
+    let p1 = roster(&mut app)[1].0;
+    let line = walk_until_rearmed(&mut app, p0, NEWS, "news_012", 60, |app| {
+        hold(app, p1, 20, DetentionPlace::Hospital, 3);
+    });
+    assert_eq!(
+        named(&parts(&line).2),
+        vec!["P1".to_string()],
+        "名单里该只有住院的那位：{line}"
+    );
+    assert!(
+        line.contains("Released { place: Hospital"),
+        "凭据要说得出放的是哪一处：{line}"
+    );
+    assert_eq!(
+        detain_of(&app, p1),
+        None,
+        "放出来就该真的没有计时了（写 0 天不算放）：{line}"
+    );
+}
+
+/// 同一颗旋钮，关在**监狱**的人不许被放出 —— 「按处筛」那一格的全部牙齿在这条反面。
+///
+/// 只看上面那条，把 `EveryoneIf(Detained(Hospital))` 换成 `Everyone` 照样绿（他确实被放出了）。
+/// 这一条把它换成真的：医院的好消息与监狱里的人无关，而他必须还在里面。
+#[test]
+fn a_hospital_news_does_not_empty_the_jail() {
+    let (mut app, p0) = step_onto_once();
+    let p1 = roster(&mut app)[1].0;
+    let line = walk_until_rearmed(&mut app, p0, NEWS, "news_012", 60, |app| {
+        hold(app, p1, 19, DetentionPlace::Jail, 3);
+    });
+    assert!(
+        parts(&line).2.is_empty(),
+        "他关在监狱，这条新闻的名单里不该有他：{line}"
+    );
+    assert_eq!(
+        detain_of(&app, p1).map(|d| d.place),
+        Some(DetentionPlace::Jail),
+        "医院的消息不放监狱的人 —— 他还得待在里面：{line}"
+    );
     assert_cash_audit(&mut app, START);
 }

@@ -18,9 +18,10 @@ use game_core::prelude::{
     FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed,
     IndemnityPaid, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn, LotteryWon,
     MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience,
-    NewsFired, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged,
-    PolicyBought, RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted, StaySentence,
-    StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
+    NewsFired, NewsScope, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName,
+    PointsChanged, PolicyBought, RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted,
+    StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide, TurnOrder,
+    TurnPhase, WalkHalted,
 };
 
 use super::dialog::describe;
@@ -1039,7 +1040,7 @@ pub(crate) fn hint_from_events(
                         )
                     })
                     .collect();
-                news_headline(&m.news.title, &said)
+                news_headline(&m.news.title, m.news.scope, &said)
             }
             NewsAudience::Ground {
                 center,
@@ -1083,19 +1084,35 @@ pub(crate) fn hint_from_events(
 ///
 /// `hits` 是 `(人名, 效果句)`，由调用方从 `NewsHit` 查好名字再传进来（人名在表现层，
 /// 规则层的凭据里只有 `Entity`）。
-fn news_headline(title: &str, hits: &[(String, String)]) -> String {
+///
+/// `scope` 只用来选那**两个名词**：「全场 2 人各…」里的「全场」，与「场上没有步行的人」里的
+/// 「步行的人」。它必须进来而不是写死成「人」/「可点名的人」—— P11b② 之后一条筛过人的新闻
+/// 播出来时，「场上没有可点名的人」是一句假话（它筛的是有车的人，而今天没人开车），
+/// 而那句假话与「按钮坏了」在玩家眼里是同一件事。
+fn news_headline(title: &str, scope: NewsScope, hits: &[(String, String)]) -> String {
     let head = format!("号外「{title}」");
+    let (crowd, none) = match scope {
+        NewsScope::Everyone => ("全场".to_string(), "人".to_string()),
+        NewsScope::One(_) => ("全场".to_string(), "可点名的人".to_string()),
+        // 筛过人的那一种：两句是同一个词（「步行的人 2 人各…」/「场上没有步行的人」）。
+        // 这个词的映射住在规则层（`FieldFilter::label`），这里不抄一份 —— 与「地名→人话」
+        // 只写在 `DetentionPlace` 同一条纪律
+        NewsScope::EveryoneIf(filter) => (filter.label(), filter.label()),
+        // 地档不从这里过（它走 [`news_ground_headline`]）。这一格写出来是为了这张表不许有 `_`：
+        // 有人把人档的句子接到地档上时，症状得是一句念得出的话而不是编译期之外的空白
+        NewsScope::Around => ("这一带".to_string(), "地可打".to_string()),
+    };
     match hits.len() {
         // 一条新闻播出去而场上没人被点到：这不是「什么都没发生」的静默失效，而是
-        // **点名点不到人**（只剩他一个人时的 `random_other`）。要说出来，否则玩家
-        // 会以为按钮坏了 —— 与灰按钮必须自带一句为什么是同一条纪律
-        0 => format!("{head}：场上没有可点名的人"),
+        // **点名点不到人**（只剩他一个人时的 `random_other`）或**筛到零个**（没人开车）。
+        // 要说出来，否则玩家会以为按钮坏了 —— 与灰按钮必须自带一句为什么是同一条纪律
+        0 => format!("{head}：场上没有{none}"),
         1 => format!("{head}：{} {}", hits[0].0, hits[0].1),
         n => {
             // 全场类新闻的绝大多数形状是「每个人都挨同样一下」，那一句就该念成一句
             let same = hits.iter().all(|(_, desc)| desc == &hits[0].1);
             if same {
-                format!("{head}：全场 {n} 人各 {}", hits[0].1)
+                format!("{head}：{crowd} {n} 人各 {}", hits[0].1)
             } else {
                 let who = hits
                     .iter()
@@ -1249,8 +1266,9 @@ mod tests {
     /// 设施的类别只在用例里需要点名（生产代码从消息里读的就是它）
     use game_core::prelude::BuildingKind;
     use game_core::prelude::{
-        CardKind, CardNotice, EffectOutcome, GameKind, GameRules, God, LandId, NewsFired, NewsHit,
-        NewsNotice, NewsScope, PlayerId, PlayerPick, StockId, TradeSide, TurnOrder,
+        CardKind, CardNotice, DetentionPlace, EffectOutcome, FieldFilter, GameKind, GameRules, God,
+        LandId, NewsFired, NewsHit, NewsNotice, NewsScope, PlayerId, PlayerPick, StockId,
+        TradeSide, TurnOrder,
     };
 
     /// 顶栏刷新只许动顶栏名下的按钮（§6.1 坑 31）。
@@ -2113,6 +2131,39 @@ mod tests {
         );
     }
 
+    /// 一条**筛过人**的新闻放出一个人（P11b② 的「医院传出好消息」）。
+    ///
+    /// 这一句同时钉两样：`describe` 里那条新的 `Released`（用的是 `back_verb` ——
+    /// 「提前出院」而不是「解除拘留 1 次」），以及一条只点到一个人的筛过类新闻
+    /// 念起来还是一句人话（它走的是「1 人」那一格，不是「全场 N 人」）。
+    #[test]
+    fn a_news_that_opens_the_hospital_door_says_so_in_one_sentence() {
+        let (mut app, me, foe, hint) = notices_app();
+        send(
+            &mut app,
+            NewsFired {
+                broadcaster: me,
+                news: NewsNotice {
+                    id: "news_012".into(),
+                    title: "医院传出好消息".into(),
+                    desc: "住院的人立刻出院".into(),
+                    scope: NewsScope::EveryoneIf(FieldFilter::Detained(DetentionPlace::Hospital)),
+                    audience: NewsAudience::People(vec![NewsHit {
+                        player: foe,
+                        outcomes: vec![EffectOutcome::Released {
+                            place: DetentionPlace::Hospital,
+                            junction: game_core::prelude::TileIndex(20),
+                        }],
+                    }]),
+                },
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "号外「医院传出好消息」：孙小美 提前出院"
+        );
+    }
+
     #[test]
     fn a_whole_field_news_reads_as_one_sentence() {
         let (mut app, me, foe, hint) = notices_app();
@@ -2175,9 +2226,46 @@ mod tests {
             ("孙小美".to_string(), "支付 $2000".to_string()),
         ];
         assert_eq!(
-            news_headline("地价税开征", &hits),
+            news_headline("地价税开征", NewsScope::Everyone, &hits),
             "号外「地价税开征」：2 人 —— 阿土伯 支付 $1000、孙小美 支付 $2000"
         );
+    }
+
+    /// 筛过人的那三种作用域各两句（P11b②）：「N 个人挨同样一下」与「一个都没筛到」。
+    /// 这一格之所以要专项钉：那两句的名词都来自规则层，写死成「可点名的人」也能让
+    /// 全部旧用例绿，而屏幕上一句「场上没有可点名的人」在「没人开车」那一条上就是假话。
+    #[test]
+    fn a_filtered_crowd_says_which_crowd_it_hit() {
+        for (scope, crowd, none) in [
+            (
+                NewsScope::EveryoneIf(FieldFilter::OnFoot),
+                "步行的人",
+                "步行的人",
+            ),
+            (
+                NewsScope::EveryoneIf(FieldFilter::Riding),
+                "有车的人",
+                "有车的人",
+            ),
+            (
+                NewsScope::EveryoneIf(FieldFilter::Detained(DetentionPlace::Hospital)),
+                "在医院的人",
+                "在医院的人",
+            ),
+        ] {
+            let hits = vec![
+                ("阿土伯".to_string(), "原地停留（1 回合）".to_string()),
+                ("孙小美".to_string(), "原地停留（1 回合）".to_string()),
+            ];
+            assert_eq!(
+                news_headline("豪雨袭城", scope, &hits),
+                format!("号外「豪雨袭城」：{crowd} 2 人各 原地停留（1 回合）")
+            );
+            assert_eq!(
+                news_headline("豪雨袭城", scope, &[]),
+                format!("号外「豪雨袭城」：场上没有{none}")
+            );
+        }
     }
 
     /// 地档那三种形状（P11b①）。它们各自对应一句玩家会问的话：

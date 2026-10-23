@@ -132,6 +132,20 @@ impl DetentionPlace {
             Self::Hotel => "退房",
         }
     }
+
+    /// 「他此刻在那一处」的短语，供按处筛人的那一句人话拼（P11b② 的 `FieldFilter::Detained`）。
+    ///
+    /// 不复用 [`Self::label`] 再在外面加一个「关在」：监狱与医院确实是关着，而**出国与住旅馆
+    /// 不是** —— 那句写成「关在国外的人」是一件不存在的事，而它读起来像一条规则。
+    /// 四格都写成中性的「在 X」，谁要加「关」字由各自的句子去说。
+    pub const fn held_phrase(self) -> &'static str {
+        match self {
+            Self::Jail => "在监狱",
+            Self::Hospital => "在医院",
+            Self::Away => "在国外",
+            Self::Hotel => "在旅馆",
+        }
+    }
 }
 
 /// 存在即被拘留中（P4，取代 B2b 起的 `JailSentence`）。递减口径见 `begin_turn_system`：

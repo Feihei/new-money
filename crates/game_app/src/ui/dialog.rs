@@ -3106,6 +3106,10 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
         EffectOutcome::Detained { place, turns, .. } => {
             format!("被关进{}（{turns} 回合）", place.label())
         }
+        // 与上面那条是一对（P11b② 的新闻「医院传出好消息」）。用的是 `back_verb` 而不是
+        // 「放出」：出狱／出院／回国／退房是四句话，而它们在模型里是同一条凭据 ——
+        // 那句人话的映射已经有一份，别再抄第二份
+        EffectOutcome::Released { place, .. } => format!("提前{}", place.back_verb()),
         EffectOutcome::Teleported { name, .. } => format!("移动到「{name}」"),
         // 拍卖卡的那一槌。卡面上不写价钱也不写谁会拍走 —— 那两个数在 `AuctionStarted`
         // 与 `AuctionWon` 上，而这条凭据要说的是「这一槌敲下去了、拍的是哪块地」

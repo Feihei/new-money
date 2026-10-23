@@ -75,7 +75,7 @@ pub mod prelude {
         days_until_dividend, is_dividend_day, is_leap_year, is_month_end,
     };
     pub use crate::calendar_fx::deliver_calendar_events_system;
-    pub use crate::card::{CardDef, CardEffect, CardKind, CardSet, CardTarget};
+    pub use crate::card::{CardDef, CardEffect, CardKind, CardSet, CardTarget, LevyBasis};
     pub use crate::charge::{
         Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, Scope, Source,
         charge_domain_of, scales_with_price, stage, stage_and_spend, transferable,
@@ -145,8 +145,8 @@ pub mod prelude {
         WalkHalted, WalkStarted,
     };
     pub use crate::news::{
-        NewsDef, NewsId, NewsScope, NewsSet, NewsSink, PlayerPick, find_id, fire_news, news_of,
-        roll_span, settle_news_landing_system,
+        FieldFilter, NewsDef, NewsId, NewsScope, NewsSet, NewsSink, PlayerPick, find_id, fire_news,
+        news_of, roll_span, settle_news_landing_system,
     };
     pub use crate::occupancy::{
         BOMB_HOSPITAL_DAYS, BOMB_STEPS, HaltCause, MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt,
