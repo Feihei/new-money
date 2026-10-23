@@ -129,6 +129,9 @@ fn answer_for(about: Pending, rules: &GameRules) -> AutoAnswer {
         // 今天这条的代价只有一条：长跑里商业地保持空地 —— 而演示盘的外滩是**预建**的
         // 购物中心，所以 A 型收费那条路在 `NM_AUTOROLL` 里照样走得到。
         Pending::Build(_) => AutoAnswer::Decide(Decision::Acknowledge),
+        // 远程建设窗口（P10d②）：与本地建设同一条回答 —— 自动玩家「先不建」，
+        // 理由相同（`answer_for` 是纯函数，拿不到账本，不知道哪块地能升）
+        Pending::RemoteBuild => AutoAnswer::Decide(Decision::Acknowledge),
         // 服务费收据（P10c）：钱已经扣完，与租金收据同一个回答
         Pending::ServiceNotice(_) => AutoAnswer::Decide(Decision::Acknowledge),
     }

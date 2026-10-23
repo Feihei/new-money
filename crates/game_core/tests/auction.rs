@@ -33,12 +33,13 @@ use game_core::prelude::{
     LandStatus, PLAYER_COLORS, Pending, PlayerSetup, TurnPhase,
 };
 
-/// 徐家汇（地块 3，绑在 7 号格上）：名义地价 3800、加盖一层 1900。
+/// 徐家汇（地块 3，绑在 9 号格上）：名义地价 3800、加盖一层 1900。
 const LOT: u32 = 3;
-/// 王府井（地块 4，9 号格）：拿它当「收不到租就当场破产」那把刀 —— 空地租 160 元，
+/// 王府井（地块 4，11 号格）：拿它当「收不到租就当场破产」那把刀 —— 空地租 160 元，
 /// 而死者兜里只摆 50 元。
 const LANDLORD_PLOT: u32 = 4;
-const LANDLORD_TILE: u32 = 9;
+/// 王府井踩到格（P10d② 顺移：9 → 11，机会格 8 → 10）。
+const LANDLORD_TILE: u32 = 11;
 /// 死者那点现金：低于这一趟的租，又高到不至于让别的用例误读成「他本来就一分没有」
 const BROKE: i64 = 50;
 

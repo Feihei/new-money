@@ -53,10 +53,16 @@ pub struct Points(pub u32);
 
 /// 银行账户：存款生息、贷款计息（`bank_system.gd` 的 deposit/loan 字段）。
 /// 利息结算不经过现金 —— 存款利息进余额、贷款利息进负债，与 Godot 一致。
+///
+/// `financing` 是融资（P10d②，银行保险董事长特权）：从**其他玩家的存款**里挪来的
+/// 那部分钱。它与 `loan` 分家有三条理由 —— 不计息（挪用不是贷款）、丢掉董事长身份
+/// 的那一刻被立刻收回（`bank.rs` 的回收 system）、赔付「银行付不出的取款」时先于
+/// 贷款挪用（见 `bank_pool` 的口径）。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BankBalance {
     pub deposit: i64,
     pub loan: i64,
+    pub financing: i64,
 }
 
 /// 逻辑位置：永远只在主环上。
@@ -165,6 +171,26 @@ pub struct StaySentence {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveCap {
     pub turns_left: u32,
+}
+
+/// 一份在效期内的保单（P10d②，人寿保险）：`days_left` 个自己的回合内，坐牢/住院
+/// 由 `insurer` 那家公司按 `indemnity_per_day × 拘留天数` 赔现金。
+///
+/// 它是身上的**第四条计时**（与 [`Detention`] / [`StaySentence`] / [`MoveCap`] 同族）：
+/// 扣在**他自己的回合开始**上 —— 这局里「一天」的既定口径就是「他的一个回合」，
+/// 拘留的天数是这么数的，保单的效期没有理由换一把尺。
+///
+/// `insurer` 存**股票 id 字符串**而不存实体：赔付要把负数记进那家公司的损益账
+/// （`CompanyLedgers` 按股票 id 分页），账页的键就是它。保费与赔付单价在**投保那一刻
+/// 随保单冻结** —— 落格时棋盘数据给了什么就是什么，之后棋盘改价不追溯旧保单。
+///
+/// 再投保 = 买一份新保单、旧的作废（不是 `max` 也不是累加 —— 你付了新保费，
+/// 就该拿到新保单写的那几天）。
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct Insured {
+    pub days_left: u32,
+    pub insurer: String,
+    pub indemnity_per_day: i64,
 }
 
 /// 载具（P5）：步行 1 颗骰、机车 2 颗、汽车 3 颗。

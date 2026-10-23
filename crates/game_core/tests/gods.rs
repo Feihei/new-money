@@ -1346,12 +1346,13 @@ fn the_turn_a_god_expires_he_takes_no_more_cards() {
 ///
 /// 三条「所经」用例共用这一句：起点与骰点都钉住，「他经过哪几格」才是算得出的事，
 /// 而不是等运气 —— 这条效果吃的就是**步数**，随机骰点会让断言变成一次巧合。
-/// 顺手把 3 号命运格铺成路面：落格时抽一张命运牌会改掉他的位置，而那不是本条要测的东西。
+/// 顺手把 5 号命运格铺成路面：落格时抽一张命运牌会改掉他的位置，而那不是本条要测的东西。
 ///
-/// 演示盘的格子对照：格1＝L0 南京路、格2＝L1 汉口路、格4＝L2 外滩（2×2，无主）。
+/// 演示盘的格子对照（P10d② 重排后）：格1＝L0 南京路、格2＝L1 汉口路、
+/// 格6＝L2 外滩（2×2，无主）。骰 6 点正好走过这三块地所在的格。
 fn walker(god: God, steps: u32) -> (App, Entity) {
     let (mut app, p0) = ready_on(0, steps, DecisionPolicy::DeclineAll);
-    pave(&mut app, 3..=3);
+    pave(&mut app, 5..=5);
     clear_gods(&mut app);
     attach_god(&mut app, p0, god, Some(40));
     (app, p0)
@@ -1362,7 +1363,7 @@ fn the_angel_raises_every_plot_he_walks_over_regardless_of_who_owns_it() {
     // PLAN §三「天使＝所经一律加盖（不分敌我、无主地也盖）」。
     // 三块地三种归属：L0 是别人的、L1 是他自己的、L2 无主 —— 三种都要长一层，
     // 少一种就是「一律」被某道归属判定偷偷过滤掉了
-    let (mut app, p0) = walker(God::Angel, 4);
+    let (mut app, p0) = walker(God::Angel, 6);
     own(&mut app, RENT_LAND, Some(1), 1, false);
     own(&mut app, SECOND_LAND, Some(0), 2, false);
     own(&mut app, 2, None, 0, false);
@@ -1371,8 +1372,8 @@ fn the_angel_raises_every_plot_he_walks_over_regardless_of_who_owns_it() {
 
     assert_eq!(
         tile_of(&app, p0),
-        4,
-        "前置：他应当正好走过格1、格2、格3、格4"
+        6,
+        "前置：他应当正好走过格1、格2、格3、格4、格5、格6"
     );
     assert_eq!(
         plot_state(&mut app, RENT_LAND).1,
@@ -1453,14 +1454,14 @@ fn the_devil_tears_down_everything_he_passes_but_never_past_empty_ground() {
     // PLAN §三「恶魔＝所经降一级（空地不拆）」。三块地三种起点：Lv3 该塌成 Lv2、
     // Lv1 该塌成 Lv0（下面那条注写清了「空地不拆」今天按哪条口径读）、
     // 无主的 Lv0 本来就没东西可拆
-    let (mut app, p0) = walker(God::Devil, 4);
+    let (mut app, p0) = walker(God::Devil, 6);
     own(&mut app, RENT_LAND, Some(1), 3, false);
     own(&mut app, SECOND_LAND, Some(0), 1, false);
     own(&mut app, 2, None, 0, false);
 
     play_turns(&mut app, 1);
 
-    assert_eq!(tile_of(&app, p0), 4, "前置：他应当走过那三块地所在的格");
+    assert_eq!(tile_of(&app, p0), 6, "前置：他应当走过那三块地所在的格");
     assert_eq!(plot_state(&mut app, RENT_LAND).1, 2, "三级塌成二级");
     assert_eq!(
         plot_state(&mut app, SECOND_LAND).1,
@@ -1487,7 +1488,7 @@ fn the_devil_tears_down_everything_he_passes_but_never_past_empty_ground() {
 fn a_money_god_walks_over_the_same_street_and_touches_no_buildings() {
     // 反例的反例：附身一位**钱神**走同一条路，三块地一格都不该动。
     // 少了这一格，「走路时动房子」这条系统可以被写成「任何人走过都动」而全绿
-    let (mut app, _p0) = walker(God::BigPoor, 4);
+    let (mut app, _p0) = walker(God::BigPoor, 6);
     own(&mut app, RENT_LAND, Some(1), 2, false);
     own(&mut app, SECOND_LAND, Some(0), 2, false);
     own(&mut app, 2, None, 2, false);

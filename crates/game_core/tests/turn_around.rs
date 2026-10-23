@@ -91,11 +91,11 @@ fn a_reversed_player_walks_the_same_ring_backwards_and_the_die_stays_positive() 
 
 #[test]
 fn walking_backwards_wraps_past_the_start_to_the_other_end_of_the_ring() {
-    // 从 1 号倒着走五步：0（起点）→ 16（彩票中心）→ 15（游乐场）→ 14（百货公司）→ 13（西单）。
+    // 从 1 号倒着走五步：0（起点）→ 18（彩票中心）→ 17（游乐场）→ 16（百货公司）→ 15（西单）。
     // 回绕用的是同一个 `rem_euclid`，而「倒着越过起点」不发薪水（`domain_of(Start) = Nothing` 早就拍板过），
     // 所以这里没有「反复擦过起点捞一笔」的套利。
-    // 五步而不是四步（环每加一格就要重数一次，P10d① 后环长 17）：四步落在 14 百货公司，
-    // 那会开出柜台窗口；三步落在 15 游乐场，开一局小游戏。两条窗口各属于 `tests/shop.rs`／
+    // 五步而不是四步（环每加一格就要重数一次，P10d② 后环长 19）：四步落在 16 百货公司，
+    // 那会开出柜台窗口；三步落在 17 游乐场，开一局小游戏。两条窗口各属于 `tests/shop.rs`／
     // `tests/minigame.rs`，不该混进这条只问「绕不绕得回去」的用例里 —— 终点选在一块无主地产上，
     // 报价被 `DeclineAll` 拒掉。
     let (mut app, p0, _p1) = standing_at(1, 5);
@@ -106,7 +106,7 @@ fn walking_backwards_wraps_past_the_start_to_the_other_end_of_the_ring() {
     clear_gods(&mut app);
     play_turns(&mut app, 1);
 
-    assert_eq!(tile_of(&app, p0), 13, "倒着越过起点该绕到环尾，不是停在 0");
+    assert_eq!(tile_of(&app, p0), 15, "倒着越过起点该绕到环尾，不是停在 0");
     assert_eq!(cash_of(&mut app, p0), 20_000, "擦过起点一分钱都不发");
 }
 

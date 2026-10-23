@@ -164,23 +164,36 @@ pub enum CompanyFee {
     RandomStay { sides: u32, per_day: i64 },
     /// C 型：单价 × 本回合骰面。暴富科技的电脑维修费（与载具无关）。
     PerStep { rate: i64, requires_mount: bool },
+    /// B 型变体（P10d②）：转盘摇出的是**投保天数**而不是离场天数 —— 人不离场，
+    /// 付 `premium_per_day × 天数` 的保费换来一份保单；投保期间坐牢/住院由公司按
+    /// `indemnity_per_day × 拘留天数` 赔现金。它不进 [`FeePrototype`]：保险的产物
+    /// 是身上的一个状态而不是一笔离场，`assess` 的「stay_days = 人走几天」在这里
+    /// 没有对应物，硬塞进去就是第二处会分叉的地方。
+    Insure {
+        sides: u32,
+        premium_per_day: i64,
+        indemnity_per_day: i64,
+    },
 }
 
 impl CompanyFee {
     /// 数据 → 原型库是纯映射，判定全在 [`crate::service::assess`]。
-    pub fn to_prototype(&self) -> crate::service::FeePrototype {
+    /// 保险（[`CompanyFee::Insure`]）没有对应物 —— 它的产物是保单不是账单，
+    /// 结算走 `company.rs` 自己那条路，这里返回 `None`。
+    pub fn to_prototype(&self) -> Option<crate::service::FeePrototype> {
         match self {
-            Self::RandomStay { sides, per_day } => crate::service::FeePrototype::RandomStay {
+            Self::RandomStay { sides, per_day } => Some(crate::service::FeePrototype::RandomStay {
                 sides: *sides,
                 per_day: *per_day,
-            },
+            }),
             Self::PerStep {
                 rate,
                 requires_mount,
-            } => crate::service::FeePrototype::PerStep {
+            } => Some(crate::service::FeePrototype::PerStep {
                 rate: *rate,
                 requires_mount: *requires_mount,
-            },
+            }),
+            Self::Insure { .. } => None,
         }
     }
 }
@@ -613,10 +626,37 @@ impl BoardDef {
                     }
                     _ => {}
                 }
-                if let Some(CompanyFee::RandomStay { sides, .. }) = t.data.fee
+                if let Some(CompanyFee::RandomStay { sides, .. } | CompanyFee::Insure { sides, .. }) =
+                    t.data.fee
                     && sides == 0
                 {
                     errs.push(format!("company 格 {}({}) 的 B 型骰面数为 0", t.id, t.name));
+                }
+                // 保险两项都得是正数：保费 0 等于白送保单、赔付 0 等于一张废纸 ——
+                // 数据写歪了要在加载期响，而不是让玩家用一局去发现保单是空的
+                if let Some(CompanyFee::Insure {
+                    premium_per_day,
+                    indemnity_per_day,
+                    ..
+                }) = t.data.fee
+                    && (premium_per_day <= 0 || indemnity_per_day <= 0)
+                {
+                    errs.push(format!(
+                        "company 格 {}({}) 的保费/赔付单价必须是正数",
+                        t.id, t.name
+                    ));
+                }
+            } else if t.kind == TileKind::Shop {
+                // P10d②：百货格也带 stock —— 董事长白拿一件的特权挂在股上，
+                // 分红那一半（P10d 行 ④）本阶段不做，但身份要先有地方长出来
+                match t.data.stock.as_deref() {
+                    None | Some("") => {
+                        errs.push(format!("shop 格 {}({}) 缺 data.stock", t.id, t.name))
+                    }
+                    _ => {}
+                }
+                if t.data.fee.is_some() {
+                    errs.push(format!("shop 格 {}({}) 不该带 fee 字段", t.id, t.name));
                 }
             } else if t.data.stock.is_some() || t.data.fee.is_some() {
                 errs.push(format!(
@@ -790,7 +830,7 @@ mod tests {
     fn prototype_parses_and_validates() {
         let b = board();
         assert_eq!(b.board_name, "prototype");
-        assert_eq!(b.loop_len(), 17);
+        assert_eq!(b.loop_len(), 19);
         assert_eq!(b.lands.len(), 6);
         assert!(
             b.validate().is_ok(),
@@ -798,10 +838,10 @@ mod tests {
             b.validate().unwrap_err()
         );
         // P10d①：两家公司的门面格 —— 门面绑的股票必须真的存在于股票表里
-        let tech = b.tile(10).unwrap();
+        let tech = b.tile(12).unwrap();
         assert_eq!(tech.kind, TileKind::Company);
         assert_eq!(tech.data.stock.as_deref(), Some("stock_001"));
-        let airline = b.tile(12).unwrap();
+        let airline = b.tile(14).unwrap();
         assert_eq!(airline.kind, TileKind::Company);
         assert_eq!(airline.data.stock.as_deref(), Some("stock_005"));
     }
@@ -809,69 +849,76 @@ mod tests {
     #[test]
     fn ring_wraps_both_directions() {
         let b = board();
-        // 12（百货公司）、13（游乐场）、14（彩票中心）是 P3d②/P7/P8 先后追加在环尾的三格：
-        // 都不改任何既有格的编号，只把「回绕」那一跳一路往后挪。P10d① 的两家公司
-        // 沿同一个先例插在**既有格的斜段中间**（科技公司 (1,4)、航空公司 (0,3)），
-        // 代价只是原来的 10–14 号顺移成 11–16 号（0–9 一个没动）。
-        assert_eq!(b.destination(9, 1), 10);
-        assert_eq!(b.destination(10, 1), 11);
+        // P3d②/P7/P8 把百货、游乐场、彩票依次推到环尾（原 12/13/14 号）。
+        // P10d① 的两家公司插在既有格的斜段中间（科技 (1,4)、航空 (0,3)）。
+        // P10d② 的保险公司 (4,1) 与日产建设 (5,1) 插在汉口路与命运之间的直段上：
+        // 2→3→4→5，既有格整体顺移两位（3–16 号变 5–18 号），0–2 号一个没动 ——
+        // 与 P10d①「只顺移编号、不动坐标」同一个先例，代价是老格号集体 +2。
+        assert_eq!(b.destination(2, 1), 3);
+        assert_eq!(b.destination(3, 1), 4);
+        assert_eq!(b.destination(4, 1), 5);
         assert_eq!(b.destination(11, 1), 12);
         assert_eq!(b.destination(12, 1), 13);
         assert_eq!(b.destination(13, 1), 14);
         assert_eq!(b.destination(14, 1), 15);
         assert_eq!(b.destination(15, 1), 16);
-        assert_eq!(b.destination(16, 1), 0, "环尾下一步该回到起点");
-        assert_eq!(b.destination(0, -1), 16);
-        assert_eq!(b.destination(5, 17), 5, "整整一圈回到原地");
-        assert_eq!(b.tile(-1).unwrap().id, 16);
-        assert_eq!(b.tile(17).unwrap().id, 0);
+        assert_eq!(b.destination(16, 1), 17);
+        assert_eq!(b.destination(17, 1), 18);
+        assert_eq!(b.destination(18, 1), 0, "环尾下一步该回到起点");
+        assert_eq!(b.destination(0, -1), 18);
+        assert_eq!(b.destination(5, 19), 5, "整整一圈回到原地");
+        assert_eq!(b.tile(-1).unwrap().id, 18);
+        assert_eq!(b.tile(19).unwrap().id, 0);
         // wrapped() 与 tile() 必须同一套取模规则，否则棋子位置与看到的格子会错位
-        assert_eq!(b.wrapped(-1), TileIndex(16));
-        assert_eq!(b.wrapped(17), TileIndex(0));
+        assert_eq!(b.wrapped(-1), TileIndex(18));
+        assert_eq!(b.wrapped(19), TileIndex(0));
     }
 
     /// 请神符（P6d）的「离自己最近」读的是这两句：先比双向最短，同距时比行进方向。
     #[test]
     fn ring_distance_counts_both_ways_while_the_heading_breaks_a_tie() {
-        let b = board(); // 17 格
+        let b = board(); // 19 格
         assert_eq!(b.ring_distance(TileIndex(0), TileIndex(0)), 0);
         assert_eq!(b.ring_distance(TileIndex(0), TileIndex(6)), 6);
         assert_eq!(
-            b.ring_distance(TileIndex(0), TileIndex(8)),
-            8,
-            "17 格环上远侧由 8 号与 9 号夹出：正向 8 步"
+            b.ring_distance(TileIndex(0), TileIndex(9)),
+            9,
+            "19 格环上远侧由 9 号与 10 号夹出：正向 9 步"
         );
         assert_eq!(
             b.ring_distance(TileIndex(0), TileIndex(16)),
-            1,
-            "跨过环尾与起点也要连着数，不能在此断开各数一半"
+            3,
+            "跨过环尾也要连着数：0→18→17→16 倒着 3 步，不能在此断开各数一半"
         );
-        // 同距的一对：17 格是**奇数**环，没有正对面那一格，远侧由两格夹出 ——
-        // 8 号与 9 号离 0 号都是 8 步。正向取 8 号，掉头之后取 9 号。
+        // 同距的一对：19 格是**奇数**环，没有正对面那一格，远侧由两格夹出 ——
+        // 9 号与 10 号离 0 号都是 9 步。正向取 9 号，掉头之后取 10 号。
         // 这一对是「决胜键真的有牙」的全部依据：只用其中一位的话，`Heading` 那一格
-        // 永远测不到（另一个方向数出来是 9，本来就输）
-        assert_eq!(
-            b.steps_toward(TileIndex(0), TileIndex(8), Heading::Forward),
-            8
-        );
+        // 永远测不到（另一个方向数出来是 10，本来就输）
         assert_eq!(
             b.steps_toward(TileIndex(0), TileIndex(9), Heading::Forward),
             9
         );
         assert_eq!(
-            b.steps_toward(TileIndex(0), TileIndex(9), Heading::Backward),
-            8,
-            "倒着走时 9 号才是前面那位"
+            b.steps_toward(TileIndex(0), TileIndex(10), Heading::Forward),
+            10
+        );
+        assert_eq!(
+            b.steps_toward(TileIndex(0), TileIndex(10), Heading::Backward),
+            9,
+            "倒着走时 10 号才是前面那位"
         );
     }
 
     #[test]
     fn walk_path_wraps_past_the_start_tile() {
         let b = board();
-        // 从环尾走 2 步：先踏过 0 号起点再落到 1 号 —— 「绕回起点经过」
-        assert_eq!(b.walk_path(16, 2), vec![TileIndex(0), TileIndex(1)]);
-        // 从倒数第二格走 2 步：先经过彩票中心再踏过起点，回绕在第二步上
-        assert_eq!(b.walk_path(15, 2), vec![TileIndex(16), TileIndex(0)]);
+        // 从环尾走 3 步：17（保险公司）→ 18（日产建设）→ 踏过 0 号起点 —— 「绕回起点经过」
+        assert_eq!(
+            b.walk_path(16, 3),
+            vec![TileIndex(17), TileIndex(18), TileIndex(0)]
+        );
+        // 从倒数第一格走 2 步：先踏过起点再落到 1 号，回绕在第一步上
+        assert_eq!(b.walk_path(18, 2), vec![TileIndex(0), TileIndex(1)]);
         assert_eq!(b.walk_path(0, 1), vec![TileIndex(1)]);
         assert!(b.walk_path(3, 0).is_empty(), "0 步不该有路径");
     }
@@ -887,15 +934,15 @@ mod tests {
             vec![TileIndex(4), TileIndex(3), TileIndex(2)],
             "倒着走是下标递减，不是把路径整个反过来念"
         );
-        // 从 1 号倒着越过起点：0 → 16（彩票中心）→ 15（游乐场）。回绕在负方向上同样成立，
+        // 从 1 号倒着越过起点：0 → 18（日产建设）→ 17（保险公司）。回绕在负方向上同样成立，
         // 而这条路径正是「被转向卡送去环尾那几格」的那条路
         assert_eq!(
             b.walk_path(1, -3),
-            vec![TileIndex(0), TileIndex(16), TileIndex(15)]
+            vec![TileIndex(0), TileIndex(18), TileIndex(17)]
         );
         // 方向不改变走了几步：正负三步都是三格，而倒着走满一圈回到出发那一格
-        assert_eq!(b.walk_path(2, -17).len(), 17);
-        assert_eq!(b.walk_path(2, -17).last(), Some(&TileIndex(2)));
+        assert_eq!(b.walk_path(2, -19).len(), 19);
+        assert_eq!(b.walk_path(2, -19).last(), Some(&TileIndex(2)));
     }
 
     #[test]
@@ -938,12 +985,13 @@ mod tests {
             .filter(|i| b.is_diagonal_step(*i as i64))
             .map(|i| b.tiles[i as usize].id)
             .collect();
-        // 2→3（汉口路→命运）是原盘就有的那段；9→10（王府井→点券箱）那一段在
-        // P10d① 被**补掉了** —— 科技公司摆在 (1,4)，王府井只能正交着过去；
-        // 新长的两段是 12→13（航空公司 (0,3) → 西单 (1,2)）与 13→14（西单 → 百货）。
-        // 所以「追加一格」的代价不总是多一条斜段 —— 这一串数读的是「现在这张盘上
-        // 有几段斜街可画」，不是「加了几格」。
-        assert_eq!(diag, vec![2, 12, 13], "非对角段被误判: {diag:?}");
+        // 2→3（汉口路→保险公司）那段在 P10d① 被补直（9→10 同理）；
+        // 5→6（命运→外滩北）那一段是原盘就有的斜街；新长的两段是
+        // 14→15（航空公司 (0,3) → 西单 (1,2)）与 15→16（西单 → 百货）。
+        // P10d② 的日产建设 (5,1) 落在 4→5 那一跳上，把「百货→游乐场」还原成
+        // 直段 —— 所以「追加一格」的代价不总是多一条斜段：这一串数读的是
+        // 「现在这张盘上有几段斜街可画」，不是「加了几格」。
+        assert_eq!(diag, vec![4, 14, 15], "非对角段被误判: {diag:?}");
     }
 
     /// 百货公司在演示盘上真有一格，而且踩得到（P3d② 验收第一条）。
@@ -957,15 +1005,15 @@ mod tests {
             .filter(|t| t.kind == TileKind::Shop)
             .map(|t| t.id)
             .collect();
-        assert_eq!(shops, vec![14], "演示盘该恰好一格百货");
+        assert_eq!(shops, vec![16], "演示盘该恰好一格百货");
         // 它关于一块地吗？不该 —— 百货是事件格，`validate` 也会替这条把关
-        assert_eq!(b.tiles[14].land_id, None);
-        assert_eq!(b.tiles[14].name, "百货公司");
+        assert_eq!(b.tiles[16].land_id, None);
+        assert_eq!(b.tiles[16].name, "百货公司");
     }
 
     /// 演示盘上那一格游乐场（P7）。`tests/minigame.rs` 钉着同一个编号，两处一起改才不会
-    /// 悄悄错位 —— 而「机制在演示盘上真能踩到」是这一格存在的理由（14 百货掷 1 点即到，
-    /// 13 西单掷 2 点即到）。
+    /// 悄悄错位 —— 而「机制在演示盘上真能踩到」是这一格存在的理由（16 百货掷 1 点即到，
+    /// 15 西单掷 2 点即到）。
     ///
     /// **`data` 是空的，那是「这一趟随机一款」**：三种游戏在演示盘上只有一格的余量，
     /// 写死一款就等于另外两种只能靠 `NM_MINIGAME` 才看得见。真棋盘（P10）一格写死一款。
@@ -978,16 +1026,17 @@ mod tests {
             .filter(|t| t.kind == TileKind::Arcade)
             .map(|t| t.id)
             .collect();
-        assert_eq!(arcades, vec![15], "演示盘该恰好一格游乐场");
-        assert_eq!(b.tiles[15].land_id, None, "游乐场是事件格，不关于一块地");
-        assert_eq!(b.tiles[15].name, "游乐场");
-        assert_eq!(b.tiles[15].data.game, None, "缺省＝随机一款");
+        assert_eq!(arcades, vec![17], "演示盘该恰好一格游乐场");
+        assert_eq!(b.tiles[17].land_id, None, "游乐场是事件格，不关于一块地");
+        assert_eq!(b.tiles[17].name, "游乐场");
+        assert_eq!(b.tiles[17].data.game, None, "缺省＝随机一款");
     }
 
-    /// 公司格（P10d①）在演示盘上真有两格，且都绑着股票表里存在的 id。
+    /// 公司格（P10d①）在演示盘上真有四格，且都绑着股票表里存在的 id。
     /// 「机制在演示盘上真能踩到」的同一条理由：科技公司插在王府井与点券箱之间的
-    /// 斜段上，从 9 王府井掷 1 点即踩到；航空公司插在点券箱与西单之间的斜段上，
-    /// 从 11 号掷 1 点即到 —— 两格都不动任何既有格的位置，只让编号顺移。
+    /// 斜段上，从 11 王府井掷 1 点即踩到；航空公司插在点券箱与西单之间的斜段上，
+    /// 从 13 号掷 1 点即到。P10d② 再添两格：保险公司 (4,1)、日产建设 (5,1)
+    /// 插在汉口路与命运之间的直段上 —— 老格号 3–16 集体顺移成 5–18。
     #[test]
     fn prototype_carries_two_companies_the_player_can_step_on() {
         let b = board();
@@ -997,9 +1046,9 @@ mod tests {
             .filter(|t| t.kind == TileKind::Company)
             .map(|t| t.id)
             .collect();
-        assert_eq!(companies, vec![10, 12], "演示盘该恰好两格公司");
+        assert_eq!(companies, vec![3, 4, 12, 14], "演示盘该恰好四格公司");
         // 科技公司：C 型维修费（与载具无关 —— 走路踩坏了也要修）
-        let tech = &b.tiles[10];
+        let tech = &b.tiles[12];
         assert_eq!(tech.name, "科技公司");
         match tech.data.fee {
             Some(CompanyFee::PerStep {
@@ -1012,7 +1061,7 @@ mod tests {
             other => panic!("科技公司读成了 {other:?}"),
         }
         // 航空公司：B 型转盘，摇出几出国几天
-        let airline = &b.tiles[12];
+        let airline = &b.tiles[14];
         assert_eq!(airline.name, "航空公司");
         match airline.data.fee {
             Some(CompanyFee::RandomStay { sides, per_day }) => {
@@ -1021,9 +1070,35 @@ mod tests {
             }
             other => panic!("航空公司读成了 {other:?}"),
         }
-        // 两格都不关于一块地：公司没有「地」可买
+        // 保险公司（P10d②）：B 型变体 —— 转盘摇出的是投保天数，保费与赔付单价都必须是正数
+        let insurer = &b.tiles[3];
+        assert_eq!(insurer.name, "保险公司");
+        match insurer.data.fee {
+            Some(CompanyFee::Insure {
+                sides,
+                premium_per_day,
+                indemnity_per_day,
+            }) => {
+                assert!(sides > 0);
+                assert!(premium_per_day > 0);
+                assert!(indemnity_per_day > 0);
+            }
+            other => panic!("保险公司读成了 {other:?}"),
+        }
+        // 日产建设（P10d②）：D 型功能格 —— 没有 fee，踩到不收费只开远程升级窗口
+        let builder = &b.tiles[4];
+        assert_eq!(builder.name, "日产建设");
+        assert!(builder.data.fee.is_none(), "日产建设不该带 fee 字段");
+        // 四格都不关于一块地：公司没有「地」可买
         assert_eq!(tech.land_id, None);
         assert_eq!(airline.land_id, None);
+        assert_eq!(insurer.land_id, None);
+        assert_eq!(builder.land_id, None);
+        // 百货格（P10d②）绑着 stock_004：董事长白拿一件的身份挂在股上
+        let shop = b.tile(16).unwrap();
+        assert_eq!(shop.kind, TileKind::Shop);
+        assert_eq!(shop.data.stock.as_deref(), Some("stock_004"));
+        assert!(shop.data.fee.is_none());
     }
 
     /// `game` 只能住在游乐场格上，与点券字段那一组同一条不变式：数据写歪了要在加载期响，
@@ -1039,7 +1114,7 @@ mod tests {
         );
 
         let mut b = board();
-        b.tiles[15].data.game = Some(crate::minigame::GameKind::PenguinDig);
+        b.tiles[17].data.game = Some(crate::minigame::GameKind::PenguinDig);
         assert!(
             b.validate().is_ok(),
             "游乐场格上写死一款是合法的：{:?}",
@@ -1051,7 +1126,7 @@ mod tests {
     fn world_pos_is_derived_from_grid() {
         let b = board();
         assert_eq!(b.world_pos(3, 5), Vec3::new(6.0, 0.0, 10.0));
-        assert_eq!(b.tile_world_pos(4), Some(Vec3::new(10.0, 0.0, 4.0)));
+        assert_eq!(b.tile_world_pos(6), Some(Vec3::new(10.0, 0.0, 4.0)));
     }
 
     #[test]
@@ -1059,7 +1134,7 @@ mod tests {
         let b = board();
         // land 2 在 (6,2) size=2 → 足迹中心 (6.5, 2.5) * 2.0
         assert_eq!(b.land_world_pos(2), Some(Vec3::new(13.0, 0.0, 5.0)));
-        assert_eq!(b.tiles_bound_to_land(2), vec![4, 5]);
+        assert_eq!(b.tiles_bound_to_land(2), vec![6, 7]);
     }
 
     #[test]
@@ -1067,7 +1142,7 @@ mod tests {
         let b = board();
         assert_eq!(b.branch_junction(BranchKind::Jail).unwrap().id, 2);
         assert_eq!(b.branch_end(BranchKind::Jail).unwrap().name, "监狱");
-        assert_eq!(b.branch_junction(BranchKind::Hospital).unwrap().id, 7);
+        assert_eq!(b.branch_junction(BranchKind::Hospital).unwrap().id, 9);
         assert_eq!(b.branch_end(BranchKind::Hospital).unwrap().name, "医院");
         // 拘留天数与罚金**不在格子上**（P4④）：天数只来自卡面，保释不动现金。
         // 这条断言反过来钉住「谁把字段加回来谁就红」
@@ -1085,8 +1160,8 @@ mod tests {
     #[test]
     fn prototype_carries_a_coupon_box_face_value() {
         let b = board();
-        let tile = &b.tiles[11];
-        assert_eq!(tile.id, 11, "P10d① 之后点券箱顺移到 11 号");
+        let tile = &b.tiles[13];
+        assert_eq!(tile.id, 13, "P10d② 之后点券箱顺移到 13 号");
         assert_eq!(tile.kind, TileKind::Coupon);
         assert_eq!(tile.data.coupon, Some(30));
         assert_eq!(
@@ -1099,10 +1174,10 @@ mod tests {
     fn land_lookup_through_tile() {
         let b = board();
         assert_eq!(b.land_for_tile(1).unwrap().id, 0);
-        assert_eq!(b.land_for_tile(9).unwrap().id, 4);
+        assert_eq!(b.land_for_tile(11).unwrap().id, 4);
         assert!(b.land_for_tile(0).is_none(), "起点格不应解析出土地");
-        assert_eq!(b.land_for_tile(4).unwrap().id, 2, "外滩北");
-        assert_eq!(b.land_for_tile(5).unwrap().id, 2, "外滩南与北共享 land 2");
+        assert_eq!(b.land_for_tile(6).unwrap().id, 2, "外滩北");
+        assert_eq!(b.land_for_tile(7).unwrap().id, 2, "外滩南与北共享 land 2");
     }
 
     #[test]
@@ -1133,16 +1208,16 @@ mod tests {
                 },
                 "分支不连通",
             ),
-            (|b| b.tiles[11].data.coupon = None, "点券格没有面额"),
+            (|b| b.tiles[13].data.coupon = None, "点券格没有面额"),
             (
-                |b| b.tiles[11].data.refresh = Some(0),
+                |b| b.tiles[13].data.refresh = Some(0),
                 "点券格的冷却写成 0（等于每次踩都发）",
             ),
             (
                 |b| b.tiles[3].data.coupon = Some(50),
                 "点券字段挂在别的格上",
             ),
-            (|b| b.tiles[10].data.stock = None, "公司格没有绑股票"),
+            (|b| b.tiles[12].data.stock = None, "公司格没有绑股票"),
             (
                 |b| b.tiles[1].data.stock = Some("stock_001".into()),
                 "股票字段挂在别的格上",

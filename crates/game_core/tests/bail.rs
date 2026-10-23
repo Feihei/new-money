@@ -1,6 +1,6 @@
 //! P4③ 的验收：保释**不动现金**，是别的玩家走到拘留场所的接入点时花点券放人。
 //!
-//! 这条规则在演示盘上的入口是 2 号（汉口路，挂监狱分支）与 7 号（徐家汇，挂医院分支）：
+//! 这条规则在演示盘上的入口是 2 号（汉口路，挂监狱分支）与 9 号（徐家汇，挂医院分支）：
 //! 踩上去先照常结算地产，然后如果那条分支里真关着人，才把保释窗口摆出来。所以本文件
 //! 的每个用例都是「真走到那一格 → 真答地产报价 → 看窗口」这条路径，而不是直接挂 Pending。
 //!
@@ -23,7 +23,7 @@ use game_core::prelude::{
 
 /// prototype 的两条分支接入点。
 const JAIL_JUNCTION: u32 = 2;
-const HOSPITAL_JUNCTION: u32 = 7;
+const HOSPITAL_JUNCTION: u32 = 9;
 
 fn other(app: &mut App, player: Entity) -> Entity {
     roster(app)

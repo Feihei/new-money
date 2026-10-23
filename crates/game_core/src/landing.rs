@@ -226,6 +226,13 @@ pub enum Pending {
     /// 三种 `Decision` 对它一律不认（见 [`decision_system`] 里那一格）：它的两个动作走
     /// [`crate::msg::AuctionMove`]，认了任何一条都会把窗口清掉，而拍卖机还在等下一个人。
     Auction,
+    /// 踩到日产建设格（P10d②）：远程升级窗口开着，可以选一块**自己的**地加盖。
+    ///
+    /// 与 [`Pending::Build`] 同一族（窗口而非报价，请求逐笔进来办），但不带 `LandId`：
+    /// 建设窗口对着**一块地**开，这里对着**全部名下的地**开 —— 升哪块由玩家在面板上点，
+    /// 请求走 [`crate::msg::RemoteUpgradeRequested`]。判据与扣款全在 `Books::upgrade`
+    /// （正路），董事长的「免费升两层」只是同一判据换了价钱与层数（`upgrade_chairman`）。
+    RemoteBuild,
 }
 
 /// 系统状态：现在正等谁的什么回答。
@@ -353,7 +360,8 @@ pub fn decision_system(
             | Pending::Lottery
             | Pending::Bail(_)
             | Pending::Minigame(_)
-            | Pending::Build(_),
+            | Pending::Build(_)
+            | Pending::RemoteBuild,
             Decision::Acknowledge,
         ) => {}
         (
@@ -362,7 +370,8 @@ pub fn decision_system(
             | Pending::Lottery
             | Pending::Bail(_)
             | Pending::Minigame(_)
-            | Pending::Build(_),
+            | Pending::Build(_)
+            | Pending::RemoteBuild,
             Decision::Accept | Decision::Decline,
         ) => return,
         // 拍卖：三种回答**都不认**。它的两个动作是「加价」与「放弃」，走

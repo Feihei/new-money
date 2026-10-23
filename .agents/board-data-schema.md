@@ -67,7 +67,7 @@
 | `refresh` | int? | **仅 `coupon`** | 取走后多少回合重新出现；缺省走 `GameRules::coupon_refresh_turns`（6）。写 `0` 等于每次踩都发，与「一次性」矛盾 |
 | `game` | string? | **仅 `arcade`** | 这一格固定玩哪一款：`pop_balloons` / `catch_treasure` / `penguin_dig`。**缺省合法**，意思是「这一趟随机一款」（抽法走 `Rng` 的小游戏子流）。写错的值不是被忽略而是**加载期报错**（serde 枚举） |
 | `stock` | string? | **仅 `company`** | 这家门面绑哪只股票（对应 `stocks.json` 的 id）。**公司格必填** —— 没绑股的公司格是加载错误 |
-| `fee` | object? | **仅 `company`**（地块的 `fee` 见下节） | 这家公司的收费原型参数：`random_stay`（航空那类，摇几点住几天）或 `per_step`（IBM 那类，单价 × 本回合骰面）。**缺省合法** = D 型门面（不收费）。**B 型 `sides` 必须 ≥ 1** |
+| `fee` | object? | **仅 `company`**（地块的 `fee` 见下节） | 这家公司的收费原型参数：`random_stay`（航空那类，摇几点住几天）、`per_step`（IBM 那类，单价 × 本回合骰面）或 `insure`（保险那类，摇几点投保几天）。**缺省合法** = D 型门面（不收费）。**B 型 `sides` 必须 ≥ 1** |
 
 > 拘留格**没有** `turns` / `fine`：拘留天数只来自卡面（10-20 拍板，P4④ 把字段与数据一起删了），而保释不动现金（P4③）。写回 `data.turns`/`data.fine` 会被 serde 忽略，而 `board.rs` 有一条断言钉住那两格的数据必须为空。
 
@@ -80,6 +80,7 @@
 - 非 `property` 格带 `land_id` → 报错（`tools/validate_board.py` 10 与 `BoardDef::validate` 两边都查）。规则 4 只管到了「`property` 缺 `land_id`」那一半，而反方向不响的话，「这一格绑了地块」就成一个只有校验器看不见的字段。
 - `lottery` 格带任何 `data` 字段 → 报错：彩票没有格子级参数，写了就是没人读（与上面那条同一条理由）。
 - `company` 格**必须带 `data.stock`**；反过来 `stock`/`fee` 挂到别的格上 → 报错（「这一格绑了股票」不能是一个只有校验器看不见的字段）。B 型 `sides == 0` → 报错（住 0 天不是「免费住」而是这条参数根本没意义）。
+- 保险格（P10d②）：`"fee": {"insure": {"sides": 4, "premium_per_day": 300, "indemnity_per_day": 800}}` —— 转盘摇出的是**投保天数**而不是离场天数：人不离场，付 `premium_per_day × 天数` 保费（进公司账）换一份保单；投保期间被拘留由公司按 `indemnity_per_day × 拘留天数` 赔现金（公司账记负数，分红日按当月真账结算时就是亏损）。**不进 `FeePrototype`**：保险的产物是身上的保单不是一笔离场，`assess` 在这里没有对应物。
 
 ### 对角判定
 相邻 `loop` 元素若 `abs(dcol)==1 && abs(drow)==1`，该段为**对角路**（斜向街道），渲染与移动均按斜线处理。

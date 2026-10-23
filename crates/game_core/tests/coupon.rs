@@ -1,9 +1,9 @@
 //! P1 的验收：点券格踩上去发一次、冷却期间谁都不发、到期再发，且这笔账不进现金。
 //!
-//! 落格一律走「把玩家摆在 `11 - 点数` 那格 + 掷出点数的种子」这条真路径
+//! 落格一律走「把玩家摆在 `13 - 点数` 那格 + 掷出点数的种子」这条真路径
 //! （`ready_on`），于是被测的是分派表与结算 system，不是手搓的组件。
-//! prototype 的 11 号格就是点券箱（面额 30，冷却走 `GameRules` 缺省 6 回合；
-//! P10d① 重排后它从 10 号顺移到 11 号）。
+//! prototype 的 13 号格就是点券箱（面额 30，冷却走 `GameRules` 缺省 6 回合；
+//! P10d② 重排后它从 11 号顺移到 13 号）。
 
 mod common;
 
@@ -13,8 +13,8 @@ use bevy::prelude::NextState;
 use common::*;
 use game_core::prelude::{ActiveBoard, GameSession, TileKind, TurnPhase};
 
-/// prototype 上的点券箱（`assets/data/boards/prototype.json` 的 11 号格）。
-const BOX: u32 = 11;
+/// prototype 上的点券箱（`assets/data/boards/prototype.json` 的 13 号格）。
+const BOX: u32 = 13;
 
 fn land(app: &mut App) {
     play_turns(app, turn_count(app) + 1);
@@ -24,7 +24,7 @@ fn turn_count(app: &App) -> u32 {
     app.world().resource::<GameSession>().turn_count
 }
 
-/// p0 从 9 号格掷 1 点，正好踩上 10 号。
+/// p0 从 12 号格掷 1 点，正好踩上 13 号。
 fn step_onto_the_box() -> (App, Entity) {
     let (app, p0) = ready_on(BOX - 1, 1, DecisionPolicy::DeclineAll);
     assert_eq!(tile_of(&app, p0), BOX - 1, "前置：把人摆在箱子前一格");
@@ -116,7 +116,7 @@ fn the_three_face_values_come_from_the_tile_data() {
 #[test]
 fn the_cooldown_is_per_tile() {
     let (mut app, p0) = step_onto_the_box();
-    coupon_tile(&mut app, 3, 10, None); // 3 号命运格改成另一颗 10 点的箱子
+    coupon_tile(&mut app, 3, 10, None); // 3 号保险公司格改成另一颗 10 点的箱子
     land(&mut app);
     assert_eq!(points_of(&app, p0), 30);
 
@@ -125,7 +125,7 @@ fn the_cooldown_is_per_tile() {
     place(&mut app, p0, 2);
     land(&mut app);
 
-    assert_eq!(points_of(&app, p0), 40, "11 号还在冷却，3 号那颗该照发");
+    assert_eq!(points_of(&app, p0), 40, "13 号还在冷却，3 号那颗该照发");
     assert_eq!(boxes_taken(&app), 2);
     assert_points_audit(&mut app, 0);
 }

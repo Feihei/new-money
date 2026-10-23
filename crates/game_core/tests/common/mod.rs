@@ -21,24 +21,26 @@ use game_core::prelude::{
     AuctionStarted, AuctionWon, BailRequested, BankBalance, BankOp, BankOpDone, BankOpRequested,
     BankVisited, BidMove, BidPlaced, BidWithdrawn, BombTransferred, Books, BuildOffered,
     BuildRequested, BuildingLevel, BuyOffered, BuyTicketRequested, CardAim, CardDrawn, CardGained,
-    CardId, CardKind, CardLost, CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived,
-    ChestOpened, CompanyCharged, CompanyLedgers, CompanyPayout, Correction, Corrections,
-    CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen, Deck, Detention,
-    DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, FacilityBuilt, GameKind,
-    GameOver, GameRules, GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared,
-    GodDeed, GodLeft, GodPossessed, Hand, Insulation, Inventory, ItemKind, ItemPlaced, Jackpot,
-    JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken,
+    CardId, CardKind, CardLost, CardPlayed, CardSet, CashChanged, ChairmanTook, ChargeKind,
+    ChargeWaived, ChestOpened, CompanyCharged, CompanyLedgers, CompanyPayout, Correction,
+    Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen, Deck,
+    Detention, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, FacilityBuilt,
+    FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameKind, GameOver, GameRules,
+    GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed, GodLeft,
+    GodPossessed, Hand, IndemnityPaid, Insulation, Insured, Inventory, ItemKind, ItemPlaced,
+    Jackpot, JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken,
     LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought, LotteryDrawn, LotteryTickets,
     LotteryWon, Market, MarketClock, MinigameResult, MinigameScore, MortgageDone, MortgageOp,
     MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt,
     OccupancyKind, Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
     PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported,
-    PlotArea, Points, PointsChanged, Possession, Presence, RedEnvelope, RemoteDiceUsed, RentDue,
-    RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone,
-    ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId,
-    StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
-    Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered,
-    WalkHalted, WalkStarted, Wallet, deal_to, grant_effects,
+    PlotArea, Points, PointsChanged, PolicyBought, Possession, Presence, RedEnvelope,
+    RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RequestRemoteDice,
+    RequestRoll, RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone, ShopOpRequested,
+    ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged,
+    StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition,
+    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkHalted,
+    WalkStarted, Wallet, deal_to, grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -120,6 +122,16 @@ pub struct AuctionRequests(pub Vec<AuctionMove>);
 #[derive(Resource, Default)]
 pub struct BuildRequests(pub Vec<BuildRequested>);
 
+/// 测试侧的「在日产建设的窗口里点一颗『升级某地块』」（P10d②）。同样走队列 → 真消息，
+/// 于是「窗口挂着谁」「只升自己的地」「董事长那两层怎么免」都被真走到。
+#[derive(Resource, Default)]
+pub struct RemoteBuildRequests(pub Vec<RemoteUpgradeRequested>);
+
+/// 测试侧的「在银行柜台按一下融资」（P10d②）。同样走队列 → 真消息，于是
+/// 「发起人是不是银行保险的董事长」「余额不足按实挪」两条判据都被真走到。
+#[derive(Resource, Default)]
+pub struct FinancingRequests(pub Vec<FinancingDrawRequested>);
+
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
 /// 要测经济就换成 `AcceptAll`（买得起就买、能升就升）。
@@ -167,6 +179,9 @@ fn auto_answer_system(
         // 建一座设施要 2200，长跑用例的现金断言钉的是「租金与地价」那几笔，
         // 多一笔建设费会让几十条既有断言一起红。建造那条路由 `tests/commercial.rs` 自己走
         (Pending::Build(_), _) => Decision::Acknowledge,
+        // 远程建设窗口（P10d②）同一条：自动玩家**不升**任何地 —— 日产格一踩到就开窗，
+        // 长跑不自动关掉会整片挂在 `WaitDecision`，而升级那条路由 `tests/remote_build.rs` 自己走
+        (Pending::RemoteBuild, _) => Decision::Acknowledge,
         // 柜台只认「办完」。这里必须显式答一句，否则每一个踩到银行格的回合都会
         // 停在 `WaitDecision`，把所有长跑用例整片挂死 —— 编译器逼这一条写出来。
         // 百货柜台同一条（P3d②）：13 格环上真有一格百货，长跑用例一定会踩到它。
@@ -345,6 +360,20 @@ struct BookReaders<'w, 's> {
     company_charged: MessageReader<'w, 's, CompanyCharged>,
     /// 公司分红凭据（正负共用一条：亏损月的「扣」也是分红）。
     company_payouts: MessageReader<'w, 's, CompanyPayout>,
+    // ===== 保险与董事长特权（P10d②）=====
+    /// 投保凭据。与 `company_charged` 分开记：那一条说「保费多少」，这一条说
+    /// 「保单生效了、管几天」—— 免单不发保单要用后者单独钉。
+    policies: MessageReader<'w, 's, PolicyBought>,
+    /// 保险赔付。与 `company_charged` 同理：赔付进了玩家钱包、公司账记负数。
+    indemnities: MessageReader<'w, 's, IndemnityPaid>,
+    /// 董事长白拿凭据。与 `shop_ops` 分开记：那一条有「实付点券」，这一条**没有钱动**。
+    freebies: MessageReader<'w, 's, ChairmanTook>,
+    /// 远程建设窗口报到。
+    remote_offered: MessageReader<'w, 's, RemoteBuildOffered>,
+    /// 融资成交（挪用与兜底共用一条）。
+    fin_drawn: MessageReader<'w, 's, FinancingDrawn>,
+    /// 融资收回（身份丢了当场清算）。
+    fin_recalled: MessageReader<'w, 's, FinancingRecalled>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -895,6 +924,51 @@ fn collect_books(
             m.profit
         ));
     }
+    // ===== 保险与董事长特权（P10d②）=====
+    for m in r.policies.read() {
+        log.0.push(format!(
+            "Policy({}@{},{}天${})",
+            who(&players, m.player),
+            m.stock,
+            m.days,
+            m.premium
+        ));
+    }
+    for m in r.indemnities.read() {
+        log.0.push(format!(
+            "Indemnity({}@{},{}天${})",
+            who(&players, m.player),
+            m.stock,
+            m.days,
+            m.amount
+        ));
+    }
+    for m in r.freebies.read() {
+        log.0.push(format!(
+            "Freebie({}@{},{})",
+            who(&players, m.player),
+            m.stock,
+            m.item
+        ));
+    }
+    for m in r.remote_offered.read() {
+        log.0
+            .push(format!("RemoteOffered({})", who(&players, m.player)));
+    }
+    for m in r.fin_drawn.read() {
+        log.0.push(format!(
+            "FinDraw({}${})",
+            who(&players, m.chairman),
+            m.amount
+        ));
+    }
+    for m in r.fin_recalled.read() {
+        log.0.push(format!(
+            "FinRecall({}${})",
+            who(&players, m.player),
+            m.amount
+        ));
+    }
     for m in r.cash.read() {
         audit.0.push((m.player, m.delta, m.balance));
     }
@@ -927,6 +1001,8 @@ struct Pump<'w> {
     tickets: ResMut<'w, TicketRequests>,
     auctions: ResMut<'w, AuctionRequests>,
     builds: ResMut<'w, BuildRequests>,
+    remote_builds: ResMut<'w, RemoteBuildRequests>,
+    financings: ResMut<'w, FinancingRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
     stay_writes: MessageWriter<'w, RequestStay>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
@@ -941,6 +1017,8 @@ struct Pump<'w> {
     ticket_writes: MessageWriter<'w, BuyTicketRequested>,
     auction_writes: MessageWriter<'w, AuctionMove>,
     build_writes: MessageWriter<'w, BuildRequested>,
+    remote_build_writes: MessageWriter<'w, RemoteUpgradeRequested>,
+    financing_writes: MessageWriter<'w, FinancingDrawRequested>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
@@ -986,6 +1064,12 @@ fn pump_inputs(mut pump: Pump<'_>) {
     for b in pump.builds.0.drain(..) {
         pump.build_writes.write(b);
     }
+    for r in pump.remote_builds.0.drain(..) {
+        pump.remote_build_writes.write(r);
+    }
+    for f in pump.financings.0.drain(..) {
+        pump.financing_writes.write(f);
+    }
 }
 
 pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
@@ -1015,6 +1099,8 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<TicketRequests>()
         .init_resource::<AuctionRequests>()
         .init_resource::<BuildRequests>()
+        .init_resource::<RemoteBuildRequests>()
+        .init_resource::<FinancingRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -1891,6 +1977,41 @@ pub fn bank_of(app: &mut App, player: Entity) -> (i64, i64) {
         .get::<BankBalance>()
         .expect("玩家应有银行账户");
     (b.deposit, b.loan)
+}
+
+/// 读某人的融资债（P10d② 三件套的第三本账：不计息、不与 `loan` 混）。
+pub fn financing_of(app: &App, player: Entity) -> i64 {
+    app.world()
+        .entity(player)
+        .get::<BankBalance>()
+        .expect("玩家应有银行账户")
+        .financing
+}
+
+/// 读某人的保单（P10d②）。效期与赔付单价都读组件，流水只活两三帧。
+pub fn policy_of(app: &App, player: Entity) -> Option<Insured> {
+    app.world().entity(player).get::<Insured>().cloned()
+}
+
+/// 替 `player` 在日产建设的窗口里点一颗「升级某地块」（P10d②）。
+/// 走队列 → 真消息：窗口挂着谁、那块地归不归他，两道门都被真走到。
+pub fn remote_build_ask(app: &mut App, player: Entity, land: LandId) {
+    app.world_mut()
+        .resource_mut::<RemoteBuildRequests>()
+        .0
+        .push(RemoteUpgradeRequested { player, land });
+}
+
+/// 替 `player` 在银行柜台按一下融资（P10d②）：要从 `of_player` 的存款挪 `amount`。
+pub fn financing_ask(app: &mut App, player: Entity, of_player: Entity, amount: i64) {
+    app.world_mut()
+        .resource_mut::<FinancingRequests>()
+        .0
+        .push(FinancingDrawRequested {
+            player,
+            of_player,
+            amount,
+        });
 }
 
 /// 替 `player` 按一次证券面板的买/卖按钮（`id` 用 `stocks.json` 里的字符串）。

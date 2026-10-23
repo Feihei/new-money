@@ -3,9 +3,9 @@
 //! 这一层要守的东西只有一句话：**资格判据在规则层**。面板会不会把按钮点错、AI 会不会
 //! 替别人操作，都不该让「没路过银行的人凭空借到钱」成立，所以每条拒绝都单独钉一根。
 //!
-//! prototype 的格子对照（`assets/data/boards/prototype.json`）：
-//! 4 外滩·北 / 5 外滩·南 / **6 银行** / 7 徐家汇(L3) / 8 机会 / **10 中央银行** / 11 西单 / 0 起点。
-//! 从 5 号掷 2 点 = 经过 6（银行）、停在 7（无主地产）；从 4 号掷 2 点 = 经过 5、停在 6（银行）。
+//! prototype 的格子对照（P10d② 重排后，`assets/data/boards/prototype.json`）：
+//! 6 外滩·北 / 7 外滩·南 / **8 银行** / 9 徐家汇(L3) / 10 机会 / 11 王府井(L4) / 15 西单(L5)。
+//! 从 7 号掷 2 点 = 经过 8（银行）、停在 9（无主地产）；从 6 号掷 2 点 = 经过 7、停在 8（银行）。
 
 mod common;
 
@@ -34,10 +34,10 @@ fn land(app: &mut App) {
     play_turns(app, turn_count(app) + 1);
 }
 
-/// 走到「柜台开着」的那一帧：p0 从 4 号掷 2 点停在 6 号银行格。
+/// 走到「柜台开着」的那一帧：p0 从 6 号掷 2 点停在 8 号银行格。
 /// 用 `Hold` 策略 —— 自动应答会把柜台直接关掉，就什么都观察不到了。
 fn open_counter() -> (App, Entity) {
-    let (mut app, p0) = ready_on(4, 2, DecisionPolicy::Hold);
+    let (mut app, p0) = ready_on(6, 2, DecisionPolicy::Hold);
     roll(&mut app, p0);
     settle(&mut app, 8);
     assert_eq!(
@@ -52,14 +52,14 @@ fn open_counter() -> (App, Entity) {
 
 #[test]
 fn passing_a_bank_unlocks_cash_moves_but_not_borrowing() {
-    let (mut app, p0) = ready_on(5, 2, DecisionPolicy::DeclineAll);
+    let (mut app, p0) = ready_on(7, 2, DecisionPolicy::DeclineAll);
     assert_eq!(atm_holder(&app), None, "还没走路就该没有资格");
 
     land(&mut app);
     assert_eq!(
         atm_holder(&app),
         Some(p0),
-        "经过 6 号银行格应解锁 ATM（停下才算柜台，路过就算 ATM）"
+        "经过 8 号银行格应解锁 ATM（停下才算柜台，路过就算 ATM）"
     );
 
     let cash_before = cash_of(&mut app, p0);
@@ -252,7 +252,7 @@ fn repaying_more_than_owed_takes_only_what_is_owed() {
 
 #[test]
 fn buying_before_the_roll_fills_and_sells_after_it_does_not() {
-    let (mut app, p0) = ready_on(5, 2, DecisionPolicy::Hold);
+    let (mut app, p0) = ready_on(7, 2, DecisionPolicy::Hold);
     // 掷骰之前：窗口开着
     trade(&mut app, p0, "stock_001", TradeSide::Buy, 10);
     settle(&mut app, 3);
@@ -267,7 +267,7 @@ fn buying_before_the_roll_fills_and_sells_after_it_does_not() {
         "买股票要真扣钱"
     );
 
-    // 掷出去之后停在 7 号无主地，`Hold` 让回合卡在 `WaitDecision` —— 那不是 WaitRoll
+    // 掷出去之后停在 9 号无主地，`Hold` 让回合卡在 `WaitDecision` —— 那不是 WaitRoll
     roll(&mut app, p0);
     settle(&mut app, 8);
     assert_eq!(
@@ -313,7 +313,24 @@ fn the_market_advances_once_per_turn_end() {
     let mut app = boot_default();
     boot_to_wait_roll(&mut app);
     assert_eq!(tick_of(&app), 0, "开局还没过完一天");
-    play_turns(&mut app, 3);
+    // 不用 play_turns：它的收尾帧足够让第四回合开始 —— 若那位正被扣着，被跳过的
+    // 回合也会当场走完 TurnEnd（P3d④c 踩过的同一口井），tick 就多出一格。
+    // 被跳过的回合当然也是一天，但这条要钉的是「第三回合结束那一帧 tick 恰好是 3」，
+    // 所以自己转循环、在 turn_count 到 3 的那一帧当场读
+    for _ in 0..3 * 120 {
+        if app.world().resource::<GameSession>().turn_count >= 3 {
+            break;
+        }
+        match phase(&app) {
+            TurnPhase::WaitRoll => {
+                let who = current(&app);
+                roll(&mut app, who);
+            }
+            TurnPhase::Over => break,
+            _ => {}
+        }
+        app.update();
+    }
     assert_eq!(tick_of(&app), 3, "三个回合结束 = 三天");
     assert_eq!(
         ledger(&app)

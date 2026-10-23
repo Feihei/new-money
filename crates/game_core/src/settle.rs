@@ -676,6 +676,9 @@ impl<'w, 's> Books<'w, 's> {
     }
 
     /// 存款：现金 → 余额。非法额或现金不足 → `false`，两边都不动。
+    ///
+    /// P10d② 起同步记**银行储备**（`GameSession::bank_vault`）：库里只有储户
+    /// 放进去的钱，融资三件套挪的、兜底的，都是这笔真金 —— 不是银行凭空造的。
     pub fn deposit(&mut self, player: Entity, amount: i64) -> bool {
         let Some(moved) = economy::deposit_plan(amount, self.balance(player)) else {
             return false;
@@ -684,12 +687,17 @@ impl<'w, 's> Books<'w, 's> {
             return false;
         };
         bank.deposit += moved;
+        self.session.bank_vault += moved;
         self.debit(player, moved)
             .expect("deposit_plan 已确认现金够");
         true
     }
 
     /// 取款：余额 → 现金。
+    ///
+    /// P10d② 起储备同步 -`moved`（钱真的从库里拿走）。**允许透支**：储备因此
+    /// 变负数，差额由「银行保险」的董事长兜底 —— `bank.rs` 的融资规则 ② 在下一
+    /// 帧读负数算差额；这一帧拒绝取款会把「4 代的银行会付不出钱」那条规则整个删掉。
     pub fn withdraw(&mut self, player: Entity, amount: i64) -> bool {
         let balance = self.bank_of(player).deposit;
         let Some(moved) = economy::withdraw_plan(amount, balance) else {
@@ -699,8 +707,91 @@ impl<'w, 's> Books<'w, 's> {
             return false;
         };
         bank.deposit -= moved;
+        self.session.bank_vault -= moved;
         self.credit(player, moved);
         true
+    }
+
+    // ===== 融资三件套（P10d②，银行保险董事长的特权）=====
+    //
+    // 三条都只动 [`BankBalance::financing`]、储备与现金，**不碰** `loan`（挪用不是
+    // 贷款，不计息），也不碰储户的 `loan`。谁有资格发起，判据在 `bank.rs` 的
+    // financing system（读 [`crate::company::chairman_of`]），这里只管账。
+
+    /// ① 挪用：从 `of_player` 的存款里划 `amount` 进董事长现金，`financing` 记等额债。
+    /// 只能挪真存着的钱（`min` 上限是他的余额）—— 储备为负的那部分不是存款，
+    /// 没东西可挪。返回实挪数额（0 = 他没存款或参数非法）。
+    pub fn financing_draw(&mut self, chairman: Entity, of_player: Entity, amount: i64) -> i64 {
+        if amount <= 0 || chairman == of_player {
+            return 0;
+        }
+        let pocket = self.bank_of(of_player).deposit;
+        let moved = amount.min(pocket.max(0));
+        if moved <= 0 {
+            return 0;
+        }
+        let Some(mut bank) = self.banks.get_mut(of_player).ok() else {
+            return 0;
+        };
+        bank.deposit -= moved;
+        self.session.bank_vault -= moved;
+        self.credit(chairman, moved);
+        self.banks.get_mut(chairman).expect("董事长在局").financing += moved;
+        moved
+    }
+
+    /// ② 兜底：储户取款把储备取穿（负数）后，董事长补 `-(vault)` 那个差额，
+    /// 补进的钱记成他自己的 `financing` 债。返回实补数额。
+    pub fn financing_cover(&mut self, chairman: Entity) -> i64 {
+        let need = -self.session.bank_vault;
+        if need <= 0 {
+            return 0;
+        }
+        let pay = need.min(self.balance(chairman));
+        if pay <= 0 {
+            return 0;
+        }
+        self.debit(chairman, pay).expect("pay 已按现金钳过");
+        self.session.bank_vault += pay;
+        self.banks.get_mut(chairman).expect("董事长在局").financing += pay;
+        pay
+    }
+
+    /// ③ 收回：董事长丢了身份的瞬间，融资债**当场清算** —— 用他的现金一次还清
+    /// 进储备；现金不够的部分记成银行的坏账（储备回不到原位，但 `financing`
+    /// 必须清零：身份没了，这笔债挂在谁名下都没有意义）。返回实还数额。
+    pub fn financing_recall(&mut self, chairman: Entity) -> i64 {
+        let debt = self.bank_of(chairman).financing;
+        if debt <= 0 {
+            return 0;
+        }
+        let pay = debt.min(self.balance(chairman));
+        if pay > 0 {
+            self.debit(chairman, pay).expect("pay 已按现金钳过");
+            self.session.bank_vault += pay;
+        }
+        self.banks.get_mut(chairman).expect("董事长在局").financing = 0;
+        pay
+    }
+
+    /// ③（广播版）所有仍背着融资债、但**已不是** `chairman` 的人，当场清算。
+    /// 每帧由 `bank::financing_system` 问一次 —— 身份是持股数的导出值，反超
+    /// 发生在哪条路径上（买卖、破产变卖）它都追不上，逐帧对账才是有效判据。
+    /// 返回 `(人, 实还)` 的清单，调用方发 [`crate::msg::FinancingRecalled`]。
+    pub fn financing_recall_all(&mut self, chairman: Option<Entity>) -> Vec<(Entity, i64)> {
+        let debtors: Vec<Entity> = self
+            .solvent()
+            .iter()
+            .map(|(e, _)| *e)
+            .filter(|&e| Some(e) != chairman && self.bank_of(e).financing > 0)
+            .collect();
+        debtors
+            .into_iter()
+            .map(|e| {
+                let paid = self.financing_recall(e);
+                (e, paid)
+            })
+            .collect()
     }
 
     /// 贷款：上限来自名下**未抵押地块**（缺陷 #1 的修复点，见 `economy::calc_max_loan`）。
@@ -871,22 +962,45 @@ impl<'w, 's> Books<'w, 's> {
     /// 多盖的那一层**不多收一次钱**：卡面那句话是「加盖多盖一层」，不是「一次买两层」——
     /// 付的是这一级的费，得到两级。这也是它与 [`Self::buy`] 一样只在账本里判一次的理由。
     pub fn upgrade(&mut self, player: Entity, land: LandId) -> Option<u8> {
+        self.upgrade_inner(player, land, false)
+    }
+
+    /// 董事长特权（P10d②，日产建设）：远程升级**不花钱、一次升两层**。
+    /// 判据与 [`Self::upgrade`] 完全同一条（垄断、组内最低层、未满级、衰神）——
+    /// 只有价钱（永远 0）与层数（本身那级 + 额外一级）两处不同。大福神的
+    /// `extra_levels` 在这里**不叠加**：特权写的是「升两层」，不是「两级再乘神」。
+    pub fn upgrade_chairman(&mut self, player: Entity, land: LandId) -> Option<u8> {
+        self.upgrade_inner(player, land, true)
+    }
+
+    fn upgrade_inner(&mut self, player: Entity, land: LandId, chairman: bool) -> Option<u8> {
         let view = self.view(land)?;
         let pid = self.id_of(player)?;
         if self.acquire_denied(player) {
             return None;
         }
         let base = economy::upgrade_cost(&self.active.def, &view)?;
-        let cost = self.quoted(ChargeKind::Upgrade { land }, player, base);
+        // 董事长免价：quote 都不用问 —— 那条管线是「这笔账怎么打折」的，没有账
+        let cost = if chairman {
+            0
+        } else {
+            self.quoted(ChargeKind::Upgrade { land }, player, base)
+        };
         let views = self.views();
         let cash = self.balance(player);
         if !economy::can_upgrade(&view, pid, &views, cost, cash, &self.rules) {
             return None;
         }
         let entity = self.land_entity(land)?;
-        self.debit(player, cost).ok()?;
+        if cost > 0 {
+            self.debit(player, cost).ok()?;
+        }
         let max = self.rules.max_building_level;
-        let extra = self.extra_levels(player);
+        let extra = if chairman {
+            1
+        } else {
+            self.extra_levels(player)
+        };
         let (_, _, _, mut level, _) = self.plots.get_mut(entity).ok()?;
         // 封顶那一位上多出来的那一层少掉，不是缺陷：4 代也没有「盖穿顶」这件事
         level.0 = level.0.saturating_add(1 + extra).min(max);

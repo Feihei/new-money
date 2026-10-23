@@ -17,7 +17,8 @@ use game_core::prelude::{
     ActiveBoard, ArcadeDeal, Auction, BuildingLevel, BuyTicketRequested, Detention, DetentionPlace,
     GameKind, GameRules, GameSession, God, GodDesk, Inventory, ItemKind, LandId, Mount,
     MountChanged, Occupancy, OccupancyKind, Owner, Pending, PendingDecision, PlayerDetained,
-    PlayerId, Points, Rng, TileIndex, TokenPosition, TurnOrder, TurnPhase, detain, place,
+    PlayerId, Points, RemoteBuildOffered, Rng, TileIndex, TokenPosition, TurnOrder, TurnPhase,
+    detain, place,
 };
 
 pub struct DevPlugin;
@@ -34,6 +35,7 @@ pub fn install_if_requested(app: &mut App) {
     let lottery = ForceLottery::from_env();
     let auction = ForceAuction::from_env();
     let house = ForceHouse::from_env();
+    let rbuild = ForceRbuild::from_env();
     if forced.0.is_none()
         && bail.0.is_none()
         && !items.0
@@ -44,6 +46,7 @@ pub fn install_if_requested(app: &mut App) {
         && lottery.0.is_none()
         && auction.0.is_none()
         && house.0.is_none()
+        && !rbuild.0
     {
         return;
     }
@@ -104,6 +107,11 @@ pub fn install_if_requested(app: &mut App) {
     if let Some((land, level)) = house.0 {
         info!(
             "开发注入已开启（NM_HOUSE）：地块 {land} 将被盖上 Lv{level}（归属与钱都不动，配 NM_DECISION=buy 拍那块地的报价）"
+        );
+    }
+    if rbuild.0 {
+        info!(
+            "开发注入已开启（NM_RBUILD）：当前玩家面前挂出远程建设窗口（配 NM_PLOTS=<n> 让他有地可升）"
         );
     }
     app.add_plugins(DevPlugin);
@@ -311,6 +319,7 @@ impl Plugin for DevPlugin {
             .insert_resource(ForceLottery::from_env())
             .insert_resource(ForceAuction::from_env())
             .insert_resource(ForceHouse::from_env())
+            .insert_resource(ForceRbuild::from_env())
             // 回菜单时清掉「已经注入过」：`NM_DETAIN` 配 `NM_MENULOOP` 要能在第二局再注入一次，
             // 而留在 true 就等于「新局什么都没有」，看着像注入失效（跨局残留那类坑的反面）
             .add_systems(OnEnter(crate::scene::Scene::Menu), clear_injected)
@@ -330,6 +339,7 @@ impl Plugin for DevPlugin {
                     force_lottery,
                     force_auction,
                     force_house,
+                    force_rbuild,
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
@@ -354,6 +364,7 @@ struct Injected {
     lottery: bool,
     auction: bool,
     house: bool,
+    rbuild: bool,
 }
 
 fn clear_injected(mut done: ResMut<Injected>) {
@@ -849,6 +860,45 @@ fn force_house(
     };
     now.0 = level;
     info!("注入：地块 {land} 现在是 Lv{level}（归属与钱都没动）");
+}
+
+/// `NM_RBUILD=1`：把远程建设窗口挂到当前玩家面前。`false` = 没开。
+///
+/// 与 `NM_MINIGAME` 同一条处理：写的是**规则层那个窗口**（`Pending::RemoteBuild`），
+/// 不是 UI 侧的开关。发 [`RemoteBuildOffered`] 是走真路径 —— 它是踩到日产建设格
+/// 的那条凭据，冒烟截图里的窗口与真玩出来的那一块必须是同一块。
+///
+/// 为什么非要有它：这个窗口的正经入口是踩 4 号建设格，而那一步押不住截图时刻
+/// （`NM_DETAIN` 那条理由的第六次学费）；配 `NM_PLOTS=<n>` 才有「他名下的地」可升。
+#[derive(Resource)]
+struct ForceRbuild(bool);
+
+impl ForceRbuild {
+    fn from_env() -> Self {
+        Self(std::env::var("NM_RBUILD").as_deref() == Ok("1"))
+    }
+}
+
+fn force_rbuild(
+    force: Res<ForceRbuild>,
+    order: Res<TurnOrder>,
+    mut pending: ResMut<PendingDecision>,
+    mut offered: MessageWriter<RemoteBuildOffered>,
+    mut done: ResMut<Injected>,
+    mut next: ResMut<NextState<TurnPhase>>,
+) {
+    let (true, false) = (force.0, done.rbuild) else {
+        return;
+    };
+    let Some(player) = order.current() else {
+        return;
+    };
+    done.rbuild = true;
+    offered.write(RemoteBuildOffered { player });
+    pending.offer(player, Pending::RemoteBuild);
+    // `WaitDecision` 是那个窗口在规则里的真实阶段（与 `force_minigame` 同一条）
+    next.set(TurnPhase::WaitDecision);
+    info!("注入：当前玩家面前挂出远程建设窗口");
 }
 
 #[cfg(test)]

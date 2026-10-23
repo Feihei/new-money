@@ -256,7 +256,10 @@ fn twenty_turns_run_without_panic() {
     let rolls = ev.iter().filter(|e| e.starts_with("Roll(")).count();
     let skipped = ev.iter().filter(|e| e.starts_with("DetainSkip(")).count();
     let ended = ev.iter().filter(|e| e.starts_with("TurnEnd(")).count();
-    assert_eq!(turns, 20, "回合计数该正好走完 20 格");
+    // 「正好 20」读不得：play_turns 的收尾帧足够让第 21 回合开始并当场走完
+    // （P3d④c 踩过的同一口井，P10d② 重排后种子 777 的落点不再被决策窗挡住）。
+    // 这条要守的不变量因此是「至少 20 个完整回合 + 每个回合都有出处」
+    assert!(turns >= 20, "回合计数该至少走完 20 格：{turns}");
     assert_eq!(
         rolls + skipped,
         turns as usize,

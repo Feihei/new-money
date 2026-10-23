@@ -205,7 +205,7 @@ fn a_mine_sends_its_own_placer_to_the_hospital_for_three_days() {
         (DetentionPlace::Hospital, 3),
         "地雷 3 天"
     );
-    assert_eq!(tile_of(&app, p0), 7, "逻辑位置回到医院的接入点");
+    assert_eq!(tile_of(&app, p0), 9, "逻辑位置回到医院的接入点");
     assert!(
         tiles_holding(&mut app, OccupancyKind::Mine).is_empty(),
         "地雷被踩掉，场上不该还留着"
@@ -245,6 +245,7 @@ fn a_carried_bomb_moves_to_the_player_it_meets_and_keeps_its_counter() {
     let (mut app, p0) = ready_on(0, 5, DecisionPolicy::DeclineAll);
     let p1 = other_of(&mut app, p0);
     clear_occupancies(&mut app);
+    pave(&mut app, 5..=5); // 终点是 5 号命运格：铺成路面，抽牌挪人不是本条要测的东西
     spawn_occupancy(&mut app, OccupancyKind::TimeBomb, 1);
     place(&mut app, p1, 3);
 
@@ -371,6 +372,7 @@ fn a_dog_bites_a_walker_for_three_days_and_stays_on_the_road() {
 fn a_car_runs_the_dog_over_and_keeps_going() {
     let (mut app, p0) = ready_on(0, 5, DecisionPolicy::DeclineAll);
     clear_occupancies(&mut app);
+    pave(&mut app, 5..=5); // 终点是 5 号命运格：铺成路面，抽牌挪人不是本条要测的东西
     spawn_occupancy(&mut app, OccupancyKind::Dog, 2);
     set_mount(&mut app, p0, game_core::prelude::Mount::Car);
 

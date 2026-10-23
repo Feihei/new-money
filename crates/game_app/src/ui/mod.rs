@@ -27,10 +27,11 @@ use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionMove, BailRequested, BankOp, BankOpRequested, BidMove,
     BuildRequested, BuildingKind, BuyTicketRequested, CardAim, CardId, Decision, DecisionChosen,
-    GameKind, GameSession, HolidaySet, ItemKind, LandId, MarketClock, MinigameResult, MortgageOp,
-    MortgageRequested, Paused, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
-    RequestRemoteDice, RequestRoll, RequestStay, ShopOpRequested, StaySentence, StockId,
-    StockTradeRequested, TileIndex, TradeSide, TurnOrder, TurnPhase, bank_op_allowed, date_of,
+    FinancingDrawRequested, GameKind, GameSession, HolidaySet, ItemKind, LandId, MarketClock,
+    MinigameResult, MortgageOp, MortgageRequested, Paused, Pending, PendingDecision,
+    PlaceItemRequested, PlayCardRequested, RemoteUpgradeRequested, RequestRemoteDice, RequestRoll,
+    RequestStay, ShopOpRequested, StaySentence, StockId, StockTradeRequested, TileIndex, TradeSide,
+    TurnOrder, TurnPhase, bank_op_allowed, date_of,
 };
 
 use theme::{col, layout, size};
@@ -284,6 +285,20 @@ pub enum UiAction {
     Build {
         land: LandId,
         kind: BuildingKind,
+    },
+    /// 在日产建设的远程窗口里升级一块自己的地（P10d②）。**地块烤在按钮里**
+    /// （那颗「升级 南京路」本身就是一整个意图），而「升不升得动、要不要钱、
+    /// 董事长那两层怎么免」全由规则层判 —— 与 [`Self::Build`] 同一条分工；
+    /// 主语也不在按钮里（派发时取建设窗口挂着的那位）。
+    RemoteBuild {
+        land: LandId,
+    },
+    /// 在银行柜台融资（P10d②）：从 `of_player` 的存款挪一笔进自己现金。
+    /// **主语与对象都烤在按钮里**（「从 孙小美 挪 500」），账由规则层算 ——
+    /// 只有银行保险的董事长按得出这一颗，判据同源。
+    Financing {
+        of_player: Entity,
+        amount: i64,
     },
     /// 在彩票柜台买一注（P8）。**号烤在按钮里**（那颗「17」本身就是一整个意图），
     /// 而一注多少钱仍由规则层从 `GameRules::ticket_price` 算 —— 与 [`UiAction::ShopOp`]
@@ -768,6 +783,8 @@ struct Sends<'w> {
     mortgages: MessageWriter<'w, MortgageRequested>,
     bails: MessageWriter<'w, BailRequested>,
     builds: MessageWriter<'w, BuildRequested>,
+    remote_builds: MessageWriter<'w, RemoteUpgradeRequested>,
+    financings: MessageWriter<'w, FinancingDrawRequested>,
     places: MessageWriter<'w, PlaceItemRequested>,
     remotes: MessageWriter<'w, RequestRemoteDice>,
     scores: MessageWriter<'w, MinigameResult>,
@@ -1044,6 +1061,38 @@ fn dispatch_ui_actions(
                     player,
                     land: *land,
                     kind: *kind,
+                });
+            }
+            // 远程建设窗口（P10d②）：主语是窗口挂着的那位，与 [`UiAction::Build`] 同一条。
+            // 「这块地归不归他、整组在不在手」全交给规则层（面板那颗灰是同源结果）。
+            UiAction::RemoteBuild { land } => {
+                if gate.paused.0 {
+                    continue;
+                }
+                let Some((player, Pending::RemoteBuild)) = gate.pending.active() else {
+                    continue;
+                };
+                sends.remote_builds.write(RemoteUpgradeRequested {
+                    player,
+                    land: *land,
+                });
+            }
+            // 融资（P10d②）：主语与对象烤在按钮里，但「是不是银行保险的董事长」
+            // 「余额还剩多少」仍由规则层按实判 —— 请求带意图，账由规则层算。
+            UiAction::Financing {
+                of_player,
+                amount: amount_of,
+            } => {
+                if gate.paused.0 {
+                    continue;
+                }
+                let Some((player, Pending::BankTeller)) = gate.pending.active() else {
+                    continue;
+                };
+                sends.financings.write(FinancingDrawRequested {
+                    player,
+                    of_player: *of_player,
+                    amount: *amount_of,
                 });
             }
             // ===== 游乐场（P7）=====
@@ -1376,6 +1425,9 @@ mod tests {
                 // P9：拍卖台那两颗按钮共用这一条出口（漏了它 = 派发这个 system 建不出来，
                 // 于是上面那一整片按钮全死，而不是只死拍卖那两颗）
                 .add_message::<AuctionMove>()
+                // P10d②：远程建设与融资那两颗按钮的出口（漏了它同样是「整片按钮全死」）
+                .add_message::<RemoteUpgradeRequested>()
+                .add_message::<FinancingDrawRequested>()
                 .add_message::<AppExit>()
                 .init_resource::<Seen>()
                 .init_resource::<tile_info::SelectedTile>()
@@ -1402,6 +1454,7 @@ mod tests {
                     epoch: Date::new(2048, 1, 6),
                     last_gift_year: None,
                     last_envelope_year: None,
+                    bank_vault: 0,
                 })
                 .insert_resource(pending)
                 .add_systems(Update, (dispatch_ui_actions, collect).chain());
@@ -2197,7 +2250,15 @@ mod tests {
             .add_message::<MinigameResult>()
             .add_message::<BuyTicketRequested>()
             .add_message::<AuctionMove>()
-            .add_message::<game_core::prelude::CompanyCharged>()
+            // P10d②：派发多了远程建设与融资两个出口，顶栏多了保险/特权五条播报 ——
+            // 请求由派发写、凭据由顶栏读，漏任何一条崩的都是「一片按钮全死」
+            .add_message::<game_core::prelude::RemoteUpgradeRequested>()
+            .add_message::<game_core::prelude::FinancingDrawRequested>()
+            .add_message::<game_core::prelude::PolicyBought>()
+            .add_message::<game_core::prelude::IndemnityPaid>()
+            .add_message::<game_core::prelude::ChairmanTook>()
+            .add_message::<game_core::prelude::FinancingDrawn>()
+            .add_message::<game_core::prelude::FinancingRecalled>()
             // P2b：日历事件的表现层读这两条（礼物一屏、红包老虎机）
             .add_message::<game_core::prelude::GiftsGiven>()
             .add_message::<game_core::prelude::RedEnvelope>()

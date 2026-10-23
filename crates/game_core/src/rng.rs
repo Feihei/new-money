@@ -69,6 +69,12 @@ const AUCTION_TAG: u64 = 0xA71C_0000_0000_000C;
 /// 都会挪动别人的随机数。而摇出几点是玩家会回头对的事（「我上次明明摇出 5」），
 /// 同一颗种子必须两次走出同一个数。
 const SERVICE_TAG: u64 = 0x5E3C_0000_0000_000E;
+/// P10d②：董事长在百货白拿的那一件。
+///
+/// 单独一条的理由与百货、神明那两条同形：**「董事长进过几次店」不该改变下一张机会牌
+/// 是谁，也不该改变下一次服务摇数**。白拿发生在落格结算的那一帧，与骰子、抽卡同帧
+/// 并发 —— 并进任何一条已有的流，董事长逛一趟百货就会挪动别人的随机数。
+const FREEBIE_TAG: u64 = 0xF3EE_0000_0000_000F;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +106,7 @@ pub struct Rng {
     lottery: ChaCha8Rng,
     auction: ChaCha8Rng,
     service: ChaCha8Rng,
+    freebie: ChaCha8Rng,
 }
 
 impl Rng {
@@ -121,6 +128,7 @@ impl Rng {
             lottery: ChaCha8Rng::seed_from_u64(seed ^ LOTTERY_TAG),
             auction: ChaCha8Rng::seed_from_u64(seed ^ AUCTION_TAG),
             service: ChaCha8Rng::seed_from_u64(seed ^ SERVICE_TAG),
+            freebie: ChaCha8Rng::seed_from_u64(seed ^ FREEBIE_TAG),
         }
     }
 
@@ -128,6 +136,11 @@ impl Rng {
     /// 范围由载体自己给（`1..=sides`）—— 原型库只收数，不认识骰子。
     pub fn pick_service(&mut self, span: RangeInclusive<u32>) -> u32 {
         self.service.random_range(span)
+    }
+
+    /// 董事长白拿那一条流（P10d②）：这一趟货架上拿走第几格。
+    pub fn pick_freebie(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.freebie.random_range(span)
     }
 
     /// 乐透那一条流（P8）：这个月开出几号。

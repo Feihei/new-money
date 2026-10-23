@@ -19,9 +19,13 @@
 use bevy::prelude::*;
 
 use crate::board::{TileIndex, TileKind};
+use crate::company::{FINANCE_STOCK, chairman_of};
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
 use crate::market::MarketClock;
-use crate::msg::{BankOp, BankOpDone, BankOpRequested, BankVisited, TileStepped};
+use crate::msg::{
+    BankOp, BankOpDone, BankOpRequested, BankVisited, FinancingDrawRequested, FinancingDrawn,
+    FinancingRecalled, TileStepped,
+};
 use crate::settle::Books;
 use crate::turn::TurnPhase;
 use crate::world::ActiveBoard;
@@ -165,6 +169,61 @@ pub fn bank_op_system(
                 amount: r.amount,
             });
         }
+    }
+}
+
+/// 融资三件套（P10d②，银行保险[`FINANCE_STOCK`]董事长的特权）的规则层。
+/// 三个动作各自的判据与账目全在 `Books`（`financing_draw` / `financing_cover` /
+/// `financing_recall_all`），这里只管**谁此刻有资格**与**该发哪条凭据**：
+///
+/// - **收回（③）每帧先查**：身份是持股数的导出值，反超可能发生在任何路径上
+///   （买卖成交、破产变卖、神明抽股）—— 没有一条「身份变了」的消息可等，
+///   逐帧对账才是有效判据（与 [`crate::company::chairman_of`] 不缓存同一条理由）。
+/// - **挪用（①）**：只认当前的董事长本人，别人的请求读掉就丢（同 `bank_op_system`
+///   的认人纪律）。余额不足按实挪数成交。
+/// - **兜底（②）最后办**：储备透支只可能来自取款，而取款在 [`bank_op_system`] 里 ——
+///   本 system 排在它之后（同一条 Update chain），到这一帧储备是正是负已有定论。
+pub fn financing_system(
+    mut books: Books,
+    mut requests: MessageReader<FinancingDrawRequested>,
+    mut drawn: MessageWriter<FinancingDrawn>,
+    mut recalled: MessageWriter<FinancingRecalled>,
+) {
+    // ③ 收回：不再是董事长却还背着融资债的，当场清算（消息带实还数 ——
+    // 现金不够的部分是银行的坏账，顶栏那句要说得清「还上了多少」）
+    let current = chairman_of(&books, FINANCE_STOCK);
+    for (player, paid) in books.financing_recall_all(current) {
+        recalled.write(FinancingRecalled {
+            player,
+            amount: paid,
+        });
+    }
+    let Some(chairman) = chairman_of(&books, FINANCE_STOCK) else {
+        // 盘上没有银行保险的董事长：挪用请求全部作废（兜底也无从谈起）
+        for _ in requests.read() {}
+        return;
+    };
+    // ① 挪用：认人只认董事长本人
+    for r in requests.read() {
+        if r.player != chairman {
+            debug!("融资被拒：{:?} 不是银行保险的董事长", r.player);
+            continue;
+        }
+        let moved = books.financing_draw(chairman, r.of_player, r.amount);
+        if moved > 0 {
+            drawn.write(FinancingDrawn {
+                chairman,
+                amount: moved,
+            });
+        }
+    }
+    // ② 兜底：储备被取穿了（负数），董事长补差额 —— 差额同样记成他的融资债
+    let covered = books.financing_cover(chairman);
+    if covered > 0 {
+        drawn.write(FinancingDrawn {
+            chairman,
+            amount: covered,
+        });
     }
 }
 

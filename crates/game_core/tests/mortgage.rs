@@ -24,8 +24,8 @@ use game_core::prelude::{LandStatus, MortgageOp, Pending, TurnPhase};
 
 /// 柜台开着、p0 名下有 0 号南京路（空地 Lv0）的那一帧。
 fn desk() -> (App, Entity) {
-    // 4 号掷 2 点 = 停在 6 号银行格（与 `finance.rs` 的柜台同一条前置）
-    let (mut app, p0) = ready_on(4, 2, DecisionPolicy::Hold);
+    // 6 号掷 2 点 = 停在 8 号银行格（与 `finance.rs` 的柜台同一条前置）
+    let (mut app, p0) = ready_on(6, 2, DecisionPolicy::Hold);
     own(&mut app, 0, Some(0), 0, false); // 级数重判后 0=空地，账面就是地价 1500
     roll(&mut app, p0);
     settle(&mut app, 8);
@@ -304,7 +304,10 @@ fn bankruptcy_takes_the_mortgage_off_the_deed() {
     own(&mut app, 5, Some(1), 0, false); // 整组在手 → 王府井空地租 160×2 = 320
     set_cash(&mut app, p0, 50);
     make_current(&mut app, p0);
-    place(&mut app, p0, 3);
+    // 骰流退回开局（第一掷 = 2）：从 9 号徐家汇掷 2 点正好踩上 11 号王府井 ——
+    // yellow 组整在 P1 手里，空地租 160×2 = 320，他身上只有 50
+    rewind_dice(&mut app);
+    place(&mut app, p0, 9);
     roll(&mut app, p0);
     settle(&mut app, 8);
 

@@ -17,10 +17,11 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::card::CardKind;
+use crate::company::chairman_of;
 use crate::deck::{CardId, Shelf};
 use crate::hand::{Hand, card_notice, deal_to};
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
-use crate::msg::{CardGained, ShopOpDone, ShopOpRequested, TradeSide};
+use crate::msg::{CardGained, ChairmanTook, ShopOpDone, ShopOpRequested, TradeSide};
 use crate::player::PlayerId;
 use crate::rng::Rng;
 use crate::rules::GameRules;
@@ -173,6 +174,71 @@ pub fn settle_shop_landing(
     stock.slots = restock(shelf.items().len(), rules.shop_slots as usize, &mut rng);
     debug!("百货换货：{:?} 进店，货架 {:?}", player, stock.slots);
     pending.offer(player, Pending::Shop);
+}
+
+/// 白拿一桌要动的全部东西（§六 坑 8：九样参数散装就顶爆 clippy 的上限）。
+#[derive(SystemParam)]
+pub struct FreebieDesk<'w, 's> {
+    pub books: Books<'w, 's>,
+    pub pending: Res<'w, PendingDecision>,
+    pub landing: Res<'w, Landing>,
+    pub stock: ResMut<'w, ShopStock>,
+    pub shelf: Shelf<'w>,
+    pub hands: Query<'w, 's, &'static mut Hand, With<PlayerId>>,
+    pub rng: ResMut<'w, Rng>,
+    pub gained: MessageWriter<'w, CardGained>,
+    pub took: MessageWriter<'w, ChairmanTook>,
+}
+
+/// 董事长白拿一件（P10d② 特权）：百货格绑的那只股的持股最多者，进店先**免费**
+/// 从货架上随机拿走一件，然后照常走买/卖流程（窗口照开、点券照花）。
+///
+/// 排在 [`settle_shop_landing`] 之后（同一条 `OnEnter(Landed)` 链）：货架刚重抽完，
+/// 白拿拿的就是「这一趟的货」。抽签走 `Rng` 的白拿子流（第十五条），它与百货
+/// 陈列子流分家 —— 董事长逛不逛街，不该挪动别人的货架。
+///
+/// 「白拿」的账目形状：货架少一格、手牌多一张、**点券分文不动**。免费不是折扣
+/// （花 0 券也算一次交易、也留 ShopOpDone），是「没这回事」—— 与董事长踩自家
+/// 公司连流水都没有是同一条纪律，凭据由 [`ChairmanTook`] 单独给。
+pub fn chairman_freebie_system(mut desk: FreebieDesk<'_, '_>) {
+    let Some((player, Pending::Shop)) = desk.pending.active() else {
+        return;
+    };
+    // 百货格绑哪只股（validate 已保证必带）—— 董事长身份挂在股上，不挂格上
+    let Some(Landed { tile, .. }) = desk.landing.0 else {
+        return;
+    };
+    let Some(tile) = desk.books.active.def.tile(tile.0 as i64) else {
+        return;
+    };
+    let Some(stock_id) = tile.data.stock.clone() else {
+        return;
+    };
+    if chairman_of(&desk.books, &stock_id) != Some(player) {
+        return;
+    }
+    if desk.stock.slots.is_empty() {
+        return; // 货架空了：白拿免谈（面板那句「被买空了」同样解释这一格）
+    }
+    let pick = desk
+        .rng
+        .pick_freebie(0..=(desk.stock.slots.len() - 1) as u32) as usize;
+    let card = desk.stock.slots.remove(pick);
+    if let Ok(mut hand) = desk.hands.get_mut(player) {
+        deal_to(
+            &mut hand,
+            desk.books.rules.hand_limit,
+            card,
+            player,
+            &desk.shelf,
+            &mut desk.gained,
+        );
+    }
+    desk.took.write(ChairmanTook {
+        player,
+        stock: stock_id,
+        item: card_notice(&desk.shelf, card).title,
+    });
 }
 
 /// 办一笔百货交易要动的全部东西。打包成参数包是这仓库的房规（§六 坑 8），而且这几样

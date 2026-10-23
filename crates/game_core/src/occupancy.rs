@@ -634,12 +634,12 @@ mod tests {
     #[test]
     fn chebyshev_box_is_a_grid_not_a_ring_distance() {
         let b = board();
-        // 4 号 (5,2) 与 5 号 (5,3) 相邻；与 2 号 (3,1) 距离 2，不在 3×3 里
-        assert!(within_chebyshev(&b, TileIndex(4), TileIndex(5), 1));
-        assert!(within_chebyshev(&b, TileIndex(4), TileIndex(4), 1));
-        assert!(!within_chebyshev(&b, TileIndex(4), TileIndex(2), 1));
-        // 环上的距离与此无关：14 号 (0,1) 与 0 号 (1,1) 相邻，11 号 (1,3) 不相邻
-        assert!(within_chebyshev(&b, TileIndex(14), TileIndex(0), 1));
-        assert!(!within_chebyshev(&b, TileIndex(14), TileIndex(11), 1));
+        // 6 号 (5,2) 与 7 号 (5,3) 相邻；与 2 号 (3,1) 距离 2，不在 3×3 里
+        assert!(within_chebyshev(&b, TileIndex(6), TileIndex(7), 1));
+        assert!(within_chebyshev(&b, TileIndex(6), TileIndex(6), 1));
+        assert!(!within_chebyshev(&b, TileIndex(6), TileIndex(2), 1));
+        // 环上的距离与此无关：16 号 (0,1) 与 0 号 (1,1) 相邻，13 号 (1,3) 不相邻
+        assert!(within_chebyshev(&b, TileIndex(16), TileIndex(0), 1));
+        assert!(!within_chebyshev(&b, TileIndex(16), TileIndex(13), 1));
     }
 }

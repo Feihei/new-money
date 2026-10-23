@@ -144,8 +144,8 @@ fn a_card_that_parks_him_in_a_room_is_the_same_one_that_stops_his_rent() {
 /// 也就是验收里那个场景本身：他被水沟送进医院，别人踩他的地不付钱。
 #[test]
 fn a_player_the_ditch_sent_to_the_hospital_collects_no_rent() {
-    const FATE: u32 = 3;
-    // P0 站在 2 号格上，下一掷 1 点正好踩进 3 号命运格
+    const FATE: u32 = 5;
+    // P0 站在 4 号格上，下一掷 1 点正好踩进 5 号命运格（P10d② 重排后命运从 3 号顺移过来）
     let (mut app, p0, p1) = two_of_them(FATE - 1, 1);
     let at = fate_index(&app, "fate_007");
     stack_card(&mut app, CardKind::Fate, at);
@@ -162,7 +162,7 @@ fn a_player_the_ditch_sent_to_the_hospital_collects_no_rent() {
         }),
         "掉水沟是住院"
     );
-    assert_eq!(tile_of(&app, p0), 7, "他人已经在医院那条分支的接入点上");
+    assert_eq!(tile_of(&app, p0), 9, "他人已经在医院那条分支的接入点上");
 
     // 让 P1 从 1 号格走一步踩到 2 号格（地块 1，住院那位名下的地）
     rewind_dice(&mut app);

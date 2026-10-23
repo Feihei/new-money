@@ -184,7 +184,7 @@ fn mortgaged_land_charges_nothing_and_opens_no_dialog() {
 /// 所以下面断的是 `(None, 2)` 而不是旧版的 `(None, 0)`。
 #[test]
 fn cant_pay_rent_bankrupts_the_payer_and_frees_their_lands() {
-    let (mut app, p0) = ready_on(3, 6, DecisionPolicy::DeclineAll); // 3 → 9 王府井
+    let (mut app, p0) = ready_on(5, 6, DecisionPolicy::DeclineAll); // 5 → 11 王府井
     own(&mut app, 3, Some(0), 2, false); // P0 自己有块徐家汇
     own(&mut app, 4, Some(1), 0, false); // yellow 组
     own(&mut app, 5, Some(1), 0, false); // 整组在手 → 空地租 160×2 = 320
@@ -260,7 +260,7 @@ fn landing_on_your_own_incomplete_group_ends_the_turn_quietly() {
 /// 而同桌没路过银行的人永远涨不了息。现在利息只认日历：踩银行只开柜台、发 ATM 卡。
 #[test]
 fn a_bank_visit_no_longer_compounds_anyones_balance() {
-    let (mut app, p0) = ready_on(0, 6, DecisionPolicy::DeclineAll); // 6 号是银行
+    let (mut app, p0) = ready_on(6, 2, DecisionPolicy::DeclineAll); // 6 号掷 2 点停在 8 号银行
     let p1 = other(&mut app);
     insert(
         &mut app,
@@ -268,6 +268,7 @@ fn a_bank_visit_no_longer_compounds_anyones_balance() {
         BankBalance {
             deposit: 10_000,
             loan: 0,
+            financing: 0,
         },
     );
     insert(
@@ -276,6 +277,7 @@ fn a_bank_visit_no_longer_compounds_anyones_balance() {
         BankBalance {
             deposit: 0,
             loan: 4_000,
+            financing: 0,
         },
     );
     land(&mut app);
@@ -317,6 +319,7 @@ fn month_end_compounds_every_players_balance() {
         BankBalance {
             deposit: 10_000,
             loan: 0,
+            financing: 0,
         },
     );
     insert(
@@ -325,6 +328,7 @@ fn month_end_compounds_every_players_balance() {
         BankBalance {
             deposit: 0,
             loan: 4_000,
+            financing: 0,
         },
     );
 
@@ -612,7 +616,7 @@ fn selling_everything_removes_the_position() {
 
 #[test]
 fn card_tile_draws_exactly_one_card_and_ends_the_turn() {
-    let (mut app, _) = ready_on(0, 3, DecisionPolicy::DeclineAll); // 3 号是命运
+    let (mut app, _) = ready_on(0, 5, DecisionPolicy::DeclineAll); // 5 号是命运
     land(&mut app);
 
     let led = ledger(&app);
@@ -629,7 +633,7 @@ fn card_tile_draws_exactly_one_card_and_ends_the_turn() {
 /// 缺陷 #3 的直接回归：扣不起的罚款必须真的把人判破产。
 #[test]
 fn a_fine_you_cannot_pay_bankrupts_you_for_real() {
-    let (mut app, p0) = ready_on(3, 5, DecisionPolicy::DeclineAll); // 3 → 8 机会
+    let (mut app, p0) = ready_on(5, 5, DecisionPolicy::DeclineAll); // 5 → 10 机会
     set_cash(&mut app, p0, 1_000);
     stack_card(&mut app, CardKind::Chance, 2); // chance_003 交通罚款 2000
     land(&mut app);
@@ -650,7 +654,7 @@ fn a_fine_you_cannot_pay_bankrupts_you_for_real() {
 
 #[test]
 fn a_detain_card_parks_the_token_at_the_junction_and_skips_two_turns() {
-    let (mut app, p0) = ready_on(0, 3, DecisionPolicy::DeclineAll); // 命运格
+    let (mut app, p0) = ready_on(0, 5, DecisionPolicy::DeclineAll); // 命运格
     stack_card(&mut app, CardKind::Fate, 0); // fate_001 直接入狱 3 回合
     land(&mut app);
 
@@ -689,7 +693,7 @@ fn a_detain_card_parks_the_token_at_the_junction_and_skips_two_turns() {
 
 #[test]
 fn move_to_card_sends_the_token_without_settling_the_new_tile() {
-    let (mut app, p0) = ready_on(0, 3, DecisionPolicy::DeclineAll); // 命运格
+    let (mut app, p0) = ready_on(0, 5, DecisionPolicy::DeclineAll); // 命运格
     stack_card(&mut app, CardKind::Fate, 1); // fate_002 回到起点 +2000
     land(&mut app);
 
@@ -714,7 +718,7 @@ fn move_to_card_sends_the_token_without_settling_the_new_tile() {
 
 #[test]
 fn a_card_naming_a_missing_tile_says_so_instead_of_guessing() {
-    let (mut app, p0) = ready_on(3, 5, DecisionPolicy::DeclineAll); // 3 → 8 机会
+    let (mut app, p0) = ready_on(5, 5, DecisionPolicy::DeclineAll); // 5 → 10 机会
     // 把一张卡的效果改成「去一个棋盘上不存在的格」：牌堆按 `CardSet` 下标发牌，
     // 卡面在资产里，所以这里就地改资产内容
     {
@@ -731,7 +735,7 @@ fn a_card_naming_a_missing_tile_says_so_instead_of_guessing() {
 
     assert_eq!(
         tile_of(&app, p0),
-        8,
+        10,
         "格名找不到时不该猜一个位置（Godot 曾把「找不到」回退成 0=起点）"
     );
     assert_eq!(cash_of(&mut app, p0), 20_000, "效果失效就不该有别的副作用");
@@ -773,7 +777,7 @@ fn forty_turns_keep_the_ledger_consistent() {
     );
     // `TileIndex` 是 newtype：这里顺手用它确认全员都在主环上
     for (entity, _, _, tile) in roster(&mut app) {
-        assert!(tile < 12, "{entity:?} 掉出了主环：{tile}");
+        assert!(tile < 19, "{entity:?} 掉出了主环：{tile}");
         let _ = TileIndex(tile);
     }
 }

@@ -13,13 +13,14 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionFailed, AuctionStarted, AuctionWon, BankOpDone, BankVisited,
-    BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, ChargeWaived, ChestOpened,
-    CompanyCharged, DetentionLifted, DetentionSkipped, FacilityBuilt, GameOver, GameSession,
-    GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, ItemPlaced, LandId, LandTaken,
-    LotteryBought, LotteryDrawn, LotteryWon, MarketClock, MinigameScore, MortgageDone, MortgageOp,
-    MountChanged, MoveCapped, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName,
-    PointsChanged, RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted, StaySentence,
-    StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
+    BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, ChairmanTook, ChargeWaived,
+    ChestOpened, CompanyCharged, DetentionLifted, DetentionSkipped, FacilityBuilt, FinancingDrawn,
+    FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed,
+    IndemnityPaid, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn, LotteryWon,
+    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, Paused,
+    PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, PolicyBought,
+    RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded,
+    StockVisited, TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
 };
 
 use super::finance::comma;
@@ -485,6 +486,22 @@ pub(crate) struct Notices<'w, 's> {
     company: MessageReader<'w, 's, CompanyCharged>,
     /// 设施建成。与 `land_taken` 同一形：只带一块地，不说办成了什么
     facility_built: MessageReader<'w, 's, FacilityBuilt>,
+    // ===== 保险与董事长特权（P10d②）=====
+    // 四条排在 `company` 之后：投保/赔付/白拿/融资与公司到访都是「过手一笔钱或货」的
+    // 事件，而它们没有收据面板 —— 顶栏这一行是唯一持久的出口（dump 那一栏要开面板）。
+    /// 投保成交。保单本身挂在身上（HUD 有「投保剩 N 天」那一段），这一行只播成交
+    policies: MessageReader<'w, 's, PolicyBought>,
+    /// 保险赔付。与 `policies` 分开：那是「付钱换保障」，这条是「出事领钱」，
+    /// 两条不同帧，同一条词会让人分不清方向
+    indemnities: MessageReader<'w, 's, IndemnityPaid>,
+    /// 董事长白拿。**没有点券流水**（分文不动），不带这一行就是「按了没反应」
+    freebies: MessageReader<'w, 's, ChairmanTook>,
+    /// 融资成交（挪用与兜底共用一条）。与 `bank_ops` 分开：那条的借还占额度计息，
+    /// 这条不计息 —— 说清「挪的是谁的存款」才不会当成贷款
+    fin_drawn: MessageReader<'w, 's, FinancingDrawn>,
+    /// 融资收回（身份丢了当场清算）。坏账那一格（现金不够还的部分）是玩家唯一
+    /// 看得见的「银行吃了亏」，必须说出口
+    fin_recalled: MessageReader<'w, 's, FinancingRecalled>,
     over: MessageReader<'w, 's, GameOver>,
 }
 
@@ -947,6 +964,60 @@ pub(crate) fn hint_from_events(
             )
         });
     }
+    // ===== 保险与董事长特权（P10d②）=====
+    // 公司名从棋盘上查 —— 与上面 `company` 那一段同一个形状，抽成闭包两处共用
+    let stock_company = |stock: &str| -> String {
+        board
+            .as_ref()
+            .and_then(|b| {
+                b.def
+                    .tiles
+                    .iter()
+                    .find(|t| t.data.stock.as_deref() == Some(stock))
+                    .map(|t| t.name.clone())
+            })
+            .unwrap_or_else(|| stock.to_string())
+    };
+    for m in notices.policies.read() {
+        line = Some(format!(
+            "{} 在{}投保 {} 天，保费 {}",
+            name(&names, m.player),
+            stock_company(&m.stock),
+            m.days,
+            comma(m.premium)
+        ));
+    }
+    for m in notices.indemnities.read() {
+        line = Some(format!(
+            "{} 被拘留 {} 天，{}赔付 {}",
+            name(&names, m.player),
+            m.days,
+            stock_company(&m.stock),
+            comma(m.amount)
+        ));
+    }
+    for m in notices.freebies.read() {
+        line = Some(format!(
+            "{} 是{}的董事长，白拿了一件「{}」",
+            name(&names, m.player),
+            stock_company(&m.stock),
+            m.item
+        ));
+    }
+    for m in notices.fin_drawn.read() {
+        line = Some(format!(
+            "{} 挪用储户存款 {}（融资债，不计息）",
+            name(&names, m.chairman),
+            comma(m.amount)
+        ));
+    }
+    for m in notices.fin_recalled.read() {
+        line = Some(format!(
+            "{} 不再执掌银行保险，还清融资 {}",
+            name(&names, m.player),
+            comma(m.amount)
+        ));
+    }
     for m in notices.over.read() {
         line = Some(match m.winner.and_then(|w| names.get(w).ok()) {
             Some(winner) => format!("胜者：{}！", winner.0),
@@ -1105,6 +1176,7 @@ mod tests {
                 epoch: game_core::prelude::Date::new(2048, 1, 1),
                 last_gift_year: None,
                 last_envelope_year: None,
+                bank_vault: 0,
             })
             .insert_resource(MarketClock::default())
             .insert_resource(GameRules::default())
@@ -1310,6 +1382,13 @@ mod tests {
             .add_message::<ServiceCharged>()
             // P10d①：公司到访那条
             .add_message::<CompanyCharged>()
+            // P10d②：保险与董事长特权的五条播报源（漏任何一条 = Notices 参数包
+            // 建不出来，症状是整个顶栏一行字都不更新）
+            .add_message::<PolicyBought>()
+            .add_message::<IndemnityPaid>()
+            .add_message::<ChairmanTook>()
+            .add_message::<FinancingDrawn>()
+            .add_message::<FinancingRecalled>()
             .add_message::<GameOver>()
             .add_systems(Update, hint_from_events);
         let me = app.world_mut().spawn(PlayerName("阿土伯".into())).id();

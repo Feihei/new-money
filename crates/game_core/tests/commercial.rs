@@ -1,6 +1,6 @@
 //! 商业用地的落格装配（P10c）。
 //!
-//! 演示盘的外滩（L2，格 4/5 两格共享）是**预建的购物中心**，所以 A 型收费、
+//! 演示盘的外滩（L2，格 6/7 两格共享）是**预建的购物中心**，所以 A 型收费、
 //! 空商业地、建设窗口全都能在这条真棋盘上验收；旅馆（B 型）与加油站（C 型）
 //! 演示盘没有现成地块，用例把西单/王府井就地改造成对应设施 —— 与 `flat_rent`
 //! 同一条手法：棋盘是资源里的一份快照，改它不必动 JSON。
@@ -87,7 +87,7 @@ fn turn_count(app: &App) -> u32 {
 /// 策略用 `Hold`：收据窗口要留着验 —— `DeclineAll` 的自动玩家会把它当场看完关掉。
 #[test]
 fn the_mall_bills_the_tier_the_service_roll_picked() {
-    let (mut app, p0) = ready_on(3, 1, DecisionPolicy::Hold);
+    let (mut app, p0) = ready_on(5, 1, DecisionPolicy::Hold);
     let p1 = *roster(&mut app)
         .iter()
         .find(|(_, id, _, _)| *id == 1)
@@ -136,7 +136,7 @@ fn the_mall_bills_the_tier_the_service_roll_picked() {
 /// 「免单」与「没这回事」的区别就在这条流水上。
 #[test]
 fn a_waived_service_still_leaves_a_receipt() {
-    let (mut app, p0) = ready_on(3, 1, DecisionPolicy::DeclineAll);
+    let (mut app, p0) = ready_on(5, 1, DecisionPolicy::DeclineAll);
     let p1 = *roster(&mut app)
         .iter()
         .find(|(_, id, _, _)| *id == 1)
@@ -164,7 +164,7 @@ fn a_waived_service_still_leaves_a_receipt() {
 /// 「这一局进过几次店/收过几次费」不改变下一次摇数（P3d② 百货同一条纪律）。
 #[test]
 fn the_service_roll_replays_from_its_own_stream() {
-    let (mut app, p0) = ready_on(3, 1, DecisionPolicy::DeclineAll);
+    let (mut app, p0) = ready_on(5, 1, DecisionPolicy::DeclineAll);
     let _p1 = *roster(&mut app)
         .iter()
         .find(|(_, id, _, _)| *id == 1)
@@ -189,7 +189,7 @@ fn the_service_roll_replays_from_its_own_stream() {
     // 子流重放应摇出同一个数
     rewind_dice(&mut app);
     make_current(&mut app, p0);
-    common::place(&mut app, p0, 3);
+    common::place(&mut app, p0, 5);
     land(&mut app);
     let lines = service_lines(&app);
     assert_eq!(lines.len(), 2);
@@ -224,7 +224,7 @@ fn smallrich_take(app: &App) -> i64 {
 #[test]
 fn the_hotel_bills_by_the_day_and_detains_the_guest() {
     // P10d① 重排后西单是 13 号：站上 12 号（航空公司）掷 1 点踩进去
-    let (mut app, p0) = ready_on(12, 1, DecisionPolicy::DeclineAll);
+    let (mut app, p0) = ready_on(14, 1, DecisionPolicy::DeclineAll);
     let p1 = *roster(&mut app)
         .iter()
         .find(|(_, id, _, _)| *id == 1)
@@ -276,11 +276,11 @@ fn the_hotel_bills_by_the_day_and_detains_the_guest() {
     let detention = detain_of(&app, p0).expect("住店的人该被扣下");
     assert_eq!(detention.place, DetentionPlace::Hotel);
     assert_eq!(detention.turns_left, stay);
-    assert_eq!(tile_of(&app, p0), 13, "旅馆不在地图上，棋子停在那一格");
+    assert_eq!(tile_of(&app, p0), 15, "旅馆不在地图上，棋子停在那一格");
     assert!(
         ledger(&app)
             .iter()
-            .any(|l| l.starts_with("Detain(P0@旅馆,格13)")),
+            .any(|l| l.starts_with("Detain(P0@旅馆,格15)")),
         "凭据也要说他在旅馆：{:?}",
         ledger(&app)
     );
@@ -315,7 +315,7 @@ fn the_hotel_bills_by_the_day_and_detains_the_guest() {
 #[test]
 fn a_broke_guest_goes_bankrupt_instead_of_checking_in() {
     // P10d① 重排后西单是 13 号：站上 12 号掷 1 点踩进去
-    let (mut app, p0) = ready_on(12, 1, DecisionPolicy::DeclineAll);
+    let (mut app, p0) = ready_on(14, 1, DecisionPolicy::DeclineAll);
     retune(
         &mut app,
         5,
@@ -344,7 +344,7 @@ fn a_broke_guest_goes_bankrupt_instead_of_checking_in() {
 /// 步行踩加油站：**根本不产生账** —— 没车就没油耗，连 0 元收据都不该有。
 #[test]
 fn a_gas_station_lets_walkers_pass_for_free() {
-    let (mut app, p0) = ready_on(8, 1, DecisionPolicy::DeclineAll);
+    let (mut app, p0) = ready_on(10, 1, DecisionPolicy::DeclineAll);
     retune(
         &mut app,
         4,
@@ -370,7 +370,7 @@ fn a_gas_station_lets_walkers_pass_for_free() {
 /// 「按骰数收费」读的是 `DiceRolled.steps`（P3d④b 起它永不乘方向、不夹步）。
 #[test]
 fn a_driver_pays_the_dice_face_not_the_steps_actually_taken() {
-    let (mut app, p0) = ready_on(8, 5, DecisionPolicy::DeclineAll);
+    let (mut app, p0) = ready_on(10, 5, DecisionPolicy::DeclineAll);
     retune(
         &mut app,
         4,
@@ -400,7 +400,7 @@ fn a_driver_pays_the_dice_face_not_the_steps_actually_taken() {
         .expect("掷过骰才有落格")
         .1;
     assert!(face >= 3, "三颗骰的最小面是 3，实际 {face}");
-    assert_eq!(tile_of(&app, p0), 9, "乌龟把他按在只走一格的位置上");
+    assert_eq!(tile_of(&app, p0), 11, "乌龟把他按在只走一格的位置上");
     assert_ne!(face, 1, "骰面与实走格数必须是两个数，这条用例才有牙");
     assert!(
         lines[0].contains(&format!("${},", 100 * face as i64)),
@@ -423,7 +423,7 @@ fn a_driver_pays_the_dice_face_not_the_steps_actually_taken() {
 /// 踩到别人的**空**商业地：一文不收 —— 设施没立起来，不产生任何账，连流水都不该有。
 #[test]
 fn an_empty_commercial_lot_owes_nothing_to_a_passerby() {
-    let (mut app, p0) = ready_on(3, 1, DecisionPolicy::DeclineAll);
+    let (mut app, p0) = ready_on(5, 1, DecisionPolicy::DeclineAll);
     strip_facility(&mut app, 2);
     own(&mut app, 2, Some(1), 0, false);
     let base = cash_of(&mut app, p0);
@@ -445,7 +445,7 @@ fn an_empty_commercial_lot_owes_nothing_to_a_passerby() {
 /// 策略 `Hold`：窗口要留着亲手按 —— `DeclineAll` 会替他「先不建」把窗口关掉。
 #[test]
 fn your_own_empty_lot_opens_the_build_window_and_refuses_a_second_build() {
-    let (mut app, p0) = ready_on(3, 1, DecisionPolicy::Hold);
+    let (mut app, p0) = ready_on(5, 1, DecisionPolicy::Hold);
     strip_facility(&mut app, 2);
     own(&mut app, 2, Some(0), 0, false);
 
@@ -505,7 +505,7 @@ fn your_own_empty_lot_opens_the_build_window_and_refuses_a_second_build() {
 /// 建成之后踩回自己家：无事发生 —— 设施不可升级、没有「逛自己的店」。
 #[test]
 fn your_own_occupied_lot_says_nothing_at_all() {
-    let (mut app, _p0) = ready_on(3, 1, DecisionPolicy::DeclineAll);
+    let (mut app, _p0) = ready_on(5, 1, DecisionPolicy::DeclineAll);
     own(&mut app, 2, Some(0), 0, false); // 预建购物中心就在身上
 
     play_turns(&mut app, 1);
@@ -525,7 +525,7 @@ fn your_own_occupied_lot_says_nothing_at_all() {
 /// （与无主地那条衰神特例同一句理由）。
 #[test]
 fn a_mortgaged_lot_wont_open_the_build_window() {
-    let (mut app, _p0) = ready_on(3, 1, DecisionPolicy::DeclineAll);
+    let (mut app, _p0) = ready_on(5, 1, DecisionPolicy::DeclineAll);
     strip_facility(&mut app, 2);
     own(&mut app, 2, Some(0), 0, true);
 
@@ -542,7 +542,7 @@ fn a_mortgaged_lot_wont_open_the_build_window() {
 /// 按下去办不成、现金分文不动；补够钱之后同一扇窗口办得成。
 #[test]
 fn the_build_quote_opens_even_when_cash_is_short_but_the_counter_refuses() {
-    let (mut app, p0) = ready_on(3, 1, DecisionPolicy::Hold);
+    let (mut app, p0) = ready_on(5, 1, DecisionPolicy::Hold);
     strip_facility(&mut app, 2);
     own(&mut app, 2, Some(0), 0, false);
     set_cash(&mut app, p0, 500);
@@ -599,7 +599,7 @@ fn a_residential_lot_still_offers_an_upgrade_not_a_build() {
 #[test]
 fn a_hotel_guest_cannot_be_bailed_out_of_the_jail_gate() {
     // P10d① 重排后西单是 13 号：站上 12 号掷 1 点踩进去
-    let (mut app, p0) = ready_on(12, 1, DecisionPolicy::DeclineAll);
+    let (mut app, p0) = ready_on(14, 1, DecisionPolicy::DeclineAll);
     let p1 = *roster(&mut app)
         .iter()
         .find(|(_, id, _, _)| *id == 1)

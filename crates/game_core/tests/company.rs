@@ -9,8 +9,8 @@
 //! - **一期一结**：分红日之后账页翻新，上月的服务费不再混进下月的分红。
 //!
 //! 落格走真路径（`place` + 掷骰 + `play_turns`），被测的是落格分派与结算 system。
-//! 演示盘格子对照（P10d① 重排后）：**10 科技公司**（9 王府井掷 1 点即踩到，
-//! C 型维修费 120/步）、**12 航空公司**（11 点券箱掷 1 点即踩到，B 型转盘 400/天）。
+//! 演示盘格子对照（P10d② 重排后）：**12 科技公司**（11 王府井掷 1 点即踩到，
+//! C 型维修费 120/步）、**14 航空公司**（13 点券箱掷 1 点即踩到，B 型转盘 400/天）。
 
 mod common;
 
@@ -49,14 +49,14 @@ fn page(app: &App, stock: &str) -> (i32, u32, i64) {
 /// 董事长踩自己公司：免单不是打折 —— 一分不付、账上也没有这一笔。
 #[test]
 fn the_chairman_steps_in_without_a_bill() {
-    let (mut app, _) = ready_on(9, 1, DecisionPolicy::AcceptAll);
+    let (mut app, _) = ready_on(11, 1, DecisionPolicy::AcceptAll);
     let (p0, _p1) = two_players(&mut app);
     set_shares(&mut app, p0, "stock_001", 100);
 
     roll(&mut app, p0);
     play_turns(&mut app, 1);
 
-    assert_eq!(tile_of(&app, p0), 10, "前置：从 9 号掷 1 点踩到科技公司");
+    assert_eq!(tile_of(&app, p0), 12, "前置：从 11 号掷 1 点踩到科技公司");
     assert_eq!(cash_of(&mut app, p0), 20_000, "董事长一分不付");
     assert!(
         app.world()
@@ -73,7 +73,7 @@ fn the_chairman_steps_in_without_a_bill() {
 /// 访客付费：钱进公司的账，**不进董事长的口袋** —— 持股最多者免单、收租是两回事。
 #[test]
 fn a_visitor_pays_into_the_companys_books_not_anyones_pocket() {
-    let (mut app, _) = ready_on(9, 1, DecisionPolicy::AcceptAll);
+    let (mut app, _) = ready_on(11, 1, DecisionPolicy::AcceptAll);
     let (p0, p1) = two_players(&mut app);
     // p1 一股就是董事长；p0 一股不持，是访客
     set_shares(&mut app, p1, "stock_001", 1);
@@ -81,7 +81,7 @@ fn a_visitor_pays_into_the_companys_books_not_anyones_pocket() {
     roll(&mut app, p0);
     play_turns(&mut app, 1);
 
-    assert_eq!(tile_of(&app, p0), 10);
+    assert_eq!(tile_of(&app, p0), 12);
     // C 型维修费 120/步，骰面 1 → 120。钱离开钱包、进了账本
     assert_eq!(cash_of(&mut app, p0), 20_000 - 120, "访客照付");
     assert_eq!(
@@ -97,13 +97,13 @@ fn a_visitor_pays_into_the_companys_books_not_anyones_pocket() {
 /// 航空公司（B 型）：转盘摇出几就出国几天，费用按天计，人被送去 `Away`。
 #[test]
 fn the_airline_bills_by_the_day_and_sends_him_abroad() {
-    let (mut app, _) = ready_on(11, 1, DecisionPolicy::AcceptAll);
+    let (mut app, _) = ready_on(13, 1, DecisionPolicy::AcceptAll);
     let (p0, _p1) = two_players(&mut app);
 
     roll(&mut app, p0);
     play_turns(&mut app, 1);
 
-    assert_eq!(tile_of(&app, p0), 12, "前置：从 11 号掷 1 点踩到航空公司");
+    assert_eq!(tile_of(&app, p0), 14, "前置：从 13 号掷 1 点踩到航空公司");
     // 转盘摇数走服务子流，具体几天是种子的事；天数与费用、拘留必须对得上 ——
     // 「费用按天计」与「摇出几离场几天」是同一次摇数的两个读数
     let days = detention_of(&app, p0)
@@ -121,8 +121,8 @@ fn the_airline_bills_by_the_day_and_sends_him_abroad() {
     assert!(
         ledger(&app)
             .iter()
-            .any(|l| l.starts_with("Detain(P0@国外,格12)")),
-        "出国那个地方不在棋盘上，接入点就是他此刻那一格——他已走到 12 号才被拦下（P4① 的试金石）",
+            .any(|l| l.starts_with("Detain(P0@国外,格14)")),
+        "出国那个地方不在棋盘上，接入点就是他此刻那一格——他已走到 14 号才被拦下（P4① 的试金石）",
     );
 }
 

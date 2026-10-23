@@ -18,8 +18,8 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiCon
 use game_core::prelude::{
     ActiveBoard, ArcadeDeal, AtmAccess, Auction, BankBalance, Bankrupt, BuildingLevel, CardKind,
     CompanyLedgers, Corrections, CouponBoxes, Deck, DeckOrder, Detention, Facility, GameRules,
-    GameSeed, GameSession, Hand, Heading, HolidaySet, Insulation, Inventory, Jackpot, LandId,
-    LandStatus, Landing, LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap, Occupancy,
+    GameSeed, GameSession, Hand, Heading, HolidaySet, Insulation, Insured, Inventory, Jackpot,
+    LandId, LandStatus, Landing, LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap, Occupancy,
     OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName, Points, Possession,
     Shelf, ShopStock, StaySentence, StockHoldings, Timed, TurnOrder, TurnPhase, Wallet, resists,
 };
@@ -208,6 +208,10 @@ pub struct DumpView<'w, 's> {
     /// 道路放置物（P5）。要同时看得见两种位置：落在哪一格、以及在谁身上剩几步 —
     /// 「炸弹在哪」是查一局为什么突然有人住院时最先要问的事
     occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
+    /// 保单（P10d②）。**不并进 [`PlayerRow`]**：那张元组已经顶到 Bevy `QueryData`
+    /// 的 15 元上限（见它的注释），第 16 格会在编译期炸 —— 与乐透票、持股同一条处理：
+    /// 另开一条查询，按实体对回去
+    insured: Query<'w, 's, (Entity, &'static Insured)>,
 }
 
 fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
@@ -558,6 +562,8 @@ fn who_are(view: &DumpView, player: Entity) -> String {
 }
 
 fn format_players(view: &DumpView) -> Vec<String> {
+    // 保单按实体对回去（见 DumpView.insured 的注释）：身上有单的人才写「投保剩N天」
+    let insured: std::collections::HashMap<Entity, &Insured> = view.insured.iter().collect();
     let mut rows: Vec<(u32, String)> = view
         .players
         .iter()
@@ -594,6 +600,16 @@ fn format_players(view: &DumpView) -> Vec<String> {
                     }
                     if let Some(cap) = cap {
                         flag.push(format!("少动剩{}", cap.turns_left));
+                    }
+                    // 保单（P10d②）：天数是他的回合数（与拘留同族），剩几天一眼对得上
+                    // 「投保 4 天、走了自己 3 个回合还剩 1」。赔付的那一半看流水里的 Indemnity
+                    if let Some(policy) = insured.get(&entity) {
+                        flag.push(format!("投保剩{}天", policy.days_left));
+                    }
+                    // 融资债（P10d②）：银行保险董事长的挪用账。挂在存款上但**不是贷款**
+                    // （不计息、反超即收回），所以不能并进「贷」那一格让人误当借款
+                    if bank.financing > 0 {
+                        flag.push(format!("融资债{}", bank.financing));
                     }
                     if *mount != Mount::Foot {
                         flag.push(mount.label().to_string());

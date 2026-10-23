@@ -315,6 +315,84 @@ pub struct CompanyPayout {
     pub profit: i64,
 }
 
+/// 投保完成（P10d②）：`player` 在保险格付了 `premium`、拿到 `days` 天的保单。
+/// 保费进公司账（与 [`CompanyCharged`] 同一条纪律：钱不进谁的口袋），这里只报
+/// 「保单生效了」—— 效期剩几天是 [`game_core::player::Insured`] 组件的事，
+/// HUD 与 dump 读组件不读流水（与「[停留]」徽章同一理由：流水只活两三帧）。
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct PolicyBought {
+    pub player: Entity,
+    pub stock: String,
+    pub days: u32,
+    pub premium: i64,
+}
+
+/// 保险赔付（P10d②）：`player` 投保期间被拘留了 `days` 天，保险公司赔 `amount`。
+/// 赔付是**公司记账负数** + 玩家记 `CashChanged` 正数两件事 —— 现金审计盯后者，
+/// 分红的「亏损月是负数」盯前者，一条消息带不全就变成两处各记各的。
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct IndemnityPaid {
+    pub player: Entity,
+    pub stock: String,
+    pub days: u32,
+    pub amount: i64,
+}
+
+/// 董事长在百货白拿了一件（P10d② 特权）：`player` 是那家百货绑定股票的董事长，
+/// 拿走 `item` 没花点券。与投保收据同理 —— 「免费」要有一条说得清为什么的流水，
+/// 静默少扣 30 券会让「点券审计对不上」变成一桩悬案。
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct ChairmanTook {
+    pub player: Entity,
+    pub stock: String,
+    pub item: String,
+}
+
+/// 远程建设窗口已开（P10d②，日产建设）：`player` 踩到建设格，可以选一块
+/// **自己的**地升级。真正的升级走 [`game_core::msg::LandUpgraded`]（`Books::build`
+/// 正路），这条只是「窗口开了」的报到 —— 面板与 autopilot 读它弹 UI。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteBuildOffered {
+    pub player: Entity,
+}
+
+/// 一笔远程升级请求（P10d②，日产建设）：窗口开着时逐笔进来办（与
+/// [`BuildRequested`] 同形），升级正路在 `Books::upgrade` —— 判据、造价、垄断
+/// 与「组内最低层」全在那里，这条消息只是把「哪块地」递进柜台。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteUpgradeRequested {
+    pub player: Entity,
+    pub land: crate::land::LandId,
+}
+
+/// 融资动作完成（P10d②，银行保险董事长特权）：`chairman` 挪用了 `amount` 的
+/// 他人存款进自己现金（记 [`CashChanged`] 正数），`financing` 债务同步 +`amount`
+/// 不计息。兜底那一半也发这条 —— 「钱从现金口袋进了银行储备、换成融资债」
+/// 是同一类账目事实。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinancingDrawn {
+    pub chairman: Entity,
+    pub amount: i64,
+}
+
+/// 融资被收回（P10d② 融资三件套 ③）：`player` 的银行保险董事长身份没了
+/// （持股被反超），背着的 `amount` 融资债当场用他的现金清算。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinancingRecalled {
+    pub player: Entity,
+    pub amount: i64,
+}
+
+/// 一笔融资请求（P10d②）：`player`（银行保险的董事长）要从 `of_player` 的存款
+/// 里挪 `amount`。资格判据在 `bank::financing_system`（每帧重算董事长，反超的
+/// 那一帧起请求就被拒）；余额不足时按实挪数成交（与证券的部分成交同一形）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinancingDrawRequested {
+    pub player: Entity,
+    pub of_player: Entity,
+    pub amount: i64,
+}
+
 // ===== 经济与银行 =====
 
 /// 现金变动。所有 `Wallet` 的增减都必须留下一条这条流水 ——

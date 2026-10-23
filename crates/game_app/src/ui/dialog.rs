@@ -227,6 +227,35 @@ pub(crate) fn sync_modal(
         Some((player, Pending::BankTeller)) => plot_rows(&books, player),
         _ => Vec::new(),
     };
+    // 融资一排候选（P10d②）：只有银行保险的董事长在柜台前才算。
+    // 名字在这里查好 —— 与 `bails`/`service` 同一条分工，收屏那一侧只管画
+    let fins: Vec<(Entity, String, i64)> = match want {
+        Some((player, Pending::BankTeller)) => {
+            if game_core::company::chairman_of(&books, game_core::company::FINANCE_STOCK)
+                != Some(player)
+            {
+                Vec::new()
+            } else {
+                books
+                    .solvent()
+                    .into_iter()
+                    .filter(|(e, _)| *e != player)
+                    .map(|(e, _)| {
+                        (
+                            e,
+                            names
+                                .get(e)
+                                .map(|n| n.0.clone())
+                                .unwrap_or_else(|_| "？".to_string()),
+                            books.bank_of(e).deposit,
+                        )
+                    })
+                    .filter(|(.., d)| *d > 0)
+                    .collect()
+            }
+        }
+        _ => Vec::new(),
+    };
     // 保释窗口的一排候选：只有保释窗口才算（P4③）
     let bails: Vec<BailRow> = match want {
         Some((player, Pending::Bail(place))) => bail_rows(&books, &names, player, place),
@@ -333,7 +362,7 @@ pub(crate) fn sync_modal(
                 card_modal(&mut commands, &font, &view.memory, player, stamp);
             }
             Pending::BankTeller => {
-                bank_modal(&mut commands, &font, &books, player, stamp, &plots);
+                bank_modal(&mut commands, &font, &books, player, stamp, &plots, &fins);
             }
             Pending::Shop => {
                 shop_modal(
@@ -354,6 +383,12 @@ pub(crate) fn sync_modal(
             // 「这里已经立着设施」的样子，玩家按「离开」才走
             Pending::Build(land) => {
                 build_modal(&mut commands, &font, &books, player, land, stamp);
+            }
+            // 远程建设窗口（P10d②）。与 `build_modal` 同一条分工：候选与灰按钮的判据
+            // 全在 `economy::can_upgrade`（就是 `Books::upgrade` 认的那张表）；
+            // 升完窗口照开，按「先不建」才收摊
+            Pending::RemoteBuild => {
+                remote_build_modal(&mut commands, &font, &books, player, stamp);
             }
             // 服务费收据（P10c）。与租金收据同一族：钱已经扣完（或被吃成 0），
             // 这一屏只负责把「摇了几点、住了几天」说出来。读数在 `sync_modal` 那边
@@ -445,8 +480,34 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
     match about {
         Pending::BankTeller => {
             let bank = books.bank_of(player);
+            // 融资那一节（P10d②）也要重烤：挪一笔 = 他的债与别人的存款同时动，
+            // 身份反超 = 整节出现/消失。少进一位就会出现「已经挪到手、按钮还亮着」
+            let chair = game_core::company::chairman_of(books, game_core::company::FINANCE_STOCK)
+                == Some(player);
+            let deposits = if chair {
+                books
+                    .solvent()
+                    .iter()
+                    .filter(|(e, _)| *e != player)
+                    .map(|(e, _)| books.bank_of(*e).deposit)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            // 末段挪出来拼（外层 format! 里再嵌 format! 会被 clippy 打回）：
+            // 「董事长在不在场 + 每位储户的存款」—— 反超收回靠逐帧对账，没有消息可等，
+            // 面板能看到的只有这一帧的身份
+            let fins = format!(
+                "{}:{}",
+                chair as u8,
+                deposits
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
             format!(
-                "{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}|{}",
                 books.balance(player),
                 bank.deposit,
                 bank.loan,
@@ -459,7 +520,9 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
                     .iter()
                     .map(|row| format!("{}:{}:{}", row.land.0, row.held as u8, row.sealed as u8))
                     .collect::<Vec<_>>()
-                    .join(",")
+                    .join(","),
+                bank.financing,
+                fins,
             )
         }
         // 百货柜台与银行同一条理由：它是一个窗口，每一笔买卖都要重烤三位 ——
@@ -583,6 +646,18 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
                 books.facility_of(land).is_some() as u8,
             )
         }),
+        // 远程建设窗口（P10d②）：升一块地 = 层数与现金同时动，与 `Build` 同一条理由。
+        // 签名带**全部**地块的层数 —— 候选列表本来就画着它们，谁变了这一屏都得重烤
+        Pending::RemoteBuild => format!(
+            "{}|{}",
+            books.balance(player),
+            books
+                .views()
+                .iter()
+                .map(|v| format!("{}:{}", v.id.0, v.level))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
     }
 }
 
@@ -1145,6 +1220,7 @@ fn bank_modal(
     player: Entity,
     stamp: String,
     plots: &[PlotRow],
+    fins: &[(Entity, String, i64)],
 ) -> Entity {
     let cash = books.balance(player);
     let bank = books.bank_of(player);
@@ -1197,6 +1273,19 @@ fn bank_modal(
                     "现有负债",
                     &comma(bank.loan),
                     col::COST,
+                    key_w,
+                );
+                // 融资债（P10d②）：与贷款分家 —— 不占额度、不计息，挪用与兜底都记它
+                info_row(
+                    rows,
+                    &font.0,
+                    "融资债",
+                    &comma(bank.financing),
+                    if bank.financing > 0 {
+                        col::COST
+                    } else {
+                        col::KEY
+                    },
                     key_w,
                 );
                 info_row(
@@ -1257,6 +1346,68 @@ fn bank_modal(
                 ("还", 5_000, bank.loan >= 5_000 && cash >= 5_000),
                 ("还清", clear_debt, bank.loan > 0 && clear_debt >= bank.loan),
             );
+            // 融资（P10d②）：只有银行保险的董事长看得见这一节。它不是借 ——
+            // 不占额度、不计息：钱从别人的存款划进你的现金，债记在 `financing` 上。
+            // 整节只在有候选时出现 —— 空着的一节读起来像坏了
+            if !fins.is_empty() {
+                p.spawn(separator());
+                p.spawn(label(
+                    &font.0,
+                    "融资（挪用储户存款，不计息）",
+                    size::SMALL,
+                    col::KEY,
+                ));
+                for (of, name, deposit) in fins {
+                    p.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(8.0),
+                        ..default()
+                    })
+                    .with_children(|line| {
+                        line.spawn((
+                            Node {
+                                flex_grow: 1.0,
+                                ..default()
+                            },
+                            label(
+                                &font.0,
+                                format!("从 {name}（存 {deposit}）"),
+                                size::ROW,
+                                col::BODY,
+                            ),
+                        ));
+                        button(
+                            line,
+                            &font.0,
+                            ButtonSpec::new(
+                                "挪 1,000",
+                                layout::SHOP_BUTTON,
+                                super::PRIMARY,
+                                UiAction::Financing {
+                                    of_player: *of,
+                                    amount: 1_000.min(*deposit),
+                                },
+                            )
+                            .disabled(*deposit < 1),
+                        );
+                        button(
+                            line,
+                            &font.0,
+                            ButtonSpec::new(
+                                "挪全部",
+                                layout::SHOP_BUTTON,
+                                SECONDARY,
+                                UiAction::Financing {
+                                    of_player: *of,
+                                    amount: *deposit,
+                                },
+                            )
+                            .disabled(*deposit < 1),
+                        );
+                    });
+                }
+            }
             p.spawn(separator());
             p.spawn(label(
                 &font.0,
@@ -1279,6 +1430,136 @@ fn bank_modal(
                         "办完",
                         layout::MODAL_BUTTON,
                         super::PRIMARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
+}
+
+/// 远程建设窗口（P10d②）：踩到日产建设格弹的那一块。与 [`build_modal`] 同一条分工 ——
+/// 候选与灰按钮的判据全在规则层（[`game_core::economy::can_upgrade`] 就是
+/// `Books::upgrade` 认的那一张表），面板不自己另算一遍「能不能升」；升完窗口照开，
+/// 一趟可以连升几块地，「先不建」才是收摊。
+fn remote_build_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    books: &Books,
+    player: Entity,
+    stamp: String,
+) -> Entity {
+    let Some(pid) = books.id_of(player) else {
+        // 没有身份的人开不出这扇窗 —— 与柜台同一条守门
+        return fallback_note(commands, font, (player, Pending::RemoteBuild), "远程建设");
+    };
+    let free =
+        game_core::company::chairman_of(books, game_core::company::BUILD_STOCK) == Some(player);
+    let def = &books.active.def;
+    let views = books.views();
+    let cash = books.balance(player);
+    frame(
+        commands,
+        (player, Pending::RemoteBuild),
+        stamp,
+        layout::SHOP_PANEL,
+        col::BORDER_SHOP,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                "日产建设 — 远程升级",
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                if free {
+                    "董事长特权：升级自己的地免费一次升两层"
+                } else {
+                    "只能升级名下的地块，照价付费"
+                },
+                size::ROW,
+                col::MUTED,
+            ));
+            p.spawn(separator());
+            for view in &views {
+                let land = view.id;
+                let cost = game_core::economy::upgrade_cost(def, view).unwrap_or(i64::MAX);
+                let name = def.land(land.0).map_or("？", |l| l.name.as_str());
+                let deny: Option<&'static str> = if view.owner != Some(pid) {
+                    Some(if view.owner.is_none() {
+                        "无主的地"
+                    } else {
+                        "不是你的地"
+                    })
+                } else if view.mortgaged {
+                    Some("抵押中的地")
+                } else if view.level >= books.rules.max_building_level {
+                    Some("已经封顶")
+                } else if view.status == Some(LandStatus::Sealed) {
+                    Some("查封中的地")
+                } else if !game_core::economy::can_upgrade(
+                    view,
+                    pid,
+                    &views,
+                    cost,
+                    cash,
+                    &books.rules,
+                ) {
+                    // 剩下的拒绝只可能是组内那两条与钱 —— 归成一句人话
+                    Some("组内还有别的地没齐，或带的钱不够")
+                } else {
+                    None
+                };
+                let text = format!("{}  {}", name, building_label(view.level));
+                let buy = if free {
+                    "免费升两层".to_string()
+                } else {
+                    format!("升级 ${}", comma(cost))
+                };
+                p.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                })
+                .with_children(|line| {
+                    let (label_text, ink) = if deny.is_some() {
+                        (text, col::KEY)
+                    } else {
+                        (text, col::BODY)
+                    };
+                    line.spawn((
+                        Node {
+                            flex_grow: 1.0,
+                            ..default()
+                        },
+                        super::label(&font.0, label_text, size::ROW, ink),
+                    ));
+                    button(
+                        line,
+                        &font.0,
+                        ButtonSpec::new(
+                            &buy,
+                            layout::SHOP_BUTTON,
+                            super::PRIMARY,
+                            UiAction::RemoteBuild { land },
+                        )
+                        .disabled(deny.is_some()),
+                    );
+                    if let Some(reason) = deny {
+                        line.spawn(super::label(&font.0, reason, size::ROW, col::JAILED));
+                    }
+                });
+            }
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "先不建",
+                        layout::MODAL_BUTTON,
+                        SECONDARY,
                         UiAction::Decide(Decision::Acknowledge),
                     ),
                 );
@@ -2412,6 +2693,9 @@ struct CompanyRow {
     amount: i64,
     roll: u32,
     stay_days: u32,
+    /// 保险格（P10d②）：转盘摇出的天数是**投保天数**，收据上「摇出 N」那半句
+    /// 得跟着换说法；免单那句也要从「免费通行」换成「保费分文不取」。
+    insure: bool,
     /// 董事长的名字。`None` = 这家公司还没有持股人，或付款的这位**就是**董事长
     /// —— 后一种时 [`company_modal`] 要把「为什么没被收钱」说出口。
     chairman_name: Option<String>,
@@ -2425,14 +2709,19 @@ fn company_row(
     memory: &RecentCompany,
 ) -> Option<CompanyRow> {
     let bill = memory.0.as_ref()?;
-    let company_name = books
+    let tile = books
         .active
         .def
         .tiles
         .iter()
-        .find(|t| t.data.stock.as_deref() == Some(&bill.stock))
+        .find(|t| t.data.stock.as_deref() == Some(&bill.stock));
+    let company_name = tile
         .map(|t| t.name.clone())
         .unwrap_or_else(|| bill.stock.clone());
+    let insure = matches!(
+        tile.and_then(|t| t.data.fee.as_ref()),
+        Some(game_core::board::CompanyFee::Insure { .. })
+    );
     Some(CompanyRow {
         company_name,
         payer_name: names
@@ -2448,6 +2737,7 @@ fn company_row(
         amount: bill.amount,
         roll: bill.roll,
         stay_days: bill.stay_days,
+        insure,
     })
 }
 
@@ -2461,8 +2751,11 @@ fn company_modal(
     stamp: String,
 ) -> Entity {
     // 怎么算出来的：航空那类按天（摇出几点住几天）、科技那类按步数 —— 与 `service_modal`
-    // 同一张嘴，但 C 型公司把步数算进了 `amount`，这里不再重复「按步数计费」那半句
-    let detail = if row.stay_days > 0 {
+    // 同一张嘴，但 C 型公司把步数算进了 `amount`，这里不再重复「按步数计费」那半句。
+    // 保险格（P10d②）摇出的天数是**投保天数**，措辞跟着换：人没走，买的是一张保单
+    let detail = if row.insure {
+        format!("摇出 {}，投保 {} 天", row.roll, row.roll)
+    } else if row.stay_days > 0 {
         format!("摇出 {}，住 {} 天", row.roll, row.stay_days)
     } else if row.roll > 0 {
         format!("摇出 {}", row.roll)
@@ -2477,7 +2770,9 @@ fn company_modal(
     let chairman_line = match &row.chairman_name {
         Some(name) => format!("董事长：{name}"),
         None => {
-            if row.amount == 0 {
+            if row.amount == 0 && row.insure {
+                "你是董事长，保费分文不取（未投保）".to_string()
+            } else if row.amount == 0 {
                 "你是董事长，免费通行".to_string()
             } else {
                 "这家公司还没有董事长".to_string()

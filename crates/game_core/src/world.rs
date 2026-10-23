@@ -177,6 +177,7 @@ pub fn begin_game_system(
         epoch,
         last_gift_year: None,
         last_envelope_year: None,
+        bank_vault: 0,
     });
     commands.insert_resource(MarketClock::default());
     // 修正登记处是**这一局**的账：上一局挂着的免罪卡若不清，新局第一笔租金就会静默归零
