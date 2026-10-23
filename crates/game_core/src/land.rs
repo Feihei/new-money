@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::board::BoardDef;
+use crate::board::{BoardDef, BuildingKind};
 use crate::player::PlayerId;
 use crate::world::Gameplay;
 
@@ -52,26 +52,39 @@ impl Mortgaged {
     }
 }
 
+/// 这块地上立着的商业设施（P10c）。**存在即已建成**——空商业地没有这个组件，
+/// 业主踩上去走 `Pending::Build`；建成之后买地、过户、拍卖都**不动它**：
+/// 设施与楼是同一族（破产变卖时「楼留在街上」的同一条口径）。
+///
+/// 为什么是组件而不是 `Listing` 的一个字段：它只在「这块地」上、跟着地走，
+/// 查询形状（`Query<&Facility>` / `Option<&Facility>`）比再开一个集合资源诚实——
+/// 而且同一条 system 里 `Books` 的地块查询带 `&mut Owner`，设施查询只读，
+/// 借用在 Bevy 的访问图上天然相容（`game_core` 不经手，编译器也不拦）。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Facility(pub BuildingKind);
+
 /// 从棋盘定义铺出 Land 实体，返回 `LandId → Entity` 索引。
 ///
 /// 实体上不重复存 `LandDef`：价格/租金是静态配置，用 `active.def.land(id)` 查，
-/// 两处都存迟早对不上。
+/// 两处都存迟早对不上。`LandDef.building_kind`（预建设施，如演示盘外滩的购物中心）
+/// 在这里落成 [`Facility`]——棋盘数据里写的就是「这块地开局就立着这座设施」。
 pub fn spawn_lands(commands: &mut Commands, board: &BoardDef) -> HashMap<LandId, Entity> {
     board
         .lands
         .iter()
         .map(|l| {
             let id = LandId(l.id);
-            let entity = commands
-                .spawn((
-                    id,
-                    Owner::default(),
-                    BuildingLevel::default(),
-                    Mortgaged::default(),
-                    Gameplay,
-                ))
-                .id();
-            (id, entity)
+            let mut entity = commands.spawn((
+                id,
+                Owner::default(),
+                BuildingLevel::default(),
+                Mortgaged::default(),
+                Gameplay,
+            ));
+            if let Some(kind) = l.building_kind {
+                entity.insert(Facility(kind));
+            }
+            (id, entity.id())
         })
         .collect()
 }

@@ -153,8 +153,18 @@ pub enum Pending {
     Buy(LandId),
     /// 自己的垄断地：升还是不升
     Upgrade(LandId),
+    /// 自己的**空商业地**：这一趟立起哪一类设施（P10c）。报价与 `Upgrade` 是同一类
+    /// （自己踩自己的地、答案是花一笔钱换资产），但它**不是同一条判据**：升级要求
+    /// 楼盖了几层、建设要求这块地上什么都没有，所以各占一格。五类设施的候选与
+    /// 造价在同一块地上是同一张表，窗口走 [`crate::msg::BuildRequested`] 逐笔进来，
+    /// 「先不建」才关窗 —— 与柜台同一形。
+    Build(LandId),
     /// 租金已扣，只需玩家看一眼收据
     RentNotice(LandId),
+    /// 服务费已结算（P10c）：购物中心摇了几点、旅馆住了几天，收据上说 ——
+    /// 免单（大财神/免费卡吃掉的那笔 0 元）也要过这里，玩家得看得见「为什么没付钱」。
+    /// 与 [`Pending::RentNotice`] 同一族：钱已扣完，窗口只负责「读完再走」。
+    ServiceNotice(LandId),
     /// 卡面已结算，只需玩家读完
     Card,
     /// 踩到银行格，柜台开着：存/取/借/还随便办，直到玩家按「办完」。
@@ -319,17 +329,21 @@ pub fn decision_system(
         // 而面板上根本没有「接受」这个按钮可对上。
         // 百货柜台与保释窗口同一条理由（`ShopOpRequested`/`BailRequested` 逐笔办），
         // 游乐场也在这组里（成绩走 `MinigameResult` 报上来），彩票柜台同一形
-        // （`BuyTicketRequested` 逐笔办）：**五个窗口**对 `Accept`/`Decline` 一律不认，
-        // 谁新增第六种窗口都要来这一格表态（P9 的 `Auction` 另起了一格 —— 它连
+        // （`BuyTicketRequested` 逐笔办）：**六个窗口**对 `Accept`/`Decline` 一律不认，
+        // 谁新增第七种窗口都要来这一格表态（P9 的 `Auction` 另起了一格 —— 它连
         // `Acknowledge` 都不认，理由写在那一格上）。
-        // ⚠️ 游乐场那一格的 `Acknowledge` 语义与另外四个不同：柜台是「办完了」，
+        // ⚠️ 游乐场那一格的 `Acknowledge` 语义与另外几个不同：柜台是「办完了」，
         //    它是「不玩了／空手离开」（成绩另有一条路）。见 `Pending::Minigame` 的注。
+        //    建设窗口（P10c）同一形：`Acknowledge` = 「先不建」，五类设施的建造走
+        //    `BuildRequested` 逐笔进来（`build_op_system` 办），办完窗口照开 ——
+        //    想在同一块地上换建是不可能的（一格一设施），但「建完看着再走」不打扰。
         (
             Pending::BankTeller
             | Pending::Shop
             | Pending::Lottery
             | Pending::Bail(_)
-            | Pending::Minigame(_),
+            | Pending::Minigame(_)
+            | Pending::Build(_),
             Decision::Acknowledge,
         ) => {}
         (
@@ -337,7 +351,8 @@ pub fn decision_system(
             | Pending::Shop
             | Pending::Lottery
             | Pending::Bail(_)
-            | Pending::Minigame(_),
+            | Pending::Minigame(_)
+            | Pending::Build(_),
             Decision::Accept | Decision::Decline,
         ) => return,
         // 拍卖：三种回答**都不认**。它的两个动作是「加价」与「放弃」，走
@@ -347,7 +362,7 @@ pub fn decision_system(
         (Pending::Auction, _) => return,
         // 收据与卡面没有「可拒绝」的选项：钱已经扣了、效果已经结算了。
         // 任何回答都算「我看完了」—— 严格拒绝只会把 UI 的一次疏忽变成挂死。
-        (Pending::RentNotice(_) | Pending::Card, _) => {}
+        (Pending::RentNotice(_) | Pending::ServiceNotice(_) | Pending::Card, _) => {}
         // 报价上答「已阅」= 没答，继续等（Godot 的 `_pending_decision != "buy"` 同义）
         (Pending::Buy(_) | Pending::Upgrade(_), Decision::Acknowledge) => return,
     }

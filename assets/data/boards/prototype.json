@@ -29,5 +29,10 @@
 	{ "id": 3, "col": 4, "row": 5, "size": 1, "name": "徐家汇",     "owner": null, "level": 0, "group": "red",    "land_type": "residential", "price": 3800, "rent": [240,720,1500,3100,4900,8000],   "upgrade_cost": 1900 },
 	{ "id": 4, "col": 2, "row": 5, "size": 1, "name": "王府井",     "owner": null, "level": 0, "group": "yellow", "land_type": "residential", "price": 2800, "rent": [160,480,1100,2300,3700,6000],   "upgrade_cost": 1400 },
 	{ "id": 5, "col": 0, "row": 2, "size": 1, "name": "西单",       "owner": null, "level": 0, "group": "yellow", "land_type": "residential", "price": 3000, "rent": [180,540,1200,2500,4000,6500],   "upgrade_cost": 1500 }
-  ]
+  ],
+  "facility_fees": {
+	"mall":        { "random_amount": { "sides": 6, "tiers": [200,400,600,800,1200,1600] } },
+	"hotel":       { "random_stay":   { "sides": 4, "per_day": 500 } },
+	"gas_station": { "per_step":      { "rate": 100, "requires_mount": true } }
+  }
 }

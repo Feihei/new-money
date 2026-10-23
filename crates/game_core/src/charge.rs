@@ -40,6 +40,11 @@ pub enum ChargeKind {
     BuyLand { land: LandId },
     /// 加盖一级的建筑费
     Upgrade { land: LandId },
+    /// 建商业设施（P10c）：空商业地上立起购物中心／旅馆／加油站那一族。
+    /// 与 [`Upgrade`] 分开不是造价算法需要（造价都是 `upgrade_cost`），是**语义**需要：
+    /// 楼是「往上盖一级」，设施是「这块地上出现一个新东西」——将来设施造价或特权
+    /// 与楼分开调时，不用回来拆这条表。归 [`ChargeDomain::Acquire`]（买的是资产）。
+    Build { land: LandId },
     /// 罚款：卡牌罚金、命运损失、交保释金
     Penalty,
     /// 奖金：横财、小游戏得分、乐透
@@ -70,7 +75,9 @@ pub enum ChargeDomain {
 pub const fn charge_domain_of(kind: ChargeKind) -> ChargeDomain {
     match kind {
         ChargeKind::Rent { .. } | ChargeKind::Service => ChargeDomain::Rent,
-        ChargeKind::BuyLand { .. } | ChargeKind::Upgrade { .. } => ChargeDomain::Acquire,
+        ChargeKind::BuyLand { .. } | ChargeKind::Upgrade { .. } | ChargeKind::Build { .. } => {
+            ChargeDomain::Acquire
+        }
         ChargeKind::Penalty => ChargeDomain::Penalty,
         ChargeKind::Bonus => ChargeDomain::Bonus,
         ChargeKind::God => ChargeDomain::God,
@@ -84,7 +91,8 @@ pub const fn scales_with_price(kind: ChargeKind) -> bool {
         ChargeKind::Rent { .. }
         | ChargeKind::Service
         | ChargeKind::BuyLand { .. }
-        | ChargeKind::Upgrade { .. } => true,
+        | ChargeKind::Upgrade { .. }
+        | ChargeKind::Build { .. } => true,
         ChargeKind::Penalty | ChargeKind::Bonus => true,
         // PLAN §三 点名豁免神明金额：那是玩家记忆里的「固定数」，缩它等于改神明的剧本
         ChargeKind::God => false,
@@ -99,6 +107,7 @@ pub const fn transferable(kind: ChargeKind) -> bool {
         ChargeKind::Rent { .. } | ChargeKind::Service | ChargeKind::Penalty => true,
         ChargeKind::BuyLand { .. }
         | ChargeKind::Upgrade { .. }
+        | ChargeKind::Build { .. }
         | ChargeKind::Bonus
         | ChargeKind::God => false,
     }
@@ -445,19 +454,14 @@ mod tests {
     /// 改它等于改平衡，不该在一次无关的重构里顺手发生。
     #[test]
     fn the_three_tables_say_what_we_mean() {
-        let rows: [(ChargeKind, ChargeDomain, bool, bool); 7] = [
+        let rows: [(ChargeKind, ChargeDomain, bool, bool); 8] = [
             (
                 ChargeKind::Rent { land: land(1) },
                 ChargeDomain::Rent,
                 true,
                 true,
             ),
-            (
-                ChargeKind::Service,
-                ChargeDomain::Rent,
-                true,
-                true,
-            ),
+            (ChargeKind::Service, ChargeDomain::Rent, true, true),
             (
                 ChargeKind::BuyLand { land: land(1) },
                 ChargeDomain::Acquire,
@@ -466,6 +470,12 @@ mod tests {
             ),
             (
                 ChargeKind::Upgrade { land: land(1) },
+                ChargeDomain::Acquire,
+                true,
+                false,
+            ),
+            (
+                ChargeKind::Build { land: land(1) },
                 ChargeDomain::Acquire,
                 true,
                 false,

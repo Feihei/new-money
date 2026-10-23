@@ -90,7 +90,9 @@ pub fn assess(proto: &FeePrototype, roll: u32, steps: u32, mount: Mount) -> Opti
         FeePrototype::RandomAmount { tiers, .. } => {
             // 摇出几就走第几档；表短于骰面（数据写歪）按没有这一档处理 ——
             // 缺档不该收第 0 档的钱，也不该 panic 一局对局。数据校验在 P10b 拦它。
-            let base = tiers.get(usize::try_from(roll.checked_sub(1)?).ok()?).copied()?;
+            let base = tiers
+                .get(usize::try_from(roll.checked_sub(1)?).ok()?)
+                .copied()?;
             Some(ServiceBill { base, stay_days: 0 })
         }
         FeePrototype::RandomStay { per_day, .. } => {
@@ -183,16 +185,10 @@ mod tests {
         assert_eq!(assess(&gas_station, 0, 5, Mount::Foot), None);
         assert_eq!(assess(&ibm, 0, 5, Mount::Foot).unwrap().base, 400);
         // 开车（机车也是车）：两家都按步数收
-        assert_eq!(
-            assess(&gas_station, 0, 5, Mount::Bike).unwrap().base,
-            500
-        );
+        assert_eq!(assess(&gas_station, 0, 5, Mount::Bike).unwrap().base, 500);
         assert_eq!(assess(&ibm, 0, 5, Mount::Bike).unwrap().base, 400);
         // 骰面是几就按几收 —— 不乘方向、不夹乌龟（那是 walk 的事，`steps` 一直是原值）
-        assert_eq!(
-            assess(&gas_station, 0, 1, Mount::Car).unwrap().base,
-            100
-        );
+        assert_eq!(assess(&gas_station, 0, 1, Mount::Car).unwrap().base, 100);
     }
 
     /// D 型：功能型不产生账。「解锁能力」归装配层，库里只有这一句 `None`，

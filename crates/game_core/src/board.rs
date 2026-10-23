@@ -3,6 +3,8 @@
 //! 只描述静态定义（`BoardDef`），运行时状态（归属/等级/抵押）是 Land 实体上的组件，
 //! 因此 JSON 里的 `owner`/`level` 字段刻意不出现在本模块——静态与运行时不可混。
 
+use std::collections::BTreeMap;
+
 use bevy::asset::Asset;
 use bevy::math::Vec3;
 use bevy::reflect::TypePath;
@@ -67,7 +69,7 @@ pub enum LandType {
 /// 五类各自绑定哪个收费原型（A 随机金额 / B 随机停留 / C 按步数 / D 功能）
 /// 是 [`FeeDef`] 的形状决定的，不是这里的分支：换参数就换行为是 P10 的真验收
 /// （见 `game_core::service` 模块头），原型库对「住在哪类设施」一无所知。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildingKind {
     /// 购物中心：踩到摇 1–6，按档位收（A 型）。
@@ -80,6 +82,31 @@ pub enum BuildingKind {
     Lab,
     /// 公园：功能型，无费用（D 型空实现）。
     Park,
+}
+
+impl BuildingKind {
+    /// 五类设施的**全部候选**，顺序就是建设窗口里那五颗按钮的次序。写成常量而不是让
+    /// UI 自己去枚举：加第六类时这里与 `label` 两处必须一起改，而漏掉一个分支会编译失败。
+    pub const ALL: [Self; 5] = [
+        Self::Mall,
+        Self::Hotel,
+        Self::GasStation,
+        Self::Lab,
+        Self::Park,
+    ];
+
+    /// 屏幕上那个名字。建设按钮、服务费收据、dump 的地块栏、顶栏播报四处共用一个 ——
+    /// 各写一份就会出现「按钮写购物中心、dump 写商场」这种同一样东西两个名字的问题
+    /// （与 `ItemKind::label`／`Mount::label` 同一条分工）。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Mall => "购物中心",
+            Self::Hotel => "旅馆",
+            Self::GasStation => "加油站",
+            Self::Lab => "研究所",
+            Self::Park => "公园",
+        }
+    }
 }
 
 /// 收费原型的参数（serde 形，P10b）。**收费就是数据**：购物中心与旅馆的档位、
@@ -231,6 +258,15 @@ pub struct BoardDef {
     pub tiles: Vec<TileDef>,
     #[serde(default)]
     pub lands: Vec<LandDef>,
+    /// 空商业地上**现建**各类设施的默认收费参数（P10c）。
+    ///
+    /// 预建设施的参数写各自 `LandDef.fee`（外滩的购物中心档位是那条街独有的）；
+    /// 这里是「空地上业主自己立一座」那套价 —— 同一类设施在一条棋盘上只有一套
+    /// 默认参数，改平衡改 JSON 不回 Rust。缺哪一类，那条棋盘就建不了那一类
+    /// （研究所/公园不收费，不需要条目）。形状由 `validate` 拦：给购物中心配
+    /// B 型参数、或给研究所配了费，加载期就红。
+    #[serde(default)]
+    pub facility_fees: BTreeMap<BuildingKind, FeeDef>,
 }
 
 const fn default_cell_size() -> f32 {
@@ -369,6 +405,18 @@ impl BoardDef {
 
     pub fn land(&self, land_id: u32) -> Option<&LandDef> {
         self.lands.iter().find(|l| l.id == land_id)
+    }
+
+    /// 这块地上 `kind` 那类设施的收费参数（P10c）。
+    ///
+    /// 预建设施用**地块自己的**参数（外滩的档位是那条街独有的）；空地上现建的
+    /// 用棋盘级默认表 —— 两个来源只在这一处汇合，服务结算与建造判据都走这条，
+    /// 「同一座旅馆两套价」在结构上写不出来。
+    pub fn facility_fee(&self, land_id: u32, kind: BuildingKind) -> Option<&FeeDef> {
+        match self.land(land_id) {
+            Some(l) if l.building_kind == Some(kind) => l.fee.as_ref(),
+            _ => self.facility_fees.get(&kind),
+        }
     }
 
     pub fn land_for_tile(&self, index: i64) -> Option<&LandDef> {
@@ -602,6 +650,25 @@ impl BoardDef {
                     l.land_type, l.id, fee
                 )),
                 (_, None, None) => {}
+            }
+        }
+
+        // 空商业地现建的默认参数表（P10c）：与上面那张矩阵同一套判据，只是对象
+        // 换成棋盘级 —— 给购物中心配 B 型、给研究所配了费，与地块上写歪同罪
+        for (kind, fee) in &self.facility_fees {
+            let ok = match (kind, fee) {
+                (BuildingKind::Mall, FeeDef::RandomAmount { sides, tiers }) => {
+                    *sides > 0 && tiers.len() == *sides as usize
+                }
+                (BuildingKind::Hotel, FeeDef::RandomStay { sides, .. }) => *sides > 0,
+                (BuildingKind::GasStation, FeeDef::PerStep { .. }) => true,
+                _ => false,
+            };
+            if !ok {
+                errs.push(format!(
+                    "默认设施参数 {:?} 与收费 {:?} 不匹配（购物中心=A 档位、旅馆=B 按天、加油站=C 按步数；研究所/公园不需要条目）",
+                    kind, fee
+                ));
             }
         }
 
@@ -998,7 +1065,11 @@ mod tests {
         let b = board();
         let land = &b.lands[2];
         assert_eq!(land.building_kind, Some(BuildingKind::Mall));
-        let proto = land.fee.as_ref().expect("购物中心必须带收费参数").to_prototype();
+        let proto = land
+            .fee
+            .as_ref()
+            .expect("购物中心必须带收费参数")
+            .to_prototype();
         use crate::service::FeePrototype;
         match proto {
             FeePrototype::RandomAmount { sides, tiers } => {
@@ -1008,5 +1079,80 @@ mod tests {
             }
             other => panic!("购物中心读成了 {other:?}"),
         }
+    }
+
+    /// 默认设施参数表（P10c）：空商业地上现建的那套价。
+    /// 解析 + 校验 + [`BoardDef::facility_fee`] 的两来源汇合，三件事各一条。
+    #[test]
+    fn prototype_default_facility_fees_parse_and_validate() {
+        let b = board();
+        assert_eq!(
+            b.facility_fees.len(),
+            3,
+            "演示盘配了购物中心/旅馆/加油站三套默认价"
+        );
+        assert!(
+            b.validate().is_ok(),
+            "校验失败: {:?}",
+            b.validate().unwrap_err()
+        );
+    }
+
+    #[test]
+    fn a_mismatched_default_fee_is_rejected() {
+        let mut b = board();
+        b.facility_fees.insert(
+            BuildingKind::Mall,
+            FeeDef::RandomStay {
+                sides: 4,
+                per_day: 500,
+            },
+        );
+        assert!(
+            b.validate().is_err(),
+            "购物中心配 B 型按天计费被放过了（A 型要档位表）"
+        );
+        let mut b = board();
+        b.facility_fees.insert(
+            BuildingKind::Park,
+            FeeDef::PerStep {
+                rate: 1,
+                requires_mount: false,
+            },
+        );
+        assert!(
+            b.validate().is_err(),
+            "公园不需要参数却配了（它根本不产生账）"
+        );
+    }
+
+    /// 预建设施用**地块自己的**参数，空地现建用棋盘默认表 ——
+    /// 两个来源只在 `facility_fee` 这一处汇合，「同一座旅馆两套价」写不出来。
+    #[test]
+    fn facility_fee_takes_the_lot_own_price_before_the_board_default() {
+        let mut b = board();
+        // 外滩（L2）预建购物中心：读它自己的档位表
+        let own = b
+            .facility_fee(2, BuildingKind::Mall)
+            .expect("预建购物中心有参数");
+        assert!(matches!(own, FeeDef::RandomAmount { tiers, .. } if tiers[0] == 200));
+        // 西单（L5）是住宅： facility_fee(5, Hotel) 落到默认表
+        let fallback = b
+            .facility_fee(5, BuildingKind::Hotel)
+            .expect("默认表里有旅馆");
+        assert!(matches!(fallback, FeeDef::RandomStay { per_day, .. } if *per_day == 500));
+        // 没配的那一类（研究所）查不到 —— 建不出来，而不是建出一座不收钱的
+        assert!(b.facility_fee(5, BuildingKind::Lab).is_none());
+        // 把外滩的预建改成旅馆后，旅馆读的是**它自己那格**的参数：
+        // 哪怕默认表里旅馆是另一个价
+        b.lands[2].building_kind = Some(BuildingKind::Hotel);
+        b.lands[2].fee = Some(FeeDef::RandomStay {
+            sides: 4,
+            per_day: 999,
+        });
+        let hotel = b
+            .facility_fee(2, BuildingKind::Hotel)
+            .expect("预建旅馆有参数");
+        assert!(matches!(hotel, FeeDef::RandomStay { per_day, .. } if *per_day == 999));
     }
 }

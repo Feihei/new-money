@@ -26,11 +26,11 @@ pub mod top_bar;
 use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionMove, BailRequested, BankOp, BankOpRequested, BidMove,
-    BuyTicketRequested, CardAim, CardId, Decision, DecisionChosen, GameKind, GameSession,
-    HolidaySet, ItemKind, LandId, MarketClock, MinigameResult, MortgageOp, MortgageRequested,
-    Paused, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested, RequestRemoteDice,
-    RequestRoll, RequestStay, ShopOpRequested, StaySentence, StockId, StockTradeRequested,
-    TileIndex, TradeSide, TurnOrder, TurnPhase, bank_op_allowed, date_of,
+    BuildRequested, BuildingKind, BuyTicketRequested, CardAim, CardId, Decision, DecisionChosen,
+    GameKind, GameSession, HolidaySet, ItemKind, LandId, MarketClock, MinigameResult, MortgageOp,
+    MortgageRequested, Paused, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
+    RequestRemoteDice, RequestRoll, RequestStay, ShopOpRequested, StaySentence, StockId,
+    StockTradeRequested, TileIndex, TradeSide, TurnOrder, TurnPhase, bank_op_allowed, date_of,
 };
 
 use theme::{col, layout, size};
@@ -40,6 +40,10 @@ pub struct UiPlugin;
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<dialog::RecentCard>()
+            // 最近一笔服务费（P10c）。与 `RecentCard` 同一条：面板弹在收据上，
+            // 而 `Pending::ServiceNotice` 只说「哪块地」，说不出摇了几点、住了几天 ——
+            // 那些数只活在这条消息里
+            .init_resource::<dialog::RecentService>()
             // `NM_PAUSE=1` 开局即暂停：没有键盘可按，暂停面板否则无法被截图核对
             .insert_resource(pause::PauseMenuOpen::from_env())
             // `NM_PICK_TILE=列:行` 开局即选中那格：详情卡否则也进不了截图
@@ -73,6 +77,7 @@ impl Plugin for UiPlugin {
                         top_bar::hint_from_events.in_set(UiSet::Live),
                         player_hud::refresh_player_hud.in_set(UiSet::Live),
                         dialog::remember_drawn_card.in_set(UiSet::Live),
+                        dialog::remember_service.in_set(UiSet::Live),
                         dialog::force_decision.in_set(UiSet::Live),
                         dialog::sync_modal.in_set(UiSet::Live),
                         finance::sync_atm_panel.in_set(UiSet::Live),
@@ -139,6 +144,23 @@ impl Plugin for UiPlugin {
             app.add_systems(
                 Update,
                 dialog::dev_grant_plots.run_if(resource_exists::<ActiveBoard>),
+            );
+        }
+        // `NM_BUILD=1`：建设窗口的非鼠标入口（P10c）。正经入口是**踩到自己的空商业地**，
+        // 而演示盘那块商业地（外滩）一开局就带着预建的购物中心 —— 这扇窗口在没有旋钮的
+        // 世界里根本不会出现（判据同 `NM_SHOP`：每个界面都得有一条不靠鼠标的入口）。
+        if std::env::var_os("NM_BUILD").is_some() {
+            app.add_systems(
+                Update,
+                dialog::dev_open_build.run_if(resource_exists::<ActiveBoard>),
+            );
+        }
+        // `NM_SERVICE=1`：服务费收据的非鼠标入口（P10c）。正经入口是踩到别人的设施，
+        // 而这一屏只活两三帧（自动玩家下一帧就答掉），截图撞不上 —— 判据同 `NM_SHOP`。
+        if std::env::var_os("NM_SERVICE").is_some() {
+            app.add_systems(
+                Update,
+                dialog::dev_open_service.run_if(resource_exists::<ActiveBoard>),
             );
         }
         // `NM_DAY=<tick>`：把日历钉在第 n 天。P2④ 之后「今天休不休市」是面板上十二颗按钮
@@ -245,6 +267,13 @@ pub enum UiAction {
     /// 「此刻站在窗口前的那个人」—— 与银行/百货那两颗同一条形状。
     Bail {
         target: Entity,
+    },
+    /// 在自己的空商业地上立起一类设施（P10c）。**类别烤在按钮里**（那颗「建购物中心」
+    /// 本身就是一整个意图），而多少钱仍由规则层算 —— 与 [`Self::BankOp`] 同一条分工。
+    /// 主语也不在按钮里（派发时取建设窗口挂着的那位）。
+    Build {
+        land: LandId,
+        kind: BuildingKind,
     },
     /// 在彩票柜台买一注（P8）。**号烤在按钮里**（那颗「17」本身就是一整个意图），
     /// 而一注多少钱仍由规则层从 `GameRules::ticket_price` 算 —— 与 [`UiAction::ShopOp`]
@@ -431,6 +460,7 @@ pub(crate) fn bank_op_subject(pending: &PendingDecision, atm: &AtmAccess) -> Opt
 /// `NM_MINIGAME` 走的是 core 的窗口（`dev.rs`），不从 UI 侧开门，所以清成 `default()`。
 pub(crate) fn reset_ui_state(mut commands: Commands, mut kept: UiMemory) {
     kept.recent_card.0 = None;
+    kept.recent_service.0 = None;
     kept.selected.0 = None;
     *kept.atm = finance::AtmPanelOpen::from_env();
     *kept.stock = finance::StockPanelOpen::from_env();
@@ -450,6 +480,7 @@ pub(crate) fn reset_ui_state(mut commands: Commands, mut kept: UiMemory) {
 #[derive(SystemParam)]
 pub(crate) struct UiMemory<'w> {
     recent_card: ResMut<'w, dialog::RecentCard>,
+    recent_service: ResMut<'w, dialog::RecentService>,
     selected: ResMut<'w, tile_info::SelectedTile>,
     atm: ResMut<'w, finance::AtmPanelOpen>,
     stock: ResMut<'w, finance::StockPanelOpen>,
@@ -726,6 +757,7 @@ struct Sends<'w> {
     shops: MessageWriter<'w, ShopOpRequested>,
     mortgages: MessageWriter<'w, MortgageRequested>,
     bails: MessageWriter<'w, BailRequested>,
+    builds: MessageWriter<'w, BuildRequested>,
     places: MessageWriter<'w, PlaceItemRequested>,
     remotes: MessageWriter<'w, RequestRemoteDice>,
     scores: MessageWriter<'w, MinigameResult>,
@@ -985,6 +1017,25 @@ fn dispatch_ui_actions(
                     target: *target,
                 });
             }
+            // 建设窗口（P10c）：主语是窗口挂着的那位，地块必须正是窗口问的那块 ——
+            // 与保释那一格同一条：按钮只说「建哪一类」，主语与对象都由状态说。
+            // 「建不建得成」全交给规则层的 `build_op_allowed`（按钮那颗灰是同源结果）。
+            UiAction::Build { land, kind } => {
+                if gate.paused.0 {
+                    continue;
+                }
+                let Some((player, Pending::Build(window))) = gate.pending.active() else {
+                    continue;
+                };
+                if window != *land {
+                    continue;
+                }
+                sends.builds.write(BuildRequested {
+                    player,
+                    land: *land,
+                    kind: *kind,
+                });
+            }
             // ===== 游乐场（P7）=====
             // 玩法内的四颗一律先看暂停：暂停菜单压在 `ZIndex(6)`、游乐场在 5，
             // 遮罩本来就点不穿；这一道挡的是「ESC 那一帧的点击已经排进队列」那种时序。
@@ -1190,6 +1241,9 @@ mod tests {
         /// 主语必须是「此刻挂着窗口的那一位」，而这一位在拍卖过程中会换人 —— 所以这一栏
         /// 记的是「谁发的」而不是「谁该发」
         bids: Vec<(Entity, BidMove)>,
+        /// 建设窗口按下的那一类（P10c）：`(谁, 哪块地, 建什么)`。地块也记下来，
+        /// 因为按钮里烤着它，而「窗口问的是另一块地」必须被挡掉
+        builds: Vec<(Entity, LandId, BuildingKind)>,
     }
 
     /// 派发出口的读者们。装成参数包而不是八个函数参数：这仓库遇到 `too_many_arguments`
@@ -1209,6 +1263,7 @@ mod tests {
         remotes: MessageReader<'w, 's, RequestRemoteDice>,
         tickets: MessageReader<'w, 's, BuyTicketRequested>,
         bids: MessageReader<'w, 's, AuctionMove>,
+        builds: MessageReader<'w, 's, BuildRequested>,
     }
 
     fn collect(mut seen: ResMut<Seen>, mut r: Readers<'_, '_>) {
@@ -1239,6 +1294,8 @@ mod tests {
         seen.tickets
             .extend(r.tickets.read().map(|t| (t.player, t.number)));
         seen.bids.extend(r.bids.read().map(|b| (b.player, b.what)));
+        seen.builds
+            .extend(r.builds.read().map(|b| (b.player, b.land, b.kind)));
     }
 
     /// 一套只装配到「能跑 UI 派发」的对局骨架：两名玩家、一颗掷骰按钮（文字是它的子节点）、
@@ -1271,6 +1328,8 @@ mod tests {
         bid_pass: Entity,
         /// 银行柜台上的一颗「押」按钮（P3d③）
         mortgage_take: Entity,
+        /// 建设窗口上的「建购物中心」（P10c）：地块与类别都烤在按钮里
+        build_mall: Entity,
         /// 道具面板上的两颗（P5）：放一个路障到 5 号格、用遥控骰子走 3 步
         place_rock: Entity,
         remote_three: Entity,
@@ -1299,6 +1358,7 @@ mod tests {
                 .add_message::<ShopOpRequested>()
                 .add_message::<MortgageRequested>()
                 .add_message::<BailRequested>()
+                .add_message::<BuildRequested>()
                 .add_message::<PlaceItemRequested>()
                 .add_message::<RequestRemoteDice>()
                 .add_message::<MinigameResult>()
@@ -1407,6 +1467,14 @@ mod tests {
                 })
                 .id();
             let toggle_stock = app.world_mut().spawn(UiAction::ToggleStock).id();
+            // 建设窗口那颗「建购物中心」（P10c）：与抵押同一形 —— 意图在按钮里，主语在窗口里
+            let build_mall = app
+                .world_mut()
+                .spawn(UiAction::Build {
+                    land: LandId(2),
+                    kind: BuildingKind::Mall,
+                })
+                .id();
             let toggle_hand = app.world_mut().spawn(UiAction::ToggleHand).id();
             let toggle_items = app.world_mut().spawn(UiAction::ToggleItems).id();
             let place_rock = app
@@ -1443,6 +1511,7 @@ mod tests {
                 bid_raise,
                 bid_pass,
                 mortgage_take,
+                build_mall,
                 place_rock,
                 remote_three,
                 roll_two,
@@ -1953,6 +2022,48 @@ mod tests {
         assert!(held.seen().mortgages.is_empty(), "暂停时还派发了抵押请求");
     }
 
+    /// 建设窗口那颗「建购物中心」（P10c）走的是与保释/抵押同一条 M 形：
+    /// **类别与地块烤在按钮里，主语由窗口给**。三件要验的事各是一种错法：
+    /// 没有窗口就建（凭空在别人的地上盖楼）、窗口问的是另一块地（按钮里的地块作数）、
+    /// 暂停时还建。判据的第三层（够不够钱、押没押、查封没查封）不在这里 ——
+    /// 那是 `Books::build_probe` 的事，`tests/commercial.rs` 有正面断言。
+    #[test]
+    fn a_build_request_names_the_window_owner_and_the_lot_the_button_carries() {
+        let mut h = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        h.click(h.build_mall);
+        assert!(
+            h.seen().builds.is_empty(),
+            "没有建设窗口也派发了建造请求 —— 凭空给自己盖了座楼"
+        );
+
+        let owner = h.player;
+        h.offer(owner, Pending::Build(LandId(2)));
+        h.click(h.build_mall);
+        assert_eq!(
+            h.seen().builds,
+            vec![(owner, LandId(2), BuildingKind::Mall)],
+            "窗口挂着的那位才是这一笔建造的主语"
+        );
+
+        // 窗口问的是另一块地：按钮里那颗地块不认账（否则同一颗按钮能盖到全盘）
+        let mut elsewhere =
+            Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let other = elsewhere.player;
+        elsewhere.offer(other, Pending::Build(LandId(3)));
+        elsewhere.click(elsewhere.build_mall);
+        assert!(
+            elsewhere.seen().builds.is_empty(),
+            "窗口问的是 L3、按钮写的是 L2，两处对不上就该整笔丢掉"
+        );
+
+        // 暂停挡住（与抵押同判据）
+        let mut held = Harness::new(TurnPhase::WaitDecision, true, PendingDecision::default());
+        let paused_one = held.player;
+        held.offer(paused_one, Pending::Build(LandId(2)));
+        held.click(held.build_mall);
+        assert!(held.seen().builds.is_empty(), "暂停时还派发了建造请求");
+    }
+
     /// 银行柜台与百货柜台是**两个**窗口，所以 `counter_of` 与 `shop_customer` 不能合成
     /// 一个「任何窗口」：并起来的第一条被放宽的就是「站在银行里能买百货」这种不该存在的口子。
     #[test]
@@ -2055,6 +2166,10 @@ mod tests {
             // P4③ 的两个出口：请求由派发写、成交由顶栏提示行读
             .add_message::<BailRequested>()
             .add_message::<game_core::prelude::PlayerBailed>()
+            // P10c：建设请求与它带来的两条凭据（顶栏那两行播报读的就是它们）
+            .add_message::<BuildRequested>()
+            .add_message::<game_core::prelude::FacilityBuilt>()
+            .add_message::<game_core::prelude::ServiceCharged>()
             // P5：道具与遥控骰子的请求，以及顶栏提示行要读的那一批成交/中断凭据。
             // 漏任何一条不是「那行字不出现」，而是 `dispatch_ui_actions` 或
             // `hint_from_events` 整个 SystemParam 建不出来 —— 一片按钮全死

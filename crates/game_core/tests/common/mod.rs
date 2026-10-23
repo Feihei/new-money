@@ -19,25 +19,26 @@ use game_core::CoreGamePlugin;
 use game_core::prelude::{
     ActiveBoard, Adjustment, ArcadeDeal, AtmAccess, Auction, AuctionFailed, AuctionMove,
     AuctionStarted, AuctionWon, BailRequested, BankBalance, BankOp, BankOpDone, BankOpRequested,
-    BankVisited, BidMove, BidPlaced, BidWithdrawn, BombTransferred, Books, BuildingLevel,
-    BuyOffered, BuyTicketRequested, CardAim, CardDrawn, CardGained, CardId, CardKind, CardLost,
-    CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived, ChestOpened, Correction,
-    Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen, Deck,
-    Detention, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, GameKind, GameOver,
-    GameRules, GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed,
-    GodLeft, GodPossessed, Hand, Insulation, Inventory, ItemKind, ItemPlaced, Jackpot,
-    JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken,
-    LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought, LotteryDrawn, LotteryTickets,
-    LotteryWon, Market, MarketClock, MinigameResult, MinigameScore, MortgageDone, MortgageOp,
-    MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt,
-    OccupancyKind, Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
-    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported,
-    PlotArea, Points, PointsChanged, Possession, Presence, RedEnvelope, RemoteDiceUsed, RentDue,
-    RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, Shelf, ShopOpDone, ShopOpRequested,
-    ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged,
-    StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition,
-    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkHalted,
-    WalkStarted, Wallet, deal_to, grant_effects,
+    BankVisited, BidMove, BidPlaced, BidWithdrawn, BombTransferred, Books, BuildOffered,
+    BuildRequested, BuildingLevel, BuyOffered, BuyTicketRequested, CardAim, CardDrawn, CardGained,
+    CardId, CardKind, CardLost, CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived,
+    ChestOpened, Correction, Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision,
+    DecisionChosen, Deck, Detention, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride,
+    FacilityBuilt, GameKind, GameOver, GameRules, GameSeed, GameSession, GameSetup, Gameplay,
+    GiftsGiven, God, GodAppeared, GodDeed, GodLeft, GodPossessed, Hand, Insulation, Inventory,
+    ItemKind, ItemPlaced, Jackpot, JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId,
+    LandStatus, LandTaken, LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought,
+    LotteryDrawn, LotteryTickets, LotteryWon, Market, MarketClock, MinigameResult, MinigameScore,
+    MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap,
+    MoveCapped, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision,
+    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
+    PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, Possession,
+    Presence, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll, RequestStay,
+    Rng, Scope, ServiceCharged, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted,
+    StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested, StockTraded,
+    StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder,
+    TurnPhase, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted, Wallet, deal_to,
+    grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -113,6 +114,12 @@ pub struct TicketRequests(pub Vec<BuyTicketRequested>);
 #[derive(Resource, Default)]
 pub struct AuctionRequests(pub Vec<AuctionMove>);
 
+/// 测试侧的「点建设窗口里的那颗『建一座购物中心』」（P10c）。同样走队列 → 真消息，
+/// 于是「窗口挂的是谁」「这块地归不归他」「一格一设施」「现钱够不够」四道门都被真走到，
+/// 而不是被测试绕过。
+#[derive(Resource, Default)]
+pub struct BuildRequests(pub Vec<BuildRequested>);
+
 /// 自动应答策略。默认 `DeclineAll`：不买不升，于是整局不产生归属、不收租金，
 /// B2 那批「整条回合流水逐字比对」的断言才不会因为经济上线而改变语义。
 /// 要测经济就换成 `AcceptAll`（买得起就买、能升就升）。
@@ -148,8 +155,14 @@ fn auto_answer_system(
     let action = match (about, *policy) {
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::DeclineAll) => Decision::Decline,
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::AcceptAll) => Decision::Accept,
-        // 收据与卡面无论如何都算「看完了」
-        (Pending::RentNotice(_) | Pending::Card, _) => Decision::Acknowledge,
+        // 收据与卡面无论如何都算「看完了」（P10c 起服务收据也在这一族）
+        (Pending::RentNotice(_) | Pending::ServiceNotice(_) | Pending::Card, _) => {
+            Decision::Acknowledge
+        }
+        // 建设窗口（P10c）只认「先不建」。它**不建** —— 与彩票那格「不买券」同一条理由：
+        // 建一座设施要 2200，长跑用例的现金断言钉的是「租金与地价」那几笔，
+        // 多一笔建设费会让几十条既有断言一起红。建造那条路由 `tests/commercial.rs` 自己走
+        (Pending::Build(_), _) => Decision::Acknowledge,
         // 柜台只认「办完」。这里必须显式答一句，否则每一个踩到银行格的回合都会
         // 停在 `WaitDecision`，把所有长跑用例整片挂死 —— 编译器逼这一条写出来。
         // 百货柜台同一条（P3d②）：13 格环上真有一格百货，长跑用例一定会踩到它。
@@ -313,6 +326,15 @@ struct BookReaders<'w, 's> {
     passes: MessageReader<'w, 's, BidWithdrawn>,
     sold: MessageReader<'w, 's, AuctionWon>,
     unsold: MessageReader<'w, 's, AuctionFailed>,
+    // ===== 商业用地（P10c）=====
+    /// 建设报价。与 `upgrade_offers` 分开记：那一条说「往上盖一级」，这一条说
+    /// 「立起一座设施」，断言「自己的空商业地不开升级窗口、开建设窗口」要能分开读。
+    build_offers: MessageReader<'w, 's, BuildOffered>,
+    /// 服务费收据（购物中心摇几点/旅馆住几天/油费几步）。与 `rents` 分开记：
+    /// 商业地的这笔钱不查租金表，混进一张表「收租」与「收费」就分不清了。
+    services: MessageReader<'w, 's, ServiceCharged>,
+    /// 建成凭据。与 `upgraded` 分开记的理由同上。
+    built: MessageReader<'w, 's, FacilityBuilt>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -809,6 +831,35 @@ fn collect_books(
     for m in r.unsold.read() {
         log.0.push(format!("Unsold({},{})", land(m.land), m.price));
     }
+    // ===== 商业用地（P10c）=====
+    for m in r.build_offers.read() {
+        log.0.push(format!(
+            "BuildOffer({},@{}${})",
+            who(&players, m.player),
+            m.land.0,
+            m.cost
+        ));
+    }
+    for m in r.services.read() {
+        log.0.push(format!(
+            "Service({}->{}@L{}${},摇{},住{})",
+            who(&players, m.payer),
+            who(&players, m.owner),
+            m.land.0,
+            m.amount,
+            m.roll,
+            m.stay_days
+        ));
+    }
+    for m in r.built.read() {
+        log.0.push(format!(
+            "Built({}@{}:{:?}${})",
+            who(&players, m.player),
+            m.land.0,
+            m.kind,
+            m.cost
+        ));
+    }
     for m in r.cash.read() {
         audit.0.push((m.player, m.delta, m.balance));
     }
@@ -840,6 +891,7 @@ struct Pump<'w> {
     scores: ResMut<'w, Scores>,
     tickets: ResMut<'w, TicketRequests>,
     auctions: ResMut<'w, AuctionRequests>,
+    builds: ResMut<'w, BuildRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
     stay_writes: MessageWriter<'w, RequestStay>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
@@ -853,6 +905,7 @@ struct Pump<'w> {
     score_writes: MessageWriter<'w, MinigameResult>,
     ticket_writes: MessageWriter<'w, BuyTicketRequested>,
     auction_writes: MessageWriter<'w, AuctionMove>,
+    build_writes: MessageWriter<'w, BuildRequested>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
@@ -895,6 +948,9 @@ fn pump_inputs(mut pump: Pump<'_>) {
     for a in pump.auctions.0.drain(..) {
         pump.auction_writes.write(a);
     }
+    for b in pump.builds.0.drain(..) {
+        pump.build_writes.write(b);
+    }
 }
 
 pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
@@ -923,6 +979,7 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<Scores>()
         .init_resource::<TicketRequests>()
         .init_resource::<AuctionRequests>()
+        .init_resource::<BuildRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -1863,6 +1920,28 @@ pub fn lot_of(app: &App) -> Option<Lot> {
 pub fn liquidation_of(app: &App) -> Vec<LiquidationPlan> {
     auction_of(app).liquidation.clone()
 }
+
+/// 替 `player` 按下建设窗口里的那颗「建一座购物中心」（P10c）。
+/// 走 `BuildRequests` 队列 → 真消息，与其它柜台同一条纪律。
+pub fn build_ask(app: &mut App, player: Entity, land: LandId, kind: BuildingKind) {
+    app.world_mut()
+        .resource_mut::<BuildRequests>()
+        .0
+        .push(BuildRequested { player, land, kind });
+    settle(app, 2);
+}
+
+/// 某块地上立着什么设施（P10c）。`None` ＝ 空地（包括空商业地）。
+pub fn facility_of(app: &mut App, land: u32) -> Option<BuildingKind> {
+    let w = app.world_mut();
+    let mut q = w.query::<(&LandId, Option<&Facility>)>();
+    q.iter(w)
+        .find(|(id, _)| id.0 == land)
+        .and_then(|(_, f)| f.map(|f| f.0))
+}
+
+use game_core::board::BuildingKind;
+use game_core::land::Facility;
 
 /// 奖池现在有多少钱。
 pub fn pot_of(app: &App) -> i64 {

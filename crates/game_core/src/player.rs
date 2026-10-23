@@ -69,7 +69,7 @@ pub struct TokenPosition {
     pub tile: TileIndex,
 }
 
-/// 被送离场的那一族，三种去处共用一个状态（P4）。
+/// 被送离场的那一族，各去处共用一个状态（P4；P10c 起多了第四个名字）。
 ///
 /// **为什么是一个枚举而不是三个组件**：4 代把它们叫作坐牢、住院、被绑架/出国旅游，
 /// 后面还有旅馆住宿与航空出国（P10）、外星人绑架（P11）—— 六七个名字，一件事：
@@ -86,9 +86,13 @@ pub enum DetentionPlace {
     Jail,
     /// 医院（`BranchKind::Hospital`）
     Hospital,
-    /// 不在棋盘上：被绑架、出国旅游、住旅馆、坐飞机。**没有死胡同格**，
+    /// 不在棋盘上：被绑架、出国旅游、坐飞机。**没有死胡同格**，
     /// 所以棋子只能停在接入点上（与「棋盘没有分支格」走的是同一条退路）
     Away,
+    /// 旅馆住宿（P10c，B 型原型装配出来的那一个）。与 [`Self::Away`] 一样**不在地图上**
+    /// —— 棋子停在旅馆所在的那一格，等退房；它与「出国」分开成两枚不是模型需要，
+    /// 是文案需要：住旅馆的人「退房」回来，说「回国」是撒谎。
+    Hotel,
 }
 
 impl DetentionPlace {
@@ -98,7 +102,7 @@ impl DetentionPlace {
         match self {
             Self::Jail => Some(B::Jail),
             Self::Hospital => Some(B::Hospital),
-            Self::Away => None,
+            Self::Away | Self::Hotel => None,
         }
     }
 
@@ -108,16 +112,18 @@ impl DetentionPlace {
             Self::Jail => "监狱",
             Self::Hospital => "医院",
             Self::Away => "国外",
+            Self::Hotel => "旅馆",
         }
     }
 
-    /// 回来那一下的动词。「出狱」「出院」「回国」是三句话，但在模型里是同一条凭据
+    /// 回来那一下的动词。「出狱」「出院」「回国」是几句话，但在模型里是同一条凭据
     /// （`DetentionLifted`）—— 所以变的只有这一个词。
     pub const fn back_verb(self) -> &'static str {
         match self {
             Self::Jail => "出狱",
             Self::Hospital => "出院",
             Self::Away => "回国",
+            Self::Hotel => "退房",
         }
     }
 }

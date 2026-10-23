@@ -65,7 +65,8 @@ pub mod prelude {
         grant_atm_access_system, settle_bank_landing,
     };
     pub use crate::board::{
-        BoardDef, BranchDef, BranchKind, GridPos, LandDef, LandType, TileDef, TileIndex, TileKind,
+        BoardDef, BranchDef, BranchKind, BuildingKind, FeeDef, GridPos, LandDef, LandType, TileDef,
+        TileIndex, TileKind,
     };
     pub use crate::calendar::{
         Date, EPOCH_YEAR, EpochOverride, HolidaySet, LunarYear, date_of, days_in_month,
@@ -78,7 +79,6 @@ pub mod prelude {
         charge_domain_of, scales_with_price, stage, stage_and_spend, transferable,
     };
     pub use crate::coupon::{CouponBoxes, settle_coupon_landing};
-    pub use crate::service::{FeePrototype, ServiceBill, assess as assess_service};
     pub use crate::damage::{DamageTally, LandDamage};
     pub use crate::data::{
         BOARD_PATH, CHANCE_PATH, DataHandles, FATE_PATH, ITEMS_PATH, STOCKS_PATH,
@@ -98,7 +98,7 @@ pub mod prelude {
     };
     pub use crate::hand::{CardAim, Hand, PlayWindow, card_notice, deal_to, play_card_system};
     pub use crate::items::{Inventory, ItemKind};
-    pub use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
+    pub use crate::land::{BuildingLevel, Facility, LandId, Mortgaged, Owner};
     pub use crate::landing::{
         Landed, Landing, LandingDomain, Pending, PendingDecision, classify_landing_system,
         close_landing_system, decision_system, detain, domain_of, teleport,
@@ -122,18 +122,18 @@ pub mod prelude {
     pub use crate::msg::{
         AuctionFailed, AuctionMove, AuctionStarted, AuctionWon, BailRequested, BankOp, BankOpDone,
         BankOpRequested, BankVisited, BidMove, BidPlaced, BidWithdrawn, BombTransferred,
-        BuyOffered, BuyTicketRequested, CardDrawn, CardGained, CardLost, CardNotice, CardPlayed,
-        CashChanged, ChargeWaived, ChestOpened, Decision, DecisionChosen, DetentionLifted,
-        DetentionSkipped, DiceRolled, EffectOutcome, GameOver, GiftGiven, GiftsGiven, GodAppeared,
-        GodDeed, GodExit, GodLeft, GodPossessed, ItemPlaced, JackpotChanged, JackpotWhy,
-        LandBought, LandTaken, LandUpgraded, LotteryBought, LotteryDrawn, LotteryWon,
-        MinigameResult, MinigameScore, MortgageDone, MortgageOp, MortgageRequested, MountChanged,
-        MoveCapped, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
-        PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, RedEnvelope,
-        RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll, RequestStay, ShopOpDone,
-        ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged, StockTradeRequested,
-        StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered,
-        WalkHalted, WalkStarted,
+        BuildOffered, BuildRequested, BuyOffered, BuyTicketRequested, CardDrawn, CardGained,
+        CardLost, CardNotice, CardPlayed, CashChanged, ChargeWaived, ChestOpened, Decision,
+        DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled, EffectOutcome,
+        FacilityBuilt, GameOver, GiftGiven, GiftsGiven, GodAppeared, GodDeed, GodExit, GodLeft,
+        GodPossessed, ItemPlaced, JackpotChanged, JackpotWhy, LandBought, LandTaken, LandUpgraded,
+        LotteryBought, LotteryDrawn, LotteryWon, MinigameResult, MinigameScore, MortgageDone,
+        MortgageOp, MortgageRequested, MountChanged, MoveCapped, PlaceItemRequested,
+        PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
+        PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
+        RequestRoll, RequestStay, ServiceCharged, ShopOpDone, ShopOpRequested, StayLifted,
+        StaySkipped, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
+        TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted,
     };
     pub use crate::occupancy::{
         BOMB_HOSPITAL_DAYS, BOMB_STEPS, HaltCause, MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt,
@@ -147,16 +147,19 @@ pub mod prelude {
         StaySentence, TokenPosition, WalkQueue, Wallet,
     };
     pub use crate::plot::{PlotArea, area_of, is_in_area};
-    pub use crate::property::settle_property_landing;
+    pub use crate::property::{
+        BuildDeny, build_op_allowed, build_op_system, settle_property_landing,
+    };
     pub use crate::rng::{DIE_FACES, GameSeed, Rng};
     pub use crate::rules::GameRules;
+    pub use crate::service::{FeePrototype, ServiceBill, assess as assess_service};
     pub use crate::settle::{Books, InsufficientFunds};
     pub use crate::shop::{
         ShopDeny, ShopStock, buyback, restock, settle_shop_landing, shop_op_allowed, shop_op_system,
     };
     pub use crate::status::{LandStatus, Timed, expire_land_status_system};
     pub use crate::stock::{PriceHistory, StockDef, StockHoldings, StockId, StockPrice, StockSet};
-    pub use crate::turn::{GameSession, Paused, TurnOrder, TurnPhase, not_paused};
+    pub use crate::turn::{GameSession, LastRoll, Paused, TurnOrder, TurnPhase, not_paused};
     pub use crate::walk::{
         WalkClock, WalkPlan, advance_walk_clock_system, plan_walk, walk_step_system,
     };
@@ -167,20 +170,21 @@ use bank::apply_month_end_interest_system;
 use prelude::{
     ActiveBoard, ArcadeDeal, AtmAccess, AuctionFailed, AuctionMove, AuctionStarted, AuctionWon,
     BailRequested, BankOpDone, BankOpRequested, BankVisited, BidPlaced, BidWithdrawn, BoardDef,
-    BombTransferred, BuyOffered, BuyTicketRequested, CardDrawn, CardGained, CardLost, CardPlayed,
-    CardSet, CashChanged, ChargeWaived, ChestOpened, Corrections, CouponBoxes, DecisionChosen,
-    DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, GameOver, GameRules, GameSeed,
-    GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, ItemPlaced,
-    JackpotChanged, JsonAssetLoader, LandBought, LandTaken, LandUpgraded, Landing, LotteryBought,
-    LotteryDrawn, LotteryWon, MarketClock, MinigameResult, MinigameScore, MortgageDone,
-    MortgageRequested, MountChanged, MoveCapped, Paused, PendingDecision, PlaceItemRequested,
-    PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
-    PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice,
-    RequestRoll, RequestStay, ShopOpDone, ShopOpRequested, ShopStock, StayLifted, StaySkipped,
-    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
-    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkHalt, WalkHalted,
-    WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system, auction_hold_system,
-    auction_move_system, bail_op_system, bank_op_system, begin_game_system, decision_system,
+    BombTransferred, BuildOffered, BuildRequested, BuyOffered, BuyTicketRequested, CardDrawn,
+    CardGained, CardLost, CardPlayed, CardSet, CashChanged, ChargeWaived, ChestOpened, Corrections,
+    CouponBoxes, DecisionChosen, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride,
+    FacilityBuilt, GameOver, GameRules, GameSeed, GameSetup, GiftsGiven, GodAppeared, GodDeed,
+    GodLeft, GodPossessed, HolidaySet, ItemPlaced, JackpotChanged, JsonAssetLoader, LandBought,
+    LandTaken, LandUpgraded, Landing, LotteryBought, LotteryDrawn, LotteryWon, MarketClock,
+    MinigameResult, MinigameScore, MortgageDone, MortgageRequested, MountChanged, MoveCapped,
+    Paused, PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
+    PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, RedEnvelope, RemoteDiceUsed,
+    RentDue, RequestRemoteDice, RequestRoll, RequestStay, ServiceCharged, ShopOpDone,
+    ShopOpRequested, ShopStock, StayLifted, StaySkipped, StockPriceChanged, StockSet,
+    StockTradeRequested, StockTraded, StockVisited, TileStepped, TurnEnded, TurnPhase, TurnStarted,
+    UpgradeOffered, WalkClock, WalkHalt, WalkHalted, WalkStarted, accrue_jackpot_interest_system,
+    advance_walk_clock_system, auction_hold_system, auction_move_system, bail_op_system,
+    bank_op_system, begin_game_system, build_op_system, decision_system,
     deliver_calendar_events_system, draw_lottery_system, expire_land_status_system,
     finish_halt_system, grant_atm_access_system, land_deity_succession_system, lottery_op_system,
     market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system, place_item_system,
@@ -189,7 +193,7 @@ use prelude::{
     walk_effect_system, walk_step_system, wander_gods_system,
 };
 use turn::{
-    begin_turn_system, end_turn_system, game_over_system, not_paused, remote_dice_system,
+    LastRoll, begin_turn_system, end_turn_system, game_over_system, not_paused, remote_dice_system,
     roll_dice_system, take_stay_system, update_price_index_system,
 };
 use world::CoreSet;
@@ -239,6 +243,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<ArcadeDeal>()
             .init_resource::<lottery::Jackpot>()
             .init_resource::<auction::Auction>()
+            .init_resource::<LastRoll>()
             .init_resource::<WalkHalt>()
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
@@ -269,6 +274,10 @@ impl Plugin for CoreGamePlugin {
             // 土地公的过户（P6c）。与 `LandBought` 分两条：那条说「有人付了这笔钱」，这条没有
             .add_message::<LandTaken>()
             .add_message::<LandUpgraded>()
+            .add_message::<BuildOffered>()
+            .add_message::<BuildRequested>()
+            .add_message::<FacilityBuilt>()
+            .add_message::<ServiceCharged>()
             .add_message::<RentDue>()
             // 一次性修正生效那一笔（免费卡花掉了）。不注册的话 `Books` 的 writer
             // 参数校验直接失败 —— 而 `Books` 被每个 system 用着，症状是整局不跑
@@ -470,6 +479,12 @@ impl Plugin for CoreGamePlugin {
                     // 保释与银行/百货/抵押同一条窗口形状（都带 `Books` 里的 `&mut Points`），
                     // 所以一起 `chain`：谁先办都不改结果，只是不能并行借同一份账本
                     bail_op_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
+                    // 建设柜台（P10c）：与上面四条同一族（都带 `Books`，都读「此刻站在哪个
+                    // 柜台前」，都不动回合状态）。办完一条建造窗口照开，玩家按「先不建」
+                    // 才由 `decision_system` 交还回合 —— 与柜台「办完才关窗」同一形
+                    build_op_system
                         .run_if(resource_exists::<ActiveBoard>)
                         .run_if(not_paused),
                 )

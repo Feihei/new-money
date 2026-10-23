@@ -17,10 +17,10 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
     ActiveBoard, ArcadeDeal, AtmAccess, Auction, BankBalance, Bankrupt, BuildingLevel, CardKind,
-    Corrections, CouponBoxes, Deck, DeckOrder, Detention, GameRules, GameSeed, GameSession, Hand,
-    Heading, HolidaySet, Insulation, Inventory, Jackpot, LandId, LandStatus, Landing,
-    LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap, Occupancy, OccupancyAt, Owner, Paused,
-    Pending, PendingDecision, PlayerId, PlayerName, Points, Possession, Shelf, ShopStock,
+    Corrections, CouponBoxes, Deck, DeckOrder, Detention, Facility, GameRules, GameSeed,
+    GameSession, Hand, Heading, HolidaySet, Insulation, Inventory, Jackpot, LandId, LandStatus,
+    Landing, LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap, Occupancy, OccupancyAt, Owner,
+    Paused, Pending, PendingDecision, PlayerId, PlayerName, Points, Possession, Shelf, ShopStock,
     StaySentence, Timed, TurnOrder, TurnPhase, Wallet, resists,
 };
 
@@ -136,6 +136,7 @@ type PlotRow = (
     &'static BuildingLevel,
     &'static Mortgaged,
     Option<&'static Timed<LandStatus>>,
+    Option<&'static Facility>,
 );
 
 /// 面板要读的全部世界状态。收成一个参数包是这仓库的房规：需要知道的就是这么多，
@@ -631,14 +632,14 @@ fn format_lands(view: &DumpView) -> Vec<String> {
     let mut rows: Vec<(u32, String)> = view
         .plots
         .iter()
-        .map(|(id, owner, level, mortgage, status)| {
+        .map(|(id, owner, level, mortgage, status, facility)| {
             let name = def
                 .and_then(|d| d.land(id.0))
                 .map_or("", |l| l.name.as_str());
             (
                 id.0,
                 format!(
-                    "L{:<2} {:<8} owner {:?} {} {} {} {}",
+                    "L{:<2} {:<8} owner {:?} {} {} {} {} {}",
                     id.0,
                     name,
                     owner.0.map(|p| p.0),
@@ -667,6 +668,9 @@ fn format_lands(view: &DumpView) -> Vec<String> {
                                 .map(|(_, label)| format!("业主在{label}·不收租"))
                         })
                         .unwrap_or_default(),
+                    // 商业设施（P10c）。空商业地读出来是空的（那一格本来就该是空），
+                    // 而「这块地为什么收了 600」要能一眼看见立的是什么
+                    facility.map_or_else(String::new, |f| f.0.label().to_string()),
                 ),
             )
         })

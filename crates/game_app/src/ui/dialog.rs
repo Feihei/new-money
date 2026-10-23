@@ -14,12 +14,12 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AfflictDomain, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Books,
-    BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind, Decision,
-    DetentionPlace, EffectOutcome, Hand, Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny,
-    LotteryTickets, MortgageDeny, MortgageOp, Owner, Pending, PendingDecision, PlayerId,
-    PlayerName, Rng, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed,
-    bid_allowed, bidders, buy_allowed, buyback, counter_plots, mortgage_op_allowed, read_facts,
-    restock, shop_op_allowed,
+    BuildingKind, BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind,
+    Decision, DetentionPlace, EffectOutcome, Facility, Hand, Jackpot, LandId, LandStatus, LandType,
+    Lot, LotteryDeny, LotteryTickets, MortgageDeny, MortgageOp, Owner, Pending, PendingDecision,
+    PlayerId, PlayerName, Rng, ServiceCharged, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder,
+    bail_op_allowed, bid_allowed, bidders, buy_allowed, buyback, counter_plots,
+    mortgage_op_allowed, read_facts, restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -55,6 +55,12 @@ pub(crate) struct ModalRoot {
 /// 这一份**必须**在回菜单时清掉：它是消息留下的记忆，实体上没有对应物。
 #[derive(Resource, Default)]
 pub(crate) struct RecentCard(pub(crate) Option<CardNotice>);
+
+/// 最近一笔服务费（P10c）。`Pending::ServiceNotice` 只挂着「哪块地」，摇了几点、住了几天、
+/// 收了多少全在 [`ServiceCharged`] 这条消息里 —— 与 [`RecentCard`] 同一条分工，
+/// 也同一条纪律：它必须回主菜单时清掉（消息留下的记忆，实体上没有对应物）。
+#[derive(Resource, Default)]
+pub(crate) struct RecentService(pub(crate) Option<ServiceCharged>);
 
 /// 开发用：`NM_DECISION=buy|upgrade|rent|card|bank` 直接把那个模态挂出来。
 ///
@@ -144,6 +150,17 @@ pub(crate) fn remember_drawn_card(
     }
 }
 
+/// 记下最近一笔服务费。排在 [`sync_modal`] 之前 —— 收据弹出来的那一帧就要读得到它
+/// （与 [`remember_drawn_card`] 同一条时序理由）。
+pub(crate) fn remember_service(
+    mut charged: MessageReader<ServiceCharged>,
+    mut memory: ResMut<RecentService>,
+) {
+    for bill in charged.read() {
+        memory.0 = Some(*bill);
+    }
+}
+
 /// 模态这一屏要读的世界状态。打包成参数包是这仓库的房规：`sync_modal` 本来就要同时看
 /// 「等谁回答」「上一张卡」「今天几号」「现在挂着的是哪块面板」，
 /// 而 `#[allow(clippy::too_many_arguments)]` 会把「一个 system 要读八样东西」这个信号吃掉
@@ -152,6 +169,8 @@ pub(crate) fn remember_drawn_card(
 pub(crate) struct ModalView<'w, 's> {
     pending: Res<'w, PendingDecision>,
     memory: Res<'w, RecentCard>,
+    /// 最近一笔服务费（P10c）。收据的读数全在这里：摇了几点、住了几天、收了多少
+    bill: Res<'w, RecentService>,
     /// 百货柜台这一趟的货架（P3d②）。它是资源而不是世界状态：同一时刻只有柜台前那位看得见
     stock: Res<'w, ShopStock>,
     /// 卡面文案在货架上（`ShopStock` 里只有下标）
@@ -193,6 +212,14 @@ pub(crate) fn sync_modal(
     let bails: Vec<BailRow> = match want {
         Some((player, Pending::Bail(place))) => bail_rows(&books, &names, player, place),
         _ => Vec::new(),
+    };
+    // 服务费收据的读数（P10c）：只有那张收据才算。名字与地块名在这里查好，
+    // 收据那一屏拿到的就是一份可以直接上屏的东西 —— 与 `bails` 同一条分工
+    let service: Option<ServiceRow> = match want {
+        Some((_player, Pending::ServiceNotice(land))) => {
+            service_row(&books, &names, &view.bill, land)
+        }
+        _ => None,
     };
     // 彩票柜台的读数：只有它开着才算（P8）。判据要的现金、号码池、已有的号都在这里，
     // 奖池那一半从 `view.jackpot` 读 —— 面板与规则层读的是同一份事实
@@ -246,6 +273,7 @@ pub(crate) fn sync_modal(
                 bails: &bails,
                 lottery: lottery.as_ref(),
                 bid: bid.as_ref(),
+                service: service.as_ref(),
             },
         )
     });
@@ -295,6 +323,30 @@ pub(crate) fn sync_modal(
             Pending::Bail(place) => {
                 bail_modal(&mut commands, &font, &books, player, place, &bails, stamp);
             }
+            // 建设窗口（P10c）。候选与灰按钮的判据全在 `Books::build_probe` 里 ——
+            // 面板不在自己这一侧另算一遍价（P9 那条「写的与扣的必须同一个表达式」）。
+            // 建成之后窗口照开（`decision_system` 那一格的注）：这一屏会重建成
+            // 「这里已经立着设施」的样子，玩家按「离开」才走
+            Pending::Build(land) => {
+                build_modal(&mut commands, &font, &books, player, land, stamp);
+            }
+            // 服务费收据（P10c）。与租金收据同一族：钱已经扣完（或被吃成 0），
+            // 这一屏只负责把「摇了几点、住了几天」说出来。读数在 `sync_modal` 那边
+            // 就像 `bails` 一样先摊好（`ServiceRow`）—— 这一屏的五个参数已经是上限了
+            Pending::ServiceNotice(land) => {
+                if let Some(row) = service.as_ref() {
+                    service_modal(&mut commands, &font, player, row, stamp);
+                } else {
+                    // 拿不到读数（注入挂的窗口、或消息还没到）：说得出「结算过了」，
+                    // 与 `card_modal` 的 `fallback_note` 同一条退路，不 panic
+                    fallback_note(
+                        &mut commands,
+                        &font,
+                        (player, Pending::ServiceNotice(land)),
+                        "服务费已结算",
+                    );
+                }
+            }
             // 彩票柜台（P8）。`lottery` 在这一屏必然是 `Some`（上面那个 match 只在
             // `Pending::Lottery` 开着时才填它），但这里不 unwrap 一个「编译器不知道」的
             // 事实：拿默认读数建一屏比整块不建更难查。
@@ -339,6 +391,10 @@ struct ModalExtra<'a> {
     /// 拍卖台的读数（P9）：这一场喊到哪、还在争谁、后面还排着几块。
     /// 「现在轮到谁」不在这里 —— 窗口挂在谁身上就是谁，由 `PendingDecision` 带
     bid: Option<&'a BidDesk>,
+    /// 服务费收据的读数（P10c）。它读的是 `RecentService`（消息留下的那一笔），
+    /// 所以**内容本身就是判据**：消息晚到一帧时这一屏要先重建成真读数，而不是停在
+    /// 「服务费已结算」那句兜底话上
+    service: Option<&'a ServiceRow>,
 }
 
 fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<'_>) -> String {
@@ -445,6 +501,32 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
             .view(land)
             .map_or(String::new(), |view| format!("Lv{}", view.level)),
         Pending::RentNotice(_) | Pending::Card => String::new(),
+        // 服务费收据的「签名」是它自己那份读数（P10c）：这笔钱已经结完、内容不会再变，
+        // 唯一的变动来源是**消息晚到**（`remember_service` 与这一屏在两个 system 里）。
+        // 不带这一格，晚到的那一帧会建出一屏「服务费已结算」，而下一帧签名不变、
+        // 不复建 —— 一张说得出金额的收据永远上不了屏（本阶段做 `NM_SERVICE` 时踩到）
+        Pending::ServiceNotice(_) => extra.service.map_or_else(
+            || "空".to_string(),
+            |row| {
+                format!(
+                    "{}|{}|{}|{}",
+                    row.amount, row.roll, row.stay_days, row.kind as u8
+                )
+            },
+        ),
+        // 建设窗口是本仓库第二种「同一块地、数字会动」的报价：建完之后这一屏要翻成
+        // 「这里已经立着设施」，而现金也会少一截 —— 少一位就会出现「已经建好了、
+        // 按钮还亮着」那种让人按第二次的面板。层数与 `Buy`/`Upgrade` 同一条理由带上
+        Pending::Build(land) => books.view(land).map_or(String::new(), |view| {
+            format!(
+                "{}|{}|{}",
+                books.balance(player),
+                view.level,
+                // `facility_of` 那一格是「建没建成」的唯一读数。用 `bool` 而不是名字：
+                // 这一屏重建要看的是「空 → 有」这一次翻转，建的是哪一类不影响判据
+                books.facility_of(land).is_some() as u8,
+            )
+        }),
     }
 }
 
@@ -2017,6 +2099,378 @@ fn bail_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &BailRow) {
             line.spawn(label(&font.0, reason, size::ROW, col::JAILED));
         }
     });
+}
+
+/// 建设窗口（P10c）：自己的**空商业地**上立哪一类设施。
+///
+/// 五类候选、各自一颗按钮，价钱**只有一行** —— 与升级同一格数据
+/// （`economy::upgrade_cost`）：「在这块地上立一座购物中心」与「加盖一级」是同一笔
+/// 建设费，价格不随类别变。每颗按钮的灰与理由都来自 [`Books::build_probe`]：
+/// 面板算的那一笔就是账本要扣的那一笔（同一条表达式，不是两份同样的 if）。
+///
+/// 建完之后这一屏会重建成「这里已经立着设施」的样子（窗口照开，理由见
+/// `landing::decision_system` 里 `Pending::Build` 那一格的注）。
+fn build_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    books: &Books,
+    player: Entity,
+    land: LandId,
+    stamp: String,
+) -> Entity {
+    let name = books
+        .active
+        .def
+        .land(land.0)
+        .map_or_else(String::new, |l| l.name.clone());
+    let built = books.facility_of(land);
+    // 五类各问一次：`Ok(cost)` 顺手给出这一屏要写的价，`Err(why)` 就是那颗按钮上的灰
+    let rows: Vec<(BuildingKind, Result<i64, String>)> = BuildingKind::ALL
+        .iter()
+        .map(|kind| {
+            (
+                *kind,
+                books
+                    .build_probe(player, land, *kind)
+                    .map_err(|why| why.label().to_string()),
+            )
+        })
+        .collect();
+    let cost = rows
+        .iter()
+        .find_map(|(_, probe)| probe.as_ref().ok().copied())
+        .unwrap_or(0);
+
+    frame(
+        commands,
+        (player, Pending::Build(land)),
+        stamp,
+        layout::SHOP_PANEL,
+        col::BORDER_SHOP,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                format!("建设 {name}"),
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                if built.is_some() {
+                    // 建成之后窗口还在：这一行就是「已经办完了」的凭据，
+                    // 玩家按下面的「离开」才交还回合
+                    format!("这里已经立着{}", built.map(|k| k.label()).unwrap_or("设施"))
+                } else {
+                    format!("造价 ${} — 立起之后路过的人按设施收费", comma(cost))
+                },
+                size::ROW,
+                col::MUTED,
+            ));
+            p.spawn(separator());
+            for (kind, probe) in &rows {
+                build_row(p, font, land, *kind, probe);
+            }
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        // 建成之后这一颗是正经出口；没建则是「这一趟不作」——
+                        // 两条意思同一个动作（`decision_system` 只认 `Acknowledge`）
+                        "离开",
+                        layout::MODAL_BUTTON,
+                        SECONDARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
+}
+
+/// 建设窗口的一行：「设施名 + 一颗带价目的按钮 + 灰掉时的那句话」。
+/// 与 [`bail_row`] 同一形 —— 五颗按钮都不在主行里，理由要写在自己旁边。
+fn build_row(
+    p: &mut ChildSpawnerCommands,
+    font: &DevFont,
+    land: LandId,
+    kind: BuildingKind,
+    probe: &Result<i64, String>,
+) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        ..default()
+    })
+    .with_children(|line| {
+        let (text, ink) = match probe {
+            Ok(cost) => (format!("{} ${}", kind.label(), comma(*cost)), col::BODY),
+            Err(_) => (kind.label().to_string(), col::KEY),
+        };
+        line.spawn((
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            super::label(&font.0, text, size::ROW, ink),
+        ));
+        button(
+            line,
+            &font.0,
+            ButtonSpec::new(
+                &format!("建{}", kind.label()),
+                layout::SHOP_BUTTON,
+                super::PRIMARY,
+                UiAction::Build { land, kind },
+            )
+            .disabled(probe.is_err()),
+        );
+        if let Err(reason) = probe {
+            line.spawn(super::label(&font.0, reason, size::ROW, col::JAILED));
+        }
+    });
+}
+
+/// 服务费收据那一屏要摊开的全部读数（P10c）。它是 `sync_modal` 在开窗那一刻从
+/// `RecentService` 与世界状态里查好的 —— 「谁付、付给谁、在哪、怎么算的、多少钱」，
+/// 五样都是消息里带着的事实，这一屏自己不再查一遍。
+struct ServiceRow {
+    land: LandId,
+    kind: BuildingKind,
+    payer_name: String,
+    owner_name: String,
+    land_name: String,
+    amount: i64,
+    roll: u32,
+    stay_days: u32,
+}
+
+/// 查一屏收据的读数。`memory` 里那一笔必须**正是这块地**的：收据弹出来之前
+/// 中间不会夹别的服务费（落格结算一帧一笔），但注入挂窗口时可能压根没有。
+fn service_row(
+    books: &Books,
+    names: &Query<&PlayerName>,
+    memory: &RecentService,
+    land: LandId,
+) -> Option<ServiceRow> {
+    let bill = memory.0.filter(|b| b.land == land)?;
+    Some(ServiceRow {
+        land,
+        kind: bill.kind,
+        payer_name: names
+            .get(bill.payer)
+            .map(|n| n.0.clone())
+            .unwrap_or_default(),
+        owner_name: names
+            .get(bill.owner)
+            .map(|n| n.0.clone())
+            .unwrap_or_default(),
+        land_name: books
+            .active
+            .def
+            .land(land.0)
+            .map_or_else(String::new, |l| l.name.clone()),
+        amount: bill.amount,
+        roll: bill.roll,
+        stay_days: bill.stay_days,
+    })
+}
+
+/// 服务费收据（P10c）：钱已经结完（免单就是 0），这一屏只把「怎么算出来的」说清楚。
+///
+/// A 型要说摇出几点、B 型要说住了几天 —— 与租金收据同一个位置、同一条纪律：
+/// 免单也要弹，否则玩家看不出「为什么没被收钱」。
+fn service_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    payer: Entity,
+    row: &ServiceRow,
+    stamp: String,
+) -> Entity {
+    // 怎么算出来的：A 型写档位、B 型写天数，C 型不写掷骰（它按步数，而步数不在消息里 ——
+    // `roll` 那一格对 C 型是 0，写出来就是「摇出 0」这句假话）
+    let detail = if row.stay_days > 0 {
+        format!("摇出 {}，住 {} 天", row.roll, row.stay_days)
+    } else if row.roll > 0 {
+        format!("摇出 {}", row.roll)
+    } else {
+        "按这一回合的步数计费".to_string()
+    };
+
+    frame(
+        commands,
+        (payer, Pending::ServiceNotice(row.land)),
+        stamp,
+        layout::RENT_PANEL,
+        col::BORDER_SHOP,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                format!("{} 服务费", row.kind.label()),
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                format!(
+                    "{} 踩到 {} 的{}",
+                    row.payer_name, row.owner_name, row.land_name
+                ),
+                size::NAME,
+                col::BODY,
+            ));
+            p.spawn(center_label(&font.0, detail, size::ROW, col::MUTED));
+            p.spawn(center_label(
+                &font.0,
+                format!("- ${}", comma(row.amount)),
+                size::RENT_AMOUNT,
+                if row.amount == 0 {
+                    col::MUTED
+                } else {
+                    col::COST
+                },
+            ));
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "确认",
+                        layout::OK_BUTTON,
+                        super::PRIMARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
+}
+
+/// 开发用：`NM_BUILD=1` 把演示盘那块商业地（外滩）划给当前回合玩家、摘掉预建的购物中心，
+/// 再挂出建设窗口。
+///
+/// 摘除是 `Commands`（延迟写），所以开出来的第一帧面板可能还读到「已经立着设施」——
+/// 下一帧签名翻转，`sync_modal` 自己会重建成空的建设窗口（那一帧的闪烁比「两帧才开窗」
+/// 少一次往返，而两者都只在开发旋钮下出现）。
+/// 判据由头上的 `Local` 收着，只在**这一局**做一次（与 `dev_grant_plots` 同一条代价）。
+pub(crate) fn dev_open_build(
+    mut commands: Commands,
+    order: Option<Res<TurnOrder>>,
+    active: Option<Res<ActiveBoard>>,
+    faces: Query<&PlayerId>,
+    mut lands: Query<(Entity, &LandId, &mut Owner)>,
+    mut pending: ResMut<PendingDecision>,
+    mut done: Local<bool>,
+) {
+    // 只在**这一局**做一次，而且窗口已经挂着别人时什么都不碰。两道门都必须在
+    // **任何世界写入之前**：挡在后面的话，这个旋钮每帧都会重写 `Owner`，
+    // 而 `render::land::sync_buildings` 是变化驱动的 —— 它于是每帧往那几块 slab
+    // 上写 `Visibility`，撞上拆场那一帧就是一条「Entity despawned」的 panic
+    // （本阶段实测：`NM_BUILD` 与 `NM_SERVICE` 同时打开、`NM_MENULOOP` 换场景时必崩）
+    if *done || pending.active().is_some() {
+        return;
+    }
+    let (Some(order), Some(active)) = (order, active) else {
+        return;
+    };
+    let Some(player) = order.current() else {
+        return;
+    };
+    let Some(pid) = faces.get(player).ok().copied() else {
+        return;
+    };
+    let Some(def) = active
+        .def
+        .lands
+        .iter()
+        .find(|l| l.land_type == LandType::Commercial && l.building_kind.is_none())
+        .or_else(|| {
+            active
+                .def
+                .lands
+                .iter()
+                .find(|l| l.land_type == LandType::Commercial)
+        })
+    else {
+        return;
+    };
+    let land = LandId(def.id);
+    for (entity, id, mut owner) in &mut lands {
+        if *id != land {
+            continue;
+        }
+        owner.0 = Some(pid);
+        // 预建设施要摘掉，否则这扇窗口开不出来（`Pending::Build` 的前提就是空地）
+        commands.entity(entity).remove::<Facility>();
+    }
+    if pending.active().is_some() {
+        return;
+    }
+    pending.offer(player, Pending::Build(land));
+    *done = true;
+}
+
+/// 开发用：`NM_SERVICE=1` 把外滩那块商业地划给**另一位**玩家（预建的购物中心留着），
+/// 再挂出一张服务费收据。
+///
+/// 为什么需要它：收据的正经入口是「有人踩到别人的设施」—— 那一掷由骰子说了算，而这一屏
+/// **只有两三秒的窗口期**（`NM_AUTOROLL` 的自动玩家下一帧就把它答掉），截图按墙钟撞不上
+/// （与 `NM_SHOP`／`NM_BUILD` 同一条判据：每个界面都得有一条不靠鼠标的入口）。
+///
+/// 它发一条**真凭据**（`ServiceCharged`，走 `remember_service` 那条正路）而不是只挂窗口：
+/// 收据的内容全在这条消息里，不发它，这一屏只写得出「服务费已结算」那句兜底话。
+/// 代价是这条流水没有对应的现金变动 —— 它不参与任何审计（那是 `tests/` 的事），
+/// 而这个旋钮**只在开发时打开**。
+pub(crate) fn dev_open_service(
+    order: Option<Res<TurnOrder>>,
+    active: Option<Res<ActiveBoard>>,
+    faces: Query<&PlayerId>,
+    mut lands: Query<(&LandId, &mut Owner)>,
+    mut pending: ResMut<PendingDecision>,
+    mut charged: MessageWriter<ServiceCharged>,
+    mut done: Local<bool>,
+) {
+    if *done || pending.active().is_some() {
+        return;
+    }
+    let (Some(order), Some(active)) = (order, active) else {
+        return;
+    };
+    // 地主与来客各挑一个：收据那张纸上要写两个名字
+    let (Some(owner), Some(guest)) = (order.order.first().copied(), order.order.get(1).copied())
+    else {
+        return;
+    };
+    let Ok(owner_id) = faces.get(owner) else {
+        return;
+    };
+    let Some(def) = active
+        .def
+        .lands
+        .iter()
+        .find(|l| l.land_type == LandType::Commercial)
+    else {
+        return;
+    };
+    let land = LandId(def.id);
+    for (id, mut holder) in &mut lands {
+        if *id == land {
+            holder.0 = Some(*owner_id);
+        }
+    }
+    // 摇出 3 → A 型第 3 档。数写死在这里是有意的：这一屏要验的是「读得出怎么算的」
+    charged.write(ServiceCharged {
+        payer: guest,
+        owner,
+        land,
+        kind: BuildingKind::Mall,
+        amount: 600,
+        roll: 3,
+        stay_days: 0,
+    });
+    pending.offer(guest, Pending::ServiceNotice(land));
+    *done = true;
 }
 
 /// 开发用：`NM_SHOP=1` 挂出百货柜台，并把「进得了店」需要的两样备齐 —— 一次换货与一笔点券。

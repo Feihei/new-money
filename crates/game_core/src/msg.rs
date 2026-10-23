@@ -245,6 +245,48 @@ pub struct LandUpgraded {
     pub new_level: u8,
 }
 
+/// 建设报价（P10c）：`player` 站在自己的空商业地 `land` 上，造价一律 `cost`
+/// （五类设施同价，取的是 `upgrade_cost`）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildOffered {
+    pub player: Entity,
+    pub land: LandId,
+    pub cost: i64,
+}
+
+/// 建造请求（P10c）：在 `land` 上立起 `kind` 那类设施。窗口与柜台同一形
+/// （`Pending::Build` 开着才被受理），请求逐笔来、办完窗口照开。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildRequested {
+    pub player: Entity,
+    pub land: LandId,
+    pub kind: crate::board::BuildingKind,
+}
+
+/// 已建成（P10c）：`land` 上立起 `kind`，造价 `cost` 已从现金扣除
+/// （`ChargeKind::Build`，过修正管线 —— 大福神那类 Acquire 豁免吃得到它）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FacilityBuilt {
+    pub player: Entity,
+    pub land: LandId,
+    pub kind: crate::board::BuildingKind,
+    pub cost: i64,
+}
+
+/// 服务费已结算（P10c）：`payer` 踩到 `owner` 的设施 `land` 上被收了 `amount`。
+/// `roll` 是 A/B 型摇出的数（摇出几走第几档/住几天；C 型为 0）；
+/// `stay_days` 非 0 时 `payer` 已被送去 [`crate::player::DetentionPlace::Hotel`] 住宿。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceCharged {
+    pub payer: Entity,
+    pub owner: Entity,
+    pub land: LandId,
+    pub kind: crate::board::BuildingKind,
+    pub amount: i64,
+    pub roll: u32,
+    pub stay_days: u32,
+}
+
 // ===== 经济与银行 =====
 
 /// 现金变动。所有 `Wallet` 的增减都必须留下一条这条流水 ——

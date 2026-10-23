@@ -98,7 +98,11 @@ pub(crate) fn sync_buildings(
             mat.base_color = Color::srgb(r, g, b);
         }
         for (i, slab) in visual.slabs.iter().enumerate() {
-            commands.entity(*slab).insert(if (i as u8) < level.0 {
+            // `try_insert` 而不是 `insert`（P10c 踩到）：这一帧若正好在拆场
+            // （`OnEnter(Menu)` 把整盘连 slab 一起 despawn），`Commands` 的延迟写会
+            // 落到一个已经失效的实体上 —— 那是 `Entity despawned` 的 panic，
+            // 而语义上「那块装饰已经不在了」本来就等于「没什么要同步的」
+            commands.entity(*slab).try_insert(if (i as u8) < level.0 {
                 Visibility::Visible
             } else {
                 Visibility::Hidden

@@ -12,7 +12,7 @@
 use bevy::ecs::entity::Entity;
 use game_core::prelude::{
     Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, FeePrototype, Mount,
-    Scope, Source, ServiceBill, assess_service, charge_domain_of, scales_with_price, stage,
+    Scope, ServiceBill, Source, assess_service, charge_domain_of, scales_with_price, stage,
     stage_and_spend, transferable,
 };
 
@@ -40,12 +40,7 @@ fn mall() -> FeePrototype {
 /// kind 是 `Service`、付方是踩格者、收方按载体是地主或董事长 —— 装配层（P10c/P10d）
 /// 不该有自己的第二种写法，否则「免费卡为什么吃得到购物中心、吃不到买地」就说不清了。
 fn service_charge(payer: Entity, payee: Entity, bill: ServiceBill) -> Charge {
-    Charge::new(
-        ChargeKind::Service,
-        Some(payer),
-        Some(payee),
-        bill.base,
-    )
+    Charge::new(ChargeKind::Service, Some(payer), Some(payee), bill.base)
 }
 
 /// 三张表对 `Service` 的裁定：归「过路费」域（P2 写下那行注释时等的就是它）、
@@ -86,19 +81,31 @@ fn a_free_pass_cancels_a_service_bill_and_burns_exactly_one_card() {
 
     // 摇出 1 天：名义 1500，没过门槛 —— 不免、也不烧卡
     let bill = assess_service(&pricey, 1, 0, Mount::Foot).expect("旅馆必有账");
-    let (staged, spent) = stage_and_spend(service_charge(player(1), player(2), bill), 1.0, &corrections);
+    let (staged, spent) = stage_and_spend(
+        service_charge(player(1), player(2), bill),
+        1.0,
+        &corrections,
+    );
     assert_eq!(staged.amount, 1_500, "没过门槛的账照付");
     assert!(spent.is_empty(), "没生效就不该烧卡");
 
     // 摇出 2 天：名义 3000，过了门槛 —— 整笔吃掉、烧一张
     let bill = assess_service(&pricey, 2, 0, Mount::Foot).unwrap();
-    let (staged, spent) = stage_and_spend(service_charge(player(1), player(2), bill), 1.0, &corrections);
+    let (staged, spent) = stage_and_spend(
+        service_charge(player(1), player(2), bill),
+        1.0,
+        &corrections,
+    );
     assert_eq!(staged.amount, 0, "免费卡该吃掉这笔服务费");
     assert_eq!(spent.len(), 1, "一笔账只烧一张卡");
 
     // 第二笔（另一名玩家踩了同一间旅馆）不再有卡可烧
     let bill = assess_service(&pricey, 1, 0, Mount::Foot).unwrap();
-    let (staged, spent) = stage_and_spend(service_charge(player(2), player(1), bill), 1.0, &corrections);
+    let (staged, spent) = stage_and_spend(
+        service_charge(player(2), player(1), bill),
+        1.0,
+        &corrections,
+    );
     assert_eq!(staged.amount, 1_500, "卡已经花了，第二笔照付");
     assert!(spent.is_empty());
 }
@@ -148,6 +155,9 @@ fn a_service_bill_can_be_shifted_to_someone_else() {
 /// 这一格钉的是「`None` 与 0 元是两件事」，0 元流水是大财神那种豁免的形状。
 #[test]
 fn no_bill_means_no_charge_row_at_all() {
-    assert_eq!(assess_service(&FeePrototype::Functional, 4, 5, Mount::Car), None);
+    assert_eq!(
+        assess_service(&FeePrototype::Functional, 4, 5, Mount::Car),
+        None
+    );
     assert_eq!(assess_service(&gas_station(), 0, 5, Mount::Foot), None);
 }

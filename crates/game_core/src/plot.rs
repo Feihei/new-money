@@ -150,6 +150,7 @@ mod tests {
             grid_rows: 8,
             tiles: Vec::new(),
             lands,
+            facility_fees: Default::default(),
         }
     }
 

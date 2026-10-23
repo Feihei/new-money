@@ -390,6 +390,7 @@ pub fn roll_dice_system(
     mut walkers: Query<RollWalker, With<PlayerId>>,
     mut writers: RollWriters<'_, '_>,
     mut next: ResMut<NextState<TurnPhase>>,
+    mut last: ResMut<LastRoll>,
 ) {
     let Some(current) = input.order.current() else {
         return;
@@ -441,6 +442,7 @@ pub fn roll_dice_system(
         &mut target,
         current,
         &plan,
+        &mut last,
     );
     if let Some(mut held) = cap {
         finish_cap(&mut writers, &mut held, current, &plan);
@@ -454,6 +456,14 @@ pub fn dice_count(requested: u32, mount: Mount) -> u32 {
         n => n.clamp(1, mount.dice()),
     }
 }
+
+/// 本回合掷出的骰面（P10c）。C 型收费（加油站油费）要在**落格那一刻**读「这一掷是几点」，
+/// 而 `DiceRolled` 是消息、只活两帧 —— 从掷骰到落格隔着整段 `Walking` 动画，读不到。
+/// 资源在两次掷骰之间一直活着，落格时读它读到的就是本回合的骰面。
+/// 写入点只有 [`apply_plan`] 一处：掷骰与遥控骰子两条入口共用它，「骰面照记」的口径
+/// 不会在第二条入口上各修一半。遥控骰子记的是它给定的步数 —— 对 C 型来说那就是「走了几步」。
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LastRoll(pub Option<(Entity, u32)>);
 
 /// `apply_plan` 要落到的那个玩家：位置、队列、起点。三样一起变，打包成一个结构
 /// 而不是八个散装参数（房规：参数多了先问「它们是不是同一件事」）。
@@ -472,6 +482,7 @@ fn apply_plan(
     target: &mut WalkTarget<'_>,
     player: Entity,
     plan: &crate::walk::WalkPlan,
+    last: &mut LastRoll,
 ) {
     let from = target.from;
     target.pos.tile = plan.to;
@@ -481,6 +492,7 @@ fn apply_plan(
         from,
     };
     clock.elapsed = 0.0;
+    last.0 = Some((player, plan.rolled));
     writers.rolled.write(DiceRolled {
         player,
         steps: plan.rolled,
@@ -546,6 +558,7 @@ pub fn remote_dice_system(
     mut walkers: Query<RemoteWalker, With<PlayerId>>,
     mut writers: RemoteWriters<'_, '_>,
     mut next: ResMut<NextState<TurnPhase>>,
+    mut last: ResMut<LastRoll>,
 ) {
     let Some(current) = input.order.current() else {
         for _ in input.requests.read() {}
@@ -604,6 +617,7 @@ pub fn remote_dice_system(
         &mut target,
         current,
         &plan,
+        &mut last,
     );
     if let Some(mut held) = cap {
         finish_cap(&mut writers.roll, &mut held, current, &plan);

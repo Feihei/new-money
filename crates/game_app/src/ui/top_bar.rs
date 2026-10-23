@@ -14,12 +14,12 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionFailed, AuctionStarted, AuctionWon, BankOpDone, BankVisited,
     BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, ChargeWaived, ChestOpened,
-    DetentionLifted, DetentionSkipped, GameOver, GameSession, GodAppeared, GodDeed, GodExit,
-    GodLeft, GodPossessed, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn, LotteryWon,
-    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, Paused,
-    PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, RemoteDiceUsed,
-    ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex,
-    TradeSide, TurnOrder, TurnPhase, WalkHalted,
+    DetentionLifted, DetentionSkipped, FacilityBuilt, GameOver, GameSession, GodAppeared, GodDeed,
+    GodExit, GodLeft, GodPossessed, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn,
+    LotteryWon, MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped,
+    Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged,
+    RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded,
+    StockVisited, TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
 };
 
 use super::finance::comma;
@@ -475,6 +475,13 @@ pub(crate) struct Notices<'w, 's> {
     /// 乌龟卡夹步：骰面与实际步数两个数都要说，否则玩家会以为骰子坏了
     capped: MessageReader<'w, 's, MoveCapped>,
     mount: MessageReader<'w, 's, MountChanged>,
+    // ===== 商业用地（P10c）=====
+    /// 服务费成交。**收据面板下一刻就被关掉了**，而这一行是唯一持久的那句话 ——
+    /// 它要说得出「哪座设施、算了多少」，否则玩家只看见钱包少了一截。
+    /// 排在 P5 那一族之后：道具与收费不会同帧发生，而这一条更该留在最后
+    service: MessageReader<'w, 's, ServiceCharged>,
+    /// 设施建成。与 `land_taken` 同一形：只带一块地，不说办成了什么
+    facility_built: MessageReader<'w, 's, FacilityBuilt>,
     over: MessageReader<'w, 's, GameOver>,
 }
 
@@ -876,6 +883,35 @@ pub(crate) fn hint_from_events(
             m.mount.label()
         ));
     }
+    // ===== 商业用地（P10c）=====
+    // 建成那一句排在服务费之前：两条同帧的概率极低（一个发生在自己的空地上、
+    // 一个是踩别人的设施），真撞上就让「刚被收了多少钱」留在最后
+    for m in notices.facility_built.read() {
+        // 商业地的设施挂在**地块**上（一块 2×2 的商业地绑两格），所以播报用 `plot_of`
+        // 那个地块名 —— 说格号会有一半人说错
+        line = Some(format!(
+            "{} 在{}建起了{}(造价 {})",
+            name(&names, m.player),
+            plot_of(m.land),
+            m.kind.label(),
+            comma(m.cost)
+        ));
+    }
+    for m in notices.service.read() {
+        // 免单（大财神/免费卡）那笔是 0：说「免费」而不是「付了 0」，与 `waived` 同一条
+        let amount = if m.amount == 0 {
+            "分文不取".to_string()
+        } else {
+            format!("{} 付 {}", name(&names, m.payer), comma(m.amount))
+        };
+        line = Some(if m.stay_days > 0 {
+            format!("{amount} 在{}住了 {} 天", m.kind.label(), m.stay_days)
+        } else if m.roll > 0 {
+            format!("{amount} 在{}（摇出 {}）", m.kind.label(), m.roll)
+        } else {
+            format!("{amount} 在{}过路", m.kind.label())
+        });
+    }
     for m in notices.over.read() {
         line = Some(match m.winner.and_then(|w| names.get(w).ok()) {
             Some(winner) => format!("胜者：{}！", winner.0),
@@ -1006,6 +1042,8 @@ fn tile_word(board: &Option<Res<ActiveBoard>>, tile: TileIndex) -> String {
 mod tests {
     use super::*;
     use bevy::state::app::StatesPlugin;
+    /// 设施的类别只在用例里需要点名（生产代码从消息里读的就是它）
+    use game_core::prelude::BuildingKind;
     use game_core::prelude::{
         CardKind, CardNotice, GameKind, GameRules, God, LandId, PlayerId, StockId, TradeSide,
         TurnOrder,
@@ -1232,6 +1270,9 @@ mod tests {
             .add_message::<RemoteDiceUsed>()
             .add_message::<MoveCapped>()
             .add_message::<MountChanged>()
+            // P10c：商业设施那两条（建成与收费）。同样属于「漏了整块播报建不出来」
+            .add_message::<FacilityBuilt>()
+            .add_message::<ServiceCharged>()
             .add_message::<GameOver>()
             .add_systems(Update, hint_from_events);
         let me = app.world_mut().spawn(PlayerName("阿土伯".into())).id();
@@ -1561,6 +1602,87 @@ mod tests {
         assert_eq!(
             hint_of(&mut app, hint),
             "阿土伯 玩「接财宝」得了 9 分 —— 练习局，不计点券"
+        );
+    }
+
+    /// 商业设施那两句（P10c）。收据面板下一刻就被关掉，服务费那笔的**唯一持久读数**
+    /// 就是这一行 —— 所以它要说得出「哪座设施、算了多少」，而不只是「钱包少了一截」。
+    /// 两种算账（A 型摇档、B 型住店）各一句：合成一句会让「住了几天」消失，
+    /// 而那是玩家下一次要不要绕开这座旅馆的唯一依据。
+    #[test]
+    fn a_service_charge_says_which_facility_and_how_it_was_priced() {
+        let (mut app, me, foe, hint) = notices_app();
+        send(
+            &mut app,
+            ServiceCharged {
+                payer: me,
+                owner: foe,
+                land: LandId(2),
+                kind: BuildingKind::Mall,
+                amount: 600,
+                roll: 3,
+                stay_days: 0,
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "阿土伯 付 600 在购物中心（摇出 3）"
+        );
+
+        // B 型：天数与金额是两件事，而这一行说的是前者（后者走现金流水与收据）
+        send(
+            &mut app,
+            ServiceCharged {
+                payer: me,
+                owner: foe,
+                land: LandId(5),
+                kind: BuildingKind::Hotel,
+                amount: 1_500,
+                roll: 3,
+                stay_days: 3,
+            },
+        );
+        assert_eq!(hint_of(&mut app, hint), "阿土伯 付 1,500 在旅馆住了 3 天");
+
+        // 免单那一笔（大财神/免费卡）不能说成「付 0」：那是一句谎话
+        send(
+            &mut app,
+            ServiceCharged {
+                payer: me,
+                owner: foe,
+                land: LandId(2),
+                kind: BuildingKind::Mall,
+                amount: 0,
+                roll: 2,
+                stay_days: 0,
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "分文不取 在购物中心（摇出 2）",
+            "金额 0 读起来像租金表坏了"
+        );
+    }
+
+    /// 建成那一句要说得清「谁、在哪、盖了什么、花了多少」—— 四样缺一样，玩家第二天
+    /// 就会来问「我这块地怎么突然有楼了」。
+    #[test]
+    fn a_new_facility_says_where_and_what_it_cost() {
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            FacilityBuilt {
+                player: me,
+                land: LandId(2),
+                kind: BuildingKind::Hotel,
+                cost: 2_200,
+            },
+        );
+        // 夹具里没有棋盘，所以地块名落在「？」—— 这一句要验的是「四样都在」
+        let said = hint_of(&mut app, hint);
+        assert!(
+            said.contains("阿土伯") && said.contains("建起了旅馆") && said.contains("造价 2,200"),
+            "建成那一行没接上：{said}"
         );
     }
 

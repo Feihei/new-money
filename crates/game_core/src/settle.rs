@@ -79,6 +79,10 @@ pub struct Books<'w, 's> {
     /// **只有 `Detention` 这一族**：P3d④c 的停留（`StaySentence`）不在这里 —— 被停留按住的
     /// 人还在场上，名下的地照收租，而卡面上没写「顺便收不到租」这一条（`tests/stay.rs` 钉着）。
     pub detained: Query<'w, 's, &'static mut Detention, With<PlayerId>>,
+    /// 商业设施（P10c）。只读：建造的插入走 `Commands`（空商业地身上**没有**这个组件，
+    /// 就地写无处可写）。与 `plots` 不同组件，借用相容 —— 账本读得到它，`Books::build`
+    /// 的「一格一设施」判据才能与扣款在同一处判，UI 不必再开第二份查询。
+    facilities: Query<'w, 's, Option<&'static crate::land::Facility>, With<LandId>>,
     /// 身上挂着哪位神（P6b②）。账本要读得到它，是因为「买地建屋必败」与「加盖多盖一层」
     /// 这两条**必须与扣款在同一处判**：判据放在调用方（落格那段、购地卡那条），
     /// 迟早会有一边忘了问 —— 而「衰神照样买到了地」这种错不会崩，只会在玩家眼里变成
@@ -887,6 +891,80 @@ impl<'w, 's> Books<'w, 's> {
         // 封顶那一位上多出来的那一层少掉，不是缺陷：4 代也没有「盖穿顶」这件事
         level.0 = level.0.saturating_add(1 + extra).min(max);
         Some(level.0)
+    }
+
+    /// 建商业设施（P10c）：扣**实付**造价，返回它。设施本体的插入（`Facility` 组件）
+    /// 在 `property::build_op_system` 里用 `Commands` —— 空商业地身上没有这个组件，
+    /// 就地写无处可写，这是它与 [`Self::upgrade`]（`BuildingLevel` 恒在）的结构差异。
+    ///
+    /// 判据唯一读点是 [`crate::property::build_op_allowed`]（UI 的灰按钮喂同一张表）。
+    /// 造价与升级同一格数据（`upgrade_cost`）—— 4 代里「在这块地上立一座购物中心」
+    /// 与「加盖一级」是同一笔建设费，两条分叉只在判据与产物上，不在价格上。
+    pub fn build(
+        &mut self,
+        player: Entity,
+        land: LandId,
+        kind: crate::board::BuildingKind,
+    ) -> Result<i64, crate::property::BuildDeny> {
+        let cost = self.build_probe(player, land, kind)?;
+        self.debit(player, cost)
+            .map_err(|_| crate::property::BuildDeny::ShortOfCash)?;
+        Ok(cost)
+    }
+
+    /// 「这块地上建这一类的具体价钱」与「建不建得成」的同一个问法 —— 与 [`Self::build`]
+    /// 只差最后那一下扣款。**UI 的灰按钮必须走这里**：判据与金额各写一遍，
+    /// 就会出现「按钮写着 2,200、扣掉 2,600」那种面板与账本各说各话的面板
+    /// （P9 拍卖台上那句「写的与扣的必须同一个表达式」是同一纪律）。
+    pub fn build_probe(
+        &self,
+        player: Entity,
+        land: LandId,
+        kind: crate::board::BuildingKind,
+    ) -> Result<i64, crate::property::BuildDeny> {
+        let Some(view) = self.view(land) else {
+            return Err(crate::property::BuildDeny::NoWindow);
+        };
+        let Some(pid) = self.id_of(player) else {
+            return Err(crate::property::BuildDeny::NotOwner);
+        };
+        if view.owner != Some(pid) {
+            return Err(crate::property::BuildDeny::NotOwner);
+        }
+        let Some(def_land) = self.active.def.land(land.0) else {
+            return Err(crate::property::BuildDeny::NoWindow);
+        };
+        let occupied = self.facility_of(land).is_some();
+        // 收费型设施（购物中心/旅馆/加油站）必须配了参数才能建 —— 建出一座
+        // 「永远不收钱的旅馆」比拒绝它更糟；研究所/公园不收费，不需要条目
+        let has_fee = match kind {
+            crate::board::BuildingKind::Mall
+            | crate::board::BuildingKind::Hotel
+            | crate::board::BuildingKind::GasStation => {
+                self.active.def.facility_fee(land.0, kind).is_some()
+            }
+            crate::board::BuildingKind::Lab | crate::board::BuildingKind::Park => true,
+        };
+        let base = economy::upgrade_cost(&self.active.def, &view).unwrap_or(0);
+        let cost = self.quoted(ChargeKind::Build { land }, player, base);
+        crate::property::build_op_allowed(
+            view,
+            def_land.land_type == crate::board::LandType::Commercial,
+            occupied,
+            has_fee,
+            self.acquire_denied(player),
+            cost,
+            self.balance(player),
+        )?;
+        Ok(cost)
+    }
+
+    /// 这块地上现在立着什么（P10c）。空商业地**没有** `Facility` 组件，
+    /// 所以 `None` 是「还没有设施」而不是查不到 —— 与 `Option<&T>` 那一条同形。
+    pub fn facility_of(&self, land: LandId) -> Option<crate::board::BuildingKind> {
+        self.land_entity(land)
+            .and_then(|e| self.facilities.get(e).ok().flatten())
+            .map(|f| f.0)
     }
 
     /// 土地公那一格：**直接占有**这块地（P6c）。返回是否办成。
