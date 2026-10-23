@@ -638,11 +638,14 @@ fn format_lands(view: &DumpView) -> Vec<String> {
             (
                 id.0,
                 format!(
-                    "L{:<2} {:<8} owner {:?} Lv{} {} {} {}",
+                    "L{:<2} {:<8} owner {:?} {} {} {} {}",
                     id.0,
                     name,
                     owner.0.map(|p| p.0),
-                    level.0,
+                    // 等级念 `building_label` 那一套（内部 Lv1＝空地，屏幕上写「空地」；
+                    // 内部 Lv2 才是「建筑 Lv1」）—— 这个面板是给人查账的，读出来的编号
+                    // 必须与 UI 那四块屏是同一个数，否则「为什么这块 Lv2 的地只值 1,500」又要问一遍
+                    crate::ui::building_label(level.0),
                     // 本金要说得出数：「抵押」与「押了 750、赎回要 825」在查账时是两件事
                     if mortgage.held() {
                         format!("抵押{}", mortgage.proceeds)

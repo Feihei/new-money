@@ -573,6 +573,24 @@ pub fn separator() -> (Node, BackgroundColor) {
     )
 }
 
+/// 建筑等级怎么说成人话。**这是内部编号与屏幕编号唯一的翻译点**，五块屏共用它。
+///
+/// 规则层那个数从 1 起算：`BuildingLevel(1)` 是**空地**（买地即 1，`rent[0]` 就是空地租金，
+/// `settle::buy` 把无主的 Lv0 钳到 1），`BuildingLevel(2)` 才是盖了第一层楼。
+/// 于是「Lv1」在屏幕上读起来像「有一层楼」，而它的意思是「一块空地」—— 10-22 就为这一格
+/// 争过一轮（「地价 + 升级费 × 等级」到底是 `× L` 还是 `× (L−1)`，答案是同一个数被数了两遍：
+/// 花钱盖的楼只有 `L−1` 层，见 `economy::estate_value`）。
+///
+/// 所以玩家面前不出现裸的内部编号：空地就叫空地（它不是一级建筑，也不该显示成 Lv0），
+/// 往上才是建筑 Lv1、Lv2…。内部编号只在规则层、测试流水与注释里活着。
+pub fn building_label(level: u8) -> String {
+    if level <= 1 {
+        "空地".to_string()
+    } else {
+        format!("建筑 Lv{}", level - 1)
+    }
+}
+
 /// 一行「键 值」信息。`key_w` 是键列的固定宽（Godot 的 `custom_minimum_size.x`），
 /// 值列 `flex_grow` 吃掉余下宽度，长文案就在列内换行。
 pub fn info_row(
@@ -1081,6 +1099,22 @@ mod tests {
         TileIndex, TurnOrder,
     };
     use std::time::Duration;
+
+    /// 内部编号 → 屏幕编号那一条映射，本身要钉住：它错位一格，五块屏就同时全都错，
+    /// 而症状是「一块空地写着有一层楼」这种没人会去查的话。
+    /// 尤其钉 0 与 1 都算空地（无主的 Lv0 与刚买下的 Lv1 在玩家眼里是同一件事），
+    /// 以及顶格那一档（`max_building_level` 默认 6 → 建筑 Lv5，租金表恰好六行）。
+    #[test]
+    fn the_level_label_never_shows_a_bare_plot_as_a_storey() {
+        assert_eq!(building_label(0), "空地", "无主空地");
+        assert_eq!(building_label(1), "空地", "买地即内部 Lv1，而它没有一层楼");
+        assert_eq!(building_label(2), "建筑 Lv1");
+        assert_eq!(
+            building_label(6),
+            "建筑 Lv5",
+            "满级那一档少说一层就是全场读错"
+        );
+    }
 
     /// 造一条落在 `entity` 上的左键点击。这些字段平时由 picking 后端填，
     /// 测试里没有窗口也没有指针，只能手拼一份最小可信的。

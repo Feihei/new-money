@@ -25,7 +25,8 @@ use game_core::prelude::{
 use super::finance::{comma, money_row};
 use super::theme::{col, layout, size};
 use super::{
-    BoardUi, ButtonSpec, SECONDARY, UiAction, button, info_row, label, overlay, panel, separator,
+    BoardUi, ButtonSpec, SECONDARY, UiAction, building_label, button, info_row, label, overlay,
+    panel, separator,
 };
 use crate::render::{DevFont, palette};
 
@@ -434,15 +435,16 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
         // 它的可见内容每帧都在动，由 `ui/minigame.rs` 自己就地改，不走「签名变了才重建」那条路
         Pending::Minigame(_) => String::new(),
         // 报价与收据的内容弹出即定稿（买地面板上的「你的现金」是那一刻的现金，
-        // 而回合停在那几帧里谁也花不了钱）—— **只有买地那一屏例外，签名里带地块的层数**。
-        // 理由与它面板上那个数同源：10-22 之后无主地可以立着楼（破产留下的那一手），
-        // 于是「买价」不再只由地块数据决定，还由世界上此刻的 `BuildingLevel` 决定；
-        // 而那一格在报价挂出之后仍然可能被改写（天使盖的那一层、`NM_HOUSE` 那条注入晚到一帧）。
-        // 不带这一格就会出现「面板写着 3,000、收据写着 6,000」，而那正是这块屏存在的理由的反面
-        Pending::Buy(land) => books
+        // 而回合停在那几帧里谁也花不了钱）—— **但买地与升级两屏例外，签名里带地块的层数**。
+        // 理由与它们面板上那些数同源：10-22 之后无主地可以立着楼（破产留下的那一手），
+        // 于是「买价」「当前等级／升级后／两行租金」都不再由地块数据单独决定，还由世界上
+        // 此刻的 `BuildingLevel` 决定；而那一格在报价挂出之后仍可能被改写（天使盖的那一层、
+        // `NM_PLOTS`／`NM_HOUSE` 这类注入晚到一帧 —— 后者实测就拍出过一张「空地 → 空地」的升级）。
+        // 不带这一格就会出现「面板写着 3,000、收据写着 6,000」，而那正是这两块屏的反面
+        Pending::Buy(land) | Pending::Upgrade(land) => books
             .view(land)
             .map_or(String::new(), |view| format!("Lv{}", view.level)),
-        Pending::Upgrade(_) | Pending::RentNotice(_) | Pending::Card => String::new(),
+        Pending::RentNotice(_) | Pending::Card => String::new(),
     }
 }
 
@@ -520,9 +522,9 @@ fn button_row(parent: &mut ChildSpawnerCommands, f: impl FnOnce(&mut ChildSpawne
 /// 无主地的报价那一屏。
 ///
 /// **面板上那个数就是 `Books::buy` 要扣的那一个**：基数取 `economy::estate_value`
-/// （地价 + 地上已有的每一层），再过一遍物价与修正，与 `buy_price`／`market_value` 同一条式子。
-/// 只写名义地价在这里曾经是安全的（无主地就是 Lv0），而 10-22 之后「无主却立着楼」是真状态 ——
-/// 破产留下的那一手、天使白给的那一层。那时按地价写就成了「写着 1,500、扣掉 3,100」，
+/// （地价 + 建筑费 × 花钱盖起来的那几层），再过一遍物价与修正，与 `buy_price`／`market_value`
+/// 同一条式子。只写名义地价在这里曾经是安全的（无主地就是 Lv0），而 10-22 之后「无主却立着楼」
+/// 是真状态 —— 破产留下的那一手、天使白给的那一层。那时按地价写就成了「写着 1,500、扣掉 3,100」，
 /// 而这一块屏是唯一让玩家决定掏不掏这笔钱的地方。
 /// 「地价」那一行照旧留着（它是这块地的固有属性，租金表按它排），多出来的那一截由
 /// 「楼上已有」与「买价」两行自己说清楚 —— 灰按钮带理由那条纪律在这儿的形式是**价带理由**。
@@ -598,13 +600,15 @@ fn buy_modal(
                     col::COST,
                     key_w,
                 );
-                // 地上已经有楼：那两层不是赠品，而是买价里最贵的一截，必须自己占一行说话
+                // 地上已经有楼：那几层不是赠品，而是买价里最贵的一截，必须自己占一行说话。
+                // 等级念的是 `building_label` 那一套（内部 Lv3 ＝「建筑 Lv2」），
+                // 而这一行恰好是那条映射最有用的地方 —— 「楼上已有 Lv3」会被读成盖了三层
                 if storeys >= 2 {
                     info_row(
                         rows,
                         &font.0,
                         "楼上已有",
-                        &format!("Lv{storeys} 的建筑，连地一起过户"),
+                        &format!("{}，连地一起过户", building_label(storeys)),
                         col::GAIN,
                         key_w,
                     );
@@ -624,7 +628,7 @@ fn buy_modal(
                         info_row(
                             rows,
                             &font.0,
-                            &format!("Lv{}", i + 1),
+                            &building_label((i + 1) as u8),
                             &format!("${amount}"),
                             col::VALUE,
                             key_w,
@@ -729,7 +733,7 @@ fn upgrade_modal(
                     rows,
                     &font.0,
                     "当前等级",
-                    &format!("Lv{level}"),
+                    &building_label(level as u8),
                     col::VALUE,
                     key_w,
                 );
@@ -737,7 +741,7 @@ fn upgrade_modal(
                     rows,
                     &font.0,
                     "升级后",
-                    &format!("Lv{}", level + 1),
+                    &building_label(level as u8 + 1),
                     col::GAIN,
                     key_w,
                 );
@@ -1189,9 +1193,9 @@ fn plot_rows(books: &Books, player: Entity) -> Vec<PlotRow> {
                 land,
                 op,
                 title: format!(
-                    "{}  Lv{}",
+                    "{}  {}",
                     def.land(land.0).map_or("？", |l| l.name.as_str()),
-                    view.level
+                    building_label(view.level)
                 ),
                 button: format!("{verb} {money}"),
                 blocked: mortgage_op_allowed(op, &facts)

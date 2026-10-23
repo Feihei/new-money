@@ -14,7 +14,7 @@ use game_core::prelude::{
 };
 
 use super::theme::{col, layout, size};
-use super::{BoardUi, ButtonSpec, UiAction, border_color, button, info_row, label};
+use super::{BoardUi, ButtonSpec, UiAction, border_color, building_label, button, info_row, label};
 use crate::render::{DevFont, TilePick, palette};
 
 /// 现在看的是哪一格（网格坐标，含死胡同格）。`None` = 没有详情卡。
@@ -160,9 +160,13 @@ fn spawn_card(
             owner_name.unwrap_or_else(|| "无主".to_string()),
             col::VALUE,
         ));
-        rows.push(("建筑等级", format!("Lv{}", view.level), col::GAIN));
+        rows.push(("建筑等级", building_label(view.level), col::GAIN));
         for (i, rent) in def.rent.iter().enumerate() {
-            rows.push(("租金", format!("Lv{} — ${rent}", i + 1), col::VALUE));
+            rows.push((
+                "租金",
+                format!("{} — ${rent}", building_label((i + 1) as u8)),
+                col::VALUE,
+            ));
         }
     }
     // 点券箱的面额写在格子上，玩家点一下就该看见「这一格值多少点券」——
