@@ -35,6 +35,7 @@ pub mod market;
 pub mod minigame;
 pub mod mortgage;
 pub mod msg;
+pub mod news;
 pub mod occupancy;
 pub mod player;
 pub mod plot;
@@ -134,13 +135,17 @@ pub mod prelude {
         FinancingRecalled, GameOver, GiftGiven, GiftsGiven, GodAppeared, GodDeed, GodExit, GodLeft,
         GodPossessed, IndemnityPaid, ItemPlaced, JackpotChanged, JackpotWhy, LandBought, LandTaken,
         LandUpgraded, LotteryBought, LotteryDrawn, LotteryWon, MinigameResult, MinigameScore,
-        MortgageDone, MortgageOp, MortgageRequested, MountChanged, MoveCapped, PlaceItemRequested,
-        PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained,
-        PlayerTeleported, PointsChanged, PolicyBought, RedEnvelope, RemoteBuildOffered,
-        RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RequestRemoteDice, RequestRoll,
-        RequestStay, ServiceCharged, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped,
-        StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileStepped, TradeSide,
-        TurnEnded, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted,
+        MortgageDone, MortgageOp, MortgageRequested, MountChanged, MoveCapped, NewsFired, NewsHit,
+        NewsNotice, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
+        PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, PolicyBought, RedEnvelope,
+        RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RequestRemoteDice,
+        RequestRoll, RequestStay, ServiceCharged, ShopOpDone, ShopOpRequested, StayLifted,
+        StaySkipped, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited,
+        TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted,
+    };
+    pub use crate::news::{
+        NewsDef, NewsId, NewsScope, NewsSet, NewsSink, PlayerPick, find_id, fire_news, news_of,
+        roll_span, settle_news_landing_system,
     };
     pub use crate::occupancy::{
         BOMB_HOSPITAL_DAYS, BOMB_STEPS, HaltCause, MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt,
@@ -186,7 +191,7 @@ use prelude::{
     GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, IndemnityPaid,
     ItemPlaced, JackpotChanged, JsonAssetLoader, LandBought, LandTaken, LandUpgraded, Landing,
     LotteryBought, LotteryDrawn, LotteryWon, MarketClock, MinigameResult, MinigameScore,
-    MortgageDone, MortgageRequested, MountChanged, MoveCapped, Paused, PendingDecision,
+    MortgageDone, MortgageRequested, MountChanged, MoveCapped, NewsFired, Paused, PendingDecision,
     PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
     PlayerDetained, PlayerTeleported, PointsChanged, PolicyBought, RedEnvelope, RemoteBuildOffered,
     RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RequestRemoteDice, RequestRoll, RequestStay,
@@ -232,10 +237,12 @@ impl Plugin for CoreGamePlugin {
             .init_asset::<CardSet>()
             .init_asset::<StockSet>()
             .init_asset::<HolidaySet>()
+            .init_asset::<crate::news::NewsSet>()
             .register_asset_loader(JsonAssetLoader::<BoardDef>::default())
             .register_asset_loader(JsonAssetLoader::<CardSet>::default())
             .register_asset_loader(JsonAssetLoader::<StockSet>::default())
             .register_asset_loader(JsonAssetLoader::<HolidaySet>::default())
+            .register_asset_loader(JsonAssetLoader::<crate::news::NewsSet>::default())
             // 对局配置有默认值（prototype 双人阵容 + 可复现种子），
             // 表现层要换阵容/换种子就在 Startup 前 insert_resource 覆盖
             .init_resource::<GameRules>()
@@ -353,6 +360,10 @@ impl Plugin for CoreGamePlugin {
             // ===== 日历事件（P2b）=====
             .add_message::<GiftsGiven>()
             .add_message::<RedEnvelope>()
+            // ===== 新闻（P11）=====
+            // 漏这一行的症状与上面每一条同形：`NewsSink` 的 writer 建不出来，
+            // 落格那条链在踩到新闻中心的一帧整批不跑
+            .add_message::<NewsFired>()
             // ===== 保释（P4③）=====
             .add_message::<BailRequested>()
             .add_message::<PlayerBailed>()
@@ -596,6 +607,16 @@ impl Plugin for CoreGamePlugin {
             .add_systems(
                 OnEnter(TurnPhase::Landed),
                 landing::close_landing_system.after(bail::settle_bail_landing_system),
+            )
+            // 新闻中心（P11）：抽一条、当场播完并结算。**排在全部域结算之后、关这一趟之前**
+            // 是因为新闻动的正是上面那些域管着的东西（钱、归属、身上的计时）——
+            // 它必须读到「这一趟已经结完」的世界，否则同一帧里地产租金与新闻课税会各按
+            // 一半的账本走。14 元组已顶满上限，与上面两条同一手法用 `.after`/`.before` 接链
+            .add_systems(
+                OnEnter(TurnPhase::Landed),
+                news::settle_news_landing_system
+                    .after(bail::settle_bail_landing_system)
+                    .before(landing::close_landing_system),
             )
             // 董事长白拿一件（P10d②）：接在 `settle_shop_landing` 之后 —— 货架刚
             // 重抽完、`Pending::Shop` 刚挂上，白拿拿的才是「这一趟的货」。14 元组

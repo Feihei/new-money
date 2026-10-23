@@ -374,6 +374,10 @@ struct BookReaders<'w, 's> {
     fin_drawn: MessageReader<'w, 's, FinancingDrawn>,
     /// 融资收回（身份丢了当场清算）。
     fin_recalled: MessageReader<'w, 's, FinancingRecalled>,
+    // ===== 新闻（P11）=====
+    /// 一条新闻播出去与它点到的人各自怎样。记进 `Ledger` 而不是 `Observed`：
+    /// 回合流水那张表是逐字断言用的（B2 的口径），而新闻断言问的是「谁的钱动了」。
+    news: MessageReader<'w, 's, game_core::prelude::NewsFired>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -967,6 +971,31 @@ fn collect_books(
             "FinRecall({}${})",
             who(&players, m.player),
             m.amount
+        ));
+    }
+    for m in r.news.read() {
+        // 形状：`News(news_001,播P0,P1[..])`。播报者单独写一格是**这条玩法的判据**：
+        // 「挨打的不是踩格者」（验收①）问的是这两个主语是不是同一个人，合并就答不出来
+        let hits = m
+            .news
+            .hits
+            .iter()
+            .map(|hit| {
+                let effects = hit
+                    .outcomes
+                    .iter()
+                    .map(|o| format!("{o:?}"))
+                    .collect::<Vec<_>>()
+                    .join("+");
+                format!("{}[{effects}]", who(&players, hit.player))
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        log.0.push(format!(
+            "News({},播{},{})",
+            m.news.id,
+            who(&players, m.broadcaster),
+            hits
         ));
     }
     for m in r.cash.read() {

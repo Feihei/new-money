@@ -12,6 +12,7 @@
   8. 点券格（coupon）必带正的 data.coupon 面额，且点券字段只属于点券格
   9. data.game 只属于游乐场格（arcade）；那一格缺省合法，意思是「这一趟随机一款」
   10. land_id 只属于 property 格；彩票格（lottery）不带任何 data 字段（价与号码池都在 GameRules 里）
+  11. 新闻中心格（news）与彩票格同一条：格子上没有参数，池子在 data/news/news_items.json 里
 """
 import json
 import sys
@@ -125,6 +126,11 @@ for t in loop:
         errors.append(f"loop[{t['id']}] 是 {t['type']} 格，却绑了 land_id")
     if t["type"] == "lottery" and data:
         errors.append(f"loop[{t['id']}] 是 lottery 格，但彩票没有格子级参数（都在 GameRules）")
+    # 新闻中心（P11）同一条：它身上没有「这一格播哪一条」那种参数 —— 抽哪一条是池子与
+    # 随机流的事（data/news/news_items.json + `news::draw`）。格子上写一个字段就等于
+    # 开出第二条真相来源：改了它的人以为自己在改规则，而结算压根不读它
+    if t["type"] == "news" and data:
+        errors.append(f"loop[{t['id']}] 是 news 格，但新闻中心没有格子级参数（池子在 news_items.json）")
 
 # 报告
 print(f"== 棋盘 '{board['board_name']}' 校验 ==")
@@ -134,6 +140,7 @@ print(f"土地数: {len(lands)}  分支接入点: {sum(1 for t in loop if 'branc
 print(f"property 道路格: {sum(1 for t in loop if t['type']=='property')}")
 print(f"点券格: {sum(1 for t in loop if t['type']=='coupon')}")
 print(f"彩票格: {sum(1 for t in loop if t['type']=='lottery')}")
+print(f"新闻中心格: {sum(1 for t in loop if t['type']=='news')}")
 arcades = [t for t in loop if t["type"] == "arcade"]
 print(f"游乐场格: {len(arcades)}  " + "、".join(
     f"{t['id']}({(t.get('data') or {}).get('game') or '随机一款'})" for t in arcades))

@@ -78,6 +78,11 @@ pub enum LandingDomain {
     /// 服务费当场结算（收进公司当月损益账）、董事长免单同帧可判。
     /// 钱在结算里已经动过，与 `ServiceNotice` 同族：窗口只负责「读完再走」。
     Company,
+    /// 新闻中心（P11，`news::settle_news_landing_system`）：踩到即**当场自动播一条新闻**，
+    /// 不挂 `Pending`。它是这张表里唯一一个「结算完就走、连收据都不留」的域 ——
+    /// 理由与 P2b 的圣诞/红包同一条（没人要回答「要不要听」），而新闻的玩法本来也是
+    /// 「世界变了」这一件事实，不是「你可以选择 ignore」。
+    News,
     /// 按设计就是什么都不做：路面只是路面，起点刻意不发薪水（PLAN §一）。
     Nothing,
     /// 玩法已在 PLAN 登记、但结算还没到位的格。踩上去 `warn!`，别当成「没有这个格」。
@@ -107,6 +112,9 @@ pub const fn domain_of(kind: TileKind) -> LandingDomain {
         TileKind::Hospital => D::Bail(DetentionPlace::Hospital),
         // 公司企业（P10d①）：不可拥有的固定格，结算在 `company.rs`
         TileKind::Company => D::Company,
+        // 新闻中心（P11）：结算在 `news.rs`。它**不挂 Pending** —— 这是全表唯一一个
+        // 当场动完整场世界、却连「读完再走」的收据都不摆的域（见 `LandingDomain::News` 那条注）
+        TileKind::News => D::News,
         // 起点「什么都不发」是拍板过的规则（4 代没有过起点领薪水），不是没做完
         TileKind::Start | TileKind::Road => D::Nothing,
         // ↓ 待办清单。中立与交通根本没有对应玩法（PLAN §三），神明那条 P6 已经改走
@@ -492,7 +500,7 @@ mod tests {
     /// 分派表的全部条目。这张清单与 `domain_of` 一一对着写：新增 `TileKind` 时
     /// `domain_of` 会先编译失败，所以这里唯一可能过期的是「加了格类型没加进清单」——
     /// 下面那条 `每格都有归宿` 的用例把两种过期分开钉住了。
-    const ALL_KINDS: [TileKind; 17] = [
+    const ALL_KINDS: [TileKind; 18] = [
         TileKind::Start,
         TileKind::Property,
         TileKind::Bank,
@@ -510,6 +518,7 @@ mod tests {
         TileKind::Shop,
         TileKind::Arcade,
         TileKind::Company,
+        TileKind::News,
     ];
 
     #[test]
@@ -534,6 +543,8 @@ mod tests {
             (TileKind::Lottery, D::Lottery),
             // P10d①：公司门面 = 服务费收据
             (TileKind::Company, D::Company),
+            // P11：新闻中心 = 当场播一条新闻（不挂窗口，所以它与其它域都不一样）
+            (TileKind::News, D::News),
             // 待办三格各自点名；将来某格实现了就从这一组挪走，
             // 于是「悄悄少了一个待办」也会在这里显形
             (TileKind::GodDeity, D::Unimplemented(TileKind::GodDeity)),

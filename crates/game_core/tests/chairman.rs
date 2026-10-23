@@ -15,7 +15,7 @@ use common::*;
 use game_core::prelude::{GameSession, LandId, Pending, ShopStock};
 
 /// 百货格。 chairman 白拿发生在 `settle_shop_landing`（整趟重抽）之后。
-const SHOP: u32 = 16;
+const SHOP: u32 = 17;
 
 fn other(app: &mut App) -> Entity {
     roster(app)[1].0

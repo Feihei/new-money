@@ -208,6 +208,9 @@ pub struct DumpView<'w, 's> {
     /// 道路放置物（P5）。要同时看得见两种位置：落在哪一格、以及在谁身上剩几步 —
     /// 「炸弹在哪」是查一局为什么突然有人住院时最先要问的事
     occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
+    /// 新闻池（P11）。`GameSession::last_news` 存的是**下标**，而「上一条是哪一条」要说得出
+    /// 标题就得读池子 —— 查「为什么连着两条一样」/「那条天灾这局到底播过没有」只有这一格
+    news: Option<Res<'w, game_core::prelude::NewsSet>>,
     /// 保单（P10d②）。**不并进 [`PlayerRow`]**：那张元组已经顶到 Bevy `QueryData`
     /// 的 15 元上限（见它的注释），第 16 格会在编译期炸 —— 与乐透票、持股同一条处理：
     /// 另开一条查询，按实体对回去
@@ -227,6 +230,7 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             row(ui, "回合", format_session(&view));
             row(ui, "状态", format_state(&view));
             row(ui, "落格", format_landing(&view));
+            row(ui, "新闻", format_news(&view));
             row(ui, "待决", format_pending(&view));
             row(ui, "资格", format_access(&view));
             row(ui, "牌堆", format_decks(&view));
@@ -255,6 +259,27 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
 
 fn row(ui: &mut egui::Ui, key: &str, value: String) {
     ui.monospace(format!("{key:　<4}{value}"));
+}
+
+/// 新闻那一栏（P11）：上一条是哪一条、池子有几条、这一格抽不抽得到别人。
+///
+/// 「同场不连重」的判据住在 `news::draw` 里，而它读的就是这里那个下标 —— 面板把它翻成
+/// 标题，是为了「查为什么连着两条一样」时不必回去数 JSON 的行。
+fn format_news(view: &DumpView) -> String {
+    let Some(session) = &view.session else {
+        return "世界未装配".to_string();
+    };
+    let pool = view.news.as_ref().map(|set| set.0.len()).unwrap_or(0);
+    let last = session
+        .last_news
+        .and_then(|id| {
+            view.news
+                .as_ref()
+                .and_then(|set| game_core::prelude::news_of(set, id))
+                .map(|def| format!("#{}「{}」", id.0, def.title))
+        })
+        .unwrap_or_else(|| "还没播过".to_string());
+    format!("上一条 {last} · 池 {pool} 条")
 }
 
 fn format_session(view: &DumpView) -> String {

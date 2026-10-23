@@ -1454,6 +1454,7 @@ mod tests {
                     epoch: Date::new(2048, 1, 6),
                     last_gift_year: None,
                     last_envelope_year: None,
+                    last_news: None,
                     bank_vault: 0,
                 })
                 .insert_resource(pending)

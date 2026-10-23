@@ -97,13 +97,17 @@ fn a_visitor_pays_into_the_companys_books_not_anyones_pocket() {
 /// 航空公司（B 型）：转盘摇出几就出国几天，费用按天计，人被送去 `Away`。
 #[test]
 fn the_airline_bills_by_the_day_and_sends_him_abroad() {
-    let (mut app, _) = ready_on(13, 1, DecisionPolicy::AcceptAll);
+    let (mut app, _) = ready_on(14, 1, DecisionPolicy::AcceptAll);
     let (p0, _p1) = two_players(&mut app);
 
     roll(&mut app, p0);
     play_turns(&mut app, 1);
 
-    assert_eq!(tile_of(&app, p0), 14, "前置：从 13 号掷 1 点踩到航空公司");
+    assert_eq!(
+        tile_of(&app, p0),
+        15,
+        "前置：从 14 号（点券箱）掷 1 点踩到航空公司"
+    );
     // 转盘摇数走服务子流，具体几天是种子的事；天数与费用、拘留必须对得上 ——
     // 「费用按天计」与「摇出几离场几天」是同一次摇数的两个读数
     let days = detention_of(&app, p0)
@@ -121,7 +125,7 @@ fn the_airline_bills_by_the_day_and_sends_him_abroad() {
     assert!(
         ledger(&app)
             .iter()
-            .any(|l| l.starts_with("Detain(P0@国外,格14)")),
+            .any(|l| l.starts_with("Detain(P0@国外,格15)")),
         "出国那个地方不在棋盘上，接入点就是他此刻那一格——他已走到 14 号才被拦下（P4① 的试金石）",
     );
 }

@@ -53,7 +53,7 @@ pub struct ActiveBoard {
     pub lands: HashMap<LandId, Entity>,
 }
 
-/// 开局要读的四份资产（棋盘 + 两副牌 + 股票）。
+/// 开局要读的七份资产（棋盘 + 两副牌 + 货架 + 股票 + 节假日表 + 新闻池）。
 ///
 /// 打包成系统参数而不是给 `begin_game_system` 挂 `#[allow(clippy::too_many_arguments)]`：
 /// 后者会把「参数确实太多了」这个真信号吃掉（`.agents/ARCHITECTURE.md` §六 坑 8）。
@@ -64,6 +64,7 @@ pub struct BootAssets<'w> {
     card_sets: Res<'w, Assets<CardSet>>,
     stock_sets: Res<'w, Assets<StockSet>>,
     holidays: Res<'w, Assets<HolidaySet>>,
+    news: Res<'w, Assets<crate::news::NewsSet>>,
 }
 
 /// 开局要读的配置打包成一个系统参数（阵容、数值、种子、历法锚点）。
@@ -96,14 +97,24 @@ pub fn begin_game_system(
     if active.is_some() {
         return;
     }
-    let (Some(def), Some(chance), Some(fate), Some(items), Some(stocks), Some(holidays)) = (
+    let (
+        Some(def),
+        Some(chance),
+        Some(fate),
+        Some(items),
+        Some(stocks),
+        Some(holidays),
+        Some(news),
+    ) = (
         assets.boards.get(&assets.data.board).cloned(),
         assets.card_sets.get(&assets.data.chance),
         assets.card_sets.get(&assets.data.fate),
         assets.card_sets.get(&assets.data.items),
         assets.stock_sets.get(&assets.data.stocks).cloned(),
         assets.holidays.get(&assets.data.holidays).cloned(),
-    ) else {
+        assets.news.get(&assets.data.news).cloned(),
+    )
+    else {
         return;
     };
     for (what, errs) in [
@@ -113,6 +124,7 @@ pub fn begin_game_system(
         ("道具牌", items.validate(CardKind::Item)),
         ("股票", stocks.validate()),
         ("节假日表", holidays.validate()),
+        ("新闻池", news.validate()),
     ] {
         if let Err(errs) = errs {
             panic!("{what}校验失败:\n  {}", errs.join("\n  "));
@@ -144,7 +156,7 @@ pub fn begin_game_system(
     let gods = crate::gods::spawn_starting_gods(&mut commands, &def, &mut rng, &chests);
 
     info!(
-        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张 + 宝箱 {} 个 + 神明 {} 位（起始现金 {}）· 开局 {epoch}",
+        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张 + 新闻 {} 条 + 宝箱 {} 个 + 神明 {} 位（起始现金 {}）· 开局 {epoch}",
         def.board_name,
         def.loop_len(),
         lands.len(),
@@ -153,6 +165,7 @@ pub fn begin_game_system(
         chance.0.len(),
         fate.0.len(),
         items.0.len(),
+        news.0.len(),
         chests.len(),
         gods.len(),
         cfg.rules.start_cash
@@ -170,6 +183,10 @@ pub fn begin_game_system(
     // 节假日是这一局的静态日历事实：克隆成资源，规则层与 UI 都直接读，
     // 免得每处再解一遍 `Assets`。装配失败前它不存在，于是所有读者都躲在状态门禁后面。
     commands.insert_resource(holidays);
+    // 新闻池同样克隆成资源（P11）：`GameSession::last_news` 存的是下标，而 dump 面板要说得
+    // 出「上一条是哪一条的标题」就得有这一份。规则层自己走 `Assets`（与牌堆同一条路），
+    // 这一份只给读、不给写
+    commands.insert_resource(news);
     commands.insert_resource(GameSession {
         turn_count: 0,
         seed: cfg.seed.0,
@@ -177,6 +194,9 @@ pub fn begin_game_system(
         epoch,
         last_gift_year: None,
         last_envelope_year: None,
+        // 「这一局还没播过新闻」是新的一份，不是上一局那一条的延续
+        // （`news::draw` 读它来避开上一条，留着旧值会让新局第一播就躲开一条没播过的）
+        last_news: None,
         bank_vault: 0,
     });
     commands.insert_resource(MarketClock::default());

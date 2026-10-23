@@ -1,9 +1,9 @@
 //! P1 的验收：点券格踩上去发一次、冷却期间谁都不发、到期再发，且这笔账不进现金。
 //!
-//! 落格一律走「把玩家摆在 `13 - 点数` 那格 + 掷出点数的种子」这条真路径
+//! 落格一律走「把玩家摆在 `箱子号 - 点数` 那格 + 掷出点数的种子」这条真路径
 //! （`ready_on`），于是被测的是分派表与结算 system，不是手搓的组件。
-//! prototype 的 13 号格就是点券箱（面额 30，冷却走 `GameRules` 缺省 6 回合；
-//! P10d② 重排后它从 11 号顺移到 13 号）。
+//! prototype 的 14 号格就是点券箱（面额 30，冷却走 `GameRules` 缺省 6 回合；
+//! P10d② 重排后它是 13 号，P11 的新闻中心插在 13 号那一格之前、它顺移到 14）。
 
 mod common;
 
@@ -13,8 +13,8 @@ use bevy::prelude::NextState;
 use common::*;
 use game_core::prelude::{ActiveBoard, GameSession, TileKind, TurnPhase};
 
-/// prototype 上的点券箱（`assets/data/boards/prototype.json` 的 13 号格）。
-const BOX: u32 = 13;
+/// prototype 上的点券箱（`assets/data/boards/prototype.json` 的 14 号格）。
+const BOX: u32 = 14;
 
 fn land(app: &mut App) {
     play_turns(app, turn_count(app) + 1);
@@ -24,7 +24,7 @@ fn turn_count(app: &App) -> u32 {
     app.world().resource::<GameSession>().turn_count
 }
 
-/// p0 从 12 号格掷 1 点，正好踩上 13 号。
+/// p0 从 13 号（新闻中心）掷 1 点，正好踩上 14 号箱子。
 fn step_onto_the_box() -> (App, Entity) {
     let (app, p0) = ready_on(BOX - 1, 1, DecisionPolicy::DeclineAll);
     assert_eq!(tile_of(&app, p0), BOX - 1, "前置：把人摆在箱子前一格");

@@ -75,6 +75,13 @@ const SERVICE_TAG: u64 = 0x5E3C_0000_0000_000E;
 /// 是谁，也不该改变下一次服务摇数**。白拿发生在落格结算的那一帧，与骰子、抽卡同帧
 /// 并发 —— 并进任何一条已有的流，董事长逛一趟百货就会挪动别人的随机数。
 const FREEBIE_TAG: u64 = 0xF3EE_0000_0000_000F;
+/// P11：这一趟播哪一条新闻，以及「点名一位」那一档点到谁。
+///
+/// 单独一条的理由与前面每一条同形，而新闻这一条多一层**必须**：抽取算法是
+/// 「全池随机 + 同场不连重」（PLAN §七 那条拍板），而「上一条是哪条」是一个**跨回合的状态**
+/// （`GameSession::last_news`）。若让它读牌堆那条流，「这一局播过几条新闻」就会挪动
+/// 下一张机会牌是谁 —— 那正是每条子流要防的事，而这里它同时还是回放的对齐点。
+const NEWS_TAG: u64 = 0xBE5F_0000_0000_0010;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +114,7 @@ pub struct Rng {
     auction: ChaCha8Rng,
     service: ChaCha8Rng,
     freebie: ChaCha8Rng,
+    news: ChaCha8Rng,
 }
 
 impl Rng {
@@ -129,7 +137,13 @@ impl Rng {
             auction: ChaCha8Rng::seed_from_u64(seed ^ AUCTION_TAG),
             service: ChaCha8Rng::seed_from_u64(seed ^ SERVICE_TAG),
             freebie: ChaCha8Rng::seed_from_u64(seed ^ FREEBIE_TAG),
+            news: ChaCha8Rng::seed_from_u64(seed ^ NEWS_TAG),
         }
+    }
+
+    /// 新闻那一条流（P11）：这一趟播哪一条、点名那一位点到谁。
+    pub fn pick_news(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.news.random_range(span)
     }
 
     /// 服务收费那一条流（P10）：购物中心掷几点、旅馆住几天、航空转盘停几段。
@@ -282,6 +296,48 @@ mod tests {
             busy.roll_die(),
             fresh.roll_die(),
             "牌堆/行情取数污染了骰子流"
+        );
+    }
+
+    /// 新闻那条流（P11）：这一局播过几条新闻、点到过谁，都不该改变下一张机会牌是谁、
+    /// 下一手骰点是几。它与 `pick_shop` 那两条同族，而这里多一层要防的东西 ——
+    /// 「同场不连重」让新闻的**取数次数**随池子大小变（见 `news::roll_span`），
+    /// 所以这条流一旦被并进牌堆，池子从 2 条改成 8 条就会重排整局的抽卡顺序。
+    #[test]
+    fn a_news_broadcast_shifts_nothing_else() {
+        let after_news = || {
+            let mut r = Rng::new(7);
+            for _ in 0..20 {
+                r.pick_news(0..=7);
+            }
+            (0..10).map(|_| r.pick(0..=99)).collect::<Vec<_>>()
+        };
+        let untouched = || {
+            let mut r = Rng::new(7);
+            (0..10).map(|_| r.pick(0..=99)).collect::<Vec<_>>()
+        };
+        assert_eq!(after_news(), untouched(), "新闻流污染了牌堆流");
+
+        let mut busy = Rng::new(99);
+        for _ in 0..30 {
+            busy.pick_news(0..=3);
+        }
+        let mut fresh = Rng::new(99);
+        assert_eq!(busy.roll_die(), fresh.roll_die(), "新闻流污染了骰子流");
+        // 而它自己是可复现的：同种子同序列（回放与截图核对的地基）
+        let seq = |seed| {
+            let mut r = Rng::new(seed);
+            (0..12).map(|_| r.pick_news(0..=3)).collect::<Vec<_>>()
+        };
+        assert_eq!(seq(4), seq(4));
+        assert_ne!(seq(4), seq(5), "新闻流与另一个域取了同一条密钥流");
+        assert_ne!(
+            seq(4),
+            {
+                let mut r = Rng::new(4);
+                (0..12).map(|_| r.pick(0..=3)).collect::<Vec<_>>()
+            },
+            "新闻流与牌堆流取了同一条密钥流"
         );
     }
 

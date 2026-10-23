@@ -778,6 +778,43 @@ pub struct RedEnvelope {
     pub amount: i64,
 }
 
+// ===== 新闻（P11）=====
+
+/// 一条新闻已经播完并结算完。
+///
+/// `broadcaster` 是踩到新闻中心的那个人，而**他通常不是挨打的那个** —— 这两个主语分开写
+/// 是这条玩法的全部新意（PLAN §三「踩格者只负责开广播，挨打的是别人」）。合成一个的话，
+/// 「他开了广播」与「他挨了打」在流水里就是同一句话，而验收①（触发者金额不变、
+/// 被点名者金额变）压根问不出来。
+///
+/// 它**不带 `Pending`**：新闻没有人要回答「要不要听」，钱与地在这一帧已经动完。
+/// 钱动过的每一笔另有 [`CashChanged`]（新闻不另开一套账），这条只说「世界变了什么」。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct NewsFired {
+    pub broadcaster: Entity,
+    pub news: NewsNotice,
+}
+
+/// 一条新闻的读数。字段与 [`CardNotice`] 同构（`id`/`title`/`desc` + 逐条效果凭据），
+/// 多出来的是 `scope` 与 `hits`：**同一条效果打在几个人头上**是新闻才有的形状，
+/// 而「谁挨了哪一下」必须逐人留在流水里（验收②「全场类新闻影响到的每个人都留流水」）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewsNotice {
+    pub id: String,
+    pub title: String,
+    pub desc: String,
+    pub scope: crate::news::NewsScope,
+    pub hits: Vec<NewsHit>,
+}
+
+/// 一条新闻落在一个人头上的那些事。文案由 UI 从 `outcomes` 生成，结算层不拼字符串
+/// （与 [`CardNotice`] 同一条分工）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewsHit {
+    pub player: Entity,
+    pub outcomes: Vec<EffectOutcome>,
+}
+
 // ===== 道路放置物与道具（P5）=====
 
 /// 把一件放置类道具放到主环的某一格（路障／地雷／定时炸弹）。

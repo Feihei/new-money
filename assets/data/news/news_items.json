@@ -1,0 +1,23 @@
+[
+	{
+		"id": "news_001",
+		"title": "财政补贴发放",
+		"desc": "每个在场玩家进账 $1500",
+		"scope": "everyone",
+		"effects": [{"action": "add_cash", "amount": 1500}]
+	},
+	{
+		"id": "news_002",
+		"title": "稽查现金大户",
+		"desc": "手上现金最多的一位付出 $3000",
+		"scope": {"one": "richest"},
+		"effects": [{"action": "deduct_cash", "amount": 3000}]
+	},
+	{
+		"id": "news_003",
+		"title": "街头劫案",
+		"desc": "随机另一位玩家付出 $2000 —— 挨打的不是踩格的人",
+		"scope": {"one": "random_other"},
+		"effects": [{"action": "deduct_cash", "amount": 2000}]
+	}
+]

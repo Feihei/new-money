@@ -223,8 +223,8 @@ fn smallrich_take(app: &App) -> i64 {
 /// 棋子停在旅馆那格（`Hotel` 没有死胡同分支），下回合开始时被跳过。
 #[test]
 fn the_hotel_bills_by_the_day_and_detains_the_guest() {
-    // P10d① 重排后西单是 13 号：站上 12 号（航空公司）掷 1 点踩进去
-    let (mut app, p0) = ready_on(14, 1, DecisionPolicy::DeclineAll);
+    // P11 之后西单是 16 号：站上 15 号（航空公司）掷 1 点踩进去
+    let (mut app, p0) = ready_on(15, 1, DecisionPolicy::DeclineAll);
     let p1 = *roster(&mut app)
         .iter()
         .find(|(_, id, _, _)| *id == 1)
@@ -276,11 +276,11 @@ fn the_hotel_bills_by_the_day_and_detains_the_guest() {
     let detention = detain_of(&app, p0).expect("住店的人该被扣下");
     assert_eq!(detention.place, DetentionPlace::Hotel);
     assert_eq!(detention.turns_left, stay);
-    assert_eq!(tile_of(&app, p0), 15, "旅馆不在地图上，棋子停在那一格");
+    assert_eq!(tile_of(&app, p0), 16, "旅馆不在地图上，棋子停在那一格");
     assert!(
         ledger(&app)
             .iter()
-            .any(|l| l.starts_with("Detain(P0@旅馆,格15)")),
+            .any(|l| l.starts_with("Detain(P0@旅馆,格16)")),
         "凭据也要说他在旅馆：{:?}",
         ledger(&app)
     );
@@ -314,8 +314,8 @@ fn the_hotel_bills_by_the_day_and_detains_the_guest() {
 /// `settle` 失败的那条路连 `Detention` 都不该挂。
 #[test]
 fn a_broke_guest_goes_bankrupt_instead_of_checking_in() {
-    // P10d① 重排后西单是 13 号：站上 12 号掷 1 点踩进去
-    let (mut app, p0) = ready_on(14, 1, DecisionPolicy::DeclineAll);
+    // P11 之后西单是 16 号：站上 15 号掷 1 点踩进去
+    let (mut app, p0) = ready_on(15, 1, DecisionPolicy::DeclineAll);
     retune(
         &mut app,
         5,
@@ -598,8 +598,8 @@ fn a_residential_lot_still_offers_an_upgrade_not_a_build() {
 /// 那条路要等多人局（P14）；这条钉的是它前面那一格：窗口压根不来。
 #[test]
 fn a_hotel_guest_cannot_be_bailed_out_of_the_jail_gate() {
-    // P10d① 重排后西单是 13 号：站上 12 号掷 1 点踩进去
-    let (mut app, p0) = ready_on(14, 1, DecisionPolicy::DeclineAll);
+    // P11 之后西单是 16 号：站上 15 号掷 1 点踩进去
+    let (mut app, p0) = ready_on(15, 1, DecisionPolicy::DeclineAll);
     let p1 = *roster(&mut app)
         .iter()
         .find(|(_, id, _, _)| *id == 1)

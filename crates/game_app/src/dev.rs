@@ -16,9 +16,9 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, ArcadeDeal, Auction, BuildingLevel, BuyTicketRequested, Detention, DetentionPlace,
     GameKind, GameRules, GameSession, God, GodDesk, Inventory, ItemKind, LandId, Mount,
-    MountChanged, Occupancy, OccupancyKind, Owner, Pending, PendingDecision, PlayerDetained,
-    PlayerId, Points, RemoteBuildOffered, Rng, TileIndex, TokenPosition, TurnOrder, TurnPhase,
-    detain, place,
+    MountChanged, NewsSink, Occupancy, OccupancyKind, Owner, Pending, PendingDecision,
+    PlayerDetained, PlayerId, Points, RemoteBuildOffered, Rng, TileIndex, TokenPosition, TurnOrder,
+    TurnPhase, detain, find_id, fire_news, place,
 };
 
 pub struct DevPlugin;
@@ -36,6 +36,7 @@ pub fn install_if_requested(app: &mut App) {
     let auction = ForceAuction::from_env();
     let house = ForceHouse::from_env();
     let rbuild = ForceRbuild::from_env();
+    let news = ForceNews::from_env();
     if forced.0.is_none()
         && bail.0.is_none()
         && !items.0
@@ -47,6 +48,7 @@ pub fn install_if_requested(app: &mut App) {
         && auction.0.is_none()
         && house.0.is_none()
         && !rbuild.0
+        && news.0.is_none()
     {
         return;
     }
@@ -112,6 +114,11 @@ pub fn install_if_requested(app: &mut App) {
     if rbuild.0 {
         info!(
             "开发注入已开启（NM_RBUILD）：当前玩家面前挂出远程建设窗口（配 NM_PLOTS=<n> 让他有地可升）"
+        );
+    }
+    if let Some(wanted) = news.0.as_deref() {
+        info!(
+            "开发注入已开启（NM_NEWS={wanted}）：当前玩家的回合里立刻播那一条新闻（不踩格、不推进回合）"
         );
     }
     app.add_plugins(DevPlugin);
@@ -320,6 +327,7 @@ impl Plugin for DevPlugin {
             .insert_resource(ForceAuction::from_env())
             .insert_resource(ForceHouse::from_env())
             .insert_resource(ForceRbuild::from_env())
+            .insert_resource(ForceNews::from_env())
             // 回菜单时清掉「已经注入过」：`NM_DETAIN` 配 `NM_MENULOOP` 要能在第二局再注入一次，
             // 而留在 true 就等于「新局什么都没有」，看着像注入失效（跨局残留那类坑的反面）
             .add_systems(OnEnter(crate::scene::Scene::Menu), clear_injected)
@@ -340,6 +348,7 @@ impl Plugin for DevPlugin {
                     force_auction,
                     force_house,
                     force_rbuild,
+                    force_news,
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
@@ -365,6 +374,7 @@ struct Injected {
     auction: bool,
     house: bool,
     rbuild: bool,
+    news: bool,
 }
 
 fn clear_injected(mut done: ResMut<Injected>) {
@@ -879,6 +889,62 @@ impl ForceRbuild {
     }
 }
 
+/// `NM_NEWS=<新闻 id 或池子里的序号>`：立刻播那一条新闻。`None` = 没开。
+///
+/// 它调的是 core 自己导出的 [`fire_news`]，与 `NM_DETAIN` 调 [`detain`] 同一条分工：
+/// **不推进回合、不替随机流取数**。刻意不写「强制下一条」那种位（`NM_LOTTERY` 也不这么干）：
+/// 那等于给规则层加一条生产环境永远不读的分支。
+///
+/// 为什么非要有它：抽哪一条是随机流上的事，而**每一天的新闻效果长得都不一样**（天灾拆街、
+/// 全场课税、点名罚款）。要让「外星人攻打地球」那一屏拍得出来，靠 `NM_SEED` 得连试很多颗种子；
+/// 而 P11 的验收①（触发者金额不变、被点名者金额变）与验收②（全场每个人都留流水）
+/// 各自钉的正是**特定那一条**。进不了截图的机制等于没做完（本模块头那条老账）。
+#[derive(Resource)]
+struct ForceNews(Option<String>);
+
+impl ForceNews {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_NEWS") else {
+            return Self(None);
+        };
+        Self(Self::parse(&raw))
+    }
+
+    /// 纯函数那半：只认「去掉空白之后非空」这一条。写错 id 不在这里响，
+    /// 要到池子那一侧才知道（`find_id`），因为合法集合是数据给的而不是代码给的。
+    fn parse(raw: &str) -> Option<String> {
+        let wanted = raw.trim();
+        (!wanted.is_empty()).then(|| wanted.to_string())
+    }
+}
+
+fn force_news(
+    order: Res<TurnOrder>,
+    mut sink: NewsSink,
+    force: Res<ForceNews>,
+    mut done: ResMut<Injected>,
+) {
+    let (Some(wanted), false) = (force.0.as_deref(), done.news) else {
+        return;
+    };
+    let Some(player) = order.current() else {
+        return;
+    };
+    done.news = true;
+    let Some(set) = sink.pool() else {
+        warn!("NM_NEWS={wanted} 没能播：新闻池还没就位");
+        return;
+    };
+    let Some(id) = find_id(set, wanted) else {
+        warn!(
+            "NM_NEWS={wanted} 不在池子里（写新闻 id 如 news_001，或序号 0..{}）",
+            set.0.len().saturating_sub(1)
+        );
+        return;
+    };
+    fire_news(&mut sink, player, id);
+}
+
 fn force_rbuild(
     force: Res<ForceRbuild>,
     order: Res<TurnOrder>,
@@ -903,8 +969,18 @@ fn force_rbuild(
 
 #[cfg(test)]
 mod tests {
-    use super::ForceGod;
+    use super::{ForceGod, ForceNews};
     use game_core::prelude::{GameKind, God};
+
+    /// `NM_NEWS` 只认「去掉空白非空」这一条：`NM_NEWS=` 那种给法要的是**不注入**，
+    /// 而不是一句「不在池子里」的 warn —— 空串是「我没填」，填错才是「我填错了」
+    #[test]
+    fn nm_news_takes_a_name_and_nothing_else() {
+        assert_eq!(ForceNews::parse("news_002"), Some("news_002".to_string()));
+        assert_eq!(ForceNews::parse(" 1 "), Some("1".to_string()));
+        assert_eq!(ForceNews::parse(""), None);
+        assert_eq!(ForceNews::parse("   "), None);
+    }
 
     /// 每一位神都要能被两种写法点名 —— 这张穷尽表是旋钮唯一的名字来源，
     /// 谁把它换成手写 slug 对照，加一位神时就会漏掉一位（漏掉的那一位拍不到，

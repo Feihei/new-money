@@ -28,12 +28,13 @@ use game_core::prelude::{
     ActiveBoard, Date, GameRules, GameSeed, GameSetup, Jackpot, Pending, Rng, TurnPhase,
 };
 
-/// 主环格数与彩票中心那一格（`prototype.json` 的 18 号；P8 追加在环尾，
-/// P10d① 两家公司插进环中段后它从 14 号顺移到 16 号，P10d② 重排演示盘后落到 18 号）。
-/// 两个数写在一起是因为前置要算「走 face 步正好落到 18 号」—— 环一变长这条就得重数，
+/// 主环格数与彩票中心那一格（`prototype.json` 的 19 号；P8 追加在环尾，
+/// P10d① 两家公司插进环中段后它从 14 号顺移到 16 号，P10d② 重排演示盘后落到 18 号，
+/// P11 的新闻中心插在 13 号、它跟着顺移到 19 号）。
+/// 两个数写在一起是因为前置要算「走 face 步正好落到 19 号」—— 环一变长这条就得重数，
 /// 而 `board.rs` 的环断言与 `tools/validate_board.py` 会一起响。
-const LOOP: u32 = 19;
-const COUNTER: u32 = 18;
+const LOOP: u32 = 20;
+const COUNTER: u32 = 19;
 
 /// 默认那套规则：36 个号、一注 1000、月息 5%。
 fn rules() -> GameRules {

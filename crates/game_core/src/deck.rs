@@ -265,8 +265,29 @@ pub fn apply_card(
     def: &CardDef,
     aim: Option<crate::hand::CardAim>,
 ) -> Vec<EffectOutcome> {
+    apply_effects(sink, player, victim, &def.effects, &def.id, aim)
+}
+
+/// 一组效果打在 `victim` 头上，返回每条效果的凭据。上面那两条入口（抽卡 / 出牌）之外，
+/// P11 的**新闻池**是第三个调用方（[`crate::news::settle_news_landing_system`]）——
+/// 那不是顺手复用，是 PLAN §四 排序原则第 3 条「命运 / 新闻 / 魔法屋不各写一套效果」
+/// 的落地方式：把这张 `match` 复制一份的代价，是「同一句 `detain` 在两个文件里各修一半」，
+/// 而那种分叉不会崩，只会变成玩家口中的「命运里的住院三天和新闻里的不一样长」。
+///
+/// `source` 是「哪条数据要办这件事」（卡 id 或新闻 id），只进日志，不进判据：三条入口的
+/// id 各有各的命名空间，而一条效果的含义不该随它从哪副池里来而变。
+/// `effects` 收切片而不是收 `&CardDef`：新闻项与卡面的字段表本来就不同（新闻带 `scope`、
+/// 不带 `kind`/`target`/`cost_points`），共用的是**动词**那一层，不是「一条数据」那一层。
+pub fn apply_effects(
+    sink: &mut CardSink,
+    player: Entity,
+    victim: Entity,
+    effects: &[CardEffect],
+    source: &str,
+    aim: Option<crate::hand::CardAim>,
+) -> Vec<EffectOutcome> {
     let mut outcomes = Vec::new();
-    for effect in &def.effects {
+    for effect in effects {
         match effect {
             CardEffect::AddCash { amount } => {
                 // 走管线：物价 2.5 时这张「横财」卡真的多给钱，而衰神的「得钱作废」
@@ -317,7 +338,7 @@ pub fn apply_card(
                     debug!(
                         "这张棋盘没有「{}」那条分支，把 {} 送去那里这条路落空",
                         place.label(),
-                        def.id
+                        source
                     );
                     continue;
                 };
@@ -385,7 +406,7 @@ pub fn apply_card(
                 // `CardSet::validate` 已经在加载期拦了（要求 target = land），这一句
                 // debug 是第二道：坏数据不该静默改着游戏状态。
                 let Some(crate::hand::CardAim::Land(center)) = aim else {
-                    debug!("{} 要盖地块状态，但这次没有地块目标", def.id);
+                    debug!("{} 要盖地块状态，但这次没有地块目标", source);
                     continue;
                 };
                 let lands =
@@ -419,7 +440,7 @@ pub fn apply_card(
                 // 抽卡那条路没有 aim，所以数据把这张卡写进机会/命运池就是静默失效 ——
                 // `validate` 已在加载期要求 `target: "unowned_land"`，这一句是第二道
                 let Some(crate::hand::CardAim::Land(land)) = aim else {
-                    debug!("{} 要买地，但这次没有地块目标", def.id);
+                    debug!("{} 要买地，但这次没有地块目标", source);
                     continue;
                 };
                 // 买这一句走的是账本的正路：地价过物价、过小福神的「买地免费」，
@@ -436,7 +457,7 @@ pub fn apply_card(
                     // 出牌那道门（`aim_is_legal`）读的正是 `buy` 读的同一个价，同一帧同一份
                     // 账本 —— 走到这里只剩一种可能：两道判据哪天开始分叉了。那是 bug，
                     // 不是玩家能遇到的处境，所以报给日志而不是编一条永远看不见的凭据
-                    None => warn!("{} 打出去了却没买下这块地：出牌判据与账本分叉了", def.id),
+                    None => warn!("{} 打出去了却没买下这块地：出牌判据与账本分叉了", source),
                 }
             }
             CardEffect::Auction => {
@@ -445,7 +466,7 @@ pub fn apply_card(
                 // 只剩「把这一槌许下去」—— 真正开场由 `auction::auction_hold_system` 做，
                 // 因为它才拿得到座位序（`TurnOrder`），而「先问谁」是拍卖机的事不是这张卡的事
                 let Some(crate::hand::CardAim::Land(land)) = aim else {
-                    debug!("{} 要拍卖地，但这次没有地块目标", def.id);
+                    debug!("{} 要拍卖地，但这次没有地块目标", source);
                     continue;
                 };
                 sink.books.auction.requested = Some((land, player));
@@ -466,7 +487,7 @@ pub fn apply_card(
                 let Ok(mut heading) = sink.headings.get_mut(victim) else {
                     warn!(
                         "{} 要替 {victim:?} 掉头，可他身上没有 Heading 组件（spawn_players 漏挂了？）",
-                        def.id
+                        source
                     );
                     continue;
                 };

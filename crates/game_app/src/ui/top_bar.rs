@@ -17,12 +17,13 @@ use game_core::prelude::{
     ChestOpened, CompanyCharged, DetentionLifted, DetentionSkipped, FacilityBuilt, FinancingDrawn,
     FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed,
     IndemnityPaid, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn, LotteryWon,
-    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, Paused,
-    PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, PolicyBought,
+    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsFired,
+    Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, PolicyBought,
     RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded,
     StockVisited, TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
 };
 
+use super::dialog::describe;
 use super::finance::comma;
 use super::theme::{col, layout, size};
 use super::{
@@ -502,6 +503,10 @@ pub(crate) struct Notices<'w, 's> {
     /// 融资收回（身份丢了当场清算）。坏账那一格（现金不够还的部分）是玩家唯一
     /// 看得见的「银行吃了亏」，必须说出口
     fin_recalled: MessageReader<'w, 's, FinancingRecalled>,
+    /// 新闻（P11）。排在全部结算之后、`over` 之前：新闻中心那一格在落格链的**末端**跑，
+    /// 而它动的正是前面那些域管着的东西 —— 同一帧里「谁付了租」与「号外说全场缴税」都写了
+    /// 的时候，留下号外那一句才对（它是这一趟最后发生的事）
+    news: MessageReader<'w, 's, NewsFired>,
     over: MessageReader<'w, 's, GameOver>,
 }
 
@@ -1018,6 +1023,24 @@ pub(crate) fn hint_from_events(
             comma(m.amount)
         ));
     }
+    for m in notices.news.read() {
+        let hits: Vec<(String, String)> = m
+            .news
+            .hits
+            .iter()
+            .map(|hit| {
+                (
+                    name(&names, hit.player),
+                    hit.outcomes
+                        .iter()
+                        .map(describe)
+                        .collect::<Vec<_>>()
+                        .join("；"),
+                )
+            })
+            .collect();
+        line = Some(news_headline(&m.news.title, &hits));
+    }
     for m in notices.over.read() {
         line = Some(match m.winner.and_then(|w| names.get(w).ok()) {
             Some(winner) => format!("胜者：{}！", winner.0),
@@ -1029,6 +1052,39 @@ pub(crate) fn hint_from_events(
         && let Ok(mut text) = hints.single_mut()
     {
         *text = Text::new(line);
+    }
+}
+
+// ===== P11：新闻那一句 =====
+
+/// 一条新闻在顶栏那一行怎么说。抽成纯函数（与 P6e 那六条同一个理由）：顶栏只有一行，
+/// 而它有四种形状 —— 点到一个人、点到全场同样一下、点到全场各不相同、谁都没点到。
+/// 不抽出来就只能靠截图去撞那四格，撞不上的那一格在验收里读起来和「没做」一样。
+///
+/// `hits` 是 `(人名, 效果句)`，由调用方从 `NewsHit` 查好名字再传进来（人名在表现层，
+/// 规则层的凭据里只有 `Entity`）。
+fn news_headline(title: &str, hits: &[(String, String)]) -> String {
+    let head = format!("号外「{title}」");
+    match hits.len() {
+        // 一条新闻播出去而场上没人被点到：这不是「什么都没发生」的静默失效，而是
+        // **点名点不到人**（只剩他一个人时的 `random_other`）。要说出来，否则玩家
+        // 会以为按钮坏了 —— 与灰按钮必须自带一句为什么是同一条纪律
+        0 => format!("{head}：场上没有可点名的人"),
+        1 => format!("{head}：{} {}", hits[0].0, hits[0].1),
+        n => {
+            // 全场类新闻的绝大多数形状是「每个人都挨同样一下」，那一句就该念成一句
+            let same = hits.iter().all(|(_, desc)| desc == &hits[0].1);
+            if same {
+                format!("{head}：全场 {n} 人各 {}", hits[0].1)
+            } else {
+                let who = hits
+                    .iter()
+                    .map(|(name, desc)| format!("{name} {desc}"))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                format!("{head}：{n} 人 —— {who}")
+            }
+        }
     }
 }
 
@@ -1151,8 +1207,8 @@ mod tests {
     /// 设施的类别只在用例里需要点名（生产代码从消息里读的就是它）
     use game_core::prelude::BuildingKind;
     use game_core::prelude::{
-        CardKind, CardNotice, GameKind, GameRules, God, LandId, PlayerId, StockId, TradeSide,
-        TurnOrder,
+        CardKind, CardNotice, EffectOutcome, GameKind, GameRules, God, LandId, NewsFired, NewsHit,
+        NewsNotice, NewsScope, PlayerId, PlayerPick, StockId, TradeSide, TurnOrder,
     };
 
     /// 顶栏刷新只许动顶栏名下的按钮（§6.1 坑 31）。
@@ -1176,6 +1232,7 @@ mod tests {
                 epoch: game_core::prelude::Date::new(2048, 1, 1),
                 last_gift_year: None,
                 last_envelope_year: None,
+                last_news: None,
                 bank_vault: 0,
             })
             .insert_resource(MarketClock::default())
@@ -1389,6 +1446,8 @@ mod tests {
             .add_message::<ChairmanTook>()
             .add_message::<FinancingDrawn>()
             .add_message::<FinancingRecalled>()
+            // P11：新闻那一条（漏了它 = `Notices` 参数包建不出来 = 顶栏整行不更新）
+            .add_message::<NewsFired>()
             .add_message::<GameOver>()
             .add_systems(Update, hint_from_events);
         let me = app.world_mut().spawn(PlayerName("阿土伯".into())).id();
@@ -1980,6 +2039,140 @@ mod tests {
         assert!(
             said.contains("没人出价，流标") && said.contains("起拍 7,600"),
             "流标那一句要念得出起拍价：{said}"
+        );
+    }
+
+    /// 新闻那一句的四种形状（P11）。全走 `news_headline` 这个纯函数 + 一条整屏接线：
+    /// 顶栏只有一行，而「点到一个人 / 全场同样一下 / 全场各不相同 / 谁都没点到」是四句
+    /// 不同的话，截图只能撞见其中一格。
+    #[test]
+    fn a_named_news_hits_the_named_one_only() {
+        let (mut app, me, foe, hint) = notices_app();
+        send(
+            &mut app,
+            NewsFired {
+                broadcaster: me,
+                news: NewsNotice {
+                    id: "news_002".into(),
+                    title: "稽查现金大户".into(),
+                    desc: "付出 $3000".into(),
+                    scope: NewsScope::One(PlayerPick::Richest),
+                    hits: vec![NewsHit {
+                        player: foe,
+                        outcomes: vec![EffectOutcome::Lost(3_000)],
+                    }],
+                },
+            },
+        );
+        // 被点名的是**别人**：这一行不出现播报者的名字，验收①在屏幕上也是这个形状
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "号外「稽查现金大户」：孙小美 支付 $3000"
+        );
+    }
+
+    #[test]
+    fn a_whole_field_news_reads_as_one_sentence() {
+        let (mut app, me, foe, hint) = notices_app();
+        let hits = |who: &[Entity]| {
+            who.iter()
+                .map(|p| NewsHit {
+                    player: *p,
+                    outcomes: vec![EffectOutcome::Gained(1_500)],
+                })
+                .collect::<Vec<_>>()
+        };
+        send(
+            &mut app,
+            NewsFired {
+                broadcaster: me,
+                news: NewsNotice {
+                    id: "news_001".into(),
+                    title: "财政补贴发放".into(),
+                    desc: "每人进账 $1500".into(),
+                    scope: NewsScope::Everyone,
+                    hits: hits(&[me, foe]),
+                },
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "号外「财政补贴发放」：全场 2 人各 获得 $1500"
+        );
+    }
+
+    #[test]
+    fn a_news_that_names_nobody_says_so_out_loud() {
+        // 「谁都没点到」必须是**一句人话**而不是一行空白：这一格是空的与按钮坏了,
+        // 在玩家眼里是同一件事（§6.1 坑 27 的 UI 版）
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            NewsFired {
+                broadcaster: me,
+                news: NewsNotice {
+                    id: "news_003".into(),
+                    title: "没人接的电话".into(),
+                    desc: "测试".into(),
+                    scope: NewsScope::One(PlayerPick::RandomOther),
+                    hits: vec![],
+                },
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "号外「没人接的电话」：场上没有可点名的人"
+        );
+    }
+
+    #[test]
+    fn the_headline_lists_people_when_the_hits_differ() {
+        // 纯函数那一侧补第四格：全场但**各不相同**（涨价卡那种「有人有地没人有」的形状）
+        let hits = vec![
+            ("阿土伯".to_string(), "支付 $1000".to_string()),
+            ("孙小美".to_string(), "支付 $2000".to_string()),
+        ];
+        assert_eq!(
+            news_headline("地价税开征", &hits),
+            "号外「地价税开征」：2 人 —— 阿土伯 支付 $1000、孙小美 支付 $2000"
+        );
+    }
+
+    /// 同帧里新闻要赢过它前面那些 reader（链上它排在全部结算之后）。
+    /// 这条是「接线」的用例：漏掉排序的话症状不是不显示，而是**看哪条先到**——
+    /// 与 P8 那条「乐透必须排在 decision 之前」同族。
+    #[test]
+    fn the_extra_wins_over_the_lines_that_came_earlier_in_the_frame() {
+        let (mut app, me, foe, hint) = notices_app();
+        send(
+            &mut app,
+            PlayerBailed {
+                player: foe,
+                by: me,
+                place: game_core::prelude::DetentionPlace::Jail,
+                points: 30,
+                junction: TileIndex(2),
+            },
+        );
+        send(
+            &mut app,
+            NewsFired {
+                broadcaster: me,
+                news: NewsNotice {
+                    id: "news_001".into(),
+                    title: "财政补贴发放".into(),
+                    desc: "每人进账 $1500".into(),
+                    scope: NewsScope::Everyone,
+                    hits: vec![NewsHit {
+                        player: me,
+                        outcomes: vec![EffectOutcome::Gained(1_500)],
+                    }],
+                },
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).starts_with("号外"),
+            "同一帧两条，留下的该是最后发生的那一件"
         );
     }
 }

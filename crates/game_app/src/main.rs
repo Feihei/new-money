@@ -138,6 +138,9 @@ fn check_assets(server: Res<AssetServer>, data: Res<DataHandles>) {
     expect_ready(&server, &data.stocks, "股票");
     // 节假日表也是装配要的一份：少了它世界永远停在 Boot，而失败资产只有这一句会响
     expect_ready(&server, &data.holidays, "节假日表");
+    // 新闻池同理（P11）：`begin_game_system` 等的是七份资产齐，而踩到新闻中心那一格
+    // 抽不到新闻是**静默**的（不挂窗口、不挡回合），只有这一句会响
+    expect_ready(&server, &data.news, "新闻池");
 }
 
 fn expect_ready<T: Asset>(server: &AssetServer, handle: &Handle<T>, what: &str) {
