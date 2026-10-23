@@ -129,7 +129,7 @@ impl Default for GameRules {
         Self {
             start_cash: 20_000,
             walk_step_interval: 0.18,
-            max_building_level: 6,
+            max_building_level: 5,
             monopoly_rent_multiplier: 2,
             hike_rent_multiplier: 2,
             deposit_rate: 0.10,

@@ -218,8 +218,8 @@ fn a_levelled_lot_still_charges_the_empty_ground_rent() {
 #[test]
 fn a_seized_lot_opens_no_monopoly_for_whoever_owns_the_rest() {
     let (mut app, _) = ready_on(0, 1, DecisionPolicy::DeclineAll);
-    own(&mut app, 0, Some(1), 1, false);
-    own(&mut app, 1, Some(1), 1, false); // brown 两块都在 P1 手里 → 本该翻倍
+    own(&mut app, 0, Some(1), 0, false);
+    own(&mut app, 1, Some(1), 0, false); // brown 两块空地都在 P1 手里 → 本该翻倍
     run_damage(
         &mut app,
         LandId(1),

@@ -59,8 +59,8 @@ fn buying_a_plot_from_the_other_side_of_the_ring_costs_exactly_a_normal_purchase
 
     assert_eq!(
         plot_state(&mut app, 3),
-        (Some(0), 1, false),
-        "刚买下的地：归 P0、Lv1（`Books::buy` 同一条）、没押着"
+        (Some(0), 0, false),
+        "刚买下的空地：归 P0、还是 Lv0（级数重判：0=空地，`Books::buy` 不再钳层）、没押着"
     );
     assert_eq!(cash_of(&mut app, p0), 20_000 - L3_PRICE, "扣的是名义地价");
     // 人还在起点：这张卡买的就是「不必走过去」
@@ -103,7 +103,7 @@ fn a_grab_over_a_house_pays_for_the_house_and_keeps_it() {
         (Some(0), 3, false),
         "买到的是一栋三层的楼，不是一块被抹平的空地"
     );
-    let want = L3_PRICE + 2 * L3_STOREY;
+    let want = L3_PRICE + 3 * L3_STOREY; // 级数重判后建筑数 = level：三层 = 三次加盖
     assert_eq!(cash_of(&mut app, p0), 20_000 - want, "地价 + 已盖的每一层");
     assert!(
         ledger(&app).contains(&format!("Bought(P0@3${want})")),

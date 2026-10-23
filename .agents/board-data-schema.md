@@ -107,6 +107,19 @@
 | `owner` | int? | 归属玩家 id；`null` = 无主 |
 | `level` | int | 等级（0=空地，1~N=建筑等级） |
 | `group` / `land_type` / `price` / `rent` / `upgrade_cost` | — | 沿用现有地产静态数据 |
+| `building_kind` | string? | **商业设施类别**（P10b）。缺省 = 空商业地；写则是预建设施。取值：`mall` 购物中心 / `hotel` 旅馆 / `gas_station` 加油站 / `lab` 研究所 / `park` 公园 |
+| `fee` | object? | 这块地的**收费原型参数**，形状必须与 `building_kind` 匹配（见下） |
+
+**商业设施（P10b）**：
+
+- `fee` 是外挂标签形状，蛇形命名：
+  - 购物中心（A 型）：`"fee": {"random_amount": {"sides": 6, "tiers": [200,400,600,800,1200,1600]}}` —— 摇出几点走第几档，**`tiers.len()` 必须等于 `sides`**（摇出没有档的点＝玩家掷出白踩，加载期拒绝）。
+  - 旅馆（B 型）：`"fee": {"random_stay": {"sides": 4, "per_day": 500}}` —— 住几天付几天，`sides ≥ 1`。同一形状换 `sides` 即航空转盘。
+  - 加油站（C 型）：`"fee": {"per_step": {"rate": 100, "requires_mount": true}}` —— 单价 × 本回合骰面；`requires_mount: true` 表示步行**不产生账**（油费）。电脑维修（IBM）同形状、`requires_mount: false`。
+  - 研究所 / 公园（D 型）：**不带 `fee`**，费用与解锁能力走装配层。
+- 匹配矩阵（对不上＝加载错误）：mall↔random_amount、hotel↔random_stay、gas_station↔per_step、lab/park↔无 `fee`。
+- 住宅/保险地写 `building_kind` 或 `fee` ＝ 加载错误。
+- 商业设施只能建在 2×2（`size: 2`）的商业地上。
 
 **绑定规则**：
 - 1×1 住宅：**1 个 property 道路格** 的 `land_id` 指向它（1:1）。

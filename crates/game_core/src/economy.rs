@@ -87,7 +87,8 @@ pub fn upgrade_cost(def: &BoardDef, land: &LandView) -> Option<i64> {
     def.land(land.id.0).map(|d| d.upgrade_cost)
 }
 
-/// 租金：无主/抵押 → 0；等级不足 1 按 1 算（空地也收 `rent[0]`，`property_system.gd:59-61`）；
+/// 租金：无主/抵押 → 0；等级直接当租金表下标（**0 级空地收 `rent[0]`**，10-23 级数重判
+/// 按四代口径，`property_system.gd:59-61`）；
 /// 等级超出租金表长度 → 0（`property_system.gd:70` 的越界分支）；
 /// 持有同色组全部未抵押地产 → ×`monopoly_rent_multiplier`（`property_system.gd:73-77`）。
 pub fn calculate_rent(def: &BoardDef, land: &LandView, all: &[LandView], rules: &GameRules) -> i64 {
@@ -110,8 +111,7 @@ pub fn calculate_rent(def: &BoardDef, land: &LandView, all: &[LandView], rules: 
     let Some(defn) = def.land(land.id.0) else {
         return 0;
     };
-    let level = land.level.max(1) as usize;
-    let base = defn.rent.get(level - 1).copied().unwrap_or(0);
+    let base = defn.rent.get(land.level as usize).copied().unwrap_or(0);
     // 垄断只对「真有个组」的地块生效：无组地块 Godot 也不翻倍（`property_system.gd:74` 的 `group != ""`）
     let monopoly = land
         .group
@@ -222,13 +222,13 @@ pub fn property_value(def: &BoardDef, all: &[LandView], player: PlayerId) -> i64
 /// 与 [`property_value`] 是两个数，而且必须保持是两个：贷款基数按 Godot 口径只看地价，
 /// 而「全场有多少财富」要把房子算进去 —— 否则玩家每加盖一层就从指数里蒸发一笔钱，
 /// **开发越猛、物价越低**，那与物价指数存在的理由正好相反。
-/// 买地即 Lv1（`settle::buy` 钳到 1），所以已购的加盖次数是 `level - 1`。
+/// 级数重判（10-23）之后**建筑数 = level**（0 级空地 = 0 栋），不再有 `-1` 那一格。
 ///
 /// 这里给的是**名义**值；物价指数要的是「按今天的价它还值多少」，所以调用方再乘一次
 /// 上一回合的指数（见 `Books::total_assets`）。
 pub fn estate_value(def: &BoardDef, land: &LandView) -> i64 {
     let price = land_price(def, land).unwrap_or(0);
-    let built = land.level.saturating_sub(1) as i64;
+    let built = land.level as i64;
     price + upgrade_cost(def, land).unwrap_or(0) * built
 }
 
@@ -467,16 +467,15 @@ mod tests {
     fn rent_follows_the_level_table() {
         let def = board();
         let r = rules();
-        // land 0 的租金表 [60,180,450,900,1500,2500]
-        let table: [(u8, i64); 6] = [(1, 60), (2, 180), (3, 450), (4, 900), (5, 1500), (6, 2500)];
+        // land 0 的租金表 [60,180,450,900,1500,2500]；级数重判后 level 直接当下标
+        let table: [(u8, i64); 6] = [(0, 60), (1, 180), (2, 450), (3, 900), (4, 1500), (5, 2500)];
         for (level, want) in table {
             let all = world(&def, &[(0, p(0), level, false)]);
             let land = at(&all, 0);
             assert_eq!(
                 calculate_rent(&def, &land, &all, &r),
                 want,
-                "{level} 级租金应取 rent[{}]",
-                level - 1
+                "{level} 级租金应取 rent[{level}]"
             );
         }
     }
@@ -525,7 +524,7 @@ mod tests {
         let land = at(&all, 0);
         assert_eq!(calculate_rent(&def, &land, &all, &r), 0, "抵押中租金为 0");
 
-        // 空地（level 0）按 1 级起租（`:59-61` 的 level<1 归一）
+        // 空地（level 0）收 rent[0] —— 级数重判后这是直接下标，不再是「不足 1 归一」
         let all = world(&def, &[(0, p(0), 0, false)]);
         let land = at(&all, 0);
         assert_eq!(calculate_rent(&def, &land, &all, &r), 60, "空地也收一档");
@@ -545,7 +544,7 @@ mod tests {
         let def = board();
         let r = rules();
         // brown 组 = land 0 + land 1
-        let all = world(&def, &[(0, p(0), 1, false)]);
+        let all = world(&def, &[(0, p(0), 0, false)]);
         let land = at(&all, 0);
         assert_eq!(
             calculate_rent(&def, &land, &all, &r),
@@ -553,7 +552,7 @@ mod tests {
             "只持有一半 → 不翻倍"
         );
 
-        let all = world(&def, &[(0, p(0), 1, false), (1, p(0), 1, false)]);
+        let all = world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]);
         let land = at(&all, 0);
         assert_eq!(
             calculate_rent(&def, &land, &all, &r),
@@ -563,7 +562,7 @@ mod tests {
         );
 
         // 组里另一块被抵押 → 垄断失效（`_owns_full_group` 的 `is_mortgaged_by_key`）
-        let all = world(&def, &[(0, p(0), 1, false), (1, p(0), 1, true)]);
+        let all = world(&def, &[(0, p(0), 0, false), (1, p(0), 1, true)]);
         let land = at(&all, 0);
         assert_eq!(
             calculate_rent(&def, &land, &all, &r),
@@ -572,7 +571,7 @@ mod tests {
         );
 
         // 组里另一块在别人手里 → 同样不翻倍
-        let all = world(&def, &[(0, p(0), 1, false), (1, p(1), 1, false)]);
+        let all = world(&def, &[(0, p(0), 0, false), (1, p(1), 1, false)]);
         let land = at(&all, 0);
         assert_eq!(
             calculate_rent(&def, &land, &all, &r),
@@ -588,7 +587,7 @@ mod tests {
         // 整组在手（垄断 60×2=120）之上再涨价。乘在垄断之后是 `calculate_rent` 里写死的
         // 顺序，这条把它钉住：两个倍数若共用一个数，这里先红
         let all = stamped(
-            world(&def, &[(0, p(0), 1, false), (1, p(0), 1, false)]),
+            world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]),
             0,
             Some(LandStatus::PriceHike),
         );
@@ -606,7 +605,7 @@ mod tests {
         // 查封：零，而且是在查租金表之前短路 —— 于是「查封 × 涨价」这种该由单槽位挡掉的
         // 组合在这里读不出第三种数（真出现时它是零，不是「翻过倍再归零」的中间态）
         let all = stamped(
-            world(&def, &[(0, p(0), 1, false), (1, p(0), 1, false)]),
+            world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]),
             0,
             Some(LandStatus::Sealed),
         );
@@ -622,7 +621,7 @@ mod tests {
         let def = board();
         let r = rules();
         let me = PlayerId(0);
-        let rows = [(0, p(0), 1, false), (1, p(0), 1, false)];
+        let rows = [(0, p(0), 0, false), (1, p(0), 0, false)];
 
         let sealed = stamped(world(&def, &rows), 0, Some(LandStatus::Sealed));
         assert!(
@@ -656,7 +655,7 @@ mod tests {
         let def = board();
         let r = rules();
         // red 组只有 land 3 一块：整组在手即垄断，翻倍恰好一次（不是 ×2×2）
-        let all = world(&def, &[(3, p(0), 1, false)]);
+        let all = world(&def, &[(3, p(0), 0, false)]);
         let land = at(&all, 3);
         assert!(owns_full_group(&all, PlayerId(0), "red"));
         assert_eq!(calculate_rent(&def, &land, &all, &r), 240 * 2);
@@ -670,12 +669,12 @@ mod tests {
         let me = PlayerId(0);
 
         // 只拿到 brown 组的一半 → 不可升级（Godot 的 test_cant_upgrade_without_monopoly）
-        let all = world(&def, &[(0, p(0), 1, false)]);
+        let all = world(&def, &[(0, p(0), 0, false)]);
         let land = at(&all, 0);
         assert!(!can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r));
 
         // 整组在手 → 可升级；现金不够（land 0 的 upgrade_cost=800）→ 不可
-        let all = world(&def, &[(0, p(0), 1, false), (1, p(0), 1, false)]);
+        let all = world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]);
         let land = at(&all, 0);
         assert!(
             can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r),
@@ -688,7 +687,7 @@ mod tests {
 
         // 落差 2（大福神一次加两层留下的形状）：**低的那块能追**，
         // 高的那块不许再跑 —— 这两句合起来才是「永久卡死」的解药
-        let all = world(&def, &[(0, p(0), 1, false), (1, p(0), 3, false)]);
+        let all = world(&def, &[(0, p(0), 0, false), (1, p(0), 3, false)]);
         let low = at(&all, 0);
         let high = at(&all, 1);
         assert!(
@@ -756,7 +755,7 @@ mod tests {
         let me = PlayerId(0);
 
         // 无主地块不可升级
-        let all = world(&def, &[(0, None, 1, false)]);
+        let all = world(&def, &[(0, None, 0, false)]);
         let land = at(&all, 0);
         assert!(!can_upgrade(&land, me, &all, cost(&def, &land), 99_999, &r));
 
@@ -764,7 +763,7 @@ mod tests {
         // 这里明确拒绝（见 owns_full_group 的注释）
         let mut def2 = board();
         def2.lands[0].group = None;
-        let all2 = world(&def2, &[(0, p(0), 1, false)]);
+        let all2 = world(&def2, &[(0, p(0), 0, false)]);
         let land2 = at(&all2, 0);
         assert!(
             !can_upgrade(&land2, me, &all2, cost(&def2, &land2), 99_999, &r),
@@ -794,9 +793,8 @@ mod tests {
 
     /// 无主而带楼的地：买它要付的就是 `estate_value` 那一条式子（10-22 实报「地价和所有建筑
     /// 升级费用相加」）。钉三件事，缺一条就会各错一种：
-    /// - **Lv0 与 Lv1 都是地价** —— 买地那一刻起就有一层（`settle::buy` 钳到 1），
-    ///   而那一层不是一笔加盖费。把它算进去等于给全场空地涨价一倍的第一档；
-    /// - **三层 = 地价 + 加盖两次**，与抵押账面、资产账面、拍卖起拍读的是同一个数；
+    /// - **Lv0 空地＝地价** —— 空地没有加盖费可算（级数重判后建筑数 = level，没有 `-1`）；
+    /// - **一层楼 = 地价 + 一次加盖**，与抵押账面、资产账面、拍卖起拍读的是同一个数；
     /// - 够不够付按这个总价判，不是按地价判（`can_buy` 收的是**实付**那个数）。
     ///
     /// 放在纯函数层是因为 `Books::buy_price` 与 `Books::market_value` 共用这条式子，
@@ -808,14 +806,14 @@ mod tests {
         // prototype 的 0 号南京路：地价 1500、加盖一层 800
         let bare = at(&world(&def, &[]), 0);
         let first = at(&world(&def, &[(0, None, 1, false)]), 0);
-        let tall = at(&world(&def, &[(0, None, 3, false)]), 0);
-        assert_eq!(estate_value(&def, &bare), 1_500, "Lv0 无主地＝地价");
+        let tall = at(&world(&def, &[(0, None, 2, false)]), 0);
+        assert_eq!(estate_value(&def, &bare), 1_500, "Lv0 无主空地＝地价");
         assert_eq!(
             estate_value(&def, &first),
-            1_500,
-            "Lv1 也＝地价（那一层不是加盖费）"
+            2_300,
+            "Lv1 = 1500 + 1×800（建筑数 = level）"
         );
-        assert_eq!(estate_value(&def, &tall), 3_100, "Lv3 = 1500 + 2×800");
+        assert_eq!(estate_value(&def, &tall), 3_100, "Lv2 = 1500 + 2×800");
 
         assert!(can_buy(&tall, 3_100, 3_100), "刚好付得起那栋楼");
         assert!(
@@ -892,13 +890,13 @@ mod tests {
         let def = board();
         let r = rules();
 
-        let all = world(&def, &[(0, p(0), 1, false), (1, p(0), 1, false)]);
+        let all = world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]);
         // brown 两块各 1500 → 3000 × 2.0
         assert_eq!(property_value(&def, &all, PlayerId(0)), 3_000);
         assert_eq!(calc_max_loan(&def, &all, PlayerId(0), &r), 6_000);
 
         // 抵押中的地块不计入基数（押给银行的东西不能再押一次）：1500 × 2.0
-        let all = world(&def, &[(0, p(0), 1, false), (1, p(0), 1, true)]);
+        let all = world(&def, &[(0, p(0), 0, false), (1, p(0), 1, true)]);
         assert_eq!(property_value(&def, &all, PlayerId(0)), 1_500);
         assert_eq!(calc_max_loan(&def, &all, PlayerId(0), &r), 3_000);
 

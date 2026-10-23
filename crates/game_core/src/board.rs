@@ -60,6 +60,68 @@ pub enum LandType {
     Insurance,
 }
 
+/// 商业设施五类（PLAN §四 P10）。住宅地没有这一位；商业地缺省是
+/// `None` ＝ 空商业地（业主买下后再踩一次选建设项，P10c 的 `Pending::Build`），
+/// 写了就是预建设施 —— 演示盘的外滩是预建的购物中心，P10c 先有东西可冒烟。
+///
+/// 五类各自绑定哪个收费原型（A 随机金额 / B 随机停留 / C 按步数 / D 功能）
+/// 是 [`FeeDef`] 的形状决定的，不是这里的分支：换参数就换行为是 P10 的真验收
+/// （见 `game_core::service` 模块头），原型库对「住在哪类设施」一无所知。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildingKind {
+    /// 购物中心：踩到摇 1–6，按档位收（A 型）。
+    Mall,
+    /// 旅馆：踩到摇 1–4，强制住宿该天数 + 按天付费（B 型，接 P4 拘留）。
+    Hotel,
+    /// 加油站：油费按步数、只对载具收（C 型，接 P5 载具）。
+    GasStation,
+    /// 研究所：功能型，产道具（D 型，接 P5 库存）。
+    Lab,
+    /// 公园：功能型，无费用（D 型空实现）。
+    Park,
+}
+
+/// 收费原型的参数（serde 形，P10b）。**收费就是数据**：购物中心与旅馆的档位、
+/// 单价都由棋盘 JSON 给，改平衡不回 Rust 改代码。加载期的形状校验见
+/// `validate`（档位表必须盖满骰面、C 型必须给单价）—— 运行期的退路
+/// （缺档不收钱、不 panic）在 [`crate::service::assess`]。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeeDef {
+    /// A 型：`tiers[i]` 是摇出 `i+1` 点时收的数。表长必须等于骰面数。
+    RandomAmount { sides: u32, tiers: Vec<i64> },
+    /// B 型：住几天付几天的钱。旅馆骰 1–4，航空转盘是另一面数 —— 同一形状。
+    RandomStay { sides: u32, per_day: i64 },
+    /// C 型：单价 × 本回合骰面。`requires_mount` 是载体参数（油费 true、
+    /// 电脑维修 false），写错方向就是「步行付油费」。
+    PerStep { rate: i64, requires_mount: bool },
+}
+
+impl FeeDef {
+    /// 换成原型库认的那个形状。数据 → 原型是纯映射，没有任何判定 ——
+    /// 判定全在 [`crate::service::assess`]，这里错了 `validate` 会拦。
+    pub fn to_prototype(&self) -> crate::service::FeePrototype {
+        match self {
+            Self::RandomAmount { sides, tiers } => crate::service::FeePrototype::RandomAmount {
+                sides: *sides,
+                tiers: tiers.clone(),
+            },
+            Self::RandomStay { sides, per_day } => crate::service::FeePrototype::RandomStay {
+                sides: *sides,
+                per_day: *per_day,
+            },
+            Self::PerStep {
+                rate,
+                requires_mount,
+            } => crate::service::FeePrototype::PerStep {
+                rate: *rate,
+                requires_mount: *requires_mount,
+            },
+        }
+    }
+}
+
 /// 主环下标。环形拓扑的一切索引都用它，而不是裸 `i64`/`u32`：
 /// 与 `LandId`、`PlayerId` 是不同 newtype，混用直接编译失败（缺陷 #1 的防线）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -148,6 +210,13 @@ pub struct LandDef {
     pub price: i64,
     pub rent: Vec<i64>,
     pub upgrade_cost: i64,
+    /// 商业设施类别（P10b）。缺省 `None`；住宅/保险地写了它、商业地写了
+    /// 与设施不匹配的 `fee`，都由 `validate` 在加载期拦下。
+    #[serde(default)]
+    pub building_kind: Option<BuildingKind>,
+    /// 这块商业地的收费参数。缺省 `None`（研究所/公园不需要）。
+    #[serde(default)]
+    pub fee: Option<FeeDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Asset, TypePath, Deserialize)]
@@ -486,6 +555,53 @@ impl BoardDef {
                         errs.push(format!("土地足迹重叠于 ({},{})", cell.0, cell.1));
                     }
                 }
+            }
+
+            // 商业设施（P10b）：住宅/保险地不挂设施与收费；商业地必须 2x2；
+            // fee 的形状必须与设施类别对得上（购物中心拿 PerStep 就是数据写歪），
+            // A 型的档位表必须盖满骰面 —— 摇出 6 却没有第 6 档，玩家掷出的是
+            // 「白踩」而不是「没建好」，那颗骰子就撒谎了
+            match (l.land_type, l.building_kind, l.fee.as_ref()) {
+                (LandType::Commercial, kind, fee) => {
+                    if l.size != 2 {
+                        errs.push(format!(
+                            "商业地 {} 的 size={}，商业设施只能建在 2x2 上",
+                            l.id, l.size
+                        ));
+                    }
+                    match (kind, fee) {
+                        (Some(BuildingKind::Mall), Some(FeeDef::RandomAmount { sides, tiers })) => {
+                            if *sides == 0 || tiers.len() != *sides as usize {
+                                errs.push(format!(
+                                    "购物中心 {} 的档位表 {} 条盖不住骰面 {}（且面数 ≥1）",
+                                    l.id,
+                                    tiers.len(),
+                                    sides
+                                ));
+                            }
+                        }
+                        (Some(BuildingKind::Hotel), Some(FeeDef::RandomStay { sides, .. })) => {
+                            if *sides == 0 {
+                                errs.push(format!("旅馆 {} 的骰面数为 0", l.id));
+                            }
+                        }
+                        (Some(BuildingKind::GasStation), Some(FeeDef::PerStep { .. })) => {}
+                        (Some(BuildingKind::Lab | BuildingKind::Park), None) => {}
+                        (kind, fee) => errs.push(format!(
+                            "土地 {} 的设施 {:?} 与收费 {:?} 不匹配（购物中心=A 档位、旅馆=B 按天、加油站=C 按步数、研究所/公园=无）",
+                            l.id, kind, fee
+                        )),
+                    }
+                }
+                (_, Some(kind), _) => errs.push(format!(
+                    "{:?} 地 {} 不该挂商业设施 {:?}",
+                    l.land_type, l.id, kind
+                )),
+                (_, None, Some(fee)) => errs.push(format!(
+                    "{:?} 地 {} 不该带收费参数 {:?}",
+                    l.land_type, l.id, fee
+                )),
+                (_, None, None) => {}
             }
         }
 
@@ -834,12 +950,63 @@ mod tests {
                 |b| b.tiles[3].data.coupon = Some(50),
                 "点券字段挂在别的格上",
             ),
+            (
+                |b| {
+                    b.lands[2].fee = Some(FeeDef::PerStep {
+                        rate: 100,
+                        requires_mount: true,
+                    })
+                },
+                "购物中心配了 C 型单价（A 型要档位表）",
+            ),
+            (
+                |b| {
+                    b.lands[2].fee = Some(FeeDef::RandomAmount {
+                        sides: 6,
+                        tiers: vec![100, 200],
+                    })
+                },
+                "档位表盖不住骰面（摇出 3 就是白踩）",
+            ),
+            (
+                |b| b.lands[0].building_kind = Some(BuildingKind::Hotel),
+                "住宅地挂商业设施",
+            ),
+            (
+                |b| {
+                    b.lands[2].fee = Some(FeeDef::RandomStay {
+                        sides: 4,
+                        per_day: 500,
+                    });
+                    b.lands[2].building_kind = Some(BuildingKind::Park);
+                },
+                "公园不需要收费参数却带了",
+            ),
         ];
 
         for (break_it, label) in cases {
             let mut b = board();
             break_it(&mut b);
             assert!(b.validate().is_err(), "坏棋盘被放过了（{label}）");
+        }
+    }
+
+    /// 演示盘外滩是预建购物中心：serde 那层 `{"random_amount": {...}}` 的外挂标签
+    /// 形状、`rename_all` 的蛇形命名、档位表盖满骰面，三件事一起在这里钉住。
+    #[test]
+    fn prototype_mall_fee_parses_and_maps_to_the_right_prototype() {
+        let b = board();
+        let land = &b.lands[2];
+        assert_eq!(land.building_kind, Some(BuildingKind::Mall));
+        let proto = land.fee.as_ref().expect("购物中心必须带收费参数").to_prototype();
+        use crate::service::FeePrototype;
+        match proto {
+            FeePrototype::RandomAmount { sides, tiers } => {
+                assert_eq!(sides, 6);
+                assert_eq!(tiers, vec![200, 400, 600, 800, 1200, 1600]);
+                assert_eq!(tiers.len() as u32, sides, "摇出任何一点都有档可走");
+            }
+            other => panic!("购物中心读成了 {other:?}"),
         }
     }
 }

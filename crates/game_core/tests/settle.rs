@@ -63,7 +63,7 @@ fn unowned_property_offers_a_buy() {
 }
 
 #[test]
-fn accepting_the_offer_takes_ownership_at_level_one() {
+fn accepting_the_offer_takes_ownership_of_the_bare_ground() {
     let (mut app, p0) = ready_on(0, 1, DecisionPolicy::AcceptAll);
     land(&mut app);
 
@@ -74,8 +74,8 @@ fn accepting_the_offer_takes_ownership_at_level_one() {
     );
     assert_eq!(
         plot(&mut app, 0),
-        (Some(0), 1),
-        "刚买到的地是 1 级（`property_registry.gd:29-33`：set_owner 顺带升到 1）"
+        (Some(0), 0),
+        "刚买到的是空地（级数重判：0=空地，买地不再钳到 1）"
     );
     assert_eq!(cash_of(&mut app, p0), 18_500);
     assert_cash_audit(&mut app, 20_000);
@@ -84,9 +84,9 @@ fn accepting_the_offer_takes_ownership_at_level_one() {
 /// 无主而带楼的地：**一次买下地 + 上面的建筑**（10-22 实报，那条消息的前半句是
 /// 「破产后剩下的地变成无主，但上面建筑也是保留的」，这一条接的是后半句）。
 ///
-/// 价 = 地价 + 已盖的每一层加盖费（南京路 1500 + 2×800 = 3100），拿到的等级是那三层的楼
-/// 而不是被抹平成一级。这两半各一条断言：只断钱不断等级，「收了楼的钱再把楼拆掉」那种
-/// 形状就看不见；只断等级不断钱，「按空地价卖一栋楼」那种形状也看不见。
+/// 价 = 地价 + 已盖的每一层加盖费（南京路 1500 + 3×800 = 3900，级数重判后建筑数 = level），
+/// 拿到的等级是那三层的楼而不是被抹平成空地。这两半各一条断言：只断钱不断等级，「收了楼的钱
+/// 再把楼拆掉」那种形状就看不见；只断等级不断钱，「按空地价卖一栋楼」那种形状也看不见。
 ///
 /// 前置用 `own(…, None, 3, …)` 而不是先打破产一局：破产那一趟留下的形状已由
 /// `cant_pay_rent_bankrupts_the_payer_and_frees_their_lands` 与 `tests/auction.rs` 钉住，
@@ -99,15 +99,15 @@ fn an_unowned_plot_with_a_house_on_it_is_bought_with_the_house() {
 
     let led = ledger(&app);
     assert!(
-        led.contains(&"Bought(P0@0$3100)".to_string()),
-        "报价要含那两层加盖费（地价 1500 + 2×800）：{led:?}"
+        led.contains(&"Bought(P0@0$3900)".to_string()),
+        "报价要含那三层加盖费（地价 1500 + 3×800）：{led:?}"
     );
     assert_eq!(
         plot(&mut app, 0),
         (Some(0), 3),
         "买家拿到的是那栋三层的楼，不是一块被抹平的空地"
     );
-    assert_eq!(cash_of(&mut app, p0), 16_900, "20000 - 3100");
+    assert_eq!(cash_of(&mut app, p0), 16_100, "20000 - 3900");
     assert_cash_audit(&mut app, 20_000);
 }
 
@@ -132,7 +132,7 @@ fn a_buy_anyone_cannot_afford_changes_nothing() {
 #[test]
 fn rent_moves_cash_from_payer_to_owner() {
     let (mut app, _) = ready_on(0, 1, DecisionPolicy::DeclineAll);
-    own(&mut app, 0, Some(1), 1, false); // P1 拥有南京路
+    own(&mut app, 0, Some(1), 0, false); // P1 拥有南京路（空地）
     land(&mut app);
 
     assert!(
@@ -151,8 +151,8 @@ fn rent_moves_cash_from_payer_to_owner() {
 fn monopoly_doubles_the_rent_in_play() {
     let (mut app, _) = ready_on(0, 1, DecisionPolicy::DeclineAll);
     // brown 组两块都在 P1 手里 → land 0 的 60 翻成 120
-    own(&mut app, 0, Some(1), 1, false);
-    own(&mut app, 1, Some(1), 1, false);
+    own(&mut app, 0, Some(1), 0, false);
+    own(&mut app, 1, Some(1), 0, false);
     land(&mut app);
 
     assert!(
@@ -186,8 +186,8 @@ fn mortgaged_land_charges_nothing_and_opens_no_dialog() {
 fn cant_pay_rent_bankrupts_the_payer_and_frees_their_lands() {
     let (mut app, p0) = ready_on(3, 6, DecisionPolicy::DeclineAll); // 3 → 9 王府井
     own(&mut app, 3, Some(0), 2, false); // P0 自己有块徐家汇
-    own(&mut app, 4, Some(1), 1, false); // yellow 组
-    own(&mut app, 5, Some(1), 1, false); // 整组在手 → 160×2 = 320
+    own(&mut app, 4, Some(1), 0, false); // yellow 组
+    own(&mut app, 5, Some(1), 0, false); // 整组在手 → 空地租 160×2 = 320
     set_cash(&mut app, p0, 50);
     land(&mut app);
 

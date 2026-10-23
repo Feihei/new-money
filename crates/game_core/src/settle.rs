@@ -794,8 +794,9 @@ impl<'w, 's> Books<'w, 's> {
     }
 
     /// 买地：扣**实付**价（地价 + 地上已有的每一层，见 [`Self::buy_price`]）→ 归属落到买家 →
-    /// 等级**至少** 1（`property_registry.gd:29-33` 的 `set_owner_by_key` 顺带把空地升到 1 级；
-    /// 本来就更高的地保留它已有的层，见下面那行注）。
+    /// 等级**不动**（级数重判之后 0 = 空地：无主空地买下来还是 0；「无主却带楼」的
+    /// 那些层（[`Self::bankrupt`] 只摘归属、不摘楼、P6c 天使白给的那一层）原样过户 ——
+    /// 买主刚刚按 `estate_value` 为每一层付过钱，「置 0」等于把那栋楼抹平）。
     /// 付不起或已有人持有 → `None`，什么都不动。
     ///
     /// 价过一遍管线（物价指数 + 小福神「买地免费」那一类 `Cancel`），所以这里返回的
@@ -805,13 +806,8 @@ impl<'w, 's> Books<'w, 's> {
         let entity = self.land_entity(land)?;
         let pid = self.id_of(player);
         self.debit(player, price).ok()?;
-        let (_, _, mut owner, mut level, _) = self.plots.get_mut(entity).ok()?;
+        let (_, _, mut owner, _, _) = self.plots.get_mut(entity).ok()?;
         owner.0 = pid;
-        // **下限 1 而不是置 1**：无主地平时就是 Lv0，而「无主却带楼」从今天起是真状态 ——
-        // 破产留下的那一手（[`Self::bankrupt`] 只摘归属、不摘楼）与 P6c 天使白给的那一层。
-        // 「置 1」等于把那栋楼抹平，而买主刚刚为它付过钱（[`Self::buy_price`] 的基数含楼）。
-        // PLAN §三 那句「建筑随土地一起过户」说的就是这件事：过户的是这块地现在的样子
-        level.0 = level.0.max(1);
         Some(price)
     }
 

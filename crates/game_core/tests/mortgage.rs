@@ -22,11 +22,11 @@ use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::prelude::{LandStatus, MortgageOp, Pending, TurnPhase};
 
-/// 柜台开着、p0 名下有 0 号南京路（Lv1）的那一帧。
+/// 柜台开着、p0 名下有 0 号南京路（空地 Lv0）的那一帧。
 fn desk() -> (App, Entity) {
     // 4 号掷 2 点 = 停在 6 号银行格（与 `finance.rs` 的柜台同一条前置）
     let (mut app, p0) = ready_on(4, 2, DecisionPolicy::Hold);
-    own(&mut app, 0, Some(0), 1, false);
+    own(&mut app, 0, Some(0), 0, false); // 级数重判后 0=空地，账面就是地价 1500
     roll(&mut app, p0);
     settle(&mut app, 8);
     assert_eq!(
@@ -75,7 +75,7 @@ fn mortgaging_pays_half_the_book_value_and_leaves_a_trail() {
 }
 
 /// 加盖花掉的钱要在抵押里回来一部分，否则「先投资再救急」等于把建筑费扔了。
-/// Lv3 = 地价 1500 + 加盖两次 ×800 = 3100 → 到手 1550。
+/// Lv3 = 地价 1500 + 加盖三次 ×800 = 3900 → 到手 1950（级数重判后建筑数 = level）。
 #[test]
 fn a_built_plot_mortgages_for_what_was_spent_on_it() {
     let (mut app, p0) = desk();
@@ -83,8 +83,8 @@ fn a_built_plot_mortgages_for_what_was_spent_on_it() {
 
     take(&mut app, p0, 0);
 
-    assert_eq!(cash_of(&mut app, p0), 21_550, "账面 3100 该到手 1550");
-    assert_eq!(mortgage_of(&app, 0), Some(1550));
+    assert_eq!(cash_of(&mut app, p0), 21_950, "账面 3900 该到手 1950");
+    assert_eq!(mortgage_of(&app, 0), Some(1950));
 }
 
 /// 写侧接上读侧：押出去之后，`Books::rent_of`（踩上去要收的那同一个数）当场归零。
@@ -93,7 +93,7 @@ fn a_built_plot_mortgages_for_what_was_spent_on_it() {
 fn a_mortgaged_plot_stops_earning_while_it_is_held() {
     let (mut app, p0) = desk();
     let before = rent_of(&mut app, 0);
-    assert!(before > 0, "前置：空地也收租（Lv1 查 rent[0]）");
+    assert!(before > 0, "前置：空地也收租（Lv0 查 rent[0]）");
 
     take(&mut app, p0, 0);
 
@@ -221,7 +221,7 @@ fn a_sealed_plot_moves_neither_way() {
     assert_eq!(mortgage_of(&app, 0), None, "查封中的地押出去了");
 
     // 押上之后再封，赎回那一支同样挡
-    own(&mut app, 1, Some(0), 1, false);
+    own(&mut app, 1, Some(0), 0, false);
     take(&mut app, p0, 1);
     assert_eq!(mortgage_of(&app, 1), Some(750), "前置：1 号该押得动");
     stamp(&mut app, 1, LandStatus::Sealed, 3);
@@ -300,8 +300,8 @@ fn bankruptcy_takes_the_mortgage_off_the_deed() {
     set_policy(&mut app, DecisionPolicy::AcceptAll);
     settle(&mut app, 6);
     set_policy(&mut app, DecisionPolicy::DeclineAll);
-    own(&mut app, 4, Some(1), 1, false);
-    own(&mut app, 5, Some(1), 1, false); // 整组在手 → 王府井 160×2 = 320
+    own(&mut app, 4, Some(1), 0, false);
+    own(&mut app, 5, Some(1), 0, false); // 整组在手 → 王府井空地租 160×2 = 320
     set_cash(&mut app, p0, 50);
     make_current(&mut app, p0);
     place(&mut app, p0, 3);
@@ -317,8 +317,8 @@ fn bankruptcy_takes_the_mortgage_off_the_deed() {
     );
     assert_eq!(
         plot_state(&mut app, 0),
-        (None, 1, false),
-        "人走了，地不该替一个不存在的债主挡租金 —— 但楼是他的遗产，留在地上"
+        (None, 0, false),
+        "人走了，地不该替一个不存在的债主挡租金 —— 押的是空地，留下的也是空地"
     );
     assert_eq!(mortgage_of(&app, 0), None, "抵押本金没跟着清掉");
     // 两人盘上打破产一个就是终局（`game_over_system` 那条），所以这里要的是「停得干净」

@@ -19,8 +19,8 @@ use game_core::prelude::{CardAim, LandId, LandStatus};
 fn brown_street_ready_to_be_hiked() -> (App, Entity) {
     // 1 号格 = 地块 0 南京路（同 tests/damage.rs 的走位）
     let (mut app, p0) = ready_on(0, 1, DecisionPolicy::DeclineAll);
-    own(&mut app, 0, Some(1), 1, false);
-    own(&mut app, 1, Some(1), 1, false);
+    own(&mut app, 0, Some(1), 0, false);
+    own(&mut app, 1, Some(1), 0, false); // 两块空地（级数重判后 Lv0 收 rent[0]=60）
     (app, p0)
 }
 

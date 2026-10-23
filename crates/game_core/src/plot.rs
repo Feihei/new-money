@@ -137,6 +137,8 @@ mod tests {
             price: 1_500,
             rent: vec![10, 50, 150, 450, 1_200, 3_000],
             upgrade_cost: 1_000,
+            building_kind: None,
+            fee: None,
         }
     }
 

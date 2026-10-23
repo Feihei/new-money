@@ -762,6 +762,26 @@ LandDamage::Clear   { seize }           // seize=true → Owner 归 None、等�
 
 **留待实报的三个数**：① 购物中心档位表（骰 1–6 摇出几收多少）—— 我填的是 100–600 等差，4 代的实际档没人记得；② 旅馆 `per_day`（我按「住一晚 500」标）；③ 加油站 `rate`（我按「每步 100」标）。三个都只在 P10b 进 JSON 时才定型，到时候一起过你的眼睛（P10 那行「造型区分度与地图可读性」也要你到场）。
 
+**落地记录（P10b，10-23）**：两件事进同一阶段 —— `building_kind` 连参数进棋盘数据（schema、校验、演示盘第一块预建设施），以及**级数重判**（10-20 拍板「Lv0 空地按 4 代重判」，它动的全是数字的读法，拖到 P10c 会逼 P10c 同时背两种读法）。
+
+**数据与校验**：
+
+- `board.rs`：`BuildingKind`（mall/hotel/gas_station/lab/park 五类）+ `FeeDef`（RandomAmount/RandomStay/PerStep 三形状，serde 外挂标签蛇形命名）+ `LandDef.building_kind`/`fee` 两个缺省字段。`FeeDef::to_prototype()` 是**纯映射**（数据→原型没有判定，判定全在 `service::assess`），五类设施 ↔ 三形状的匹配矩阵写进 `BoardDef::validate`：mall↔random_amount（**档位表必须盖满骰面** —— 摇出 6 却没有第 6 档，玩家掷出的是白踩，那颗骰子就撒谎了）、hotel↔random_stay（sides ≥ 1）、gas_station↔per_step、lab/park↔无 fee；住宅/保险地挂设施或参数＝加载错误；商业设施只能建在 2×2。校验单测 +4（含一条反例「购物中心配了 C 型单价」）。
+- `prototype.json`：外滩商业区（2 号）预建**购物中心**，档位 `[200,400,600,800,1200,1600]`。这是 P10c 落格接线前唯一可冒烟的设施；旅馆/加油站等其余设施等 P10c 连 `Pending::Build` 一起上盘。
+- `board-data-schema.md`：商业设施一节（匹配矩阵、三条形状示例、「摇出没有档的点＝白踩」那条理由）。
+
+**级数重判**（四条读数一起改，缺一条就各错一种）：
+
+- `calculate_rent`：删 `level.max(1)`，`rent[level]` **直接下标** —— 0 级空地收 `rent[0]`，与 4 代 `property_system.gd:59-61` 同口径；
+- `estate_value`：删 `saturating_sub(1)`，**建筑数 = level** —— 「Lv1 就是空地」那层翻译消失了，「地价 + 建筑费 × 建筑数」与式子字面一致；
+- `Books::buy`：**删掉钳层那三行** —— 无主空地买下来还是 Lv0；「无主却带楼」（破产残留、天使白给）原样过户，买主为每层付过钱，置 0 等于把楼抹平。附带红利：`buy` 里那行遮蔽 bug（`level` 改了却没写回）本来就是死代码，这次连根没了；
+- `GameRules.max_building_level` 6→5：空地→平房→店铺→商场→商业大楼→摩天大楼，加盖 5 次，租金表六行 0..=5 正好对满。
+- 屏幕不受影响：P9 那个「内部编号 ↔ 屏幕数字」的唯一翻译点 `ui::building_label` 本来就把 Lv0/Lv1 都叫「空地」、Lv2 起叫「建筑 Lv1」，重判后语义自动对齐，八个调用点没动；`NM_HOUSE` 注入的数在新口径下反而变准（敲 1 就是真的一层）。
+
+**red-check 计 20 处测试跟着改**（这是这一步的真成本：级数是一条全局读法，每个夹具里藏的 `own(…, 1, …)` 都是旧口径的化石）—— economy 6（租金表六行改下标、estate_value 三态、can_buy）、auction 3（OPENING 5700→7600、STEP 570→760、TALL 7600→9500，喊价序列注释一起重算）、damage 1、grab 2（买空地不再升 Lv1；三层楼收三层钱）、mortgage 9（desk 夹具 Lv1→Lv0，9 条用例的期望数全从 750/825/1550 重算成新口径）、plot_status 2、settle 5（含「买地得 Lv1」那条断言改名 `accepting_the_offer_takes_ownership_of_the_bare_ground`）。**没有一条红暴露出代码错**：级数重判在代码侧是删代码（`max(1)`/`saturating_sub(1)`/钳层三行），红的全是期望数 —— 这正是「翻译层只剩一个」想换来的形状。
+
+验收：规则层 **527** 项、表现层 79 项（`check.sh` 全绿，clippy 干净）。级数重判与 `building_kind` 两个字段进 schema 文档。P10c 开工前欠一张截图：外滩购物中心预建但还没有落格行为，画面与 P9 无差别 —— 等接线时一起拍。
+
 **排期单位（10-16 改）**：这张表原本带一列「粗估 N 天」，沿用移植阶段（B0–B5b，现已归档到 [`docs/archive/migration-b0-b5b.md`](../docs/archive/migration-b0-b5b.md)）的口径。**这列已经删掉**，因为那个单位现在是假的：B 阶段估的是人敲键盘与查文档的时间，P 阶段的耗时几乎不在写代码上，而在**验证**上 —— 真窗口截图、肉眼看排版、`cargo` 编译本身，这些与改动行数无关。留下**依赖**（决定什么能并行）与**验收**（决定什么需要你到场）两列就够，顺序即排期。
 
 需要你到场、用眼睛判断的东西，规则测试替你看不到：

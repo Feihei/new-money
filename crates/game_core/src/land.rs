@@ -19,8 +19,14 @@ pub struct LandId(pub u32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Owner(pub Option<PlayerId>);
 
-/// 建筑等级：0 = 空地（刚购入即置 1，对应 Godot `test_buy_success` 的 get_level==1），
-/// 1..=6 可升；租金查 `rent[level-1]`。上限在 `GameRules.max_building_level`。
+/// 建筑等级：**0 = 空地**（无主、刚买下都算；10-23 级数重判，见 PLAN §三），
+/// 1..=5 可升（空地→平房→店铺→商场→商业大楼→摩天大楼，加盖 5 次）；
+/// 租金查 `rent[level]`，六行租金表 0..=5 正好对上。上限在 `GameRules.max_building_level`。
+///
+/// 为什么 0 起算而不是买地钳到 1：`rent[level]` 直接对下标、`estate_value` 的
+/// 「建筑数 = level」不再差一格，而「无主却带楼」（破产残留、天使白给）与
+/// 「无主的空地」从此是同一个数轴上的两个真状态，没有第三种「0 级其实是一级」
+/// 的翻译。屏幕上的名字见 `game_app::ui::building_label`。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BuildingLevel(pub u8);
 
