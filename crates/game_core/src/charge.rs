@@ -30,6 +30,12 @@ use crate::land::LandId;
 pub enum ChargeKind {
     /// 踩到别人地块的过路费
     Rent { land: LandId },
+    /// 服务收费（P10①）：商业用地的事件费与公司企业的服务费，原型见 [`crate::service`]。
+    /// 不挂 `land`：收款方是地主（购物中心、旅馆、加油站）或董事长（航空、IBM），
+    /// 但「公司的地是哪块」没有答案，挂了 `land` 就得编一个假的。
+    /// 归 [`ChargeDomain::Rent`] 是 `Rent` 行注释里那句话兑现 —— 免费卡、大财神、
+    /// 嫁祸卡、物价指数四条既有规则**不改一行**就吃得到它。
+    Service,
     /// 买地地价（收款方是市场，即 `payee: None`）
     BuyLand { land: LandId },
     /// 加盖一级的建筑费
@@ -63,7 +69,7 @@ pub enum ChargeDomain {
 /// kind → 域。**不许出现 `_`**。
 pub const fn charge_domain_of(kind: ChargeKind) -> ChargeDomain {
     match kind {
-        ChargeKind::Rent { .. } => ChargeDomain::Rent,
+        ChargeKind::Rent { .. } | ChargeKind::Service => ChargeDomain::Rent,
         ChargeKind::BuyLand { .. } | ChargeKind::Upgrade { .. } => ChargeDomain::Acquire,
         ChargeKind::Penalty => ChargeDomain::Penalty,
         ChargeKind::Bonus => ChargeDomain::Bonus,
@@ -75,7 +81,10 @@ pub const fn charge_domain_of(kind: ChargeKind) -> ChargeDomain {
 pub const fn scales_with_price(kind: ChargeKind) -> bool {
     match kind {
         // 地价一族三个都缩。升级费不缩的话，物价 5 倍时加盖等于拿 1980 年的价盖楼
-        ChargeKind::Rent { .. } | ChargeKind::BuyLand { .. } | ChargeKind::Upgrade { .. } => true,
+        ChargeKind::Rent { .. }
+        | ChargeKind::Service
+        | ChargeKind::BuyLand { .. }
+        | ChargeKind::Upgrade { .. } => true,
         ChargeKind::Penalty | ChargeKind::Bonus => true,
         // PLAN §三 点名豁免神明金额：那是玩家记忆里的「固定数」，缩它等于改神明的剧本
         ChargeKind::God => false,
@@ -85,8 +94,9 @@ pub const fn scales_with_price(kind: ChargeKind) -> bool {
 /// 允不允许转嫁给别人（嫁祸卡读这一位）。
 pub const fn transferable(kind: ChargeKind) -> bool {
     match kind {
-        // 只有「我欠的」能嫁祸出去：过路费与罚款。买地要的是地契，转给别人付钱不等于给别人地
-        ChargeKind::Rent { .. } | ChargeKind::Penalty => true,
+        // 只有「我欠的」能嫁祸出去：过路费、服务费与罚款。买地要的是地契，
+        // 转给别人付钱不等于给别人地
+        ChargeKind::Rent { .. } | ChargeKind::Service | ChargeKind::Penalty => true,
         ChargeKind::BuyLand { .. }
         | ChargeKind::Upgrade { .. }
         | ChargeKind::Bonus
@@ -435,9 +445,15 @@ mod tests {
     /// 改它等于改平衡，不该在一次无关的重构里顺手发生。
     #[test]
     fn the_three_tables_say_what_we_mean() {
-        let rows: [(ChargeKind, ChargeDomain, bool, bool); 6] = [
+        let rows: [(ChargeKind, ChargeDomain, bool, bool); 7] = [
             (
                 ChargeKind::Rent { land: land(1) },
+                ChargeDomain::Rent,
+                true,
+                true,
+            ),
+            (
+                ChargeKind::Service,
                 ChargeDomain::Rent,
                 true,
                 true,

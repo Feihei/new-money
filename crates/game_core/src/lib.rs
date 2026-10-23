@@ -40,6 +40,7 @@ pub mod plot;
 pub mod property;
 pub mod rng;
 pub mod rules;
+pub mod service;
 pub mod settle;
 pub mod shop;
 pub mod status;
@@ -74,9 +75,10 @@ pub mod prelude {
     pub use crate::card::{CardDef, CardEffect, CardKind, CardSet, CardTarget};
     pub use crate::charge::{
         Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, Scope, Source,
-        charge_domain_of, scales_with_price, stage, transferable,
+        charge_domain_of, scales_with_price, stage, stage_and_spend, transferable,
     };
     pub use crate::coupon::{CouponBoxes, settle_coupon_landing};
+    pub use crate::service::{FeePrototype, ServiceBill, assess as assess_service};
     pub use crate::damage::{DamageTally, LandDamage};
     pub use crate::data::{
         BOARD_PATH, CHANCE_PATH, DataHandles, FATE_PATH, ITEMS_PATH, STOCKS_PATH,

@@ -5,8 +5,8 @@
 //! 假种子函数（缺陷 #6）。这里整局共用一个种子，于是「同种子 → 同对局」变成一条
 //! 可以断言的性质 —— 回放与失败复现都从这里长出来。
 //!
-//! **同一个种子分成十二条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
-//! 宝箱位置 / 宝箱掉落 / 神明 / 小游戏 / 乐透）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
+//! **同一个种子分成十四条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
+//! 宝箱位置 / 宝箱掉落 / 神明 / 小游戏 / 乐透 / 拍卖 / 服务收费）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
 //! 取随机数就会把 `turn_flow` 里「对局骰点 == 独立掷出的骰点」那批回归网整片打翻，
 //! 回放也对不齐；分流之后每域的随机性各自稳定，加内容不互相扰动。
 //!
@@ -62,6 +62,13 @@ const LOTTERY_TAG: u64 = 0x1077_0000_0000_000B;
 /// 事（「我那块地为什么是第二场」），若让它跟着「这一局进过几次店」或「刷过几次神」漂移，
 /// 同一颗种子的两次跑法会拍出两块不同的地 —— 那比拍哪几块更难查。
 const AUCTION_TAG: u64 = 0xA71C_0000_0000_000C;
+/// P10：服务收费原型摇出的那个数（购物中心掷几点、旅馆住几天、航空转盘停几段）。
+///
+/// 单独一条的理由与百货、神明那两条同形，而这里多一层：**这一摇发生在落格结算的那一帧**，
+/// 与骰子、抽卡、神明挪格同帧并发 —— 并进任何一条已有的流，「这一趟踩没踩购物中心」
+/// 都会挪动别人的随机数。而摇出几点是玩家会回头对的事（「我上次明明摇出 5」），
+/// 同一颗种子必须两次走出同一个数。
+const SERVICE_TAG: u64 = 0x5E3C_0000_0000_000E;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +99,7 @@ pub struct Rng {
     minigame: ChaCha8Rng,
     lottery: ChaCha8Rng,
     auction: ChaCha8Rng,
+    service: ChaCha8Rng,
 }
 
 impl Rng {
@@ -112,7 +120,14 @@ impl Rng {
             minigame: ChaCha8Rng::seed_from_u64(seed ^ MINIGAME_TAG),
             lottery: ChaCha8Rng::seed_from_u64(seed ^ LOTTERY_TAG),
             auction: ChaCha8Rng::seed_from_u64(seed ^ AUCTION_TAG),
+            service: ChaCha8Rng::seed_from_u64(seed ^ SERVICE_TAG),
         }
+    }
+
+    /// 服务收费那一条流（P10）：购物中心掷几点、旅馆住几天、航空转盘停几段。
+    /// 范围由载体自己给（`1..=sides`）—— 原型库只收数，不认识骰子。
+    pub fn pick_service(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.service.random_range(span)
     }
 
     /// 乐透那一条流（P8）：这个月开出几号。
@@ -460,5 +475,42 @@ mod tests {
         assert_eq!(four_digits(1, [0, 0, 0]), 1_000, "千位是千位，不是 1");
         assert_eq!(four_digits(9, [9, 9, 9]), 9_999, "四位数的上限");
         assert_eq!(four_digits(3, [0, 7, 5]), 3_075, "中间那位是 0 也要占位");
+    }
+
+    /// P10 的第十四条流。服务收费的摇数与骰子、抽卡、神明同帧发生，是这条流存在的
+    /// 全部理由：踩没踩购物中心不该挪动别人的随机数，反过来也一样。
+    #[test]
+    fn a_service_roll_shifts_nothing() {
+        let draws = |seed: u64, busy: bool| {
+            let mut r = Rng::new(seed);
+            if busy {
+                for _ in 0..40 {
+                    r.pick_service(1..=6);
+                    r.pick_service(1..=4);
+                }
+            }
+            (
+                (0..6).map(|_| r.roll_die()).collect::<Vec<_>>(),
+                (0..6).map(|_| r.pick(0..=9)).collect::<Vec<_>>(),
+                (0..6).map(|_| r.pick_shop(0..=9)).collect::<Vec<_>>(),
+                (0..6).map(|_| r.pick_god(1..=12)).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            draws(33, true),
+            draws(33, false),
+            "服务流污染了骰子/牌堆/百货/神明流"
+        );
+    }
+
+    #[test]
+    fn service_draws_are_reproducible_and_in_range() {
+        let series = |seed: u64| {
+            let mut r = Rng::new(seed);
+            (0..40).map(|_| r.pick_service(1..=4)).collect::<Vec<_>>()
+        };
+        assert_eq!(series(5), series(5), "同种子必须复现同一条摇数序列");
+        assert_ne!(series(5), series(6));
+        assert!(series(5).iter().all(|v| (1..=4).contains(v)));
     }
 }
