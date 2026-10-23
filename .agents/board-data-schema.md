@@ -49,13 +49,14 @@
 | `land_id` | int? | **仅 property 道路格**有；指向 `lands[]` 的土地 |
 | `branch` | object? | **可选**；存在即为分支接入点 |
 
-**道路格 `type` 取值**：`start` / `road` / `chance` / `fate` / `bank` / `stock` / `coupon` / `shop` / `arcade` / `transport` / `property` / `jail`(接入点) / `hospital`(接入点) ……
+**道路格 `type` 取值**：`start` / `road` / `chance` / `fate` / `bank` / `stock` / `coupon` / `shop` / `arcade` / `transport` / `property` / `company`(P10d①) / `jail`(接入点) / `hospital`(接入点) ……
 - `property` 道路格：**必带 `land_id`**，落到此格经 `land_id` 触发土地的购买/收租/升级。
 - 拐角格必须是 `fate`/`bank`/`news` 等特殊类型，**不绑土地**（无 `land_id`）。
 - `jail` / `hospital` 作为**分支尽头格**时只是地址，不是触发器：踩不到（`walk_path` 从不进分支），人被关着时棋子停在那里（10-20 拍板，P4④）。作为**主环格**时它是保释入口：踩上去开保释窗口，花 `GameRules::bail_points`（30）点券把关在对应分支里的人放出来，没人可保就与路面一样收摊（P4③）。
 - 演示盘把拘留分支挂在地产格上（2 汉口路 / 7 徐家汇），所以「走到监狱门口」表现为先结算地产、再弹保释窗口；将来的真棋盘可以把 `type: jail` 直接放在主环上，两条入口共用同一张窗口。
 - `arcade`（游乐场，P7）：踩上去开一局小游戏，成绩按 `GameRules::minigames` 那张表换点券。**三种游戏共用这一个 `type`**，靠 `data.game` 分流（`pop_balloons` / `catch_treasure` / `penguin_dig`）—— 不各开一个 `type`，否则格类型的数量会被美术资产的数量牵着走。
 - `lottery`（彩票中心，P8）：踩上去开买券窗口，一注 `GameRules::ticket_price`（现金），每月 15 号与分红同一天开奖。**格子本身没有任何参数** —— 号码池、票价、月息都在 `GameRules` 里（改它们要动的平衡读数是同一份，见 `rules.rs`）。与 `jail`/`hospital` 一样是「窗口而不是报价」。
+- `company`（公司门面，P10d①）：**不可拥有的固定格**，绑一只股票（`data.stock`）。落到此格按 `data.fee` 收一笔服务费进该公司的当月账（持股最多者＝董事长，免费通行且连账都不记）；每月 15 号分红按「当月真账净额 ÷ 总股数」摊给全体持股人，**亏损月是负数、按比例扣现金**（10-20 实报口径）。没有 `fee` 的公司是 D 型门面：踩上去只弹一张到访收据、不收钱、不记账。「公司的地是哪块」没有答案 —— 它不走 `land_id`/`building_kind`，拓扑上就是一格。
 - 其余类型按各自事件处理，无 `land_id`。
 
 ### `data` 的字段与归属（P1 起）
@@ -65,6 +66,8 @@
 | `coupon` | int? | **仅 `coupon`** | 点券面额，**必须为正**（三档 10/30/50 由数据决定，不随机抽，见 PLAN §五） |
 | `refresh` | int? | **仅 `coupon`** | 取走后多少回合重新出现；缺省走 `GameRules::coupon_refresh_turns`（6）。写 `0` 等于每次踩都发，与「一次性」矛盾 |
 | `game` | string? | **仅 `arcade`** | 这一格固定玩哪一款：`pop_balloons` / `catch_treasure` / `penguin_dig`。**缺省合法**，意思是「这一趟随机一款」（抽法走 `Rng` 的小游戏子流）。写错的值不是被忽略而是**加载期报错**（serde 枚举） |
+| `stock` | string? | **仅 `company`** | 这家门面绑哪只股票（对应 `stocks.json` 的 id）。**公司格必填** —— 没绑股的公司格是加载错误 |
+| `fee` | object? | **仅 `company`**（地块的 `fee` 见下节） | 这家公司的收费原型参数：`random_stay`（航空那类，摇几点住几天）或 `per_step`（IBM 那类，单价 × 本回合骰面）。**缺省合法** = D 型门面（不收费）。**B 型 `sides` 必须 ≥ 1** |
 
 > 拘留格**没有** `turns` / `fine`：拘留天数只来自卡面（10-20 拍板，P4④ 把字段与数据一起删了），而保释不动现金（P4③）。写回 `data.turns`/`data.fine` 会被 serde 忽略，而 `board.rs` 有一条断言钉住那两格的数据必须为空。
 
@@ -76,6 +79,7 @@
 - `arcade` 格不绑土地：它是一个窗口，没有归属、等级、租金。
 - 非 `property` 格带 `land_id` → 报错（`tools/validate_board.py` 10 与 `BoardDef::validate` 两边都查）。规则 4 只管到了「`property` 缺 `land_id`」那一半，而反方向不响的话，「这一格绑了地块」就成一个只有校验器看不见的字段。
 - `lottery` 格带任何 `data` 字段 → 报错：彩票没有格子级参数，写了就是没人读（与上面那条同一条理由）。
+- `company` 格**必须带 `data.stock`**；反过来 `stock`/`fee` 挂到别的格上 → 报错（「这一格绑了股票」不能是一个只有校验器看不见的字段）。B 型 `sides == 0` → 报错（住 0 天不是「免费住」而是这条参数根本没意义）。
 
 ### 对角判定
 相邻 `loop` 元素若 `abs(dcol)==1 && abs(drow)==1`，该段为**对角路**（斜向街道），渲染与移动均按斜线处理。

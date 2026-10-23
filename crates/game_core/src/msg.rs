@@ -287,6 +287,34 @@ pub struct ServiceCharged {
     pub stay_days: u32,
 }
 
+/// 公司服务费已结算（P10d①）：`payer` 踩到那家公司的门面格被收了 `amount`。
+/// 与 [`ServiceCharged`] 分开不是形状不同，是**收款方**不同：这笔钱不进任何玩家的钱包，
+/// 而是记进那家公司的**当月损益账**（`company::MonthLedger`），分红日按持股比例分它。
+/// `chairman` 是此刻持股最多的人 —— 他踩格免费（`amount == 0` 就是免单的那一笔）；
+/// `stock` 供面板与顶栏读「是哪家公司收的」。
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct CompanyCharged {
+    pub payer: Entity,
+    pub stock: String,
+    pub chairman: Option<Entity>,
+    pub amount: i64,
+    pub roll: u32,
+    pub stay_days: u32,
+}
+
+/// 公司分红已发放（P10d①）：分红日（15 号）按持股比例把 `MonthLedger` 的当月净额
+/// 分给持股人。`per_share` 可为**负数** —— 亏损月份按比例扣现金（10-20 实报的口径），
+/// 负得付不出的人当场破产（与租金同一条判据）。`profit` 是当月净额（含符号），
+/// 顶栏与 dump 读它说清「这笔钱从哪来」。
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct CompanyPayout {
+    pub stock: String,
+    pub player: Entity,
+    pub shares: u32,
+    pub per_share: i64,
+    pub profit: i64,
+}
+
 // ===== 经济与银行 =====
 
 /// 现金变动。所有 `Wallet` 的增减都必须留下一条这条流水 ——

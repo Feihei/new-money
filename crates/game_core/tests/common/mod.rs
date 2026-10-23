@@ -22,23 +22,23 @@ use game_core::prelude::{
     BankVisited, BidMove, BidPlaced, BidWithdrawn, BombTransferred, Books, BuildOffered,
     BuildRequested, BuildingLevel, BuyOffered, BuyTicketRequested, CardAim, CardDrawn, CardGained,
     CardId, CardKind, CardLost, CardPlayed, CardSet, CashChanged, ChargeKind, ChargeWaived,
-    ChestOpened, Correction, Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision,
-    DecisionChosen, Deck, Detention, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride,
-    FacilityBuilt, GameKind, GameOver, GameRules, GameSeed, GameSession, GameSetup, Gameplay,
-    GiftsGiven, God, GodAppeared, GodDeed, GodLeft, GodPossessed, Hand, Insulation, Inventory,
-    ItemKind, ItemPlaced, Jackpot, JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId,
-    LandStatus, LandTaken, LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought,
-    LotteryDrawn, LotteryTickets, LotteryWon, Market, MarketClock, MinigameResult, MinigameScore,
-    MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap,
-    MoveCapped, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision,
-    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
-    PlayerDetained, PlayerId, PlayerTeleported, PlotArea, Points, PointsChanged, Possession,
-    Presence, RedEnvelope, RemoteDiceUsed, RentDue, RequestRemoteDice, RequestRoll, RequestStay,
-    Rng, Scope, ServiceCharged, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted,
-    StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested, StockTraded,
-    StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder,
-    TurnPhase, TurnStarted, UpgradeOffered, WalkHalted, WalkStarted, Wallet, deal_to,
-    grant_effects,
+    ChestOpened, CompanyCharged, CompanyLedgers, CompanyPayout, Correction, Corrections,
+    CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen, Deck, Detention,
+    DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, FacilityBuilt, GameKind,
+    GameOver, GameRules, GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared,
+    GodDeed, GodLeft, GodPossessed, Hand, Insulation, Inventory, ItemKind, ItemPlaced, Jackpot,
+    JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken,
+    LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought, LotteryDrawn, LotteryTickets,
+    LotteryWon, Market, MarketClock, MinigameResult, MinigameScore, MortgageDone, MortgageOp,
+    MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt,
+    OccupancyKind, Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
+    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported,
+    PlotArea, Points, PointsChanged, Possession, Presence, RedEnvelope, RemoteDiceUsed, RentDue,
+    RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone,
+    ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId,
+    StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
+    Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered,
+    WalkHalted, WalkStarted, Wallet, deal_to, grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -156,9 +156,13 @@ fn auto_answer_system(
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::DeclineAll) => Decision::Decline,
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::AcceptAll) => Decision::Accept,
         // 收据与卡面无论如何都算「看完了」（P10c 起服务收据也在这一族）
-        (Pending::RentNotice(_) | Pending::ServiceNotice(_) | Pending::Card, _) => {
-            Decision::Acknowledge
-        }
+        (
+            Pending::RentNotice(_)
+            | Pending::ServiceNotice(_)
+            | Pending::CompanyNotice
+            | Pending::Card,
+            _,
+        ) => Decision::Acknowledge,
         // 建设窗口（P10c）只认「先不建」。它**不建** —— 与彩票那格「不买券」同一条理由：
         // 建一座设施要 2200，长跑用例的现金断言钉的是「租金与地价」那几笔，
         // 多一笔建设费会让几十条既有断言一起红。建造那条路由 `tests/commercial.rs` 自己走
@@ -335,6 +339,12 @@ struct BookReaders<'w, 's> {
     services: MessageReader<'w, 's, ServiceCharged>,
     /// 建成凭据。与 `upgraded` 分开记的理由同上。
     built: MessageReader<'w, 's, FacilityBuilt>,
+    // ===== 公司企业（P10d①）=====
+    /// 公司服务费收据。与 `services` 分开记：那一条的钱进了地主的钱包，
+    /// 这一条的钱进了公司的当月损益账 —— 「谁收的」答案不同。
+    company_charged: MessageReader<'w, 's, CompanyCharged>,
+    /// 公司分红凭据（正负共用一条：亏损月的「扣」也是分红）。
+    company_payouts: MessageReader<'w, 's, CompanyPayout>,
 }
 
 fn who(players: &Query<&PlayerId>, e: Entity) -> String {
@@ -860,6 +870,31 @@ fn collect_books(
             m.cost
         ));
     }
+    // ===== 公司企业（P10d①）=====
+    for m in r.company_charged.read() {
+        log.0.push(format!(
+            "Company({}@{}${},摇{},住{}天,董事长{})",
+            who(&players, m.payer),
+            m.stock,
+            m.amount,
+            m.roll,
+            m.stay_days,
+            match m.chairman {
+                Some(c) => who(&players, c),
+                None => "无".into(),
+            }
+        ));
+    }
+    for m in r.company_payouts.read() {
+        log.0.push(format!(
+            "Dividend({}@{}:每股{}×{}股,当月{})",
+            who(&players, m.player),
+            m.stock,
+            m.per_share,
+            m.shares,
+            m.profit
+        ));
+    }
     for m in r.cash.read() {
         audit.0.push((m.player, m.delta, m.balance));
     }
@@ -1359,6 +1394,34 @@ where
     app.update();
 }
 
+/// P10d①：把行情钟推一天（含公司分红）。`tick_at_turn_end` 的参数比 `run_op` 的
+/// 两件套多出损益账与 `Commands`，不值得为它改所有既有用例的闭包签名 —— 单开一条。
+///
+/// 与 `run_op` 同一条一次性纪律：add 过的 system 在后续每一帧都还在跑，靠旗标
+/// 让它空转 —— 否则循环里调 N 次就挂 N 条 tick，行情钟一帧被推 N 天。
+#[derive(Resource, Default)]
+pub struct MarketTickReq(pub bool);
+
+pub fn run_market_tick(app: &mut App) {
+    app.insert_resource(MarketTickReq(true));
+    app.add_systems(Update, run_market_tick_system);
+    app.update();
+}
+
+fn run_market_tick_system(
+    mut req: ResMut<MarketTickReq>,
+    mut commands: Commands,
+    mut books: Books,
+    mut market: Market,
+    mut ledgers: ResMut<CompanyLedgers>,
+) {
+    if !req.0 {
+        return;
+    }
+    req.0 = false;
+    market.tick_at_turn_end(&mut books, &mut ledgers, &mut commands);
+}
+
 /// 一次建筑损害请求（[`run_damage`] 的载体）。
 #[derive(Resource)]
 pub struct DamageReq(Option<(LandId, LandDamage, PlotArea)>);
@@ -1470,6 +1533,38 @@ pub fn shares_of(app: &mut App, player: Entity, id: &str) -> u32 {
         .get(&game_core::prelude::StockId(id.to_string()))
         .copied()
         .unwrap_or(0)
+}
+
+/// 直接把某位玩家对某只股的持仓摆到 `shares`（预置「谁当董事长」这类前置）。
+///
+/// 持仓不是现金：没有「余额 == Σ流水」那类审计押着它，走 `trade` 反而要把现金、
+/// 现价、封顶三条不相干的量搅进前置 —— 董事长判定要的是精确的股数对比。
+pub fn set_shares(app: &mut App, player: Entity, id: &str, shares: u32) {
+    app.world_mut()
+        .entity_mut(player)
+        .get_mut::<game_core::prelude::StockHoldings>()
+        .expect("玩家应有持仓组件")
+        .0
+        .insert(game_core::prelude::StockId(id.to_string()), shares);
+}
+
+/// 往某家公司的当月账上添一笔（预置「分红日之前攒下了多少利润」这类前置）。
+/// 日期取当前行情钟所在的那一天 —— 损益账按自然月分页，跨月入账会被翻页吞掉。
+pub fn add_company_entry(app: &mut App, stock: &str, amount: i64, why: &'static str) {
+    let tick = app
+        .world()
+        .resource::<game_core::prelude::MarketClock>()
+        .tick;
+    let epoch = app
+        .world()
+        .resource::<game_core::prelude::GameSession>()
+        .epoch;
+    let date = game_core::prelude::date_of(tick, epoch);
+    app.world_mut()
+        .resource_mut::<CompanyLedgers>()
+        .current_mut(stock, date)
+        .entries
+        .push(game_core::prelude::LedgerEntry { date, amount, why });
 }
 
 /// 把某位玩家的现金调到 `cash`（预置「付不起」这类边界）。

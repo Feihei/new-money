@@ -74,6 +74,10 @@ pub enum LandingDomain {
     /// 拘留场所的接入点：踩上去可以花点券保释关在里面的人（P4③，`bail::settle_bail_landing`）。
     /// 带的是**这个入口管哪一处** —— 监狱门口放不出医院里的人。
     Bail(DetentionPlace),
+    /// 公司企业（P10d①，`company::settle_company_landing`）：踩到那家公司的门面 ——
+    /// 服务费当场结算（收进公司当月损益账）、董事长免单同帧可判。
+    /// 钱在结算里已经动过，与 `ServiceNotice` 同族：窗口只负责「读完再走」。
+    Company,
     /// 按设计就是什么都不做：路面只是路面，起点刻意不发薪水（PLAN §一）。
     Nothing,
     /// 玩法已在 PLAN 登记、但结算还没到位的格。踩上去 `warn!`，别当成「没有这个格」。
@@ -101,6 +105,8 @@ pub const fn domain_of(kind: TileKind) -> LandingDomain {
         // 「没有任何踩到某格就被关的规则」是 10-20 拍板的另一半
         TileKind::Jail => D::Bail(DetentionPlace::Jail),
         TileKind::Hospital => D::Bail(DetentionPlace::Hospital),
+        // 公司企业（P10d①）：不可拥有的固定格，结算在 `company.rs`
+        TileKind::Company => D::Company,
         // 起点「什么都不发」是拍板过的规则（4 代没有过起点领薪水），不是没做完
         TileKind::Start | TileKind::Road => D::Nothing,
         // ↓ 待办清单。中立与交通根本没有对应玩法（PLAN §三），神明那条 P6 已经改走
@@ -165,6 +171,10 @@ pub enum Pending {
     /// 免单（大财神/免费卡吃掉的那笔 0 元）也要过这里，玩家得看得见「为什么没付钱」。
     /// 与 [`Pending::RentNotice`] 同一族：钱已扣完，窗口只负责「读完再走」。
     ServiceNotice(LandId),
+    /// 公司服务费已结算（P10d①）：维修费按几步算、出国几天付多少，收据上说。
+    /// 与 `ServiceNotice` 分开占一格不是形状不同（都是已结算的收据），是**收款方**不同：
+    /// 这笔钱收进公司的当月损益账（分红按它分），面板上那行「谁收的」也答得出来。
+    CompanyNotice,
     /// 卡面已结算，只需玩家读完
     Card,
     /// 踩到银行格，柜台开着：存/取/借/还随便办，直到玩家按「办完」。
@@ -362,7 +372,13 @@ pub fn decision_system(
         (Pending::Auction, _) => return,
         // 收据与卡面没有「可拒绝」的选项：钱已经扣了、效果已经结算了。
         // 任何回答都算「我看完了」—— 严格拒绝只会把 UI 的一次疏忽变成挂死。
-        (Pending::RentNotice(_) | Pending::ServiceNotice(_) | Pending::Card, _) => {}
+        (
+            Pending::RentNotice(_)
+            | Pending::ServiceNotice(_)
+            | Pending::CompanyNotice
+            | Pending::Card,
+            _,
+        ) => {}
         // 报价上答「已阅」= 没答，继续等（Godot 的 `_pending_decision != "buy"` 同义）
         (Pending::Buy(_) | Pending::Upgrade(_), Decision::Acknowledge) => return,
     }
@@ -467,7 +483,7 @@ mod tests {
     /// 分派表的全部条目。这张清单与 `domain_of` 一一对着写：新增 `TileKind` 时
     /// `domain_of` 会先编译失败，所以这里唯一可能过期的是「加了格类型没加进清单」——
     /// 下面那条 `每格都有归宿` 的用例把两种过期分开钉住了。
-    const ALL_KINDS: [TileKind; 16] = [
+    const ALL_KINDS: [TileKind; 17] = [
         TileKind::Start,
         TileKind::Property,
         TileKind::Bank,
@@ -484,6 +500,7 @@ mod tests {
         TileKind::Coupon,
         TileKind::Shop,
         TileKind::Arcade,
+        TileKind::Company,
     ];
 
     #[test]
@@ -506,6 +523,8 @@ mod tests {
             (TileKind::Road, D::Nothing),
             // P8：彩票中心 = 买券窗口（它从下面那组待办里挪出来，正是这条注释说的那件事）
             (TileKind::Lottery, D::Lottery),
+            // P10d①：公司门面 = 服务费收据
+            (TileKind::Company, D::Company),
             // 待办三格各自点名；将来某格实现了就从这一组挪走，
             // 于是「悄悄少了一个待办」也会在这里显形
             (TileKind::GodDeity, D::Unimplemented(TileKind::GodDeity)),
@@ -566,6 +585,8 @@ mod tests {
             Pending::Buy(LandId(2)),
             Pending::Upgrade(LandId(2)),
             Pending::RentNotice(LandId(2)),
+            Pending::ServiceNotice(LandId(2)),
+            Pending::CompanyNotice,
             Pending::Card,
             Pending::BankTeller,
             Pending::Shop,

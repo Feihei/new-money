@@ -1461,7 +1461,7 @@ mod tests {
         assert!(dogs.dog);
     }
 
-    /// 15 格的演示盘（环上算术要有真实的环长可数，而不是测试自己造一个数）。
+    /// 17 格的演示盘（环上算术要有真实的环长可数，而不是测试自己造一个数）。
     /// 环长变了这两条用例的格号就跟着变 —— 那正是「用真盘而不是自造一个数」的代价与好处。
     fn ring() -> BoardDef {
         BoardDef::from_json(include_str!("../../../assets/data/boards/prototype.json"))
@@ -1470,33 +1470,33 @@ mod tests {
 
     #[test]
     fn the_summon_buys_the_nearest_god_even_when_he_stands_behind_me() {
-        // 从 0 号起：6 号离 6 步，10 号离 5 步（倒着数）。请神符要请 10 号那一位，
+        // 从 0 号起：6 号离 6 步，12 号离 5 步（倒着数）。请神符要请 12 号那一位，
         // 而**沿行进方向他下一回合本来就会先踩到 6 号** —— 这张卡卖的不是「快点走到」，
         // 是「不必走到那一格」（与购地卡同一条理由）
         let two = [
             (God::BigRich, TileIndex(6)),
-            (God::SmallRich, TileIndex(10)),
+            (God::SmallRich, TileIndex(12)),
         ];
         assert_eq!(
             nearest_god(&ring(), TileIndex(0), Heading::Forward, two.into_iter()),
-            Some((God::SmallRich, TileIndex(10), 5)),
+            Some((God::SmallRich, TileIndex(12), 5)),
             "回来的第三个数是「离几步」—— 请神符的流水要说它"
         );
     }
 
     #[test]
     fn a_tie_on_the_ring_is_broken_by_which_way_he_is_facing() {
-        // 7 号与 8 号离 0 号都是 7 步：正向取前面那位，掉头之后就取另一位。
-        // 15 格是奇数环，没有「正对面那一位」这种陷阱（14 格环上 7 号两个方向都数出 7，
+        // 8 号与 9 号离 0 号都是 8 步：正向取前面那位，掉头之后就取另一位。
+        // 17 格是奇数环，没有「正对面那一位」这种陷阱（16 格环上 8 号两个方向都数出 8，
         // 拿它当用例的话 `Heading` 那一格永远测不到）；同距的一对是夹着远侧的那两格
-        let two = [(God::Angel, TileIndex(7)), (God::Devil, TileIndex(8))];
+        let two = [(God::Angel, TileIndex(8)), (God::Devil, TileIndex(9))];
         assert_eq!(
             nearest_god(&ring(), TileIndex(0), Heading::Forward, two.into_iter()),
-            Some((God::Angel, TileIndex(7), 7))
+            Some((God::Angel, TileIndex(8), 8))
         );
         assert_eq!(
             nearest_god(&ring(), TileIndex(0), Heading::Backward, two.into_iter()),
-            Some((God::Devil, TileIndex(8), 7)),
+            Some((God::Devil, TileIndex(9), 8)),
             "转向卡之后请到的该换一位 —— 否则这条决胜键与「按格号排」分不出来"
         );
     }

@@ -120,6 +120,7 @@ fn answer_for(about: Pending, rules: &GameRules) -> AutoAnswer {
         | Pending::Card
         | Pending::BankTeller
         | Pending::Shop
+        | Pending::CompanyNotice
         | Pending::Bail(_) => AutoAnswer::Decide(Decision::Acknowledge),
         // 建设窗口（P10c）：自动玩家答「先不建」。**不是「还没实现」** —— 建哪一类是
         // 一个要读世界状态的意图（棋盘默认表配了哪几类、这块地的价、灰按钮的理由都在

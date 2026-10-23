@@ -14,12 +14,12 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionFailed, AuctionStarted, AuctionWon, BankOpDone, BankVisited,
     BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, ChargeWaived, ChestOpened,
-    DetentionLifted, DetentionSkipped, FacilityBuilt, GameOver, GameSession, GodAppeared, GodDeed,
-    GodExit, GodLeft, GodPossessed, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn,
-    LotteryWon, MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped,
-    Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged,
-    RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded,
-    StockVisited, TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
+    CompanyCharged, DetentionLifted, DetentionSkipped, FacilityBuilt, GameOver, GameSession,
+    GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, ItemPlaced, LandId, LandTaken,
+    LotteryBought, LotteryDrawn, LotteryWon, MarketClock, MinigameScore, MortgageDone, MortgageOp,
+    MountChanged, MoveCapped, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName,
+    PointsChanged, RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted, StaySentence,
+    StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
 };
 
 use super::finance::comma;
@@ -480,6 +480,9 @@ pub(crate) struct Notices<'w, 's> {
     /// 它要说得出「哪座设施、算了多少」，否则玩家只看见钱包少了一截。
     /// 排在 P5 那一族之后：道具与收费不会同帧发生，而这一条更该留在最后
     service: MessageReader<'w, 's, ServiceCharged>,
+    /// 公司到访（P10d①）。与 `service` 同一条理由：收据下一刻就被关掉，这一行是
+    /// 唯一持久的那句话 —— 它要说得出「哪家公司、为什么是这个数（董事长免单）」
+    company: MessageReader<'w, 's, CompanyCharged>,
     /// 设施建成。与 `land_taken` 同一形：只带一块地，不说办成了什么
     facility_built: MessageReader<'w, 's, FacilityBuilt>,
     over: MessageReader<'w, 's, GameOver>,
@@ -912,6 +915,38 @@ pub(crate) fn hint_from_events(
             format!("{amount} 在{}过路", m.kind.label())
         });
     }
+    for m in notices.company.read() {
+        // 公司名要从棋盘上查（消息里只有股票 id）：夹具没有棋盘，落回 id 本身
+        let company = board
+            .as_ref()
+            .and_then(|b| {
+                b.def
+                    .tiles
+                    .iter()
+                    .find(|t| t.data.stock.as_deref() == Some(&m.stock))
+                    .map(|t| t.name.clone())
+            })
+            .unwrap_or_else(|| m.stock.clone());
+        // 董事长到访那笔金额是 0：「免费」要说得出为什么，不能读起来像租金表坏了
+        line = Some(if m.amount == 0 && m.chairman == Some(m.payer) {
+            format!("{} 是{}的董事长，免费通行", name(&names, m.payer), company)
+        } else if m.stay_days > 0 {
+            format!(
+                "{} 付 {} 在{}住了 {} 天",
+                name(&names, m.payer),
+                comma(m.amount),
+                company,
+                m.stay_days
+            )
+        } else {
+            format!(
+                "{} 付 {} 在{}过路",
+                name(&names, m.payer),
+                comma(m.amount),
+                company
+            )
+        });
+    }
     for m in notices.over.read() {
         line = Some(match m.winner.and_then(|w| names.get(w).ok()) {
             Some(winner) => format!("胜者：{}！", winner.0),
@@ -1273,6 +1308,8 @@ mod tests {
             // P10c：商业设施那两条（建成与收费）。同样属于「漏了整块播报建不出来」
             .add_message::<FacilityBuilt>()
             .add_message::<ServiceCharged>()
+            // P10d①：公司到访那条
+            .add_message::<CompanyCharged>()
             .add_message::<GameOver>()
             .add_systems(Update, hint_from_events);
         let me = app.world_mut().spawn(PlayerName("阿土伯".into())).id();
@@ -1661,6 +1698,67 @@ mod tests {
             hint_of(&mut app, hint),
             "分文不取 在购物中心（摇出 2）",
             "金额 0 读起来像租金表坏了"
+        );
+    }
+
+    /// 公司到访那几句（P10d①）。董事长免单那句必须说得出「为什么免费」——
+    /// 金额 0 读起来像租金表坏了，与设施免单那一句同一条理由。
+    /// 夹具没有棋盘，公司名落回股票 id：这里验的是三件事都在（人、免费/金额、去向）。
+    #[test]
+    fn a_company_visit_says_why_it_was_free_or_how_much() {
+        let (mut app, me, _foe, hint) = notices_app();
+        // 董事长免单：金额 0 + 董事长是自己
+        send(
+            &mut app,
+            CompanyCharged {
+                payer: me,
+                stock: "stock_001".into(),
+                chairman: Some(me),
+                amount: 0,
+                roll: 0,
+                stay_days: 0,
+            },
+        );
+        let said = hint_of(&mut app, hint);
+        assert!(
+            said.contains("阿土伯") && said.contains("董事长") && said.contains("免费通行"),
+            "免单收据那一行没接上：{said}"
+        );
+
+        // 访客付费：金额要说出来（按步数计费的那一类）
+        send(
+            &mut app,
+            CompanyCharged {
+                payer: me,
+                stock: "stock_001".into(),
+                chairman: Some(_foe),
+                amount: 240,
+                roll: 0,
+                stay_days: 0,
+            },
+        );
+        let said = hint_of(&mut app, hint);
+        assert!(
+            said.contains("阿土伯") && said.contains("240"),
+            "付费到访那一行没接上：{said}"
+        );
+
+        // 航空那类按天：天数与金额是两件事，这一行说的是前者
+        send(
+            &mut app,
+            CompanyCharged {
+                payer: me,
+                stock: "stock_005".into(),
+                chairman: None,
+                amount: 1_200,
+                roll: 3,
+                stay_days: 3,
+            },
+        );
+        let said = hint_of(&mut app, hint);
+        assert!(
+            said.contains("1,200") && said.contains("住了 3 天"),
+            "按天计费那一行没接上：{said}"
         );
     }
 

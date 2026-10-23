@@ -1,8 +1,9 @@
 //! P1 的验收：点券格踩上去发一次、冷却期间谁都不发、到期再发，且这笔账不进现金。
 //!
-//! 落格一律走「把玩家摆在 `10 - 点数` 那格 + 掷出点数的种子」这条真路径
+//! 落格一律走「把玩家摆在 `11 - 点数` 那格 + 掷出点数的种子」这条真路径
 //! （`ready_on`），于是被测的是分派表与结算 system，不是手搓的组件。
-//! prototype 的 10 号格就是点券箱（面额 30，冷却走 `GameRules` 缺省 6 回合）。
+//! prototype 的 11 号格就是点券箱（面额 30，冷却走 `GameRules` 缺省 6 回合；
+//! P10d① 重排后它从 10 号顺移到 11 号）。
 
 mod common;
 
@@ -12,8 +13,8 @@ use bevy::prelude::NextState;
 use common::*;
 use game_core::prelude::{ActiveBoard, GameSession, TileKind, TurnPhase};
 
-/// prototype 上的点券箱（`assets/data/boards/prototype.json` 的 10 号格）。
-const BOX: u32 = 10;
+/// prototype 上的点券箱（`assets/data/boards/prototype.json` 的 11 号格）。
+const BOX: u32 = 11;
 
 fn land(app: &mut App) {
     play_turns(app, turn_count(app) + 1);
@@ -124,7 +125,7 @@ fn the_cooldown_is_per_tile() {
     place(&mut app, p0, 2);
     land(&mut app);
 
-    assert_eq!(points_of(&app, p0), 40, "10 号还在冷却，3 号那颗该照发");
+    assert_eq!(points_of(&app, p0), 40, "11 号还在冷却，3 号那颗该照发");
     assert_eq!(boxes_taken(&app), 2);
     assert_points_audit(&mut app, 0);
 }

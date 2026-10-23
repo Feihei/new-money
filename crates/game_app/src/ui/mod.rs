@@ -44,6 +44,8 @@ impl Plugin for UiPlugin {
             // 而 `Pending::ServiceNotice` 只说「哪块地」，说不出摇了几点、住了几天 ——
             // 那些数只活在这条消息里
             .init_resource::<dialog::RecentService>()
+            // 最近一笔公司到访（P10d①）。与 `RecentService` 同一条：收据的读数只在消息里
+            .init_resource::<dialog::RecentCompany>()
             // `NM_PAUSE=1` 开局即暂停：没有键盘可按，暂停面板否则无法被截图核对
             .insert_resource(pause::PauseMenuOpen::from_env())
             // `NM_PICK_TILE=列:行` 开局即选中那格：详情卡否则也进不了截图
@@ -78,6 +80,7 @@ impl Plugin for UiPlugin {
                         player_hud::refresh_player_hud.in_set(UiSet::Live),
                         dialog::remember_drawn_card.in_set(UiSet::Live),
                         dialog::remember_service.in_set(UiSet::Live),
+                        dialog::remember_company.in_set(UiSet::Live),
                         dialog::force_decision.in_set(UiSet::Live),
                         dialog::sync_modal.in_set(UiSet::Live),
                         finance::sync_atm_panel.in_set(UiSet::Live),
@@ -161,6 +164,13 @@ impl Plugin for UiPlugin {
             app.add_systems(
                 Update,
                 dialog::dev_open_service.run_if(resource_exists::<ActiveBoard>),
+            );
+        }
+        // `NM_COMPANY=1`：公司到访收据的非鼠标入口（P10d①）。判据同 `NM_SERVICE`。
+        if std::env::var_os("NM_COMPANY").is_some() {
+            app.add_systems(
+                Update,
+                dialog::dev_open_company.run_if(resource_exists::<ActiveBoard>),
             );
         }
         // `NM_DAY=<tick>`：把日历钉在第 n 天。P2④ 之后「今天休不休市」是面板上十二颗按钮
@@ -2170,6 +2180,7 @@ mod tests {
             .add_message::<BuildRequested>()
             .add_message::<game_core::prelude::FacilityBuilt>()
             .add_message::<game_core::prelude::ServiceCharged>()
+            .add_message::<game_core::prelude::CompanyCharged>()
             // P5：道具与遥控骰子的请求，以及顶栏提示行要读的那一批成交/中断凭据。
             // 漏任何一条不是「那行字不出现」，而是 `dispatch_ui_actions` 或
             // `hint_from_events` 整个 SystemParam 建不出来 —— 一片按钮全死
@@ -2186,6 +2197,7 @@ mod tests {
             .add_message::<MinigameResult>()
             .add_message::<BuyTicketRequested>()
             .add_message::<AuctionMove>()
+            .add_message::<game_core::prelude::CompanyCharged>()
             // P2b：日历事件的表现层读这两条（礼物一屏、红包老虎机）
             .add_message::<game_core::prelude::GiftsGiven>()
             .add_message::<game_core::prelude::RedEnvelope>()

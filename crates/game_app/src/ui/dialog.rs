@@ -15,11 +15,11 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AfflictDomain, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Books,
     BuildingKind, BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind,
-    Decision, DetentionPlace, EffectOutcome, Facility, Hand, Jackpot, LandId, LandStatus, LandType,
-    Lot, LotteryDeny, LotteryTickets, MortgageDeny, MortgageOp, Owner, Pending, PendingDecision,
-    PlayerId, PlayerName, Rng, ServiceCharged, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder,
-    bail_op_allowed, bid_allowed, bidders, buy_allowed, buyback, counter_plots,
-    mortgage_op_allowed, read_facts, restock, shop_op_allowed,
+    CompanyCharged, Decision, DetentionPlace, EffectOutcome, Facility, Hand, Jackpot, LandId,
+    LandStatus, LandType, Lot, LotteryDeny, LotteryTickets, MortgageDeny, MortgageOp, Owner,
+    Pending, PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf, ShopDeny,
+    ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders, buy_allowed, buyback,
+    counter_plots, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -61,6 +61,12 @@ pub(crate) struct RecentCard(pub(crate) Option<CardNotice>);
 /// 也同一条纪律：它必须回主菜单时清掉（消息留下的记忆，实体上没有对应物）。
 #[derive(Resource, Default)]
 pub(crate) struct RecentService(pub(crate) Option<ServiceCharged>);
+
+/// 最近一笔公司到访（P10d①）。`Pending::CompanyNotice` 只说「到过一家公司的门面」，
+/// 摇了几点、住了几天、付了多少全在 [`CompanyCharged`] 里 —— 与 [`RecentService`]
+/// 同一条分工，也同一条纪律：它必须回主菜单时清掉（消息留下的记忆，实体上没有对应物）。
+#[derive(Resource, Default)]
+pub(crate) struct RecentCompany(pub(crate) Option<CompanyCharged>);
 
 /// 开发用：`NM_DECISION=buy|upgrade|rent|card|bank` 直接把那个模态挂出来。
 ///
@@ -161,6 +167,17 @@ pub(crate) fn remember_service(
     }
 }
 
+/// 记下最近一笔公司到访。排在 [`sync_modal`] 之前 —— 收据弹出来的那一帧就要读得到它
+/// （与 [`remember_service`] 同一条时序理由）。
+pub(crate) fn remember_company(
+    mut charged: MessageReader<CompanyCharged>,
+    mut memory: ResMut<RecentCompany>,
+) {
+    for bill in charged.read() {
+        memory.0 = Some(bill.clone());
+    }
+}
+
 /// 模态这一屏要读的世界状态。打包成参数包是这仓库的房规：`sync_modal` 本来就要同时看
 /// 「等谁回答」「上一张卡」「今天几号」「现在挂着的是哪块面板」，
 /// 而 `#[allow(clippy::too_many_arguments)]` 会把「一个 system 要读八样东西」这个信号吃掉
@@ -171,6 +188,8 @@ pub(crate) struct ModalView<'w, 's> {
     memory: Res<'w, RecentCard>,
     /// 最近一笔服务费（P10c）。收据的读数全在这里：摇了几点、住了几天、收了多少
     bill: Res<'w, RecentService>,
+    /// 最近一笔公司到访（P10d①）。收据的读数全在这里：哪家公司、董事长是谁、收了多少
+    company_bill: Res<'w, RecentCompany>,
     /// 百货柜台这一趟的货架（P3d②）。它是资源而不是世界状态：同一时刻只有柜台前那位看得见
     stock: Res<'w, ShopStock>,
     /// 卡面文案在货架上（`ShopStock` 里只有下标）
@@ -219,6 +238,11 @@ pub(crate) fn sync_modal(
         Some((_player, Pending::ServiceNotice(land))) => {
             service_row(&books, &names, &view.bill, land)
         }
+        _ => None,
+    };
+    // 公司收据的读数（P10d①）：只有那张收据才算。与 `service` 同一条分工
+    let company: Option<CompanyRow> = match want {
+        Some((_player, Pending::CompanyNotice)) => company_row(&books, &names, &view.company_bill),
         _ => None,
     };
     // 彩票柜台的读数：只有它开着才算（P8）。判据要的现金、号码池、已有的号都在这里，
@@ -274,6 +298,7 @@ pub(crate) fn sync_modal(
                 lottery: lottery.as_ref(),
                 bid: bid.as_ref(),
                 service: service.as_ref(),
+                company: company.as_ref(),
             },
         )
     });
@@ -347,6 +372,22 @@ pub(crate) fn sync_modal(
                     );
                 }
             }
+            // 公司收据（P10d①）。与租金/服务费同一族：钱已经结完（董事长免单也是
+            // 「结完了 0 元」），这一屏把「哪家公司、怎么算的、谁在当董事长」说出来
+            Pending::CompanyNotice => {
+                if let Some(row) = company.as_ref() {
+                    company_modal(&mut commands, &font, player, row, stamp);
+                } else {
+                    // 拿不到读数（注入挂的窗口、或消息还没到）：说得出「结算过了」，
+                    // 与 `service_modal` 那条退路同一条，不 panic
+                    fallback_note(
+                        &mut commands,
+                        &font,
+                        (player, Pending::CompanyNotice),
+                        "公司到访已结算",
+                    );
+                }
+            }
             // 彩票柜台（P8）。`lottery` 在这一屏必然是 `Some`（上面那个 match 只在
             // `Pending::Lottery` 开着时才填它），但这里不 unwrap 一个「编译器不知道」的
             // 事实：拿默认读数建一屏比整块不建更难查。
@@ -395,6 +436,9 @@ struct ModalExtra<'a> {
     /// 所以**内容本身就是判据**：消息晚到一帧时这一屏要先重建成真读数，而不是停在
     /// 「服务费已结算」那句兜底话上
     service: Option<&'a ServiceRow>,
+    /// 公司收据的读数（P10d①）。与 `service` 同一条理由：`RecentCompany` 是消息留下的，
+    /// 内容本身就是判据
+    company: Option<&'a CompanyRow>,
 }
 
 fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<'_>) -> String {
@@ -511,6 +555,18 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
                 format!(
                     "{}|{}|{}|{}",
                     row.amount, row.roll, row.stay_days, row.kind as u8
+                )
+            },
+        ),
+        // 公司收据的签名与租金/服务费同一条（P10d①）：内容弹出即定稿，唯一变动是消息晚到。
+        // 不带这一格，晚到的那一帧会建出一屏兜底话、下一帧签名不变不复建 ——
+        // `NM_SERVICE` 当年踩过的坑在这里重演一遍
+        Pending::CompanyNotice => extra.company.map_or_else(
+            || "空".to_string(),
+            |row| {
+                format!(
+                    "{}|{}|{}|{}",
+                    row.stock, row.amount, row.roll, row.stay_days
                 )
             },
         ),
@@ -2347,6 +2403,135 @@ fn service_modal(
     )
 }
 
+/// 公司到访收据那一屏要摊开的全部读数（P10d①）。「谁付、付给哪家、怎么算的、多少钱、
+/// 董事长是谁」，五样都是消息里带着的事实，这一屏自己不再查一遍。
+struct CompanyRow {
+    stock: String,
+    company_name: String,
+    payer_name: String,
+    amount: i64,
+    roll: u32,
+    stay_days: u32,
+    /// 董事长的名字。`None` = 这家公司还没有持股人，或付款的这位**就是**董事长
+    /// —— 后一种时 [`company_modal`] 要把「为什么没被收钱」说出口。
+    chairman_name: Option<String>,
+}
+
+/// 查一屏公司收据的读数。公司与地块不同：它不是任何人的产业，账本与格子
+/// 各自有名字，在这里各查各的。
+fn company_row(
+    books: &Books,
+    names: &Query<&PlayerName>,
+    memory: &RecentCompany,
+) -> Option<CompanyRow> {
+    let bill = memory.0.as_ref()?;
+    let company_name = books
+        .active
+        .def
+        .tiles
+        .iter()
+        .find(|t| t.data.stock.as_deref() == Some(&bill.stock))
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| bill.stock.clone());
+    Some(CompanyRow {
+        company_name,
+        payer_name: names
+            .get(bill.payer)
+            .map(|n| n.0.clone())
+            .unwrap_or_default(),
+        chairman_name: bill
+            .chairman
+            .filter(|c| *c != bill.payer)
+            .and_then(|c| names.get(c).ok())
+            .map(|n| n.0.clone()),
+        stock: bill.stock.clone(),
+        amount: bill.amount,
+        roll: bill.roll,
+        stay_days: bill.stay_days,
+    })
+}
+
+/// 公司到访收据（P10d①）：钱已经结完（董事长免单那张收据金额就是 0），这一屏只把
+/// 「为什么是这个数」说清楚 —— 免单也要弹，否则玩家看不出「为什么没被收钱」。
+fn company_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    payer: Entity,
+    row: &CompanyRow,
+    stamp: String,
+) -> Entity {
+    // 怎么算出来的：航空那类按天（摇出几点住几天）、科技那类按步数 —— 与 `service_modal`
+    // 同一张嘴，但 C 型公司把步数算进了 `amount`，这里不再重复「按步数计费」那半句
+    let detail = if row.stay_days > 0 {
+        format!("摇出 {}，住 {} 天", row.roll, row.stay_days)
+    } else if row.roll > 0 {
+        format!("摇出 {}", row.roll)
+    } else {
+        "免费通行".to_string()
+    };
+    // 董事长那一行：免单的收据必须说得出为什么免，不能只写一个「$0」。
+    // 判定用的是「收据上还有没有别人当董事长」—— `company_row` 已经把
+    // 董事长==付款人的那一格归成 `None`，所以 `Some(name)` 一定意味着
+    // 「另有人当家」，这时哪怕金额是 0 也不许写成「你是董事长」
+    // （`NM_COMPANY` 注入的凭据就踩过这一格：董事长是孙小美、金额 0）。
+    let chairman_line = match &row.chairman_name {
+        Some(name) => format!("董事长：{name}"),
+        None => {
+            if row.amount == 0 {
+                "你是董事长，免费通行".to_string()
+            } else {
+                "这家公司还没有董事长".to_string()
+            }
+        }
+    };
+
+    frame(
+        commands,
+        (payer, Pending::CompanyNotice),
+        stamp,
+        layout::RENT_PANEL,
+        col::BORDER_SHOP,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                format!("{} 到访", row.company_name),
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                format!("{} 到访门面", row.payer_name),
+                size::NAME,
+                col::BODY,
+            ));
+            p.spawn(center_label(&font.0, detail, size::ROW, col::MUTED));
+            p.spawn(center_label(&font.0, chairman_line, size::ROW, col::MUTED));
+            p.spawn(center_label(
+                &font.0,
+                format!("- ${}", comma(row.amount)),
+                size::RENT_AMOUNT,
+                if row.amount == 0 {
+                    col::MUTED
+                } else {
+                    col::COST
+                },
+            ));
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "确认",
+                        layout::OK_BUTTON,
+                        super::PRIMARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
+}
+
 /// 开发用：`NM_BUILD=1` 把演示盘那块商业地（外滩）划给当前回合玩家、摘掉预建的购物中心，
 /// 再挂出建设窗口。
 ///
@@ -2470,6 +2655,47 @@ pub(crate) fn dev_open_service(
         stay_days: 0,
     });
     pending.offer(guest, Pending::ServiceNotice(land));
+    *done = true;
+}
+
+/// 开发用：`NM_COMPANY=1` 挂出一张公司到访收据（董事长免单那种，0 元那张最有说的）。
+///
+/// 为什么需要它：与 [`dev_open_service`] 同一条判据 —— 收据的正经入口是踩到公司门面格，
+/// 那一掷由骰子说了算，而 `NM_AUTOROLL` 的自动玩家下一帧就把它答掉，截图按墙钟撞不上。
+///
+/// 它发一条**真凭据**（`CompanyCharged`，走 [`remember_company`] 那条正路）。董事长
+/// 指到第二位玩家，收据上就能写出「董事长：孙小美」与「0 元」这对兄弟 —— 免单那张
+/// 才是这一屏最要紧的可读数。
+pub(crate) fn dev_open_company(
+    order: Option<Res<TurnOrder>>,
+    faces: Query<&PlayerId>,
+    mut pending: ResMut<PendingDecision>,
+    mut charged: MessageWriter<CompanyCharged>,
+    mut done: Local<bool>,
+) {
+    if *done || pending.active().is_some() {
+        return;
+    }
+    let Some(order) = order else {
+        return;
+    };
+    let (Some(guest), Some(chairman)) = (order.order.first().copied(), order.order.get(1).copied())
+    else {
+        return;
+    };
+    if faces.get(guest).is_err() {
+        return;
+    }
+    // stock_001 = 暴富科技（演示盘 10 号格），amount 0 = 董事长免单那张
+    charged.write(CompanyCharged {
+        payer: guest,
+        stock: "stock_001".to_string(),
+        chairman: Some(chairman),
+        amount: 0,
+        roll: 0,
+        stay_days: 0,
+    });
+    pending.offer(guest, Pending::CompanyNotice);
     *done = true;
 }
 

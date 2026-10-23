@@ -638,8 +638,8 @@ mod tests {
         assert!(within_chebyshev(&b, TileIndex(4), TileIndex(5), 1));
         assert!(within_chebyshev(&b, TileIndex(4), TileIndex(4), 1));
         assert!(!within_chebyshev(&b, TileIndex(4), TileIndex(2), 1));
-        // 环上的距离与此无关：12 号 (0,1) 与 0 号 (1,1) 相邻，10 号 (1,3) 不相邻
-        assert!(within_chebyshev(&b, TileIndex(12), TileIndex(0), 1));
-        assert!(!within_chebyshev(&b, TileIndex(12), TileIndex(10), 1));
+        // 环上的距离与此无关：14 号 (0,1) 与 0 号 (1,1) 相邻，11 号 (1,3) 不相邻
+        assert!(within_chebyshev(&b, TileIndex(14), TileIndex(0), 1));
+        assert!(!within_chebyshev(&b, TileIndex(14), TileIndex(11), 1));
     }
 }

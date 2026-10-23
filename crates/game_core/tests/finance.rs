@@ -342,15 +342,11 @@ fn a_default_rules_game_pays_dividends_on_the_fifteenth_of_each_month() {
     assert_eq!(rules.dividend_day, 15, "P2b 把派息日挪到月中");
     for _ in 0..13 {
         let before = cash_of(&mut app, p0);
-        run_op(&mut app, move |books, market| {
-            market.tick_at_turn_end(books)
-        });
+        run_market_tick(&mut app);
         assert_eq!(cash_of(&mut app, p0), before, "还没到 15 号");
     }
     let before = cash_of(&mut app, p0);
-    run_op(&mut app, move |books, market| {
-        market.tick_at_turn_end(books)
-    });
+    run_market_tick(&mut app);
     assert_eq!(today(&app), Date::new(2048, 1, 15));
     assert!(
         cash_of(&mut app, p0) > before,

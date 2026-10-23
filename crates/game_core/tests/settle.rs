@@ -489,9 +489,11 @@ fn dividends_land_on_the_calendar_day_only() {
     pin_epoch(&mut app, Date::new(2048, 1, 1));
     assert!(run_until_world(&mut app));
     let p0 = me(&mut app);
-    // 建仓用 `credit` 而不是直改钱包：现金审计要求每笔变动都留下流水
+    // 建仓用 `credit` 而不是直改钱包：现金审计要求每笔变动都留下流水。
+    // P10d① 起持有「有门面的股票」（stock_001 科技 / stock_005 航空）走的是
+    // 公司真账那一半 —— 这里要钉的是兜底公式，所以特意买**没有门面**的那只
     run_op(&mut app, move |books, _| books.credit(p0, 480_000));
-    let stock = StockId("stock_001".to_string());
+    let stock = StockId("stock_004".to_string());
     run_op(&mut app, move |books, market| {
         let filled = market
             .trade(books, p0, &stock, TradeSide::Buy, 1_000)
@@ -505,13 +507,11 @@ fn dividends_land_on_the_calendar_day_only() {
     let mut paid_on: Vec<u32> = Vec::new();
     for tick in 1..=75 {
         let before = cash_of(&mut app, p0);
-        run_op(&mut app, move |books, market| {
-            market.tick_at_turn_end(books)
-        });
+        run_market_tick(&mut app);
         let delta = cash_of(&mut app, p0) - before;
         let date = game_core::prelude::date_of(tick, Date::new(2048, 1, 1));
         let want = if game_core::prelude::is_dividend_day(date, rules.dividend_day) {
-            dividend_per_share(price_of(&mut app, "stock_001"), &rules) * 1_000
+            dividend_per_share(price_of(&mut app, "stock_004"), &rules) * 1_000
         } else {
             0
         };

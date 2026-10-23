@@ -23,10 +23,13 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::calendar::{HolidaySet, date_of, is_dividend_day};
+use crate::company::CompanyLedgers;
 use crate::data::DataHandles;
 use crate::economy;
 use crate::landing::{Landed, Landing, LandingDomain};
-use crate::msg::{StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TradeSide};
+use crate::msg::{
+    CompanyPayout, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TradeSide,
+};
 use crate::rng::Rng;
 use crate::settle::Books;
 use crate::stock::{PriceHistory, StockId, StockPrice, StockSet};
@@ -61,6 +64,10 @@ pub struct Market<'w, 's> {
     >,
     changed: MessageWriter<'w, StockPriceChanged>,
     traded: MessageWriter<'w, StockTraded>,
+    /// 公司分红的凭据（P10d①）。真正的分钱在 [`crate::company::pay_company_dividends`]，
+    /// 这里只是替它把消息递出去 —— 分红的公式（真账 ÷ 总股数）与市场无关，
+    /// 市场只负责「到点了」这个时刻。
+    payouts: MessageWriter<'w, CompanyPayout>,
 }
 
 impl<'w, 's> Market<'w, 's> {
@@ -83,13 +90,18 @@ impl<'w, 's> Market<'w, 's> {
     ///
     /// 周末与节假日**只推日历、不推行情**（P2b：休市只挡股市，银行全年无休）。
     /// tick 照常 +1，否则「1 回合 = 1 天」这条日历的地基就断了：休市的那两天会变成不存在。
-    pub fn tick_at_turn_end(&mut self, books: &mut Books) {
+    pub fn tick_at_turn_end(
+        &mut self,
+        books: &mut Books,
+        ledgers: &mut CompanyLedgers,
+        commands: &mut Commands,
+    ) {
         self.clock.tick += 1;
         let date = date_of(self.clock.tick, books.session.epoch);
         if !self.holidays.is_market_closed(date) {
             self.advance_prices(books);
         }
-        self.pay_dividends(books, date);
+        self.pay_dividends(books, ledgers, commands, date);
     }
 
     /// 一次 tick：每只股独立随机游走。迭代顺序由实体生成顺序决定，
@@ -112,17 +124,30 @@ impl<'w, 's> Market<'w, 's> {
         }
     }
 
-    /// 分红：**每月 15 号**给持股人发现金，`floor(股价 × rate) × 股数`
-    /// （派息规则来自 `stock_market.gd:156-176`，日期口径是新拍的）。破产者不发
-    /// （Godot 的 `status` 过滤）。
+    /// 分红：**每月 15 号**发放，一天就是一个回合，于是「每月 15 号」与「行情每天
+    /// 更新」是同一个数（P2b 起分红与月末结息是两个日子）。
     ///
-    /// P2b 起分红与月末结息是两个日子：15 号分红（P8 乐透也在这天开奖），月末结息。
-    fn pay_dividends(&mut self, books: &mut Books, date: crate::calendar::Date) {
+    /// P10d① 起公式分两半（10-20 实报的口径）：**有公司账的股票分当月真账**
+    /// （服务费进的多就分得多，亏损月按比例扣钱 —— 正负同一条公式），归
+    /// [`crate::company::pay_company_dividends`]；**没有公司账的股票**（盘上没有
+    /// 那家门面）回落到旧的兜底公式 `floor(股价 × rate) × 股数`。两边以
+    /// [`CompanyLedgers::find`] 有没有这一页分家 —— 同一只股永远不会被两半同时发，
+    /// 「盘上有没有门面」是互斥的那道闸。
+    fn pay_dividends(
+        &mut self,
+        books: &mut Books,
+        ledgers: &mut CompanyLedgers,
+        commands: &mut Commands,
+        date: crate::calendar::Date,
+    ) {
         let rules = *books.rules;
         if !is_dividend_day(date, rules.dividend_day) {
             return;
         }
-        // 先把价格收成小表再发钱：迭代持仓时不该挂着 `self.stocks` 的可变借用
+        // 先发公司真账这一半（会扣钱、会破产，必须在兜底之前算完）
+        crate::company::pay_company_dividends(commands, books, ledgers, date, &mut self.payouts);
+        // 兜底那一半：只发没进过公司账的股票。持股的名单重新收一遍 ——
+        // 上一半可能刚让某位持股人破产（亏损月扣穿了），破产者不发
         let prices: Vec<(StockId, f32)> = self
             .stocks
             .iter()
@@ -132,6 +157,7 @@ impl<'w, 's> Market<'w, 's> {
             let total = books
                 .holdings_of(player)
                 .iter()
+                .filter(|(id, _)| ledgers.find(&id.0).is_none())
                 .map(|(id, shares)| {
                     prices
                         .iter()
@@ -214,8 +240,13 @@ pub fn settle_market_landing(landing: Res<Landing>, mut visited: MessageWriter<S
 /// 刻意**不**挂 `not_paused`：暂停挡的是「玩家还能不能行动」，而这一句是状态机自己
 /// 走到 `TurnEnd` 才触发的。若让它被暂停挡住而 `end_turn_system` 照跑，日历就会比
 /// 回合数慢，「每月 1 号派息」变成一句看不见的错话。
-pub fn market_tick_on_turn_end_system(mut books: Books, mut market: Market) {
-    market.tick_at_turn_end(&mut books);
+pub fn market_tick_on_turn_end_system(
+    mut commands: Commands,
+    mut books: Books,
+    mut market: Market,
+    mut ledgers: ResMut<CompanyLedgers>,
+) {
+    market.tick_at_turn_end(&mut books, &mut ledgers, &mut commands);
 }
 
 /// 受理买卖请求。只在 `WaitRoll` 里跑 —— 「掷骰之前可以安排本回合的钱怎么花」这条

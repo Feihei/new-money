@@ -164,6 +164,10 @@ pub mod palette {
             // bank 的绿偏蓝（0.5,0.85,0.5）、coupon 的 mint 偏青（0.35,0.9,0.75），
             // 而这一格要读起来像「玩」，所以往黄那边推满
             TileKind::Arcade => Color::srgb(0.8, 0.95, 0.3),
+            // 公司门面（P10d①）也没有 Godot 对照。钢青一档：与 property 的蓝差在灰度上
+            // （它是暗蓝、不是「可购买」的亮蓝），与 transport 的青灰差在饱和度上 ——
+            // 公司不是任何人的产业，颜色上就要读出「这格不属于可拥有那一族」
+            TileKind::Company => Color::srgb(0.3, 0.42, 0.62),
         }
     }
 

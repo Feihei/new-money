@@ -17,14 +17,16 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
     ActiveBoard, ArcadeDeal, AtmAccess, Auction, BankBalance, Bankrupt, BuildingLevel, CardKind,
-    Corrections, CouponBoxes, Deck, DeckOrder, Detention, Facility, GameRules, GameSeed,
-    GameSession, Hand, Heading, HolidaySet, Insulation, Inventory, Jackpot, LandId, LandStatus,
-    Landing, LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap, Occupancy, OccupancyAt, Owner,
-    Paused, Pending, PendingDecision, PlayerId, PlayerName, Points, Possession, Shelf, ShopStock,
-    StaySentence, Timed, TurnOrder, TurnPhase, Wallet, resists,
+    CompanyLedgers, Corrections, CouponBoxes, Deck, DeckOrder, Detention, Facility, GameRules,
+    GameSeed, GameSession, Hand, Heading, HolidaySet, Insulation, Inventory, Jackpot, LandId,
+    LandStatus, Landing, LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap, Occupancy,
+    OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName, Points, Possession,
+    Shelf, ShopStock, StaySentence, StockHoldings, Timed, TurnOrder, TurnPhase, Wallet, resists,
 };
 
 use crate::asset_root;
+
+use crate::ui::finance::comma;
 
 pub struct DumpPlugin;
 
@@ -190,6 +192,19 @@ pub struct DumpView<'w, 's> {
     /// 全在这一个资源上 —— 而面板每帧都在换主语（问的是下一个出价的人），
     /// 顶栏那一行只活两三帧。查「拍卖为什么停在半空」只有这一条路。
     auction: Res<'w, Auction>,
+    /// 公司损益账（P10d①）。分红按它分，查「这次分红为什么是这个数」先看这一页
+    ledgers: Res<'w, CompanyLedgers>,
+    /// 每位玩家持有什么股 —— 董事长那一半要从这里现算（持股最多者，破产者不算）
+    holdings: Query<
+        'w,
+        's,
+        (
+            &'static PlayerId,
+            &'static PlayerName,
+            &'static StockHoldings,
+            Option<&'static Bankrupt>,
+        ),
+    >,
     /// 道路放置物（P5）。要同时看得见两种位置：落在哪一格、以及在谁身上剩几步 —
     /// 「炸弹在哪」是查一局为什么突然有人住院时最先要问的事
     occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
@@ -213,6 +228,7 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             row(ui, "牌堆", format_decks(&view));
             row(ui, "货架", format_stock(&view));
             row(ui, "奖池", format_jackpot(&view));
+            row(ui, "公司", format_companies(&view));
             row(ui, "拍卖", format_auction(&view));
             ui.separator();
             for line in format_corrections(&view) {
@@ -387,6 +403,49 @@ fn format_stock(view: &DumpView) -> String {
         })
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// 公司那一栏（P10d①）：`暴富科技 当月 1,200 · 董事长 P0阿土伯`。
+///
+/// 账页只对「有过进出」的公司开（董事长免单连账都不产生），所以盘上的公司格也要扫一遍 ——
+/// 有格没账写「当月 0」，那一行空着读起来像面板坏了。董事长在这里现算而不是缓存：
+/// 与规则层同一条口径（持股最多、破产者不算），并列取先遇到的（持股人查询顺序稳定）。
+fn format_companies(view: &DumpView) -> String {
+    let Some(active) = view.active.as_ref() else {
+        return "没有棋盘".to_string();
+    };
+    let companies: Vec<&game_core::prelude::TileDef> = active
+        .def
+        .tiles
+        .iter()
+        .filter(|t| t.kind == game_core::prelude::TileKind::Company)
+        .collect();
+    if companies.is_empty() {
+        return "盘上没有公司格".to_string();
+    }
+    companies
+        .iter()
+        .map(|tile| {
+            let stock = tile.data.stock.clone().unwrap_or_default();
+            let net = view.ledgers.find(&stock).map_or(0, |page| page.net());
+            // 董事长：持股最多的在世者。与 core 的 `chairman_of` 同一条判据 ——
+            // 这里不调它是因为账本面板不开第二条 `Books`（那边全是 ResMut）
+            let chairman = view
+                .holdings
+                .iter()
+                .filter(|(.., bankrupt)| bankrupt.is_none())
+                .max_by_key(|(.., held, _)| held.get(&game_core::prelude::StockId(stock.clone())))
+                .filter(|(.., held, _)| held.get(&game_core::prelude::StockId(stock.clone())) > 0)
+                .map(|(id, name, ..)| format!("P{}{}", id.0, name.0));
+            format!(
+                "{} 当月 {} · {}",
+                tile.name,
+                comma(net),
+                chairman.unwrap_or_else(|| "无董事长".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 /// 奖池那一栏（P8）：`池 3000 · 上期 7 号 · 一注 1000/36 号 · P0阿土伯[3,17]`。

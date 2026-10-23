@@ -21,10 +21,10 @@ use game_core::prelude::{
 };
 
 /// prototype 上那一格百货。`board.rs::prototype_carries_a_shop_the_player_can_step_on`
-/// 钉着这个编号，两处一起改才不会悄悄错位。
-const SHOP: u32 = 12;
+/// 钉着这个编号，两处一起改才不会悄悄错位。（P10d① 两家公司插进环中段后它从 12 号顺移到 14 号。）
+const SHOP: u32 = 14;
 
-/// 走到「柜台开着」的那一帧：p0 从 11 号（西单）掷 1 点停在 12 号。
+/// 走到「柜台开着」的那一帧：p0 从 13 号（西单）掷 1 点停在 14 号。
 /// 用 `Hold` 策略 —— 自动应答会把窗口直接关掉，就什么都观察不到了（同 `finance.rs` 的柜台）。
 fn open_counter() -> (App, Entity) {
     let (mut app, p0) = ready_on(SHOP - 1, 1, DecisionPolicy::Hold);
@@ -42,6 +42,22 @@ fn open_counter() -> (App, Entity) {
 /// 卡按 **id** 给（不是下标）：改 `item_cards.json` 的顺序不该让一批用例集体变红。
 fn stocked(points: u32, cards: &[&str]) -> (App, Entity, Vec<CardId>) {
     let (mut app, p0) = open_counter();
+    let ids: Vec<CardId> = cards.iter().map(|id| item_index(&app, id)).collect();
+    set_points(&mut app, p0, points);
+    set_shelf(&mut app, &ids.iter().map(|c| c.0).collect::<Vec<_>>());
+    (app, p0, ids)
+}
+
+/// 同 [`stocked`]，但种子自选 —— 需要避开默认种子上神明的剧本时用
+/// （P10d① 环长变了，默认种子的刷位跟着挪）。
+fn stocked_seeded(
+    points: u32,
+    cards: &[&str],
+    seed: game_core::prelude::GameSeed,
+) -> (App, Entity, Vec<CardId>) {
+    let (mut app, p0) = ready_on_seeded(SHOP - 1, DecisionPolicy::Hold, seed);
+    roll(&mut app, p0);
+    settle(&mut app, 8);
     let ids: Vec<CardId> = cards.iter().map(|id| item_index(&app, id)).collect();
     set_points(&mut app, p0, points);
     set_shelf(&mut app, &ids.iter().map(|c| c.0).collect::<Vec<_>>());
@@ -264,7 +280,10 @@ fn somebody_else_and_the_period_after_leaving_are_both_refused() {
 /// 池子只有 5 张、货位 3 个，两次撞上并不奇怪，那不该让这条用例红。
 #[test]
 fn the_next_visit_redraws_the_shelf_even_after_buying_out() {
-    let (mut app, p0, ids) = stocked(100, &["item_frame"]);
+    // 换第 3 颗种子：默认那颗的神明恰好刷在百货格上，回合结束小福神上身
+    // 送一张转向卡 —— 卡进了手牌，这条「重抽的是货架不是手牌」的断言就被
+    // 无关的神明剧本打红（P10d① 环长 15→17 改变了刷位）。
+    let (mut app, p0, ids) = stocked_seeded(100, &["item_frame"], nth_seed_rolling_first(1, 3));
     let frame = ids[0];
     shop_ask(&mut app, p0, TradeSide::Buy, frame.0);
     settle(&mut app, 3);
