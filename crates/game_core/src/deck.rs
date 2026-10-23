@@ -418,6 +418,22 @@ pub fn apply_effects(
                     days: *days,
                 });
             }
+            CardEffect::Damage { depth, area } => {
+                // 与 `LandStatus` 同一条：锚点来自 aim（新闻给的是播报者脚下那块地，
+                // 卡给的是玩家点的那块），没有锚就落空而不猜一块 —— 猜哪一块都是替玩家做决定
+                let Some(crate::hand::CardAim::Land(center)) = aim else {
+                    debug!("{} 要打建筑损害，但这次没有地块目标", source);
+                    continue;
+                };
+                // 清单先问再打：地块类新闻要把「拆了哪几块」念出来（见 `Books::area_of`）
+                let lands = sink.books.area_of(center, *area);
+                let n = lands.len() as u32;
+                let tally = sink.books.damage_lands(&lands, *depth);
+                outcomes.push(EffectOutcome::Razed {
+                    lands: n,
+                    seized: tally.seized,
+                });
+            }
             CardEffect::FreePass { floor } => {
                 // 登记一条**带门槛的一次性 `Cancel`**。三样信息各有归属：门槛与「免哪几族钱」
                 // 是这张卡的玩法（所以写在这里，不写在管线里），而「什么时候算用掉」是世界的

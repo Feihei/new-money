@@ -223,7 +223,7 @@ fn unmet_precondition(
                     .map(|why| why.label().to_string())
             }
             // 其余每一条效果都不需要「此刻有没有对象」这一问：免罪与免费是挂上去就等着，
-            // 拘留/停留/乌龟/转向打在谁身上都成立，地块类由 `aim_is_legal` 管。
+            // 拘留/停留/乌龟/转向打在谁身上都成立，地块类（涨价、查封、拆房）由 `aim_is_legal` 管。
             // 穷尽而不是 `_ => None`：新加一条效果必须当场回答它会不会落空
             CardEffect::AddCash { .. }
             | CardEffect::DeductCash { .. }
@@ -235,6 +235,7 @@ fn unmet_precondition(
             | CardEffect::Stay { .. }
             | CardEffect::MoveCap { .. }
             | CardEffect::LandStatus { .. }
+            | CardEffect::Damage { .. }
             | CardEffect::BuyLand => None,
         };
         if why.is_some() {

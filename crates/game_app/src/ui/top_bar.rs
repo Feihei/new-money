@@ -17,10 +17,10 @@ use game_core::prelude::{
     ChestOpened, CompanyCharged, DetentionLifted, DetentionSkipped, FacilityBuilt, FinancingDrawn,
     FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed,
     IndemnityPaid, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn, LotteryWon,
-    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsFired,
-    Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, PolicyBought,
-    RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded,
-    StockVisited, TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
+    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience,
+    NewsFired, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged,
+    PolicyBought, RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted, StaySentence,
+    StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide, TurnOrder, TurnPhase, WalkHalted,
 };
 
 use super::dialog::describe;
@@ -1024,22 +1024,42 @@ pub(crate) fn hint_from_events(
         ));
     }
     for m in notices.news.read() {
-        let hits: Vec<(String, String)> = m
-            .news
-            .hits
-            .iter()
-            .map(|hit| {
-                (
-                    name(&names, hit.player),
-                    hit.outcomes
-                        .iter()
-                        .map(describe)
-                        .collect::<Vec<_>>()
-                        .join("；"),
+        line = Some(match &m.news.audience {
+            NewsAudience::People(hits) => {
+                let said: Vec<(String, String)> = hits
+                    .iter()
+                    .map(|hit| {
+                        (
+                            name(&names, hit.player),
+                            hit.outcomes
+                                .iter()
+                                .map(describe)
+                                .collect::<Vec<_>>()
+                                .join("；"),
+                        )
+                    })
+                    .collect();
+                news_headline(&m.news.title, &said)
+            }
+            NewsAudience::Ground {
+                center,
+                lands,
+                outcomes,
+            } => {
+                let plot = |id: &LandId| {
+                    board
+                        .as_ref()
+                        .and_then(|b| b.def.land(id.0))
+                        .map_or_else(|| format!("L{}", id.0), |l| l.name.clone())
+                };
+                news_ground_headline(
+                    &m.news.title,
+                    center.as_ref().map(plot).as_deref(),
+                    &lands.iter().map(plot).collect::<Vec<_>>(),
+                    &outcomes.iter().map(describe).collect::<Vec<_>>().join("；"),
                 )
-            })
-            .collect();
-        line = Some(news_headline(&m.news.title, &hits));
+            }
+        });
     }
     for m in notices.over.read() {
         line = Some(match m.winner.and_then(|w| names.get(w).ok()) {
@@ -1057,7 +1077,7 @@ pub(crate) fn hint_from_events(
 
 // ===== P11：新闻那一句 =====
 
-/// 一条新闻在顶栏那一行怎么说。抽成纯函数（与 P6e 那六条同一个理由）：顶栏只有一行，
+/// 一条**人档**新闻在顶栏那一行怎么说。抽成纯函数（与 P6e 那六条同一个理由）：顶栏只有一行，
 /// 而它有四种形状 —— 点到一个人、点到全场同样一下、点到全场各不相同、谁都没点到。
 /// 不抽出来就只能靠截图去撞那四格，撞不上的那一格在验收里读起来和「没做」一样。
 ///
@@ -1085,6 +1105,28 @@ fn news_headline(title: &str, hits: &[(String, String)]) -> String {
                 format!("{head}：{n} 人 —— {who}")
             }
         }
+    }
+}
+
+/// 一条**地档**新闻在顶栏那一行怎么说（P11b①）。与人档分成两个函数而不是给上面那个
+/// 加参数：两档要念的东西没有交集 —— 人档念「谁、各挨多少」，地档念「哪几块、有没有连地
+/// 一起收」，合成一个带可选参数的函数会得到「人名列表与地块列表都为空」那种说不出话的形状。
+///
+/// 「哪几块」是这条的存在理由：PLAN §四 那句「外星人拆了哪几块」要的就是地块名列表，
+/// 而 `Razed{lands: 2}` 那个数答不出「我家那块在不在里面」。
+fn news_ground_headline(title: &str, center: Option<&str>, lands: &[String], deed: &str) -> String {
+    let head = format!("号外「{title}」");
+    match center {
+        // 锚点算不出来 = 这张盘上一块地都没有。与「场上没有可点名的人」同一条纪律：
+        // 空手要说得出为什么空，否则玩家以为自己按错了
+        None => format!("{head}：这一带没有地可打"),
+        Some(at) if lands.is_empty() => format!("{head}：{at} 一带没有地"),
+        Some(at) if lands.len() == 1 => format!("{head}：{at} {deed}"),
+        Some(at) => format!(
+            "{head}：{at} 一带 {} 块 —— {} {deed}",
+            lands.len(),
+            lands.join("、")
+        ),
     }
 }
 
@@ -2057,10 +2099,10 @@ mod tests {
                     title: "稽查现金大户".into(),
                     desc: "付出 $3000".into(),
                     scope: NewsScope::One(PlayerPick::Richest),
-                    hits: vec![NewsHit {
+                    audience: NewsAudience::People(vec![NewsHit {
                         player: foe,
                         outcomes: vec![EffectOutcome::Lost(3_000)],
-                    }],
+                    }]),
                 },
             },
         );
@@ -2091,7 +2133,7 @@ mod tests {
                     title: "财政补贴发放".into(),
                     desc: "每人进账 $1500".into(),
                     scope: NewsScope::Everyone,
-                    hits: hits(&[me, foe]),
+                    audience: NewsAudience::People(hits(&[me, foe])),
                 },
             },
         );
@@ -2115,7 +2157,7 @@ mod tests {
                     title: "没人接的电话".into(),
                     desc: "测试".into(),
                     scope: NewsScope::One(PlayerPick::RandomOther),
-                    hits: vec![],
+                    audience: NewsAudience::People(vec![]),
                 },
             },
         );
@@ -2135,6 +2177,74 @@ mod tests {
         assert_eq!(
             news_headline("地价税开征", &hits),
             "号外「地价税开征」：2 人 —— 阿土伯 支付 $1000、孙小美 支付 $2000"
+        );
+    }
+
+    /// 地档那三种形状（P11b①）。它们各自对应一句玩家会问的话：
+    /// 「拆了哪几块」「我家那块在不在里面」「为什么什么都没拆」。
+    #[test]
+    fn the_ground_headline_names_the_plots_it_touched() {
+        let deed = "夷为平地 2 块（土地收回 2 块）";
+        assert_eq!(
+            news_ground_headline(
+                "外星人攻打地球",
+                Some("南京路"),
+                &["南京路".to_string(), "汉口路".to_string()],
+                deed
+            ),
+            format!("号外「外星人攻打地球」：南京路 一带 2 块 —— 南京路、汉口路 {deed}")
+        );
+        // 一整条街在缺路段键的盘上可能只剩一块 —— 那一格不该念成「一带 1 块」，
+        // 与 `Stamped{lands}` 那句「块数要说」同一条理由
+        assert_eq!(
+            news_ground_headline(
+                "山洪爆发土地流失",
+                Some("西单"),
+                &["西单".to_string()],
+                deed
+            ),
+            "号外「山洪爆发土地流失」：西单 夷为平地 2 块（土地收回 2 块）"
+        );
+        // 盘上一块地都没有：说清楚，别播一条静默的空标题
+        assert_eq!(
+            news_ground_headline("外星人攻打地球", None, &[], deed),
+            "号外「外星人攻打地球」：这一带没有地可打"
+        );
+        assert_eq!(
+            news_ground_headline("外星人攻打地球", Some("南京路"), &[], deed),
+            "号外「外星人攻打地球」：南京路 一带没有地"
+        );
+    }
+
+    /// 地档走完整条接线（顶栏那一行由 `hint_from_events` 拼，纯函数只覆盖它自己那一半）。
+    /// 这份夹具没有棋盘资源，所以地块名回退成 `L2` —— 那正是「名字查不到时说什么」那一格，
+    /// 而菜单态（`Option<Res<ActiveBoard>>` 是 `None`）真的会走到这里。
+    #[test]
+    fn a_ground_news_reads_its_plot_list_on_the_bar() {
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            NewsFired {
+                broadcaster: me,
+                news: NewsNotice {
+                    id: "news_004".into(),
+                    title: "外星人攻打地球".into(),
+                    desc: "一整条街".into(),
+                    scope: NewsScope::Around,
+                    audience: NewsAudience::Ground {
+                        center: Some(game_core::prelude::LandId(2)),
+                        lands: vec![game_core::prelude::LandId(2), game_core::prelude::LandId(3)],
+                        outcomes: vec![EffectOutcome::Razed {
+                            lands: 2,
+                            seized: 1,
+                        }],
+                    },
+                },
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "号外「外星人攻打地球」：L2 一带 2 块 —— L2、L3 夷为平地 2 块（土地收回 1 块）"
         );
     }
 
@@ -2163,10 +2273,10 @@ mod tests {
                     title: "财政补贴发放".into(),
                     desc: "每人进账 $1500".into(),
                     scope: NewsScope::Everyone,
-                    hits: vec![NewsHit {
+                    audience: NewsAudience::People(vec![NewsHit {
                         player: me,
                         outcomes: vec![EffectOutcome::Gained(1_500)],
-                    }],
+                    }]),
                 },
             },
         );

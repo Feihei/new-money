@@ -974,28 +974,48 @@ fn collect_books(
         ));
     }
     for m in r.news.read() {
-        // 形状：`News(news_001,播P0,P1[..])`。播报者单独写一格是**这条玩法的判据**：
-        // 「挨打的不是踩格者」（验收①）问的是这两个主语是不是同一个人，合并就答不出来
-        let hits = m
-            .news
-            .hits
-            .iter()
-            .map(|hit| {
-                let effects = hit
-                    .outcomes
+        // 形状：`News(news_001,播P0,P1[..]|P2[..])`，地档则是 `News(..,播P0,地L3[L2/L5][..])`。
+        // 播报者单独写一格是**这条玩法的判据**：「挨打的不是踩格者」（验收①）问的是这两个
+        // 主语是不是同一个人，合并就答不出来。而地档没有承受者 —— 它带的是**中心与被扫到的
+        // 那几块**（含无主的），按业主分组恰好会把「那块没人要的地也被拆了」这句话丢掉
+        let body = match &m.news.audience {
+            game_core::prelude::NewsAudience::People(hits) => hits
+                .iter()
+                .map(|hit| {
+                    let effects = hit
+                        .outcomes
+                        .iter()
+                        .map(|o| format!("{o:?}"))
+                        .collect::<Vec<_>>()
+                        .join("+");
+                    format!("{}[{effects}]", who(&players, hit.player))
+                })
+                .collect::<Vec<_>>()
+                .join("|"),
+            game_core::prelude::NewsAudience::Ground {
+                center,
+                lands,
+                outcomes,
+            } => {
+                let at = center.map_or_else(|| "-".to_string(), |l| format!("L{}", l.0));
+                let touched = lands
+                    .iter()
+                    .map(|l| format!("L{}", l.0))
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let effects = outcomes
                     .iter()
                     .map(|o| format!("{o:?}"))
                     .collect::<Vec<_>>()
                     .join("+");
-                format!("{}[{effects}]", who(&players, hit.player))
-            })
-            .collect::<Vec<_>>()
-            .join("|");
+                format!("地{at}[{touched}]{effects}")
+            }
+        };
         log.0.push(format!(
             "News({},播{},{})",
             m.news.id,
             who(&players, m.broadcaster),
-            hits
+            body
         ));
     }
     for m in r.cash.read() {

@@ -19,5 +19,26 @@
 		"desc": "随机另一位玩家付出 $2000 —— 挨打的不是踩格的人",
 		"scope": {"one": "random_other"},
 		"effects": [{"action": "deduct_cash", "amount": 2000}]
+	},
+	{
+		"id": "news_004",
+		"title": "外星人攻打地球",
+		"desc": "播报者脚下那一整条街的建筑被夷为平地，土地一并收回",
+		"scope": "around",
+		"effects": [{"action": "damage", "depth": {"clear": {"seize": true}}, "area": "street"}]
+	},
+	{
+		"id": "news_005",
+		"title": "山洪爆发土地流失",
+		"desc": "播报者脚下这一带（3×3）的房屋与土地一起没了",
+		"scope": "around",
+		"effects": [{"action": "damage", "depth": {"clear": {"seize": true}}, "area": {"box": {"side": 3}}}]
+	},
+	{
+		"id": "news_006",
+		"title": "这一带地价调涨",
+		"desc": "播报者脚下那一整条街租金翻倍，5 个回合之后自己失效",
+		"scope": "around",
+		"effects": [{"action": "land_status", "status": "price_hike", "days": 5, "area": "street"}]
 	}
 ]

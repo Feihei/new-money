@@ -22,7 +22,7 @@ use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::prelude::{
     ActiveBoard, Adjustment, CardEffect, ChargeDomain, Correction, DataHandles, GameSeed,
-    GameSession, ItemKind, NewsId, NewsSet, Scope, Source, TileKind, TurnPhase,
+    GameSession, ItemKind, LandStatus, NewsId, NewsSet, Scope, Source, TileKind, TurnPhase,
 };
 
 /// 演示盘上的新闻中心（`prototype.json` 的 13 号格，`(0,4)`）。
@@ -73,6 +73,43 @@ fn named(hits: &str) -> Vec<String> {
         .map(|seg| seg.split('[').next().unwrap_or_default().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// 这一条是**地档**（第三段以 `地` 开头：`地L3[L2/L5][Razed { … }]`）而不是人档。
+///
+/// 金额类断言一律先筛掉地档那几条：它们没有钱，而「一条新闻播出去、里面没有钱」正是
+/// P11b① 新增的那一档的形状。不筛的话红的是「补贴的数不对」，而真正该说的是「这条不归钱管」。
+fn is_ground(line: &str) -> bool {
+    parts(line).2.starts_with('地')
+}
+
+/// 一串流水里的人档那几条。
+fn people_only(lines: &[String]) -> Vec<String> {
+    lines.iter().filter(|l| !is_ground(l)).cloned().collect()
+}
+
+/// 地档那一段里的中心与清单：`地L3[L2/L5][…]` → `("L3", ["L2","L5"])`。
+fn ground(line: &str) -> (String, Vec<String>) {
+    let body = parts(line).2;
+    let at = body
+        .strip_prefix('地')
+        .unwrap_or_default()
+        .split('[')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let list = body
+        .split('[')
+        .nth(1)
+        .unwrap_or_default()
+        .split(']')
+        .next()
+        .unwrap_or_default()
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    (at, list)
 }
 
 /// 一条效果凭据的带符号金额：`Gained(n)` 记正、`Lost(n)` 记负，其余（`CouldNotPay{…}`
@@ -138,33 +175,88 @@ fn walk_onto_news(app: &mut App, p0: Entity, times: usize) -> Vec<String> {
     step_onto_news(app, p0, times, None)
 }
 
+/// 踩 `times` 次，只留**人档**那几条，且每轮把物价指数钉在 `index`。
+///
+/// 金额类用例全走这一条，理由有两句：① P11b① 之后池子里有了地档（拆房、盖状态），
+/// 它们身上没有钱，混进「补贴的数对不对」的循环里只会红在错误的那一行上；② 钉住指数
+/// 之后「卡面那个数 == 钱包那个数」才说得出。`times` 给到 12 是因为池子已经六条 ——
+/// 十二次里三种人档各得撞几次，那几条用例的「前置」断言才有牙（撞不到就是空跑的）。
+fn step_onto_money_news(app: &mut App, p0: Entity, times: usize, index: f32) -> Vec<String> {
+    people_only(&step_onto_news(app, p0, times, Some(index)))
+}
+
 /// 同一件事，但每轮把物价指数摆回 `index`（`Some` 那一条是金额类验收要的：
 /// 指数本身会被补贴一路推高，而「卡面 × 指数」那个确切的数只有在钉住之后才说得出）。
 fn step_onto_news(app: &mut App, p0: Entity, times: usize, index: Option<f32>) -> Vec<String> {
-    let mut lines = Vec::new();
     for _ in 0..times {
-        clear_occupancies(app);
-        make_current(app, p0);
-        place(app, p0, NEWS - 1);
-        if let Some(at) = index {
-            set_price_index(app, at);
-        }
-        grant_item(app, p0, ItemKind::RemoteDice, 1);
-        let want = turn_count(app) + 1;
-        use_remote_dice(app, p0, 1);
-        // 先把遥控骰子被受理、走进行走的那几帧让出来：`play_turns` 看见 `WaitRoll`
-        // 就会按普通掷骰，同一颗骰子上按两次会多走一步
-        settle(app, 2);
-        play_turns(app, want);
-        assert_eq!(
-            tile_of(app, p0),
-            NEWS,
-            "这一轮没踩到新闻中心（遥控骰子被拒了？）：{lines:?}"
-        );
-        lines = news_lines(app);
+        step_news_once(app, p0, index);
     }
+    let lines = news_lines(app);
     assert_eq!(lines.len(), times, "踩 {times} 次就该播 {times} 条");
     lines
+}
+
+/// 让 P0 踩**一次**新闻中心（一播一条），不检查累计条数 —— 地档那几条用例要的是
+/// 「一直踩到抽中某一条为止」，而累计条数那一断言属于按次数说话的用例。
+/// `tile` 那一格是给「换一格当新闻中心」的用例留的（锚点跟着人走，得能把他摆到别处）。
+fn step_news_once(app: &mut App, p0: Entity, index: Option<f32>) {
+    step_news_on(app, p0, NEWS, index)
+}
+
+fn step_news_on(app: &mut App, p0: Entity, tile: u32, index: Option<f32>) {
+    clear_occupancies(app);
+    make_current(app, p0);
+    place(app, p0, tile - 1);
+    if let Some(at) = index {
+        set_price_index(app, at);
+    }
+    grant_item(app, p0, ItemKind::RemoteDice, 1);
+    let want = turn_count(app) + 1;
+    use_remote_dice(app, p0, 1);
+    // 先把遥控骰子被受理、走进行走的那几帧让出来：`play_turns` 看见 `WaitRoll`
+    // 就会按普通掷骰，同一颗骰子上按两次会多走一步
+    settle(app, 2);
+    play_turns(app, want);
+    assert_eq!(
+        tile_of(app, p0),
+        tile,
+        "这一轮没踩到新闻中心（遥控骰子被拒了？）"
+    );
+}
+
+/// 一直踩到 `want` 那一条播出来为止，返回那一条流水（最多 `tries` 次），
+/// 每轮先跑一次 `rearm` 把夹具摆回「被测那一播该有的样子」。
+///
+/// 池子是「全池随机 + 同场不连重」，测试要问的是**某一条特定新闻**的行为（地档那几条），
+/// 所以不能靠「第 N 次恰好抽到它」—— 那是一条只有代码知道的隐藏状态。撞不到就 panic：
+/// 六条池子四十次还抽不出某一条，说明抽取偏了，那是比这条用例本身更响的红。
+///
+/// **只认 P0 播出去的那一条**：长跑里乙也会走路，她踩到新闻中心同样会抽中 `want`，
+/// 而她的锚点、她的现金与这条用例要问的那件事无关 —— 不筛主语，用例就会停在错误的那一播上。
+///
+/// `rearm` 不是保险，是**必要**：中间那一播可能正是一条天灾（山洪的 3×3 罩得住王府井），
+/// 不重摆地块，最后那一播读到的就是上一播留下的残局 —— 症状是「seized 少了 1」，
+/// 而它跟被测的那条规则一点关系都没有。
+fn walk_until_rearmed(
+    app: &mut App,
+    p0: Entity,
+    tile: u32,
+    want: &str,
+    tries: usize,
+    mut rearm: impl FnMut(&mut App),
+) -> String {
+    for _ in 0..tries {
+        rearm(app);
+        step_news_on(app, p0, tile, None);
+        if let Some(line) = news_lines(app)
+            .into_iter()
+            .rev()
+            .find(|l| parts(l).0 == want && parts(l).1 == "P0")
+        {
+            return line;
+        }
+    }
+    panic!("{tries} 次播映里 P0 没抽到 {want}（「全池随机」那条是假的）");
 }
 
 /// 只给「不需要任何预置」的用例用的一份新盘 + 一串播映。
@@ -289,7 +381,7 @@ fn a_news_that_names_somebody_else_never_touches_the_broadcaster() {
     let before = (cash_of(&mut app, p0), cash_of(&mut app, p1));
     assert_eq!(before.1, 90_000, "前置：乙确实是全场最高");
 
-    let lines = step_onto_news(&mut app, p0, 6, Some(1.0));
+    let lines = step_onto_money_news(&mut app, p0, 12, 1.0);
     let mut paid_out = 0;
     for line in &lines {
         let (id, broadcaster, hits) = parts(line);
@@ -367,7 +459,10 @@ fn the_richest_pick_reads_wallets_not_seats() {
     set_cash(&mut app, p0, 90_000);
     let before = (cash_of(&mut app, p0), cash_of(&mut app, p1));
 
-    let lines = step_onto_news(&mut app, p0, 8, Some(1.0));
+    // 二十四次而不是十二次：这一条要**两种点名都撞到**（`richest` 砸自己、`random_other`
+    // 砸别人），而 6 条池子里 12 次播映只回来 7 条人档 —— 下面那句「各得撞一次」的
+    // 前置断言在 12 次时真的红过一次，这不是保险，是它该有的牙
+    let lines = step_onto_money_news(&mut app, p0, 24, 1.0);
     let mut taxed = 0;
     let mut other = 0;
     for line in &lines {
@@ -395,7 +490,7 @@ fn the_richest_pick_reads_wallets_not_seats() {
     }
     assert!(
         taxed > 0 && other > 0,
-        "八条里那两种点名各得撞一次，否则这两句是空跑的：{lines:?}"
+        "这二十四次里那两种点名各得撞一次，否则这两句是空跑的：{lines:?}"
     );
     assert_eq!(
         cash_of(&mut app, p0) - before.0,
@@ -421,7 +516,7 @@ fn a_whole_field_news_moves_every_wallet() {
     let before = (cash_of(&mut app, p0), cash_of(&mut app, p1));
     let subsidy = carded(&app, "news_001");
 
-    let lines = step_onto_news(&mut app, p0, 10, Some(1.0));
+    let lines = step_onto_money_news(&mut app, p0, 12, 1.0);
     let field: Vec<&String> = lines.iter().filter(|l| l.contains("news_001")).collect();
     assert!(
         !field.is_empty(),
@@ -468,7 +563,7 @@ fn the_carded_amount_is_scaled_by_the_price_index() {
     let p1 = roster(&mut app)[1].0;
     set_cash(&mut app, p1, 90_000);
 
-    let lines = step_onto_news(&mut app, p0, 6, Some(2.0));
+    let lines = step_onto_money_news(&mut app, p0, 12, 2.0);
     assert!(lines.len() >= 2, "前置：这一串够长");
     for line in &lines {
         let (id, _broadcaster, hits) = parts(line);
@@ -503,34 +598,57 @@ fn no_two_broadcasts_in_a_row_are_the_same() {
     }
 }
 
-/// 换一颗种子就换一串新闻，而几颗种子加起来**三条都露过面**。
+/// 换一颗种子就换一串新闻，而几颗种子加起来**每一条都露过面**。
 ///
-/// 这一条不能只在一种子上问：池子只有三条，固定一条序列里「缺谁」都是可能的，那种红
-/// 说的是种子而不是算法。五颗种子各播三轮（15 次）还凑不齐三条，才说明抽取真的偏了。
+/// 这一条不能只在一种子上问：固定一条序列里「缺谁」都是可能的，那种红说的是种子而不是
+/// 算法。六颗种子各播五轮（30 次）还凑不齐池子，才说明抽取真的偏了。要覆盖的 id 名单
+/// 从资产里读（[`pool_ids`]）而不是在测试里抄一遍 —— 「往 JSON 里加一条新闻」该红的是
+/// 「新那条没被抽到」，而不是「测试里那三行字符串没改」。
+///
 /// 它同时也钉住「新闻流读的是会话种子」：有人把 `Rng::new` 的 tag 换成常量或忘了接子流，
 /// 这一条会红而 [`no_two_broadcasts_in_a_row_are_the_same`] 照绿。
 #[test]
 fn another_seed_broadcasts_another_show() {
     let mut firsts: Vec<String> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    for seed in 1..=5u64 {
+    let mut pool = Vec::new();
+    for seed in 1..=6u64 {
         let (mut app, p0) =
             ready_on_seeded(NEWS - 1, DecisionPolicy::DeclineAll, GameSeed(seed * 7919));
-        let lines = walk_onto_news(&mut app, p0, 3);
+        if pool.is_empty() {
+            pool = pool_ids(&app);
+        }
+        let lines = walk_onto_news(&mut app, p0, 5);
         firsts.push(parts(&lines[0]).0);
         seen.extend(lines.into_iter().map(|l| parts(&l).0));
     }
     let distinct: std::collections::HashSet<&String> = firsts.iter().collect();
     assert!(
         distinct.len() > 1,
-        "五颗种子第一播全是同一条，说明抽签没读会话种子：{firsts:?}"
+        "六颗种子第一播全是同一条，说明抽签没读会话种子：{firsts:?}"
     );
-    for want in ["news_001", "news_002", "news_003"] {
+    assert!(
+        pool.len() >= 3,
+        "前置：池子至少三条，否则下面那句覆盖断言是空的：{pool:?}"
+    );
+    for want in &pool {
         assert!(
             seen.iter().any(|id| id == want),
-            "十五次播映里没念过 {want}，「全池随机」是假的：{seen:?}"
+            "三十次播映里没念过 {want}，「全池随机」是假的：{seen:?}"
         );
     }
+}
+
+/// 池子里所有 id（从资产读）。
+fn pool_ids(app: &App) -> Vec<String> {
+    app.world()
+        .resource::<Assets<NewsSet>>()
+        .get(&app.world().resource::<DataHandles>().news)
+        .expect("新闻池没加载")
+        .0
+        .iter()
+        .map(|n| n.id.clone())
+        .collect()
 }
 
 /// `last_news` 存的是**下标**，而它必须在开局归零（P15 存档的那条账）。
@@ -591,7 +709,7 @@ fn a_named_fine_is_a_penalty_so_a_cancel_waives_it() {
     );
     let before = cash_of(&mut app, p1);
 
-    let lines = step_onto_news(&mut app, p0, 6, Some(1.0));
+    let lines = step_onto_money_news(&mut app, p0, 12, 1.0);
     let fines: Vec<&String> = lines.iter().filter(|l| !l.contains("news_001")).collect();
     let field = lines.len() - fines.len();
     assert!(
@@ -644,7 +762,7 @@ fn a_one_shot_free_pass_waives_exactly_one_news_fine() {
     );
     let before = cash_of(&mut app, p1);
 
-    let lines = step_onto_news(&mut app, p0, 6, Some(1.0));
+    let lines = step_onto_money_news(&mut app, p0, 12, 1.0);
     let fines: Vec<String> = lines
         .iter()
         .filter(|l| !l.contains("news_001"))
@@ -698,4 +816,156 @@ fn the_turn_machine_keeps_running_after_a_broadcast() {
     assert!(!news_lines(&app).is_empty(), "前置：这一趟至少播过一条");
     assert_ne!(current(&app), p0, "三回合之后早该换人");
     assert_eq!(phase(&app), TurnPhase::WaitRoll, "回合机没被新闻卡住");
+}
+
+// ===== P11b①：地档（作用域「这一带」）=====
+//
+// 演示盘的路段：4 王府井 与 5 西单 同属 `group: yellow`（`prototype.json` 里那两格的
+// 路段键），而 13 号新闻中心脚下不是地 —— 环上离它最近的一块地是 11 号格上的王府井
+// （2 步）。同一个数由 `board.rs::nearest_land_walks_outward_from_a_tile_that_is_not_land`
+// 钉住，这里只念它，不在测试里再算一遍环。
+
+const ANCHOR: u32 = 4;
+const STREET: [u32; 2] = [4, 5];
+
+/// 把那一整条街重新摆成「阿土伯名下的三层楼」（中心那块还押着）。
+fn arm_street(app: &mut App) {
+    own(app, ANCHOR, Some(0), 3, true);
+    own(app, 5, Some(0), 3, false);
+}
+
+/// 天灾落在**开广播那个人脚下**那一整条街：楼平了、地收回、抵押一起清，而钱一分不动。
+#[test]
+fn a_ground_news_razes_the_street_under_the_broadcaster() {
+    let (mut app, p0) = step_onto_once();
+    arm_street(&mut app);
+    for land in STREET {
+        assert_eq!(
+            plot_state(&mut app, land),
+            (Some(0), 3, land == ANCHOR),
+            "前置：两块都是他的三层楼（中心那块还押着）"
+        );
+    }
+
+    let line = walk_until_rearmed(&mut app, p0, NEWS, "news_004", 40, arm_street);
+    let (center, lands) = ground(&line);
+    assert_eq!(center, format!("L{ANCHOR}"), "锚点是脚下最近那块地：{line}");
+    assert_eq!(
+        lands,
+        vec!["L4".to_string(), "L5".to_string()],
+        "整条街都要在清单里（凭据上那份清单就是「拆了哪几块」那句话）：{line}"
+    );
+    assert!(
+        line.contains("Razed { lands: 2, seized: 2 }"),
+        "两块都该连地收回：{line}"
+    );
+    for land in STREET {
+        assert_eq!(
+            plot_state(&mut app, land),
+            (None, 0, false),
+            "L{land} 该被夷平、收回、抵押一起清：{line}"
+        );
+    }
+    // 拆房不赔钱：这一条上没有任何一笔现金。这是这条阶梯的定义（PLAN §三 那一行
+    // 「仅拆建筑、所有权保留／连地收回」里没有「补偿」那一格），不是漏了结算
+    assert!(
+        !line.contains("Gained") && !line.contains("Lost"),
+        "地档不该动钱：{line}"
+    );
+    assert_cash_audit(&mut app, START);
+}
+
+/// 清单里有**无主的那一块**，而 `seized` 只数有主的。
+///
+/// 这一条是「按业主分组会把无主的那块丢掉」的反例：若清单是从业主集合推出来的，
+/// 这里会是 `["L4"]` + `lands: 1`，而街上明明少了两排房子 —— 那种世界画面上看不出来，
+/// 只有清单与 `seized` 两个数并排放才读得出「扫到 2 块、其中 1 块本来没人要」。
+#[test]
+fn the_ground_list_includes_the_plot_that_had_no_owner() {
+    let (mut app, p0) = step_onto_once();
+    // 只有王府井是他的；西单无主（演示盘开局本来就是这样，摆一次是防上一轮残留）
+    own(&mut app, ANCHOR, Some(0), 3, false);
+    own(&mut app, 5, None, 2, false);
+    let line = walk_until_rearmed(&mut app, p0, NEWS, "news_004", 40, |app| {
+        own(app, ANCHOR, Some(0), 3, false);
+        own(app, 5, None, 2, false);
+    });
+    let (_center, lands) = ground(&line);
+    assert_eq!(
+        lands,
+        vec!["L4".to_string(), "L5".to_string()],
+        "无主那块也要在清单里：{line}"
+    );
+    assert!(
+        line.contains("Razed { lands: 2, seized: 1 }"),
+        "扫到 2 块、只有 1 块有主可收：{line}"
+    );
+    assert_eq!(plot_state(&mut app, 5).1, 0, "无主的那块照样被拆：{line}");
+    assert_cash_audit(&mut app, START);
+}
+
+/// 验收③：**路段类新闻盖上去的状态，到期自动失效**。
+///
+/// 「这一带地价调涨」盖的是 `Timed<LandStatus>`，与涨价卡同一枚组件、同一个到期钟
+/// （`expire_land_status_system`，一天＝一个回合末）。所以这条验的不是「新闻能不能盖」
+/// （上一条管），而是「新闻盖上去的那一枚会不会自己掉」—— 盖了不掉，租金就永久翻倍。
+///
+/// 盖完之后把 13 号格改成道路再跑回合：不这么做，路上还会再抽到新闻，
+/// 而「再盖一次」与「到期没掉」在画面上是同一个读数（`status_of` 又有了）。
+#[test]
+fn a_street_news_expires_by_itself() {
+    let (mut app, p0) = step_onto_once();
+    arm_street(&mut app);
+    let line = walk_until_rearmed(&mut app, p0, NEWS, "news_006", 40, arm_street);
+    let (_center, lands) = ground(&line);
+    assert_eq!(
+        lands,
+        vec!["L4".to_string(), "L5".to_string()],
+        "整条街都盖上了：{line}"
+    );
+    assert!(line.contains("Stamped"), "盖状态的那条凭据要在：{line}");
+    for land in STREET {
+        let (status, days) = status_of(&mut app, land).expect("刚播完，这一格该挂着涨价");
+        assert_eq!(status, LandStatus::PriceHike, "L{land} 盖的是涨价");
+        assert!(
+            days > 0 && days <= 5,
+            "L{land} 的天数在卡面那一格之内：{days}"
+        );
+    }
+
+    // 撤掉载体，让后面那几回合不可能再盖一次（改的是内存里那份棋盘快照）
+    retile(&mut app, NEWS, TileKind::Road);
+    let want = turn_count(&app) + 12;
+    play_turns(&mut app, want);
+    for land in STREET {
+        assert_eq!(
+            status_of(&mut app, land),
+            None,
+            "L{land} 的涨价早该自己掉了（十二个回合末 > 卡面 5 天）"
+        );
+    }
+    assert_cash_audit(&mut app, START);
+}
+
+/// 锚点跟着**人**走，不是跟着新闻中心那一格走。
+///
+/// 这条是「脚下那块地」这五个字的全部依据：把 7 号格（它本身就是一块地 —— 外滩商业区
+/// 的两格之一）改成新闻中心，人踩上去时锚点就该是 **L2**，而不是上次那个 L4。
+/// 若锚点写成了「盘上第一块地」或「新闻中心在数据里绑的那块」，这一条会红。
+#[test]
+fn the_anchor_is_the_ground_under_the_broadcaster_not_the_tile_itself() {
+    let (mut app, p0) = ready_on(6, 1, DecisionPolicy::DeclineAll);
+    retile(&mut app, 7, TileKind::News);
+    own(&mut app, 2, Some(0), 3, false);
+    let line = walk_until_rearmed(&mut app, p0, 7, "news_005", 40, |app| {
+        own(app, 2, Some(0), 3, false);
+    });
+    let (center, lands) = ground(&line);
+    assert_eq!(center, "L2", "他脚下那一格就是那块地，锚点该是它：{line}");
+    assert!(
+        lands.iter().any(|l| l == "L2"),
+        "3×3 以脚下为中心，中心那块必在清单里：{line}"
+    );
+    assert_eq!(plot_state(&mut app, 2).1, 0, "楼该被拆平：{line}");
+    assert_cash_audit(&mut app, START);
 }

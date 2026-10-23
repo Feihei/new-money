@@ -25,7 +25,7 @@ use crate::card::CardEffect;
 use crate::data::DataHandles;
 use crate::deck::{CardSink, apply_effects};
 use crate::landing::{Landed, Landing, LandingDomain};
-use crate::msg::{NewsFired, NewsHit, NewsNotice};
+use crate::msg::{NewsAudience, NewsFired, NewsHit, NewsNotice};
 
 /// 一条新闻在池子里的位置。**存下标而不是 id 字符串**（与 [`crate::deck::CardId`] 同构）：
 /// `GameSession::last_news` 要进存档，而下标在「策划改了 id 命名」时不会失效——
@@ -55,6 +55,76 @@ pub enum NewsScope {
     Everyone,
     /// 点名一位。
     One(PlayerPick),
+    /// 这一带：以**播报者脚下那块地**为锚的一片地（P11b① 的天灾与路段新闻）。
+    ///
+    /// 锚为什么是「他站的地方」而不是随机一块地、也不是「最富那位的地」：新闻池说的是
+    /// 「打到谁」，数据里写不出「哪条街」，而让玩家点那一格就不是新闻了。把锚放在他身上，
+    /// 荒诞感就留在规则里 —— 他刚走到自己家那条街旁边的新闻中心，灾正落在他最熟的那几块地。
+    /// 脚下那一格通常**不是**地（新闻中心自己就是道路格），所以往环上找最近的一块，
+    /// 同距时按他面朝的方向决胜，与请神符同一条键（[`crate::board::BoardDef::nearest_land`]）。
+    ///
+    /// **范围（整街 / 3×3 / 全图）不住在这里，住在动词里**：`CardEffect::LandStatus{area}`
+    /// 与 `Damage{area}` 各自带那一格，这一档只给中心。两处各写一份迟早会分叉，
+    /// 而「全场拆房」那种写法里的「全场」是地不是人 —— 它该写成 `Around` + `area: whole`。
+    Around,
+}
+
+/// 一条效果落在**人**身上还是**地**上 —— [`mismatch`] 的那张配对表用的就是这一位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    /// 承受者是一个人（钱、停走、离场、护身…）
+    People,
+    /// 锚点是一块地（盖状态、打损害）
+    Ground,
+    /// 今天两档都不属于它。写出来而不是并进前两格，是因为「它为什么不行」每条各有一句
+    Neither,
+}
+
+/// 动词属于哪一族。**不许出现 `_`**：给 [`crate::card::CardEffect`] 加一条新动词时，
+/// 这里必须当场回答「它打在谁身上」，否则它会以「谁都能带」的形状溜进池子，
+/// 到运行时才在 [`crate::deck::apply_effects`] 里静默落空。
+const fn family_of(effect: &CardEffect) -> Family {
+    match effect {
+        CardEffect::AddCash { .. }
+        | CardEffect::DeductCash { .. }
+        | CardEffect::Detain { .. }
+        | CardEffect::MoveTo { .. }
+        | CardEffect::Insulate { .. }
+        | CardEffect::FreePass { .. }
+        | CardEffect::Reverse
+        | CardEffect::Stay { .. }
+        | CardEffect::MoveCap { .. }
+        | CardEffect::SummonGod
+        | CardEffect::BanishGod => Family::People,
+        CardEffect::LandStatus { .. } | CardEffect::Damage { .. } => Family::Ground,
+        // 购地卡：买哪块无主地是玩家按下去那一刻定的，而新闻不替人挑地（挑地是它的玩法本体）
+        CardEffect::BuyLand => Family::Neither,
+        // 拍卖卡：那一槌要问的是**业主**（承受者与开槌人是两个人）。PLAN §四 把它列在
+        // 第二批的「公开拍卖公有土地」，而无主的地没有业主 —— 那条新闻得先回答
+        // 「无主的地谁挨这一槌」（所得归银行？像破产清算那样），所以今天不放它进池子
+        CardEffect::Auction => Family::Neither,
+    }
+}
+
+/// 作用域与动词必须**同族**。`None` = 这一对成立；`Some(理由)` = 开局就拒。
+///
+/// 混档没有「谁挨打」的答案：地块类新闻没有承受者（无主的地也被拆了），而一条打在一个人
+/// 身上的动词拿不到地块锚点 —— 它会在 `apply_effects` 里 `debug!` 一声然后什么都不做，
+/// 于是玩家看见顶栏播出一条标题、世界却没变。那种「说了没做」的形状与 P1 那条
+/// 「踩上去什么都不发生必须是数据错误」是同一条纪律。
+fn mismatch(scope: NewsScope, effect: &CardEffect) -> Option<&'static str> {
+    match scope {
+        NewsScope::Everyone | NewsScope::One(_) => match family_of(effect) {
+            Family::People => None,
+            Family::Ground => Some("它打在一块地上，而这一条的作用域是人"),
+            Family::Neither => Some("它要的是玩家当场挑一块地，新闻不替人挑"),
+        },
+        NewsScope::Around => match family_of(effect) {
+            Family::Ground => None,
+            Family::People => Some("它打在一个人的身上，而这一条的作用域是一片地"),
+            Family::Neither => Some("它要的是玩家当场挑一块地，新闻不替人挑"),
+        },
+    }
 }
 
 /// 一条新闻。字段与 [`crate::card::CardDef`] 同构（`id`/`title`/`desc`/`effects`），
@@ -111,6 +181,13 @@ impl NewsSet {
                 errs.push(format!("新闻 {} 没有任何效果", n.id));
             }
             for e in &n.effects {
+                // 先问同族（那条纪律的理由在 [`mismatch`]），再问这一条自己的数
+                if let Some(why) = mismatch(n.scope, e) {
+                    errs.push(format!(
+                        "新闻 {} 的 {:?} 与 {:?} 配不上：{why}",
+                        n.id, e, n.scope
+                    ));
+                }
                 match e {
                     CardEffect::AddCash { amount } | CardEffect::DeductCash { amount } => {
                         if *amount <= 0 {
@@ -127,16 +204,16 @@ impl NewsSet {
                             errs.push(format!("新闻 {} 的停走回合数是 0", n.id));
                         }
                     }
-                    // 瞬移要靠格名，而新闻没有「出牌人指着哪块地」那一步 —— 它的锚点只能
-                    // 由作用域算出来。留这一条在这里，是为了「哪天给新闻加地块类效果」
-                    // 必须先在 `NewsScope` 那一头表态，而不是在运行时静默落空。
-                    CardEffect::MoveTo { .. } | CardEffect::LandStatus { .. } => {
-                        errs.push(format!(
-                            "新闻 {} 用了 {:?}：它需要作用域之外的锚点，\
-                             而新闻池里写不出这一格（要它就先扩 `NewsScope`）",
-                            n.id, e
-                        ));
+                    // 0 天的地块状态会在面板上挂满一整天再消失（「剩 0 天」），而它的本意是
+                    // 「什么也没发生」—— 与卡池那一条同一个判据（`CardSet::validate`）
+                    CardEffect::LandStatus { days, .. } => {
+                        if *days == 0 {
+                            errs.push(format!("新闻 {} 的地块状态天数是 0", n.id));
+                        }
                     }
+                    // 一记「谁都不打」的损害不是新闻，是空转：中心与范围都是数据给的，
+                    // 算出零块只可能是盘上没地（那一条新闻本来就不该上池子）
+                    CardEffect::Damage { .. } => {}
                     _ => {}
                 }
             }
@@ -203,16 +280,17 @@ pub fn draw(pool: usize, last: Option<NewsId>, roll: u32) -> Option<NewsId> {
     Some(NewsId((id % pool) as u32))
 }
 
-/// 这一条新闻点名到的那几个人（**已经过滤掉破产者**）。
+/// 这一条新闻点名到的那几个人（**已经过滤掉破产者**）。人档专用 —— 地档走
+/// [`ground_anchor`]，它给的是中心而不是承受者。
 ///
 /// 返回的是「承受者」而不是「谁触发」：踩格的人由调用方带在凭据上（`NewsFired::broadcaster`），
 /// 两处分开才是这条玩法的全部新意 —— 合成一个人的话，「他开广播又挨了打」与
 /// 「他挨了打」在流水里读起来是同一句话。
 ///
-/// `audience` 要 `&mut CardSink` 而不是「账本 + 随机流」两格：随机流挂在
+/// `people` 要 `&mut CardSink` 而不是「账本 + 随机流」两格：随机流挂在
 /// [`crate::gods::BestowKit`] 里（那条流是 `Rng` 的第十五条，见 [`crate::rng`]），
 /// 而账本与它在同一个参数包上，分两头借会在参数建立期撞。
-fn audience(scope: NewsScope, actor: Entity, sink: &mut CardSink) -> Vec<Entity> {
+fn people(scope: NewsScope, actor: Entity, sink: &mut CardSink) -> Vec<Entity> {
     match scope {
         // 全场：破产的人已经不在牌桌上（与 P2b 的礼物/红包同一条判据）
         NewsScope::Everyone => sink.books.solvent().into_iter().map(|(p, _)| p).collect(),
@@ -247,6 +325,14 @@ fn audience(scope: NewsScope, actor: Entity, sink: &mut CardSink) -> Vec<Entity>
                     best.map(|(_, p)| vec![p]).unwrap_or_default()
                 }
             }
+        }
+        // 地档没有「哪几个人」这一问：它的锚是一块地，答案在 [`ground_anchor`] 那里。
+        // 这一格今天走不到（`fire_news` 先按作用域分开了两条路），写出来是为了
+        // **这张表不许有 `_`** —— 有人把 `Around` 接进人档时，症状得是一声 warn，
+        // 而不是「播了一条谁都没点到的新闻」
+        NewsScope::Around => {
+            warn!("地档新闻走进了人档的取数：这一条该由 ground_anchor 回答锚点");
+            Vec::new()
         }
     }
 }
@@ -328,18 +414,56 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
         def.id.clone(),
     );
     let scope = def.scope;
-    let targets = audience(scope, actor, &mut sink.card);
-    let mut hits = Vec::with_capacity(targets.len());
-    for target in targets {
-        hits.push(NewsHit {
-            player: target,
-            outcomes: apply_effects(&mut sink.card, actor, target, &effects, &news_id, None),
-        });
-    }
-    info!(
-        "新闻「{title}」（{news_id}）：由 {actor:?} 播出，点到 {} 个人",
-        hits.len()
-    );
+    let audience = match scope {
+        NewsScope::Everyone | NewsScope::One(_) => {
+            let targets = people(scope, actor, &mut sink.card);
+            let mut hits = Vec::with_capacity(targets.len());
+            for target in targets {
+                hits.push(NewsHit {
+                    player: target,
+                    outcomes: apply_effects(
+                        &mut sink.card,
+                        actor,
+                        target,
+                        &effects,
+                        &news_id,
+                        None,
+                    ),
+                });
+            }
+            NewsAudience::People(hits)
+        }
+        NewsScope::Around => {
+            // 锚点是播报者脚下那块地。`None` 只可能是「这张盘上一块地都没有」——
+            // 那时这一播扫不到任何东西，但仍然要播出去：顶栏那句「这一带没有地可打」与
+            // 「场上没有可点名的人」是同一条纪律，空手要说得出为什么空
+            let center = ground_anchor(actor, &mut sink.card);
+            let lands = match center {
+                Some(at) => touched(&mut sink.card, at, &effects),
+                None => Vec::new(),
+            };
+            // `victim` 那一格对地块类动词是死的（[`mismatch`] 保证走到这里的只有地块类动词），
+            // 传 `actor` 只为让签名成立 —— 地档没有「谁挨的」，只有「谁开的广播」
+            let outcomes = apply_effects(
+                &mut sink.card,
+                actor,
+                actor,
+                &effects,
+                &news_id,
+                center.map(crate::hand::CardAim::Land),
+            );
+            NewsAudience::Ground {
+                center,
+                lands,
+                outcomes,
+            }
+        }
+    };
+    let readout = match &audience {
+        NewsAudience::People(hits) => format!("点到 {} 个人", hits.len()),
+        NewsAudience::Ground { lands, .. } => format!("扫到 {} 块地", lands.len()),
+    };
+    info!("新闻「{title}」（{news_id}）：由 {actor:?} 播出，{readout}");
     sink.fired.write(NewsFired {
         broadcaster: actor,
         news: NewsNotice {
@@ -347,10 +471,69 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
             title,
             desc,
             scope,
-            hits,
+            audience,
         },
     });
     true
+}
+
+/// 这一条新闻的锚点：播报者**脚下那块地**（他站的那一格不是地时，往环上找最近的一块）。
+///
+/// 位置与朝向都读他自己身上那两个组件，而不是「当前回合玩家」—— 注入路径（`NM_NEWS`）
+/// 与踩格路径的播报者可以是两个人，而锚该跟着开广播的那一位走。
+fn ground_anchor(actor: Entity, sink: &mut CardSink) -> Option<crate::land::LandId> {
+    let at = sink.positions.get(actor).ok()?.tile;
+    let heading = *sink.headings.get(actor).ok()?;
+    let (land, _, _) = sink.books.active.def.nearest_land(at, heading)?;
+    Some(crate::land::LandId(land))
+}
+
+/// 这一条动词的作用范围 —— 地块类动词各带一格，打在人身上的动词没有。
+///
+/// 这里**也**不带 `_`，因为两条表是对同一个枚举各表态一次：「打在地上」与
+/// 「带一片范围」必须是同一条判断。写成 `Some(..) | _ => None` 的话，将来加一条地块类动词
+/// 只需在那儿登记一次、这里漏一次，而漏掉的形状是「新闻播了、地也改了，凭据上那份清单却是
+/// 空的」—— 顶栏念得出「拆了几块」，念不出**拆了哪几块**。两条表都要求新变体当场表态，
+/// 那种半截登记就只剩编译错误这一种结局
+/// （[`a_ground_verb_is_the_one_that_carries_a_land_area`] 数的是两条表已登记的那些对不对得上）。
+fn verb_area(effect: &CardEffect) -> Option<crate::plot::PlotArea> {
+    match effect {
+        CardEffect::LandStatus { area, .. } | CardEffect::Damage { area, .. } => Some(*area),
+        CardEffect::AddCash { .. }
+        | CardEffect::DeductCash { .. }
+        | CardEffect::Detain { .. }
+        | CardEffect::MoveTo { .. }
+        | CardEffect::Insulate { .. }
+        | CardEffect::FreePass { .. }
+        | CardEffect::BuyLand
+        | CardEffect::Reverse
+        | CardEffect::Stay { .. }
+        | CardEffect::MoveCap { .. }
+        | CardEffect::SummonGod
+        | CardEffect::BanishGod
+        | CardEffect::Auction => None,
+    }
+}
+
+/// 这一播**真的扫到了哪几块地**（各动词的范围取并集、去重、排序）。
+///
+/// 它是凭据上那份清单，不是 `apply_effects` 的副产品：效果凭据带的是块数（`Stamped{lands}`
+/// 与 `Razed{lands}`，与卡池共用同一套形状），而新闻要说得出「外星人拆了哪几块」——
+/// 那句话里没有块数就没有「我家那块在不在里面」。清单由这里算而不是从 `damage` 里挤出来，
+/// 是为了不把 `DamageTally` 的 `Copy` 破掉（它被飞弹、炸弹、恶魔与测试共用）。
+fn touched(
+    sink: &mut CardSink,
+    center: crate::land::LandId,
+    effects: &[CardEffect],
+) -> Vec<crate::land::LandId> {
+    let mut lands: Vec<crate::land::LandId> = effects
+        .iter()
+        .filter_map(verb_area)
+        .flat_map(|area| sink.books.area_of(center, area))
+        .collect();
+    lands.sort();
+    lands.dedup();
+    lands
 }
 
 #[cfg(test)]
@@ -381,20 +564,155 @@ mod tests {
     }
 
     #[test]
-    fn a_land_anchored_effect_needs_a_scope_that_cannot_give_one() {
-        // 「瞬移到某格」这类效果要的是**卡面上写死的锚点**，而新闻池的锚点只能由作用域算。
-        // 这一条挡的是「先写了效果、忘了扩 NewsScope」那种半截数据
-        let set = NewsSet(vec![NewsDef {
-            id: "news_move".into(),
-            title: "有人搬家".into(),
-            desc: "把一位玩家送到南京路".into(),
-            scope: NewsScope::Everyone,
-            effects: vec![CardEffect::MoveTo {
+    fn a_ground_verb_only_passes_under_the_ground_scope() {
+        // 同一条动词，两档作用域两种命运：这条断言钉的是「混档会在开局就响」，
+        // 而不是等到玩家踩上新闻中心、顶栏播出一条标题、街上什么都没变
+        let wrong = NewsSet(vec![news(
+            "news_alien",
+            NewsScope::Everyone,
+            vec![CardEffect::Damage {
+                depth: crate::damage::LandDamage::Clear { seize: true },
+                area: crate::plot::PlotArea::Street,
+            }],
+        )]);
+        let errs = wrong.validate().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("它打在一块地上，而这一条的作用域是人")),
+            "{errs:?}"
+        );
+
+        let right = NewsSet(vec![news(
+            "news_alien",
+            NewsScope::Around,
+            vec![CardEffect::Damage {
+                depth: crate::damage::LandDamage::Clear { seize: true },
+                area: crate::plot::PlotArea::Street,
+            }],
+        )]);
+        assert!(
+            right.validate().is_ok(),
+            "地档带动词该过：{:?}",
+            right.validate()
+        );
+    }
+
+    #[test]
+    fn a_people_verb_does_not_belong_to_a_ground_scope() {
+        let set = NewsSet(vec![cash_news("news_subsidy", NewsScope::Around, 1_500)]);
+        let errs = set.validate().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("它打在一个人的身上，而这一条的作用域是一片地")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_ground_status_still_needs_a_number_of_days() {
+        // 「天数是 0」那条判据从卡池搬过来：作用域换档不改变「0 天等于什么也没盖」
+        let set = NewsSet(vec![news(
+            "news_hike",
+            NewsScope::Around,
+            vec![CardEffect::LandStatus {
+                status: crate::status::LandStatus::PriceHike,
+                days: 0,
+                area: crate::plot::PlotArea::Street,
+            }],
+        )]);
+        let errs = set.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("地块状态天数是 0")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_named_tile_now_belongs_to_the_people_side() {
+        // P11a 那一步 `MoveTo` 是被**整条拒掉**的（那时新闻池只有人档，而拒掉的理由写的是
+        // 「需要作用域之外的锚点」—— 那句对 `LandStatus` 成立，对 `MoveTo` 其实不成立：
+        // 它的锚点就在条目上）。今天它按它本来的样子过：打在一个人身上、格名写在数据里
+        let set = NewsSet(vec![news(
+            "news_move",
+            NewsScope::Everyone,
+            vec![CardEffect::MoveTo {
                 tile_name: "南京路".into(),
             }],
-        }]);
-        let errs = set.validate().unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("需要作用域之外的锚点")));
+        )]);
+        assert!(set.validate().is_ok(), "{:?}", set.validate());
+    }
+
+    #[test]
+    fn the_two_land_choosing_verbs_belong_to_neither_side() {
+        // 购地卡与拍卖卡都要有人**当场挑一块地**（那是它们各自的玩法本体），而新闻不替人挑。
+        // 这一格写在这里而不是悄悄放进人档：`Auction` 是 PLAN §四 第二批那条
+        // 「公开拍卖公有土地」的必经之路，它得先回答「无主的地谁挨这一槌」
+        for (id, effect) in [
+            ("news_grab", CardEffect::BuyLand),
+            ("news_auction", CardEffect::Auction),
+        ] {
+            for scope in [NewsScope::Everyone, NewsScope::Around] {
+                let set = NewsSet(vec![news(id, scope, vec![effect.clone()])]);
+                let errs = set.validate().unwrap_err();
+                assert!(
+                    errs.iter().any(|e| e.contains("玩家当场挑一块地")),
+                    "{id} 在 {scope:?} 下居然过了：{errs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_ground_verb_is_the_one_that_carries_a_land_area() {
+        // 「打在地上」与「带一片范围」是同一条判断的两半，各住在一张表里。这里把每一条动词
+        // 都问一遍两半是否一致 —— 半截登记在画面上的形状是「标题播了、地也拆了，
+        // 而那份「哪几块」是空的」。编译期那一半牙齿在两张都不带 `_` 的 match 上
+        for effect in all_verbs() {
+            let ground = matches!(family_of(&effect), Family::Ground);
+            assert_eq!(
+                ground,
+                verb_area(&effect).is_some(),
+                "{effect:?} 两条表读数不一致：地档={ground} 范围={:?}",
+                verb_area(&effect)
+            );
+        }
+    }
+
+    /// 每一条动词各取一个样本。列在这里而不是靠宏：要的是「这两张表对同一批东西说过话」，
+    /// 而漏列一条的后果由 [`family_of`] / [`verb_area`] 的穷尽 match 挡（新变体两处都得表态）。
+    fn all_verbs() -> Vec<CardEffect> {
+        use crate::player::DetentionPlace;
+        use crate::plot::PlotArea;
+        use crate::status::LandStatus as Plot;
+        vec![
+            CardEffect::AddCash { amount: 100 },
+            CardEffect::DeductCash { amount: 100 },
+            CardEffect::Detain {
+                place: DetentionPlace::Jail,
+                turns: 3,
+            },
+            CardEffect::MoveTo {
+                tile_name: "南京路".into(),
+            },
+            CardEffect::Insulate { charges: 1 },
+            CardEffect::LandStatus {
+                status: Plot::PriceHike,
+                days: 5,
+                area: PlotArea::Street,
+            },
+            CardEffect::Damage {
+                depth: crate::damage::LandDamage::Clear { seize: true },
+                area: PlotArea::Box { side: 3 },
+            },
+            CardEffect::FreePass { floor: 2_000 },
+            CardEffect::BuyLand,
+            CardEffect::Reverse,
+            CardEffect::Stay { turns: 1 },
+            CardEffect::MoveCap { turns: 3 },
+            CardEffect::SummonGod,
+            CardEffect::BanishGod,
+            CardEffect::Auction,
+        ]
     }
 
     #[test]

@@ -94,6 +94,20 @@ pub enum CardEffect {
         days: u32,
         area: crate::plot::PlotArea,
     },
+    /// 打一片建筑损害（P11b①：外星人与山洪；4 代那两张拆房卡将来也走这一格）。
+    ///
+    /// 它带的不是「扣钱」那一族的任何一条：拆的是**街上那几层楼**，而夺不夺地是
+    /// [`crate::damage::LandDamage`] 那两支自己说的（`Degrade` 结构上没有 `seize` 那一格）。
+    /// 与 [`Self::LandStatus`] 同一条形状：**中心来自 aim，不在卡面/条目上**，
+    /// 范围是动词自带的那一格 —— 于是「外星人打哪条街」由作用域回答（新闻是播报者
+    /// 脚下那块地），「打多大一片」由数据回答。两处各留一份就会分叉。
+    ///
+    /// 它**不进结算管线**：这里没有一笔钱过手（P2 那条链管的是钱），所以免罪卡与免费卡
+    /// 都挡不住它 —— 与 `LandStatus` 同一条口径，而 PLAN §三 的免疫矩阵将来要分头问这两族。
+    Damage {
+        depth: crate::damage::LandDamage,
+        area: crate::plot::PlotArea,
+    },
     /// 挂上一条**待用**的免付（免费卡，P3c②）。`floor` 是门槛的名义额：过完物价的实付
     /// 金额要**超过** `floor × 物价` 才免得掉，而且只免一次。
     ///
@@ -272,6 +286,13 @@ impl CardSet {
                         // 那时候它已经是一张「买了没用的卡」了 —— 在加载期就拦
                         if c.target != CardTarget::Land {
                             errs.push(format!("卡牌 {} 要盖地块状态，但 target 不是 land", c.id));
+                        }
+                    }
+                    CardEffect::Damage { .. } => {
+                        // 与 `LandStatus` 同一条绑定：这一拳打在哪一片要有个中心，而中心
+                        // 不在卡面上（卡面上有中心的话，一张卡就得为每条街写一遍）
+                        if c.target != CardTarget::Land {
+                            errs.push(format!("卡牌 {} 要打建筑损害，但 target 不是 land", c.id));
                         }
                     }
                     CardEffect::FreePass { floor } => {

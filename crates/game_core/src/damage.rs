@@ -21,10 +21,13 @@
 //! 本模块只有**词汇与算术**，不碰实体：面积解析在 [`crate::plot`]，是 `BoardDef` 上的纯函数，
 //! 单笔算术是 [`strike`]，真正写组件的那一句在 [`crate::settle::Books::damage`]。
 
+use serde::Deserialize;
+
 use crate::plot::PlotArea;
 
 /// 深度与归属。两支互斥，且只有 `Clear` 那支能动所有权。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LandDamage {
     /// 降 `levels` 层，**永不动所有权**。0 级空地不会被降成负数（`saturating_sub`）。
     /// 出处：飞弹「威力 3×3、房屋下降一级」；恶魔附身「所经降一级（空地不拆）」。

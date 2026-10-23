@@ -654,6 +654,17 @@ pub enum EffectOutcome {
         lands: u32,
         days: u32,
     },
+    /// 一片地上的建筑挨了一拳（P11b①）。`lands` 是被扫到的块数（含本来就是空地的那些 ——
+    /// 范围是范围，不为「没打到东西」缩小，与 [`crate::damage::DamageTally::hit`] 同一个口径），
+    /// `seized` 是其中所有权被收走的块数。
+    ///
+    /// 两个数都要有：「拆了房没夺地」与「连地一起收」是阶梯上两个不同的格子，只看块数
+    /// 分不出来。而**具体是哪几块**在这条上放不下也不该放 —— 地块类新闻的凭据
+    /// [`NewsAudience::Ground`] 带那份清单，因为「外星人拆了哪几块」是玩家要念出来的那句话。
+    Razed {
+        lands: u32,
+        seized: u32,
+    },
     /// 挂上了一条待用的免付（免费卡）。`floor` 是门槛的名义额 —— 这条凭据说的是
     /// 「从今天起，超过这个数的账可以免一次」，而**不是**「已经免了」。真免掉那笔是
     /// 另一条消息 [`ChargeWaived`]，两件事之间可以隔几十个回合。
@@ -796,7 +807,7 @@ pub struct NewsFired {
 }
 
 /// 一条新闻的读数。字段与 [`CardNotice`] 同构（`id`/`title`/`desc` + 逐条效果凭据），
-/// 多出来的是 `scope` 与 `hits`：**同一条效果打在几个人头上**是新闻才有的形状，
+/// 多出来的是 `scope` 与 `audience`：**同一条效果打在几个人头上**是新闻才有的形状，
 /// 而「谁挨了哪一下」必须逐人留在流水里（验收②「全场类新闻影响到的每个人都留流水」）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewsNotice {
@@ -804,7 +815,28 @@ pub struct NewsNotice {
     pub title: String,
     pub desc: String,
     pub scope: crate::news::NewsScope,
-    pub hits: Vec<NewsHit>,
+    pub audience: NewsAudience,
+}
+
+/// 一条新闻点到的是**人**还是**地**。
+///
+/// 两档不是同一个问题的两种写法：人档的主语是承受者（他的钱、他的停走），地档的主语是
+/// 那片地（谁被拆了、哪几块盖上了状态）。把它们塞进同一个 `Vec<NewsHit>` 会得到
+/// 「一块地的 `player` 填谁」这种没有答案的字段 —— 而**无主的那几块也得列出来**，
+/// 按业主分组恰好会把它们丢掉（外星人拆了三块地、其中一块没人要，那句话仍然要说得出）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum NewsAudience {
+    /// 人档：每个人一笔（`NewsHit::player` 是承受者，与播报者可以是同一个人）。
+    /// 空表说的是「点名点不到人」（只剩他一个人时的 `random_other`），不是「没播」。
+    People(Vec<NewsHit>),
+    /// 地档：一次打在一片地上。`center` 是锚（P11b① 用的是播报者脚下那块地），
+    /// `lands` 是**真的被扫到的那几块**（含无主的、含本来就是空地的），`outcomes` 是这一片上
+    /// 办成的事。`center == None` 只可能是「这张盘上一块地都没有」，那时 `lands` 必空。
+    Ground {
+        center: Option<crate::land::LandId>,
+        lands: Vec<crate::land::LandId>,
+        outcomes: Vec<EffectOutcome>,
+    },
 }
 
 /// 一条新闻落在一个人头上的那些事。文案由 UI 从 `outcomes` 生成，结算层不拼字符串

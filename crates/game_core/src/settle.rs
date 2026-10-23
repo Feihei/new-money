@@ -510,6 +510,16 @@ impl<'w, 's> Books<'w, 's> {
         );
     }
 
+    /// 一片作用域**打到哪几块地**（中心由调用方给）。
+    ///
+    /// 范围算术只有一份（[`crate::plot::area_of`]），而 P11b① 的地块类新闻需要那份**清单**
+    /// 而不只是块数 —— 「外星人拆了哪几块」是玩家要念出来的那句话，`DamageTally` 里装不下
+    /// （它是 `Copy` 的计数）。所以这里开一个只读入口，让新闻先问清单、再打那一拳，
+    /// 而不是给 `DamageTally` 加一个把它的 `Copy` 破掉的字段。
+    pub fn area_of(&self, center: LandId, area: PlotArea) -> Vec<LandId> {
+        area_of(&self.active.def, center, area)
+    }
+
     /// 打一次建筑损害（P2② 的「拆房 / 征收」动词，形状见 [`crate::damage`]）。
     ///
     /// 抵押本金只在**夺地**那一刻清：抵押中的地被 `Degrade` 或 `Clear{seize:false}` 打过
@@ -520,10 +530,11 @@ impl<'w, 's> Books<'w, 's> {
     /// 挡掉租金。
     ///
     /// 不发消息：表现层读的是 `Owner`/`BuildingLevel` 的**变化**（`render::land::sync_buildings`
-    /// 用 `Ref<T>` 检测），组件改了它就跟着改。等 P11 的新闻要播「外星人拆了哪几块」时
-    /// 再补一条带地块清单的消息，而不是现在就为它准备一个没人读的字段。
+    /// 用 `Ref<T>` 检测），组件改了它就跟着改。要说得出「拆了哪几块」的那一侧（P11b① 的新闻）
+    /// 走 [`Self::area_of`] ＋ [`Self::damage_lands`]，清单在它自己手里，而不是在这里
+    /// 为它准备一个没人读的字段。
     pub fn damage(&mut self, center: LandId, depth: LandDamage, area: PlotArea) -> DamageTally {
-        let lands = area_of(&self.active.def, center, area);
+        let lands = self.area_of(center, area);
         let tally = self.damage_lands(&lands, depth);
         info!(
             "建筑损害 {depth:?} × {area:?}（中心 {center:?}）：命中 {} 块、收回 {} 块",

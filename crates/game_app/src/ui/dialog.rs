@@ -3129,6 +3129,17 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
             lands,
             days,
         } => format!("{} {lands} 块地 {days} 天", status.label()),
+        // 与 `Stamped` 同一条：块数要说，而**哪几块**在新闻那句里由 `NewsAudience::Ground`
+        // 那份清单给出（这条凭据只说「办成了多大一片」，它不带地块名字）。
+        // 「收回几块」也要单独念：拆房与夺地是阶梯上两个格子，只看块数分不出来
+        EffectOutcome::Razed { lands, seized } => format!(
+            "夷为平地 {lands} 块{}",
+            if *seized > 0 {
+                format!("（土地收回 {seized} 块）")
+            } else {
+                String::new()
+            }
+        ),
         // 打出去那一刻**什么都不发生**，所以这一句必须说清「从今天起可以免一次」——
         // 否则玩家以为自己按错了。门槛要连着物价一起写，因为「现在值不值得用」正是这张卡
         // 唯一需要判断的地方

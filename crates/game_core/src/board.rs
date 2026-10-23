@@ -489,6 +489,33 @@ impl BoardDef {
         self.tile(index)?.land_id.and_then(|id| self.land(id))
     }
 
+    /// 离某一格**最近的那块地**：`(地块编号, 它绑在哪一格, 几步)`。
+    ///
+    /// 决胜键与请神符（[`crate::gods::nearest_god`]）是同一条：先比双向最短，同距时比
+    /// 「他面朝哪边」—— 环上两格可以与起点同距而一前一后，那时候「他接下来先遇到谁」
+    /// 是唯一还有玩法意义的分法，而一张转向卡该换掉这一位。
+    ///
+    /// 它存在的原因是 P11b 的地块类新闻：「外星人打哪条街」既不在数据里（新闻池说的是
+    /// 「打到谁」而不是「打到哪」），也不该由玩家点（那就不是新闻了）。唯一说得通的锚点
+    /// 是**开广播那个人站的地方** —— 而他脚下那一格通常正是一块道路格（新闻中心自己就是），
+    /// 所以要往环上找最近的一块。盘上一块 property 格都没有时返回 `None`。
+    pub fn nearest_land(&self, at: TileIndex, heading: Heading) -> Option<(u32, TileIndex, u32)> {
+        self.tiles
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| t.land_id.map(|id| (id, TileIndex(i as u32))))
+            .map(|(id, tile)| {
+                (
+                    id,
+                    tile,
+                    self.ring_distance(at, tile),
+                    self.steps_toward(at, tile, heading),
+                )
+            })
+            .min_by_key(|(_, _, distance, ahead)| (*distance, *ahead))
+            .map(|(id, tile, distance, _)| (id, tile, distance))
+    }
+
     /// 某块土地绑定了哪些道路格（size=2 商业应有 2 个）。
     pub fn tiles_bound_to_land(&self, land_id: u32) -> Vec<u32> {
         self.tiles
@@ -991,6 +1018,59 @@ mod tests {
         assert_eq!(found.name, end.name);
         // 棋盘外的坐标：None，而不是回退到某一格
         assert!(b.tile_at_grid(999, 999).is_none());
+    }
+
+    /// 地块类新闻的锚点（P11b①）：「离播报者最近的那块地」。
+    ///
+    /// 演示盘的绑定是 land0@格1、land1@格2、land2@格6**与**格7（2×2 商业地）、
+    /// land3@格9、land4@格11、land5@格16 —— 三个数都从这张表来，不是测试自己造的。
+    #[test]
+    fn nearest_land_walks_outward_from_a_tile_that_is_not_land() {
+        let b = board();
+        // 起点自己没有地：最近的是 1 号格上的南京路（1 步）
+        assert_eq!(
+            b.nearest_land(TileIndex(0), Heading::Forward),
+            Some((0, TileIndex(1), 1))
+        );
+        // 新闻中心（13 号）脚下也不是地：往两边数，11 号那块（西单…王府井一侧）2 步最近
+        assert_eq!(
+            b.nearest_land(TileIndex(13), Heading::Forward),
+            Some((4, TileIndex(11), 2)),
+            "跨不跨过环尾都要连着数：13→12→11 倒着 2 步，比正着 18 步近"
+        );
+        // 2×2 那块绑了两格：取离得近的那一格的**下标**，而不是地块编号先出现的那一格
+        assert_eq!(
+            b.nearest_land(TileIndex(5), Heading::Forward),
+            Some((2, TileIndex(6), 1)),
+            "一块地绑两格时按最近那一格算距离（6 号 1 步、7 号 2 步）"
+        );
+        // 没有并列时，掉头**不改变**答案：1 号那块离起点 1 步，从哪个方向数都是它。
+        // 这一句钉的是「决胜键只在同距时才出场」—— 反过来写就成了「倒着走先撞环尾」
+        assert_eq!(
+            b.nearest_land(TileIndex(0), Heading::Backward),
+            Some((0, TileIndex(1), 1)),
+            "方向不该把 1 步的近邻换成 4 步的那一块"
+        );
+    }
+
+    /// 同距的一对由**面朝方向**决胜 —— 与请神符同一条键，两处必须一样，否则玩家
+    /// 会看到「请神请到了东边那位、天灾却砸在西边那条街」这种说不出原因的分叉。
+    #[test]
+    fn nearest_land_breaks_a_tie_by_the_heading() {
+        let b = board();
+        // 10 号（机会）夹在两块地中间：9 号与 11 号离它都是 1 步
+        assert_eq!(b.ring_distance(TileIndex(10), TileIndex(9)), 1);
+        assert_eq!(b.ring_distance(TileIndex(10), TileIndex(11)), 1);
+        assert_eq!(
+            b.nearest_land(TileIndex(10), Heading::Forward),
+            Some((4, TileIndex(11), 1)),
+            "正向先遇到 11 号"
+        );
+        assert_eq!(
+            b.nearest_land(TileIndex(10), Heading::Backward),
+            Some((3, TileIndex(9), 1)),
+            "掉头之后是 9 号 —— 这一位不换，`Heading` 那半条键就是死的"
+        );
     }
 
     #[test]
