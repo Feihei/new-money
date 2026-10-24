@@ -13,15 +13,16 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionFailed, AuctionStarted, AuctionWon, BankOpDone, BankVisited,
-    BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, ChairmanTook, ChargeWaived,
-    ChestOpened, CompanyCharged, DetentionLifted, DetentionSkipped, FacilityBuilt, FinancingDrawn,
-    FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed,
-    IndemnityPaid, Institution, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn,
-    LotteryWon, MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped,
-    NewsAudience, NewsFired, NewsScope, Paused, PendingDecision, PlayerBailed, PlayerBankrupt,
-    PlayerName, PointsChanged, PolicyBought, RemoteDiceUsed, ServiceCharged, ShopOpDone,
-    StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide,
-    TurnOrder, TurnPhase, WalkHalted,
+    BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, CardSnatched, ChairmanTook,
+    ChargeWaived, ChestOpened, CompanyCharged, DepositsRobbed, DetentionLifted, DetentionSkipped,
+    FacilityBuilt, FinancingDrawn, FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed,
+    GodExit, GodLeft, GodPossessed, IndemnityPaid, Institution, ItemPlaced, ItemThieved, LandId,
+    LandTaken, LotteryBought, LotteryDrawn, LotteryWon, MarketClock, MinigameScore, MortgageDone,
+    MortgageOp, MountChanged, MoveCapped, NewsAudience, NewsFired, NewsScope, Paused,
+    PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, PointsStolen,
+    PolicyBought, RemoteDiceUsed, RentRerouted, ServiceCharged, ShopOpDone, StayLifted,
+    StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TollExtorted, TradeSide,
+    TurnOrder, TurnPhase, VillainHired, WalkHalted,
 };
 
 use super::dialog::describe;
@@ -186,6 +187,10 @@ pub(crate) struct TurnView<'w, 's> {
     /// 当前这位身上有没有停留计时（P4④）：有则那颗「掷骰」写「停留」。
     /// 判据放在这里而不是按 `TurnPhase` 猜，是因为它跟人走、不跟阶段走。
     stays: Query<'w, 's, &'static StaySentence>,
+    /// 此刻在行动的是不是一位**受雇的恶人**（P12）。旁白要说清这件事：
+    /// 「请掷骰」对一位自己会掷骰的 NPC 是一句假指令，而玩家那侧真正想知道的是
+    /// 「这是谁雇来的、替谁办事」——那半句话只存在于 `Hired` 里。
+    hired: Query<'w, 's, &'static game_core::prelude::Hired>,
 }
 
 /// 一颗按钮此刻该不该亮。三颗按钮三种判据，都从这里出，
@@ -362,15 +367,27 @@ fn phase_hint(phase: TurnPhase, turn: &TurnView) -> Option<String> {
             // 指数每回合末重算，而这一行在进入 WaitRoll 时才写 —— 两者同帧之后，
             // 所以这里读到的就是「今天」那个数（旁白不会显示昨天的物价）
             let index = turn.session.price_index;
-            match turn.order.current().and_then(|p| turn.names.get(p).ok()) {
-                Some(name) => format!(
-                    "{} 的回合 — 请掷骰（第 {turn_no} 回合 · {} · 物价 ×{index:.2}）",
-                    name.0,
-                    date,
-                    turn_no = turn.session.turn_count
-                ),
-                None => format!("请掷骰（{date} · 物价 ×{index:.2}）"),
-            }
+            // 主语那一格分三种读数：玩家（请按骰）、受雇的恶人（他自己掷，替他报一声）、
+            // 查不到名字（菜单态与装配前）
+            let head = match turn.order.current() {
+                Some(who) => match (turn.names.get(who).ok(), turn.hired.get(who).ok()) {
+                    (Some(name), Some(hired)) => {
+                        let boss = turn
+                            .names
+                            .get(hired.employer)
+                            .map(|n| n.0.clone())
+                            .unwrap_or_else(|_| "?".into());
+                        format!("{} 替 {boss} 办事 — 他自己掷骰", name.0)
+                    }
+                    (Some(name), None) => format!("{} 的回合 — 请掷骰", name.0),
+                    (None, _) => "请掷骰".to_string(),
+                },
+                None => "请掷骰".to_string(),
+            };
+            format!(
+                "{head}（第 {} 回合 · {date} · 物价 ×{index:.2}）",
+                turn.session.turn_count
+            )
         }
         TurnPhase::Walking => "移动中…".to_string(),
         _ => return None,
@@ -446,6 +463,25 @@ pub(crate) struct Notices<'w, 's> {
     /// 出牌的结果。手牌面板随手牌重建，把一次性结果烤进去下一次就没了 ——
     /// 持久的读数只有这一行（与点券那一条同一个道理）
     played: MessageReader<'w, 's, CardPlayed>,
+    // ===== 四大恶人（P12b–d）=====
+    // 六条排在一起，说的都是「雇来的那个家伙刚刚干了什么」。出场那两条（抢存款/偷点券）
+    // 各只有一句汇总；环上的四条是逐次发生的，同一帧里后写的盖掉前写的。
+    // 他们的名字从 `PlayerName` 来（恶人也挂这一位），所以 `name()` 直接可用。
+    /// 出场分派（bail 窗口发的）。抢存款/偷点券的凭据在下面两条 —— 这一条基本被盖掉，
+    /// 留着是「谁被放出来了」的那一帧记录
+    villain_hired: MessageReader<'w, 's, VillainHired>,
+    /// 强盗抢走全场存款（含雇主自己 —— 那是特性，播报要把这句话说全）
+    robbed: MessageReader<'w, 's, DepositsRobbed>,
+    /// 小偷偷走其他玩家的一半点券
+    stolen: MessageReader<'w, 's, PointsStolen>,
+    /// 小偷搬走一件路上放置物
+    thieved: MessageReader<'w, 's, ItemThieved>,
+    /// 强盗擦肩抢走一张卡
+    snatched: MessageReader<'w, 's, CardSnatched>,
+    /// 流氓勒索成功
+    toll: MessageReader<'w, 's, TollExtorted>,
+    /// 间谍截租
+    rerouted: MessageReader<'w, 's, RentRerouted>,
     // ===== 神明（P6e①）=====
     // 这六条排在 `played` **之前**：请神符那句 `describe` 已经说了「请来哪位、他从哪一格
     // 过来」，再让 `GodPossessed` 盖上去就是同一件事说两遍；而**走路踩到神**时根本没有
@@ -523,11 +559,16 @@ pub(crate) fn hint_from_events(
     // 与 Godot 那些信号处理函数逐个覆盖 `hint_label.text` 的结果一致
     let mut line: Option<String> = None;
     for m in notices.detention_skip.read() {
+        // 「剩几回合」在笼中那一条上没有答案（P12 的恶人：只有保释办得出来），
+        // 而那句话说得出「等保释」—— 写成「剩 0 回合」正好是反的
+        let left = match m.left {
+            Some(n) => format!("剩 {n} 回合"),
+            None => "等保释".to_string(),
+        };
         line = Some(format!(
-            "{} 在{}中（剩 {} 回合），跳过本回合",
+            "{} 在{}中（{left}），跳过本回合",
             name(&names, m.player),
-            m.place.label(),
-            m.turns_left
+            m.place.label()
         ));
     }
     for m in notices.detention_back.read() {
@@ -721,6 +762,75 @@ pub(crate) fn hint_from_events(
             m.points,
             name(&names, m.player),
             m.place.back_verb()
+        ));
+    }
+    // ===== 四大恶人（P12b–d）=====
+    // 排在保释之后：出场那两条与保释同源（保释成交的下一帧分派），放在一起读得出
+    // 「保释 → 出场动手」的因果。恶人的名字走 `PlayerName`，与玩家同一条读法。
+    for m in notices.villain_hired.read() {
+        line = Some(format!(
+            "{} 出笼，替 {} 办事",
+            name(&names, m.villain),
+            name(&names, m.employer)
+        ));
+    }
+    for m in notices.robbed.read() {
+        line = Some(format!(
+            "{} 出手，抢走全场 {} 的存款（{} 个人，包括雇主自己）",
+            name(&names, m.villain),
+            comma(m.total),
+            m.victims
+        ));
+    }
+    for m in notices.stolen.read() {
+        line = Some(format!(
+            "{} 出手，偷走 {} 的 {} 点券给 {}",
+            name(&names, m.villain),
+            m.victims,
+            m.total,
+            name(&names, m.employer)
+        ));
+    }
+    for m in notices.thieved.read() {
+        line = Some(format!(
+            "{} 把格{}的{}偷走送给了雇主",
+            name(&names, m.thief),
+            m.tile.0,
+            m.item.label()
+        ));
+    }
+    for m in notices.snatched.read() {
+        line = Some(format!(
+            "{} 擦肩抢走 {} 的「{}」",
+            name(&names, m.robber),
+            name(&names, m.victim),
+            m.card.title
+        ));
+    }
+    for m in notices.toll.read() {
+        let plot = board
+            .as_ref()
+            .and_then(|b| b.def.land(m.land.0))
+            .map_or("？", |l| l.name.as_str());
+        line = Some(format!(
+            "{} 路过{}，勒索 {} {}（钱归他自己）",
+            name(&names, m.hoodlum),
+            plot,
+            name(&names, m.owner),
+            comma(m.amount)
+        ));
+    }
+    for m in notices.rerouted.read() {
+        let plot = board
+            .as_ref()
+            .and_then(|b| b.def.land(m.land.0))
+            .map_or("？", |l| l.name.as_str());
+        line = Some(format!(
+            "间谍探到{}有案底，{} 的租 {} 转进了 {} 的口袋",
+            plot,
+            name(&names, m.spy),
+            comma(m.amount),
+            name(&names, m.employer)
         ));
     }
     // 百货成交：这一行要说得出「哪张卡」与「几点券」，因为柜台面板下一刻就重建了。
@@ -1538,6 +1648,14 @@ mod tests {
             .add_message::<FinancingRecalled>()
             // P11：新闻那一条（漏了它 = `Notices` 参数包建不出来 = 顶栏整行不更新）
             .add_message::<NewsFired>()
+            // P12b–d：四大恶人的六条播报源（同一条理由 —— 漏了参数包建不出来）
+            .add_message::<VillainHired>()
+            .add_message::<DepositsRobbed>()
+            .add_message::<PointsStolen>()
+            .add_message::<ItemThieved>()
+            .add_message::<CardSnatched>()
+            .add_message::<TollExtorted>()
+            .add_message::<RentRerouted>()
             .add_message::<GameOver>()
             .add_systems(Update, hint_from_events);
         let me = app.world_mut().spawn(PlayerName("阿土伯".into())).id();

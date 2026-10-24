@@ -849,8 +849,17 @@ pub fn settle_god_landing_system(
     mut desk: GodDesk<'_, '_>,
     mut arrivals: MessageReader<PlayerArrived>,
     occupancies: Query<(Entity, &Occupancy)>,
+    villains: Query<&crate::villain::Villain>,
 ) {
     for arrival in arrivals.read() {
+        // **神不上恶人的身**（P12a 定的边界）：十二位管的四类修正（收租、买地、建屋、
+        // 命运）读的全是玩家身上的钱与地，而恶人一样都没有。让他附一位神，那条修正
+        // 就挂在一个查不到钱包的实体上 —— 效果登记了、没人消费，症状是那位神「明明
+        // 上身了却什么都没发生」。所以落脚的这一格先问一句他是谁，答「恶人」就让开。
+        if villains.get(arrival.player).is_ok() {
+            debug!("{:?} 踩到了路上的神，但神只上身于人", arrival.player);
+            continue;
+        }
         let hit = occupancies.iter().find(|(_, occupancy)| {
             occupancy.at == OccupancyAt::OnTile(arrival.to)
                 && matches!(occupancy.kind, OccupancyKind::God(_))

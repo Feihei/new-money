@@ -18,7 +18,7 @@ use bevy::ecs::message::Messages;
 use common::*;
 use game_core::prelude::{
     Decision, DecisionChosen, Detention, DetentionPlace, GameRules, GameSetup, PLAYER_COLORS,
-    Pending, PlayerSetup, TurnPhase,
+    Pending, PlayerSetup, Term, TurnPhase,
 };
 
 /// prototype 的两条分支接入点。
@@ -69,7 +69,7 @@ fn bailing_someone_costs_points_and_never_cash() {
         p1,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 5,
+            term: Term::Turns(5),
         },
     );
     place(&mut app, p1, JAIL_JUNCTION);
@@ -121,7 +121,7 @@ fn the_released_player_rolls_normally_on_his_next_turn() {
         p1,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 5,
+            term: Term::Turns(5),
         },
     );
     place(&mut app, p1, JAIL_JUNCTION);
@@ -179,7 +179,7 @@ fn the_jail_gate_cannot_release_a_patient_from_the_hospital() {
         p1,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 5,
+            term: Term::Turns(5),
         },
     );
     place(&mut app, p1, JAIL_JUNCTION);
@@ -188,7 +188,7 @@ fn the_jail_gate_cannot_release_a_patient_from_the_hospital() {
         p2,
         Detention {
             place: DetentionPlace::Hospital,
-            turns_left: 3,
+            term: Term::Turns(3),
         },
     );
     place(&mut app, p2, HOSPITAL_JUNCTION);
@@ -225,7 +225,7 @@ fn the_hospital_gate_is_its_own_window() {
         p1,
         Detention {
             place: DetentionPlace::Hospital,
-            turns_left: 3,
+            term: Term::Turns(3),
         },
     );
     place(&mut app, p1, HOSPITAL_JUNCTION);
@@ -252,7 +252,7 @@ fn not_enough_points_means_nothing_happens() {
         p1,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 5,
+            term: Term::Turns(5),
         },
     );
     place(&mut app, p1, JAIL_JUNCTION);
@@ -264,7 +264,7 @@ fn not_enough_points_means_nothing_happens() {
 
     assert_eq!(points_of(&app, p0), 29, "一分都不该扣");
     assert_eq!(
-        detention_of(&app, p1).map(|d| d.turns_left),
+        detention_of(&app, p1).and_then(|d| d.term.turns()),
         Some(5),
         "人还得关着"
     );
@@ -284,7 +284,7 @@ fn only_the_player_at_the_window_can_bail() {
         p1,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 5,
+            term: Term::Turns(5),
         },
     );
     place(&mut app, p1, JAIL_JUNCTION);
@@ -311,7 +311,7 @@ fn two_requests_for_the_same_head_in_one_frame_charge_once() {
         p1,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 5,
+            term: Term::Turns(5),
         },
     );
     place(&mut app, p1, JAIL_JUNCTION);
@@ -342,7 +342,7 @@ fn a_ring_tile_typed_jail_opens_the_same_window_without_a_property_quote() {
         p1,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 3,
+            term: Term::Turns(3),
         },
     );
     place(&mut app, p1, JAIL_JUNCTION);
@@ -364,8 +364,12 @@ fn a_ring_tile_typed_jail_opens_the_same_window_without_a_property_quote() {
 
 #[test]
 fn nobody_to_bail_means_no_window_at_all() {
-    // 没人关着的时候，接入点就与路面一样直接收摊 —— 不能弹一个空窗口把回合停住
-    let (mut app, p0) = ready_on(JAIL_JUNCTION - 1, 1, DecisionPolicy::Hold);
+    // 没人关着的时候，接入点就与路面一样直接收摊 —— 不能弹一个空窗口把回合停住。
+    //
+    // **这一条今天只能拿医院门口试**（P12a）：四位恶人开局全关在监狱里，而「这一处关着谁」
+    // 读的正是笼中的恶人 —— 拿监狱门口测「没人可保」会测到一个不存在的世界。
+    // 「监狱门口从今天起永远有排可保」那句话由 `tests/villain.rs` 钉。
+    let (mut app, p0) = ready_on(HOSPITAL_JUNCTION - 1, 1, DecisionPolicy::Hold);
     set_points(&mut app, p0, 100);
     let p0 = walk_onto(&mut app, p0);
     answer(&mut app, p0, Decision::Decline);

@@ -18,11 +18,11 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiCon
 use game_core::prelude::{
     ActiveBoard, ArcadeDeal, AtmAccess, Auction, BankBalance, Bankrupt, BuildingLevel, CardKind,
     CompanyLedgers, Corrections, CouponBoxes, Deck, DeckOrder, Detention, Facility, GameRules,
-    GameSeed, GameSession, Gavel, Hand, Heading, HolidaySet, Institution, Insulation, Insured,
-    Inventory, Jackpot, LandId, LandStatus, Landing, LotteryTickets, MarketClock, Mortgaged, Mount,
-    MoveCap, Occupancy, OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName,
-    Points, Possession, Shelf, ShopStock, StaySentence, StockHoldings, Timed, TurnOrder, TurnPhase,
-    Wallet, resists,
+    GameSeed, GameSession, Gavel, Hand, Heading, Hired, HolidaySet, Institution, Insulation,
+    Insured, Inventory, Jackpot, LandId, LandStatus, Landing, LotteryTickets, MarketClock,
+    Mortgaged, Mount, MoveCap, Occupancy, OccupancyAt, Owner, Paused, Pending, PendingDecision,
+    PlayerId, PlayerName, Points, Possession, Shelf, ShopStock, StaySentence, StockHoldings, Timed,
+    TokenPosition, TurnOrder, TurnPhase, Villain, Wallet, resists,
 };
 
 use crate::asset_root;
@@ -144,6 +144,9 @@ type PlotRow = (
 
 /// 面板要读的全部世界状态。收成一个参数包是这仓库的房规：需要知道的就是这么多，
 /// 而 `#[allow(clippy::too_many_arguments)]` 会把这个信号吃掉。
+// 恶人那一条查询要一次读八样（他是谁、在哪、替谁、被什么按住）—— 拆散就答不全，
+// 而这张面板的职责本来就是「把世界摆出来给人扫读」。
+#[allow(clippy::type_complexity)]
 #[derive(SystemParam)]
 pub struct DumpView<'w, 's> {
     session: Option<Res<'w, GameSession>>,
@@ -216,6 +219,26 @@ pub struct DumpView<'w, 's> {
     /// 的 15 元上限（见它的注释），第 16 格会在编译期炸 —— 与乐透票、持股同一条处理：
     /// 另开一条查询，按实体对回去
     insured: Query<'w, 's, (Entity, &'static Insured)>,
+    /// 四大恶人（P12）。同样**不并进 `PlayerRow`**，而且理由还前面一层：他们不是玩家，
+    /// 进不了那张按 `PlayerId` 收的表。这一栏要说的是「谁在笼里等保释、谁在环上替谁走路、
+    /// 走到第几格、被什么按住」—— 查「恶人为什么一动不动」与「保释窗口为什么没他」时，
+    /// 这是唯一一处能同时看见 `Detention`/`Hired`/`TurnOrder` 三者关系的地方。
+    villains: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static Villain,
+            &'static TokenPosition,
+            Option<&'static Detention>,
+            Option<&'static Hired>,
+            Option<&'static StaySentence>,
+            Option<&'static MoveCap>,
+            &'static PlayerName,
+        ),
+    >,
+    /// 名字（雇主那一半从这里读）。恶人也挂 `PlayerName`，见那个组件的注释
+    names: Query<'w, 's, &'static PlayerName>,
 }
 
 fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
@@ -233,6 +256,9 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             row(ui, "落格", format_landing(&view));
             row(ui, "新闻", format_news(&view));
             row(ui, "停摆", format_suspensions(&view));
+            for line in format_villains(&view) {
+                row(ui, "恶人", line);
+            }
             row(ui, "待决", format_pending(&view));
             row(ui, "资格", format_access(&view));
             row(ui, "牌堆", format_decks(&view));
@@ -305,6 +331,74 @@ fn format_suspensions(view: &DumpView) -> String {
     } else {
         halted
     }
+}
+
+/// 恶人那一栏（P12a）：谁在笼里等保释、谁在环上替谁走路、被什么按住。
+///
+/// **一人一行**而不是挤成一行：这一栏要说的是「他在哪、替谁、被什么按住」三段话，
+/// 四个人接在一起会超出面板宽度被裁掉，而它存在的意义正是让人不必回去读组件。
+/// 一个都不写也要出声（「场上没有恶人」），理由与「停摆」那一栏同一条：空栏分不清
+/// 「装配没跑」与「面板没读到」，那两种在排查时差一整趟。
+fn format_villains(view: &DumpView) -> Vec<String> {
+    let current = view.order.as_ref().and_then(|o| o.current());
+    let mut rows: Vec<(String, String)> = view
+        .villains
+        .iter()
+        .map(|(entity, villain, at, held, hired, stay, cap, name)| {
+            // 他在环上的哪一格 / 在笼里 —— 处境与格子写在一起：查「他为什么不走」时
+            // 这两个数必须同时看得见（在笼里的人也有 `TokenPosition`，那是他的视觉停车位）
+            let where_ = match held {
+                Some(d) => crate::ui::dialog::detention_phrase(d),
+                None => {
+                    let tile = format!("格{}", at.tile.0);
+                    match hired {
+                        Some(job) => {
+                            // 雇主的名字读不到就退回实体号（面板别的地方也这么念）：
+                            // 这一栏要说的是「他替谁」，而「查不到」本身正是要看得见的那件事
+                            let boss = view
+                                .names
+                                .get(job.employer)
+                                .map(|n| n.0.clone())
+                                .unwrap_or_else(|_| format!("{:?}", job.employer));
+                            format!("{tile}·替 {boss} 办事")
+                        }
+                        // 没人雇却在环上走 = 那两个位分叉了，这一格就是把矛盾摊在屏幕上
+                        None => format!("{tile}·无人雇用"),
+                    }
+                }
+            };
+            let mut flag: Vec<String> = Vec::new();
+            if current == Some(entity) {
+                flag.push("正在行动".to_string());
+            }
+            if let Some(sentence) = stay {
+                flag.push(format!("停留剩{}回合", sentence.turns_left));
+            }
+            if let Some(cap) = cap {
+                flag.push(format!("少动{}", cap.turns_left));
+            }
+            let flag = if flag.is_empty() {
+                "-".to_string()
+            } else {
+                flag.join(" ")
+            };
+            (
+                name.0.clone(),
+                format!(
+                    "{:<4} {:<18} {:<12} {:?}",
+                    villain.label(),
+                    where_,
+                    flag,
+                    entity
+                ),
+            )
+        })
+        .collect();
+    if rows.is_empty() {
+        return vec!["场上没有恶人（装配缺位）".to_string()];
+    }
+    rows.sort();
+    rows.into_iter().map(|(_, row)| row).collect()
 }
 
 fn format_session(view: &DumpView) -> String {
@@ -645,7 +739,8 @@ fn format_players(view: &DumpView) -> Vec<String> {
                     flag.push("破产".to_string());
                 } else {
                     if let Some(d) = held {
-                        flag.push(format!("{}剩{}回合", d.place.label(), d.turns_left));
+                        // 一句人话两处共用（顶栏与这张面板），所以映射不在这里重写一遍
+                        flag.push(crate::ui::dialog::detention_phrase(d));
                     }
                     if let Some(sentence) = stay {
                         flag.push(format!("停留剩{}回合", sentence.turns_left));

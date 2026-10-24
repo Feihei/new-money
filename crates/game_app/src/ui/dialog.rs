@@ -15,11 +15,12 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AfflictDomain, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Books,
     BuildingKind, BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind,
-    CompanyCharged, Decision, DetentionPlace, EffectOutcome, Facility, Gavel, Hand, Institution,
-    Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets, MortgageDeny,
-    MortgageOp, Owner, Pending, PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf,
-    ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders, buy_allowed,
-    buyback, counter_plots, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
+    CompanyCharged, Decision, Detention, DetentionPlace, EffectOutcome, Facility, Gavel, Hand,
+    Institution, Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets,
+    MortgageDeny, MortgageOp, Owner, Pending, PendingDecision, PlayerId, PlayerName, Rng,
+    ServiceCharged, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed,
+    bidders, buy_allowed, buyback, counter_plots, mortgage_op_allowed, read_facts, restock,
+    shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -1688,11 +1689,16 @@ fn plot_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &PlotRow) {
     });
 }
 
-/// 保释窗口的一行：关在这里的一个人，和「他现在能不能被赎出去」。
+/// 保释窗口的一行：关在这里的一个人（或一个恶人），和「他现在能不能被赎出去」。
 #[derive(Debug, Clone)]
 pub(crate) struct BailRow {
     pub target: Entity,
     pub name: String,
+    /// 这一行的价目（P12）。**一行一个数而不是一个窗口一个数**：同一处牢房里可以同时
+    /// 关着服刑的玩家（30）与等保释的恶人（300），而 `Books::bail_price` 就是那个唯一来源
+    pub cost: u32,
+    /// 花这笔钱买到的是哪件事。两行都写着「关在里面」的话，玩家看不出 300 那行买的是武器
+    pub note: &'static str,
     /// `Some(为什么)` = 这颗按钮灰着
     pub blocked: Option<&'static str>,
 }
@@ -2329,12 +2335,14 @@ fn bail_rows(
     player: Entity,
     place: DetentionPlace,
 ) -> Vec<BailRow> {
-    let cost = books.rules.bail_points;
     let points = books.points_of(player);
     books
         .held(place)
         .into_iter()
         .map(|(target, held)| {
+            // 价钱与「他是什么」都问账本那一张表（`bail_price` 的判据是身上有没有 `Villain`），
+            // 面板这里一个字都不判断 —— 灰按钮的理由与真正扣的钱因此不可能分叉
+            let cost = books.bail_price(target);
             let facts = BailFacts {
                 at_window: true,
                 window: place,
@@ -2342,12 +2350,19 @@ fn bail_rows(
                 points,
                 cost,
             };
+            let villain = books.is_villain(target);
             BailRow {
                 target,
                 name: names
                     .get(target)
                     .map(|n| n.0.clone())
                     .unwrap_or_else(|_| "?".into()),
+                cost,
+                note: if villain {
+                    "放出来替你干活"
+                } else {
+                    "替他减刑"
+                },
                 blocked: bail_op_allowed(&facts).err().map(|d: BailDeny| d.label()),
             }
         })
@@ -2365,7 +2380,6 @@ fn bail_modal(
     rows: &[BailRow],
     stamp: String,
 ) -> Entity {
-    let cost = books.rules.bail_points;
     let points = books.points_of(player);
 
     frame(
@@ -2383,7 +2397,7 @@ fn bail_modal(
             ));
             p.spawn(center_label(
                 &font.0,
-                format!("点券 {points} — 花 {cost} 点券把里面的人放出来，办完才继续"),
+                format!("点券 {points} — 把里面的人放出来，各行多少钱写在按钮上"),
                 size::ROW,
                 col::MUTED,
             ));
@@ -2412,7 +2426,9 @@ fn bail_modal(
     )
 }
 
-/// 保释窗口的一行：「名字 + 说明 + 一颗带价目的按钮 + 灰掉时的那句话」。
+/// 保释窗口的一行：「名字 + 他关着这件事 + 一颗带价目的按钮 + 灰掉时的那句话」。
+///
+/// 价钱写在**按钮上**而不是标题里（P12）：同一排里 30 与 300 并存，而一句话只能有一个数。
 fn bail_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &BailRow) {
     p.spawn(Node {
         flex_direction: FlexDirection::Row,
@@ -2429,7 +2445,7 @@ fn bail_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &BailRow) {
             },
             label(
                 &font.0,
-                format!("{} 关在里面", row.name),
+                format!("{} 关在里面 · {}", row.name, row.note),
                 size::ROW,
                 if row.blocked.is_some() {
                     col::KEY
@@ -2442,7 +2458,7 @@ fn bail_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &BailRow) {
             line,
             &font.0,
             ButtonSpec::new(
-                &format!("保释 {}", row.name),
+                &format!("保释 {} {}", row.name, row.cost),
                 layout::SHOP_BUTTON,
                 super::PRIMARY,
                 UiAction::Bail { target: row.target },
@@ -3113,6 +3129,17 @@ fn outcome_line(outcomes: &[EffectOutcome]) -> String {
         return String::new();
     }
     format!("效果：{}", parts.join("；"))
+}
+
+/// 拘留那一格的人话：有钟的写「剩 N 回合」，笼中的写「等保释」。
+///
+/// 顶栏、dump、保释窗口三处要说同一句话，所以这一句的映射只有一份。写成两句而不是
+/// 「剩 0 回合」：0 在回合机上意思是「现在就放人」，而那正是笼中那一条**不会**发生的事。
+pub fn detention_phrase(held: &Detention) -> String {
+    match held.term.turns() {
+        Some(n) => format!("{}剩{}回合", held.place.label(), n),
+        None => format!("{}·等保释", held.place.label()),
+    }
 }
 
 pub(crate) fn describe(outcome: &EffectOutcome) -> String {

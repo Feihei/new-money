@@ -19,7 +19,9 @@ mod common;
 use bevy::app::App;
 use bevy::ecs::entity::Entity;
 use common::*;
-use game_core::prelude::{CardAim, Detention, DetentionPlace, Heading, StaySentence, TurnPhase};
+use game_core::prelude::{
+    CardAim, Detention, DetentionPlace, Heading, StaySentence, Term, TurnPhase,
+};
 
 /// 这位此刻朝哪边走。缺组件就 panic：`Heading` 是必挂的那一格（`spawn_players`）。
 fn heading_of(app: &App, player: Entity) -> Heading {
@@ -222,7 +224,7 @@ fn a_jail_skip_does_not_consume_the_stay_counter() {
         p1,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 2,
+            term: Term::Turns(2),
         },
     );
     hold_there(&mut app, p0, p1);

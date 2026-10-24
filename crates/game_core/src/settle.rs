@@ -18,7 +18,9 @@ use crate::damage::{self, DamageTally, LandDamage};
 use crate::economy::{self, LandView};
 use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
 use crate::msg::{CashChanged, ChargeWaived, PlayerBankrupt, PointsChanged};
-use crate::player::{BankBalance, Bankrupt, Detention, DetentionPlace, PlayerId, Points, Wallet};
+use crate::player::{
+    BankBalance, Bankrupt, Detention, DetentionPlace, PlayerId, Points, Walker, Wallet,
+};
 use crate::plot::{PlotArea, area_of};
 use crate::rules::GameRules;
 use crate::status::{LandStatus, Timed};
@@ -78,7 +80,28 @@ pub struct Books<'w, 's> {
     ///
     /// **只有 `Detention` 这一族**：P3d④c 的停留（`StaySentence`）不在这里 —— 被停留按住的
     /// 人还在场上，名下的地照收租，而卡面上没写「顺便收不到租」这一条（`tests/stay.rs` 钉着）。
-    pub detained: Query<'w, 's, &'static mut Detention, With<PlayerId>>,
+    ///
+    /// **`With<Walker>` 而不是 `With<PlayerId>`**（P12）：保释窗口要看得见笼中的恶人，
+    /// 而「这一处关着谁」这个问题不区分关着的是人还是恶人。名单那两侧仍然只认玩家
+    /// （见 [`Self::locked`] 与 `faces`）—— 恶人没有地，也就没有「他的收租权被剥夺」这件事。
+    pub detained: Query<'w, 's, &'static mut Detention, With<Walker>>,
+    /// 环上全部行动者的实体（P12）。**只要 `Entity` 本身**：它是 `detained` 那条查询的
+    /// 名字来源 —— `Query<&mut Detention>` 迭代出来的是组件而不是实体，而保释那一排
+    /// 候选要的是「谁」。与 `detained` 的组件集不相交（`Entity` 是只读伪组件、`Walker`
+    /// 只当过滤器），所以账本里一读一写并存不会撞（§6.1 坑 33 同族）。
+    movers: Query<'w, 's, Entity, With<crate::player::Walker>>,
+    /// 哪一种行动者是恶人（P12）。账本要读得到它，是因为**保释的价钱**由它决定：
+    /// 判据放在账本里而不是让面板自己开一条查询，UI 与规则层才会读到同一个数
+    /// （30 与 300 是同一张表里的两行，而这张表只有一个表头）。
+    villains: Query<'w, 's, &'static crate::villain::Villain>,
+    /// 谁在替谁办事（P12b）。账本要读得到它，是因为**间谍的租金转付**由它答：
+    /// 「场上有没有受雇的间谍、雇主是谁」是租金结算的那一笔账里的一格，
+    /// 与 [`Self::bail_price`] 同一条理由 —— 判据在账本，UI 与规则层读同一份。
+    hired: Query<'w, 's, (Entity, &'static crate::villain::Hired)>,
+    /// 每块地收过几回租（P12d）。**写入只在 [`Self::settle`] 那一笔 Rent 完成时**就地加一，
+    /// 而那一处已经拿着 `plots`（两个 `mut`）—— 单独一条查询与它组件不相交，借用相容；
+    /// 反过来塞进 `plots` 的五元组会让二十来个解构点全跟着长一截。
+    ledgers: Query<'w, 's, &'static mut crate::land::RentLedger, With<LandId>>,
     /// 商业设施（P10c）。只读：建造的插入走 `Commands`（空商业地身上**没有**这个组件，
     /// 就地写无处可写）。与 `plots` 不同组件，借用相容 —— 账本读得到它，`Books::build`
     /// 的「一格一设施」判据才能与扣款在同一处判，UI 不必再开第二份查询。
@@ -142,22 +165,173 @@ impl<'w, 's> Books<'w, 's> {
             .collect()
     }
 
-    /// 被关在 `place` 的人（实体 + 计时），按 `faces` 的顺序。
+    /// 被关在 `place` 的**每一个行动者**（实体 + 计时），按实体生成序。
     ///
     /// 保释窗口要一排候选，而面板手上只有 `&Books`：这里把「谁是实体」与「他被关在哪」
     /// 两半合起来给一次，UI 就不必再开一条读 `Detention` 的查询（那会与账本里的
     /// `&mut Detention` 在参数建立期撞成借用冲突 —— 与 P4② 那条同一个坑）。
+    ///
+    /// P12 起这里**同时给出玩家与恶人**（`detained` 那条查询按 `Walker` 收），而两行的
+    /// 价钱不同 —— 价钱不在这里给，见 [`Self::bail_price`]：窗口把「关着谁」与「要花几」
+    /// 分成两个读数，将来加第三种价目时才不用改这一句。
+    ///
+    /// 顺序按 `Entity::index()` 而不是按查询本身的迭代序：那条序在 0.20 里不被保证，
+    /// 而这一排是要上屏的（面板重建时同一个位置该是同一个名字）。
     pub fn held(&self, place: DetentionPlace) -> Vec<(Entity, Detention)> {
-        self.faces
+        let mut rows: Vec<(Entity, Detention)> = self
+            .movers
             .iter()
-            .filter_map(|(entity, _, _)| {
+            .filter_map(|entity| {
                 self.detained
                     .get(entity)
                     .ok()
                     .filter(|d| d.place == place)
                     .map(|d| (entity, *d))
             })
-            .collect()
+            .collect();
+        rows.sort_by_key(|(e, _)| e.index());
+        rows
+    }
+
+    /// 这一位是不是四大恶人之一。
+    pub fn is_villain(&self, target: Entity) -> bool {
+        self.villains.get(target).is_ok()
+    }
+
+    /// 这一位是哪一种恶人。`None` = 他是玩家（或世界还没装配到恶人）。
+    /// 与 [`Self::bail_price`] 读同一份查询：出场消息要带 kind，而「他是谁」
+    /// 这件事不该有第二份判据。
+    pub fn villain_kind(&self, target: Entity) -> Option<&crate::villain::Villain> {
+        self.villains.get(target).ok()
+    }
+
+    /// 保释这一位要花几点券 —— **一张表两行**（10-20 拍板：30 与 300 只是同一张表里
+    /// 的两个价目，一处实现两处装配）。
+    ///
+    /// 判据是「他身上有没有 `Villain`」而不是「他关在哪一处」：监狱门口既关着玩家也关着
+    /// 恶人，而按处定价会得到「在监狱的都是 30」这种听起来像规则、实际上是抄错了的读数。
+    pub fn bail_price(&self, target: Entity) -> u32 {
+        if self.is_villain(target) {
+            self.rules.villain_bail_points
+        } else {
+            self.rules.bail_points
+        }
+    }
+
+    /// 强盗出场那一下：全场存款被抢走 [`GameRules::robber_deposit_percent`]（P12b）。
+    ///
+    /// **含雇主自己** —— 那是 PLAN 拍板的特性（验收原话「这是特性不是 bug，必须测住」），
+    /// 所以这条方法没有「豁免谁」的参数。抢走的那笔进的是强盗口袋（世界外），
+    /// 返回 `(总金额, 被抢人数)` 给出场行为的凭据；0 存款的人不算受害。
+    ///
+    /// 整数乘除向下取整，与房租、分红、点券那一族同一条口径。存款结构只动 `deposit`：
+    /// 贷款与融资是负债，抢负债等于替银行销账，那不是强盗干得出来的事。
+    pub fn sweep_deposits(&mut self, percent: u32) -> (i64, u32) {
+        let mut total = 0i64;
+        let mut victims = 0u32;
+        // 先收名单再逐个动账：`faces` 的迭代借用不能与 `banks` 的可变借用同时活着
+        // （同一个 system 参数里的两条查询，运行时访问检查会拦）
+        let everyone: Vec<Entity> = self.faces.iter().map(|(e, _, _)| e).collect();
+        for entity in everyone {
+            let Ok(mut bank) = self.banks.get_mut(entity) else {
+                continue;
+            };
+            if bank.deposit <= 0 {
+                continue;
+            }
+            let took = bank.deposit * i64::from(percent) / 100;
+            if took <= 0 {
+                continue;
+            }
+            bank.deposit -= took;
+            total += took;
+            victims += 1;
+        }
+        (total, victims)
+    }
+
+    /// 小偷出场那一下：其他玩家（不含雇主）的点券被偷走
+    /// [`GameRules::thief_points_percent`]，直接进雇主口袋（P12c）。
+    ///
+    /// 走 [`Self::spend_points`] 与 [`Self::award_points`] 那条正路 —— 每一位玩家的
+    /// 变动各自发过 `PointsChanged`，HUD 与 dump 读到的就是逐人的真数；这一条只回报
+    /// `(总格数, 被偷人数)` 给凭据。0 点券与已破产的人不算受害。
+    pub fn steal_points(&mut self, employer: Entity, percent: u32) -> (u32, u32) {
+        let mut total = 0u32;
+        let mut victims = 0u32;
+        let others: Vec<Entity> = self
+            .faces
+            .iter()
+            .filter(|(e, _, bankrupt)| *e != employer && bankrupt.is_none())
+            .map(|(e, _, _)| e)
+            .collect();
+        for entity in others {
+            let Some(balance) = self.points.get(entity).ok().map(|p| p.0) else {
+                continue;
+            };
+            let took = balance * percent.min(100) / 100;
+            if took == 0 {
+                continue;
+            }
+            if !self.spend_points(entity, took) {
+                continue;
+            }
+            self.award_points(employer, took);
+            total += took;
+            victims += 1;
+        }
+        (total, victims)
+    }
+
+    /// 此刻在环上办事的那位间谍与他的雇主（P12d）。
+    ///
+    /// 「在环上」是这一条的全部难点：受伤回笼的恶人 `Hired` 要等回合收尾才被同步摘掉
+    /// （[`crate::villain::villain_rotation_system`] 排在 `end_turn` 之后），那几帧里
+    /// 他不该还在劫租 —— 所以这里再问一句「他没被关着」。间谍至多一位
+    /// （四种恶人各一个实体），找到即返回。
+    pub fn on_duty_spy(&self) -> Option<(Entity, Entity)> {
+        use crate::villain::VillainKind;
+        let (spy, hired) = self.hired.iter().find(|(e, _)| {
+            self.villains
+                .get(*e)
+                .is_ok_and(|v| v.kind == VillainKind::Spy)
+        })?;
+        if self.detained.get(spy).is_ok() {
+            return None;
+        }
+        Some((spy, hired.employer))
+    }
+
+    /// 这一笔租该不该被在场的间谍截给他的雇主（P12d）。
+    ///
+    /// 四条判据全在账本里判，`property.rs` 的租金结算只问这一个数：
+    /// - 场上**此刻**有一位受雇的间谍（[`Self::on_duty_spy`]）；
+    /// - 踩地的人与地主都不是雇主 —— 雇主自己交租是正常交易，截自己的钱是空转；
+    /// - 那块地**收过租**（[`crate::land::RentLedger`]）—— 「从未有人踩过交费则
+    ///   无功而返」是 PLAN §三 原文照抄的第四条，也是间谍区别于「全自动劫租」的
+    ///   反制窗口：新买的地、从没人走过的街，他探不到。
+    ///
+    /// 返回 `Some(雇主)` 时租金的收款人就是他；`None` = 照常付地主。
+    pub fn rent_rerouted_to(&self, payer: Entity, land: LandId, owner: Entity) -> Option<Entity> {
+        let (_, employer) = self.on_duty_spy()?;
+        if payer == employer || owner == employer {
+            return None;
+        }
+        let entity = self.land_entity(land)?;
+        let times = self.ledgers.get(entity).ok()?.times;
+        (times > 0).then_some(employer)
+    }
+
+    /// 这块地的**纯地皮**现价（P12b 流氓的勒索额）：地价 × 物价指数，不含楼。
+    ///
+    /// 借 [`ChargeKind::BuyLand`] 那一条缩放而不是自己再写一遍乘法：`scale` 的
+    /// 四舍五入口径只有一处真相。带 `bearer = None` 走 [`charge::stage`]，修正链
+    /// 在那里就返回原价 —— 勒索不该被任何玩家的折扣或免费特权打折（那是买地的特权，
+    /// 不是这块地的价）。
+    pub fn land_market_price(&self, land: LandId) -> Option<i64> {
+        let defn = self.active.def.land(land.0)?;
+        let charge = Charge::new(ChargeKind::BuyLand { land }, None, None, defn.price);
+        Some(charge::stage(charge, self.session.price_index, &self.corrections).amount)
     }
 
     /// 单块地的运行时快照。`None` = 棋盘里没有这块地（`validate` 已在加载期拦下）。
@@ -296,6 +470,7 @@ impl<'w, 's> Books<'w, 's> {
             if let Some(payee) = charge.payee {
                 self.credit(payee, charge.amount);
             }
+            self.stamp_rent(&charge);
             return Ok(charge);
         };
         if let Err(short) = self.debit(payer, charge.amount) {
@@ -305,7 +480,29 @@ impl<'w, 's> Books<'w, 's> {
         if let Some(payee) = charge.payee {
             self.credit(payee, charge.amount);
         }
+        self.stamp_rent(&charge);
         Ok(charge)
+    }
+
+    /// 一笔账结完之后给那块地留案底（P12d）：**收过钱的租金**才算「踩过交费」。
+    ///
+    /// 判据三条缺一不可：这一笔是 [`ChargeKind::Rent`]（买地、罚款、服务费不是租）；
+    /// 最终 `amount > 0`（大福神白嫖掉的那一笔没有钱动，间谍对免费的东西没有案底可探）；
+    /// 这一笔真的走完（破产那条 `Err` 路根本到不了这里）。间谍的
+    /// 「从未有人踩过交费则无功而返」读的就是这个计数 —— 见 [`Self::rent_rerouted_to`]。
+    fn stamp_rent(&mut self, done: &Charge) {
+        let ChargeKind::Rent { land } = done.kind else {
+            return;
+        };
+        if done.amount <= 0 {
+            return;
+        }
+        let Some(entity) = self.land_entity(land) else {
+            return;
+        };
+        if let Ok(mut ledger) = self.ledgers.get_mut(entity) {
+            ledger.times += 1;
+        }
     }
 
     /// 全场现资产总和（物价指数的分子）。破产者不计 —— 他们已经离场，账也清零了。

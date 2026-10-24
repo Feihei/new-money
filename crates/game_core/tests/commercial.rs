@@ -271,11 +271,11 @@ fn the_hotel_bills_by_the_day_and_detains_the_guest() {
     );
 
     // 人被送进旅馆：place 是 Hotel、剩的正是摇出的天数、棋子停在原格。
-    // 读数必须赶在他**自己的下一个回合开始**之前 —— begin_turn 见 turns_left 就放人/扣格，
+    // 读数必须赶在他**自己的下一个回合开始**之前 —— begin_turn 见 `term` 就放人/扣格，
     // 而 play_turns 的收尾帧足够走进他的下一回合（P3d④c 踩过的同一口井）。
     let detention = detain_of(&app, p0).expect("住店的人该被扣下");
     assert_eq!(detention.place, DetentionPlace::Hotel);
-    assert_eq!(detention.turns_left, stay);
+    assert_eq!(detention.term, Term::Turns(stay));
     assert_eq!(tile_of(&app, p0), 16, "旅馆不在地图上，棋子停在那一格");
     assert!(
         ledger(&app)
@@ -646,6 +646,27 @@ fn a_hotel_guest_cannot_be_bailed_out_of_the_jail_gate() {
         });
     settle(&mut app, 3);
 
-    // 报价答完了，保释窗口没来：监狱里没有人 —— 那位客人在旅馆
-    assert_eq!(pending_of(&app), None, "旅馆里的人撑不开监狱门口的保释窗口");
+    // 报价答完了，窗口**确实**开了 —— 但不是因为旅馆里那位（P12a：四位恶人开局就关在监狱，
+    // 所以这一格「有没有人可保」从今天起恒真）。这条用例原本断言的是「没有窗口」，
+    // 而它真正要守的那句话是「旅馆里的人不在这排候选里、隔着一处保不出他」，
+    // 所以断言换成后者：窗口为恶人开，而伸手去保住旅馆的人要被关闭的判据挡下来。
+    assert_eq!(
+        pending_of(&app),
+        Some((p1, Pending::Bail(DetentionPlace::Jail))),
+        "监狱门口的窗口该为笼中的恶人开"
+    );
+    set_points(&mut app, p1, 300);
+    app.world_mut()
+        .resource_mut::<bevy::ecs::message::Messages<BailRequested>>()
+        .write(BailRequested {
+            player: p1,
+            target: p0,
+        });
+    settle(&mut app, 3);
+    assert_eq!(
+        detain_of(&app, p0).map(|d| d.place),
+        Some(DetentionPlace::Hotel),
+        "监狱门口放不出住在旅馆里的人 —— 窗口管的是这一处"
+    );
+    assert_eq!(points_of(&app, p1), 300, "被拒的保释一分不许收");
 }

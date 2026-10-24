@@ -82,6 +82,13 @@ const FREEBIE_TAG: u64 = 0xF3EE_0000_0000_000F;
 /// （`GameSession::last_news`）。若让它读牌堆那条流，「这一局播过几条新闻」就会挪动
 /// 下一张机会牌是谁 —— 那正是每条子流要防的事，而这里它同时还是回放的对齐点。
 const NEWS_TAG: u64 = 0xBE5F_0000_0000_0010;
+/// P12：恶人的随机行为（强盗擦肩抢走哪一张卡）。
+///
+/// 单独一条的理由与前面每一条同形，而这里多一层**行为稀疏性**：恶人的取数发生在
+/// 别人走路的步进帧上（擦肩那一格），与骰子、抽卡、神明挪格同帧并发 —— 并进任何一条
+/// 已有的流，「这一回合擦过谁的肩」都会挪动别人的随机数。而抢走哪张卡是玩家会回头对的事
+/// （「我那张停在我手里好好的卡怎么没了」），同一颗种子必须两次抢走同一张。
+const VILLAIN_TAG: u64 = 0x7A1A_0000_0000_0011;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +122,7 @@ pub struct Rng {
     service: ChaCha8Rng,
     freebie: ChaCha8Rng,
     news: ChaCha8Rng,
+    villain: ChaCha8Rng,
 }
 
 impl Rng {
@@ -138,12 +146,18 @@ impl Rng {
             service: ChaCha8Rng::seed_from_u64(seed ^ SERVICE_TAG),
             freebie: ChaCha8Rng::seed_from_u64(seed ^ FREEBIE_TAG),
             news: ChaCha8Rng::seed_from_u64(seed ^ NEWS_TAG),
+            villain: ChaCha8Rng::seed_from_u64(seed ^ VILLAIN_TAG),
         }
     }
 
     /// 新闻那一条流（P11）：这一趟播哪一条、点名那一位点到谁。
     pub fn pick_news(&mut self, span: RangeInclusive<u32>) -> u32 {
         self.news.random_range(span)
+    }
+
+    /// 恶人那一条流（P12）：强盗擦肩抢走受害者手牌里的第几张。
+    pub fn pick_villain(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.villain.random_range(span)
     }
 
     /// 服务收费那一条流（P10）：购物中心掷几点、旅馆住几天、航空转盘停几段。

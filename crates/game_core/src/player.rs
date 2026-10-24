@@ -15,6 +15,15 @@ use std::collections::VecDeque;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlayerId(pub u32);
 
+/// 这颗棋子的名字。顶栏、HUD、保释窗口、dump 都按实体读它。
+///
+/// **P12 起四大恶人也挂这一位**（值是他的诨名「强盗」）。这不是「把恶人当玩家」：
+/// 「他是不是玩家」的判据永远是 [`PlayerId`]，而场上每一处按名字**列举**的查询
+/// （手牌目标名单、HUD 那几张卡、地块归属、`Books::solvent`）都同时要求 `PlayerId`，
+/// 恶人一个也进不去。反过来，五十多处「按实体查名字」的调用点若各写一遍
+/// 「查不到 `PlayerName` 就再查一次 `Villain`」，漏写那一处不报错，只会让屏幕上冒出一个
+/// 「玩家」或「?」—— 名字这一位因此与 `PlayerColor` 分开放：颜色要分玩家与恶人两套
+/// （棋子视觉的构造点只有两处），名字不该。
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct PlayerName(pub String);
 
@@ -148,13 +157,80 @@ impl DetentionPlace {
     }
 }
 
+/// 拘留要扣多久（P12 起两种）。
+///
+/// **为什么要一个枚举而不是一个 `u32`**：`UntilBailed` 在那条「没有钟」的句子里读起来
+/// 像 0，而 0 在现在的递减口径里是「本回合就放人」——恶人回笼要是写成 0，他下一回合
+/// 自己就走出来了，而 PLAN 拍的那一条恰恰是「踩地雷与恶犬回医院**需再保释**」。
+/// 反过来写成一个很大的数（99）是能跑，但那份数据在说谎：没人打算数到 99。
+/// 类型里写成两个变体，「钟会不会放他走」这件事就不需要任何人去猜。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Term {
+    /// 服刑 N 个自己的回合，扣到头由回合机放人（玩家挨的那一族全是这一支）。
+    Turns(u32),
+    /// **没有钟**：只有保释办得出来。四大恶人的笼子归这一支 ——
+    /// 他被踩雷、被恶犬咬、还没人保释的时候，都停在这个状态上。
+    UntilBailed,
+}
+
+impl Term {
+    /// 还剩几个回合（`UntilBailed` 没有答案，所以是 `None` 而不是一个大数）。
+    /// 顶栏与 dump 那句「还剩几回合」与那句「等保释」的分界就在这一个函数上。
+    pub const fn turns(self) -> Option<u32> {
+        match self {
+            Self::Turns(n) => Some(n),
+            Self::UntilBailed => None,
+        }
+    }
+}
+
 /// 存在即被拘留中（P4，取代 B2b 起的 `JailSentence`）。递减口径见 `begin_turn_system`：
-/// 每次回合开始扣一格，扣到只剩 1 的那一回合**当场可行动**，所以「判 3 天」= 跳过 2 个回合。
+/// `Turns` 每次回合开始扣一格，扣到只剩 1 的那一回合**当场可行动**，所以「判 3 天」= 跳过 2 个回合；
+/// `UntilBailed` 不扣（P12 的恶人：他压根不在轮转里，见 `villain::villain_rotation_system`）。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Detention {
     pub place: DetentionPlace,
-    pub turns_left: u32,
+    pub term: Term,
 }
+
+impl Detention {
+    /// 两张拘留合成一张：**更久的那一张赢**（P4① 定的口径，P12 把它从「比数字」升级成
+    /// 「比有没有钟」）。赢的那一张连 `place` 一起带走 —— 只关 2 天的医院不该把
+    /// 「他关在监狱」那句话覆盖掉，而 [`Term::UntilBailed`] 赢下一切：已经被关进笼子等保释的人，
+    /// 不该因为又挨了一颗只关 3 天的地雷就凭空长出一把钟。
+    ///
+    /// 等长时**后来者赢** —— 那是 P4① 剩下唯一的任意格，由 `tests/detention.rs` 钉着。
+    pub const fn kept_against(self, incoming: Self) -> Self {
+        use Term as T;
+        match (self.term, incoming.term) {
+            (T::UntilBailed, _) => self,
+            (_, T::UntilBailed) => incoming,
+            (T::Turns(a), T::Turns(b)) => {
+                if a > b {
+                    self
+                } else {
+                    incoming
+                }
+            }
+        }
+    }
+}
+
+/// 环上「会轮到自己行动」的东西（P12）。
+///
+/// **它是角色身份，不是第二个位置**：位置仍然只有 [`TokenPosition`]，走的方向仍然只有
+/// [`Heading`]，被按住仍然只有 [`StaySentence`]。这个标记回答的只有一件事 ——
+/// 「回合机、走步循环、落格分派这三处要不要看他」。
+///
+/// 为什么不用 `Or<(With<PlayerId>, With<Villain>)>` 逐处写：那十三处判据会在某一天
+/// 只被其中十二处更新，而漏掉的那一处不报错（恶人走到某一步突然没人管他的停留计时，
+/// 症状是回合机停在 `WaitRoll`）。有了它，第三种行动者（将来）只要挂上这个标记
+/// 并在 [`crate::landing`] 的那张「谁踩的」表上表态一次。
+///
+/// 反过来，**钱与账的那些查询仍然只认 [`PlayerId`]**：恶人没有钱包、没有点券、没有手牌、
+/// 不进物价指数的分子、不算进「还剩几个人」。这条边界是 P12 全部形状的地基。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Walker;
 
 /// 存在即「原地停留」中（停留卡）。**字面口径（P4④）**：写 N 就停 N 个回合。
 ///
@@ -369,35 +445,83 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
         .iter()
         .enumerate()
         .map(|(i, p)| {
+            // 四层嵌套而不是十六个平摊的元组元素：Bevy 的 `Bundle` 只给到 15 元组，
+            // 而 P12 的 `Walker` 正好把这条线压过界。分组按「他是谁 / 他的钱与货 /
+            // 他在哪怎么走 / 他的账」，读的时候恰好是四句话
             commands
                 .spawn((
-                    PlayerId(i as u32),
-                    PlayerName(p.name.clone()),
-                    p.color,
-                    Wallet {
-                        cash: rules.start_cash,
-                    },
-                    // 点券开局为 0（PLAN §三：来源只有点券格与小游戏格）
-                    Points::default(),
-                    // 手牌开局为空：道具卡只能从百货公司买到（P3d），没有任何格子会发卡
-                    crate::hand::Hand::default(),
-                    // 道具栏开局送一个路障（PLAN §三：路障/机器娃娃/机器工人开局即送）
-                    crate::items::Inventory::starting(),
-                    TokenPosition { tile: START_TILE },
-                    WalkQueue::default(),
-                    // 开局恒正向：转向卡是玩家身上的事，不是棋盘的事（见 [`Heading`]）
-                    Heading::default(),
-                    // 开局步行：载具的来路（车行）还没装配，P5 先让规则层把骰子颗数
-                    // 与「毁载具」两条跑通；表现层的换车入口等车行落地再补
-                    Mount::Foot,
-                    BankBalance::default(),
-                    crate::stock::StockHoldings::default(),
-                    // 乐透券开局为空。它是**一期**的凭证：开奖有人猜中就全场清空，
-                    // 没人猜中则留到下月（见 `crate::lottery` 模块头）
-                    crate::lottery::LotteryTickets::default(),
-                    Gameplay,
+                    (
+                        PlayerId(i as u32),
+                        // 玩家是第一种环上行动者（P12）：回合机与走步循环认这个标记而不是 `PlayerId`
+                        Walker,
+                        PlayerName(p.name.clone()),
+                        p.color,
+                    ),
+                    (
+                        Wallet {
+                            cash: rules.start_cash,
+                        },
+                        // 点券开局为 0（PLAN §三：来源只有点券格与小游戏格）
+                        Points::default(),
+                        // 手牌开局为空：道具卡只能从百货公司买到（P3d），没有任何格子会发卡
+                        crate::hand::Hand::default(),
+                        // 道具栏开局送一个路障（PLAN §三：路障/机器娃娃/机器工人开局即送）
+                        crate::items::Inventory::starting(),
+                    ),
+                    (
+                        TokenPosition { tile: START_TILE },
+                        WalkQueue::default(),
+                        // 开局恒正向：转向卡是玩家身上的事，不是棋盘的事（见 [`Heading`]）
+                        Heading::default(),
+                        // 开局步行：载具的来路（车行）还没装配，P5 先让规则层把骰子颗数
+                        // 与「毁载具」两条跑通；表现层的换车入口等车行落地再补
+                        Mount::Foot,
+                    ),
+                    (
+                        BankBalance::default(),
+                        crate::stock::StockHoldings::default(),
+                        // 乐透券开局为空。它是**一期**的凭证：开奖有人猜中就全场清空，
+                        // 没人猜中则留到下月（见 `crate::lottery` 模块头）
+                        crate::lottery::LotteryTickets::default(),
+                        Gameplay,
+                    ),
                 ))
                 .id()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Term as T;
+
+    #[test]
+    fn the_two_terms_answer_the_remaining_question_differently() {
+        assert_eq!(T::Turns(3).turns(), Some(3));
+        // 「还剩几回合」这一问在笼中那一支上**没有答案** —— 而不是 0，也不是 99
+        assert_eq!(T::UntilBailed.turns(), None);
+    }
+
+    #[test]
+    fn the_longer_wins_and_the_cage_always_wins() {
+        use super::{Detention, DetentionPlace as P, Term};
+        let at = |place, term| Detention { place, term };
+        let jail3 = at(P::Jail, Term::Turns(3));
+        let jail2 = at(P::Jail, Term::Turns(2));
+        let hosp3 = at(P::Hospital, Term::Turns(3));
+        let hosp5 = at(P::Hospital, Term::Turns(5));
+
+        assert_eq!(jail3.kept_against(jail2), jail3);
+        assert_eq!(
+            jail2.kept_against(hosp5),
+            hosp5,
+            "更久的那一张连关在哪一处一起带走"
+        );
+        // 等长时后来者赢 —— P4① 之后这条是这张表里唯一的任意格，所以必须有名字钉着它
+        assert_eq!(jail3.kept_against(hosp3), hosp3);
+        // 笼中那张两个方向都赢：给笼子装一把钟的那条 bug 只会从一个方向进来
+        let cage = at(P::Jail, Term::UntilBailed);
+        assert_eq!(cage.kept_against(hosp5), cage);
+        assert_eq!(hosp5.kept_against(cage), cage);
+    }
 }

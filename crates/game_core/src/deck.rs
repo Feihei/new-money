@@ -23,7 +23,9 @@ use crate::msg::{
     PlayerTeleported,
 };
 use crate::occupancy::{Occupancy, OccupancyAt, OccupancyKind};
-use crate::player::{Detention, Heading, Mount, MoveCap, PlayerId, StaySentence, TokenPosition};
+use crate::player::{
+    Detention, Heading, Mount, MoveCap, PlayerId, StaySentence, Term, TokenPosition, Walker,
+};
 use crate::rng::Rng;
 use crate::settle::Books;
 
@@ -195,7 +197,9 @@ impl<'w> Shelf<'w> {
 pub struct CardSink<'w, 's> {
     pub books: Books<'w, 's>,
     pub commands: Commands<'w, 's>,
-    pub positions: Query<'w, 's, &'static mut TokenPosition, With<PlayerId>>,
+    /// 位置（P12 起按 `Walker` 收）。传给 [`crate::landing::detain`] 的签名要的是行动者那一族，
+    /// 而这一族里今天会被卡点到的仍然只有玩家 —— 恶人不在 `CardTarget` 的候选名单上。
+    pub positions: Query<'w, 's, &'static mut TokenPosition, With<Walker>>,
     pub insulations: Query<'w, 's, &'static mut Insulation>,
     /// 身上挂着哪位神（P6b②）。**只读**，而且它不是效果的存放处 —— 神给的免疫与天数
     /// 加倍每次都现读这一格（见 [`crate::gods::resists`]），因为「附身期间」这件事的
@@ -385,7 +389,9 @@ pub fn apply_effects(
                     &sink.books.active.def,
                     victim,
                     *place,
-                    days,
+                    // 卡面写几天就是几天（10-20 拍板「天数只来自卡面」）。恶人专用的那一支
+                    // `UntilBailed` 从这里出不去：卡打不到恶人，而「踩到某格就被关」也没有
+                    Term::Turns(days),
                 ) else {
                     debug!(
                         "这张棋盘没有「{}」那条分支，把 {} 送去那里这条路落空",
@@ -402,7 +408,11 @@ pub fn apply_effects(
                 });
                 outcomes.push(EffectOutcome::Detained {
                     place: held.place,
-                    turns: held.turns_left,
+                    // 读的是 `detain` 返回的那一张而不是 `days`：更久的旧账赢。
+                    // 「赢的会不会是笼中那一张（读不出数）」这条路今天走不到 ——
+                    // 卡与新闻都打不到恶人（`CardTarget` 与 `NewsAudience` 的承受者都是玩家），
+                    // 所以兜底取的正是卡上写的那个数
+                    turns: held.term.turns().unwrap_or(days),
                     junction,
                 });
             }

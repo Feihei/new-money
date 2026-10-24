@@ -24,7 +24,7 @@ use crate::occupancy::{
     BOMB_STEPS, HaltCause, Occupancy, OccupancyAt, OccupancyKind, Trigger, WalkHalt,
     first_roadblock, trigger_of,
 };
-use crate::player::{Heading, Mount, PlayerId, TokenPosition, WalkQueue};
+use crate::player::{Heading, Mount, TokenPosition, WalkQueue, Walker};
 use crate::rules::GameRules;
 use crate::turn::TurnPhase;
 
@@ -81,6 +81,7 @@ pub fn plan_walk(
     rolled: u32,
     cap: Option<u32>,
     occupancies: &Query<(Entity, &Occupancy)>,
+    pass_roadblocks: bool,
 ) -> WalkPlan {
     let moved = match cap {
         Some(_) => rolled.min(1),
@@ -93,7 +94,10 @@ pub fn plan_walk(
     } else {
         def.walk_path(from.0 as i64, moved as i64 * heading.sign())
     };
-    if let Some(at) = first_roadblock(occupancies, &path) {
+    // 路障截断对小偷豁免（P12c）：PLAN §三 那句「唯一能穿路障」落在这一个布尔上，
+    // 而不是让两个调用点各写一遍判据。他穿过去的那一格在走步循环里被偷走 ——
+    // 「穿」与「偷」是同一次经过的两句话
+    if !pass_roadblocks && let Some(at) = first_roadblock(occupancies, &path) {
         path.truncate(at + 1);
     }
     let to = path.last().copied().unwrap_or(from);
@@ -123,19 +127,40 @@ pub struct WalkDesk<'w, 's> {
             &'static mut TokenPosition,
             &'static Mount,
         ),
-        With<PlayerId>,
+        With<Walker>,
     >,
     /// 一步一拍地读；放置物全场个位数，线性扫比再挂索引划算（ADR-002 §3 明确不要第二份索引）。
     occupancies: Query<'w, 's, (Entity, &'static mut Occupancy)>,
-    /// 「相遇」要判另一名玩家此刻在哪一格。按 `PlayerId` 排一次，结果与实体生成顺序无关。
-    ids: Query<'w, 's, (Entity, &'static PlayerId)>,
+    /// 「相遇」要判**另一个行动者**此刻在哪一格（P12 起含受雇的恶人：他站在路上就是一块
+    /// 会挡路的肉，炸弹经过他那一格就该转让）。
+    ///
+    /// **`Without<Detention>`**：被关着的人不在路上。他的逻辑位置停在接入点（那是
+    /// 「放出来之后从哪格继续走」的读数，见 `player::TokenPosition`），但他人其实在那条
+    /// 死胡同尽头 —— 让他站在门口接住一颗经过的炸弹，说的是「路过监狱门口的人替囚犯扛雷」，
+    /// 而那不是任何一条规则。P12 之前这条过滤不改变任何结果（那时场上只有正在走路的人
+    /// 与没被关的人）；恶人一上场，接入点上就会常年站着几位囚犯，所以这一格必须显式回答。
+    ///
+    /// 只要 `Entity`：位置从上面那条 `walkers` 借读，因为 `TokenPosition` 在那里已经是
+    /// `&mut` —— 同一条 system 里并存两条读它的查询会撞成借用冲突（§6.1 坑 33 同族，
+    /// 而这条在旧代码里是靠「拿 `PlayerId` 再回查 `walkers`」绕开的，P12 只是把那个
+    /// 「谁」从玩家换成了行动者）。排一次序（按实体）：同格站着两个人时「转让给谁」要稳定。
+    movers: Query<'w, 's, Entity, (With<Walker>, Without<crate::player::Detention>)>,
     commands: Commands<'w, 's>,
     stepped: MessageWriter<'w, TileStepped>,
     arrived: MessageWriter<'w, PlayerArrived>,
     halted: MessageWriter<'w, WalkHalted>,
+    /// 炸弹经手人变更（ADR-002 §8）。与 `halt` 一样是走步循环写下的现场记录。
     bomb_transferred: MessageWriter<'w, BombTransferred>,
+    /// 走步循环只记「为什么停」，后果由 `occupancy::resolve_halt_system` 应用 ——
+    /// 与消息分开是因为那一侧要读 `Books`。
     halt: ResMut<'w, WalkHalt>,
     next: ResMut<'w, NextState<TurnPhase>>,
+    /// 他是哪一种行动者（P12c）。**只在这一处读**：小偷对地雷/路障的「偷」必须与
+    /// 「踩到即炸」同帧裁定 —— 消息是帧末投递的，等一条 reader 赶到，人已经回笼了。
+    /// 走步循环因此认识「小偷」这一个词（不认识他的雇主、更不认识道具栏）：
+    /// 偷走的东西给谁，由 `villain::thief_deliver_system` 凭消息里的 `Hired` 回答。
+    villains: Query<'w, 's, &'static crate::villain::Villain>,
+    thieved: MessageWriter<'w, crate::msg::ItemThieved>,
 }
 
 /// 逐格推进：消费 [`WalkClock`]，把应到而未到的步数补齐（每步一条
@@ -147,20 +172,19 @@ pub struct WalkDesk<'w, 's> {
 pub fn walk_step_system(mut desk: WalkDesk<'_, '_>) {
     // 相遇快照：这一帧谁站在哪儿。行走互斥，所以除正在走的人以外不会有人移动；
     // 正在走的人自己那一格每步更新，不影响「别人在哪」。
-    let snapshot: Vec<(u32, Entity, crate::board::TileIndex)> = {
-        let mut rows: Vec<(u32, Entity, crate::board::TileIndex)> = desk
-            .ids
-            .iter()
-            .filter_map(|(entity, id)| {
-                desk.walkers
-                    .get(entity)
-                    .ok()
-                    .map(|(_, _, pos, _)| (id.0, entity, pos.tile))
-            })
-            .collect();
-        rows.sort_by_key(|(id, _, _)| *id);
-        rows
-    };
+    // 排一次序（按实体，也就是按生成号）：同格站着两个人时「转让给谁」要稳定，
+    // 而 archetype 的迭代序在 0.20 里不被保证
+    let mut snapshot: Vec<(Entity, crate::board::TileIndex)> = desk
+        .movers
+        .iter()
+        .filter_map(|entity| {
+            desk.walkers
+                .get(entity)
+                .ok()
+                .map(|(_, _, pos, _)| (entity, pos.tile))
+        })
+        .collect();
+    snapshot.sort();
 
     let due_rules = *desk.rules;
     for (entity, mut queue, mut pos, mount) in desk.walkers.iter_mut() {
@@ -174,6 +198,13 @@ pub fn walk_step_system(mut desk: WalkDesk<'_, '_>) {
         );
         let mut last = queue.from;
         let mut stopped = false;
+        // 小偷的两个专属行为都在这一趟循环里裁（P12c）：穿路障不截断（掷骰入队时已豁免，
+        // 见 `plan_walk`）与「偷走路上的雷/路障」。偷必须先于「踩到即炸」的裁定 ——
+        // 同一帧里他先下手，雷就炸不到他
+        let thief = desk
+            .villains
+            .get(entity)
+            .is_ok_and(|v| v.kind == crate::villain::VillainKind::Thief);
         while (queue.done as usize) < due {
             let tile = queue.path.pop_front().expect("done < total 保证队列非空");
             last = tile;
@@ -187,6 +218,7 @@ pub fn walk_step_system(mut desk: WalkDesk<'_, '_>) {
             let mut mine = None;
             let mut dog = None;
             let mut bomb = None;
+            let mut roadblock = None;
             // 先拾取：OnTile 的炸弹改成 Carried，然后同一步就开始计数
             for (occ_entity, occ) in desk.occupancies.iter() {
                 if occ.at != OccupancyAt::OnTile(tile) || trigger_of(occ.kind) != Trigger::Pass {
@@ -197,8 +229,14 @@ pub fn walk_step_system(mut desk: WalkDesk<'_, '_>) {
                     OccupancyKind::Dog => dog = Some(occ_entity),
                     OccupancyKind::TimeBomb => bomb = Some(occ_entity),
                     // 路障在掷骰入队时已经截断；走到这里只可能是路径被别的东西改了。
-                    // 它不中断也不消耗 —— 静态格照常结算（ADR-002 §5/§6）
-                    OccupancyKind::Roadblock | OccupancyKind::Chest => {}
+                    // 它不中断也不消耗 —— 静态格照常结算（ADR-002 §5/§6）。
+                    // 小偷例外（P12c）：他路过顺手偷走，发消息给雇主收货
+                    OccupancyKind::Roadblock => {
+                        if thief {
+                            roadblock = Some(occ_entity);
+                        }
+                    }
+                    OccupancyKind::Chest => {}
                     // 神：落脚触发，上面那道 `trigger_of` 已经把它挡在外面。
                     // 这一格不是可达分支，是**这张表要求的表态** —— 谁哪天把神改成 Pass
                     // 触发，这里会立刻变成「走路时被附身」那条没人见过的路径，
@@ -247,9 +285,9 @@ pub fn walk_step_system(mut desk: WalkDesk<'_, '_>) {
             // 相遇：路径经过另一名玩家当前所在格即转让（ADR-002 §8）。
             // 先爆炸后转让 —— 已经爆掉的炸弹不该在新主人手上再响一次。
             if !exploded
-                && let Some((_, target, _)) = snapshot
+                && let Some((target, _)) = snapshot
                     .iter()
-                    .find(|(_, other, at)| *other != entity && *at == tile)
+                    .find(|(other, at)| *other != entity && *at == tile)
             {
                 let carried: Vec<(Entity, u32)> = desk
                     .occupancies
@@ -279,10 +317,27 @@ pub fn walk_step_system(mut desk: WalkDesk<'_, '_>) {
 
             // 地雷与恶犬：走进去就中断。载具有两种命运 —— 踩雷被毁，
             // 撞狗把狗撞飞（PLAN §三「载具」行）。
-            let mine_hit = mine.is_some();
-            let dog_hit = dog.is_some();
+            // 小偷先下手（P12c）：他踩到的雷不发火、顺手搬走 —— 拆掉的东西炸不到人，
+            // 这一步也不停。恶犬不是放置物（它是活的），照咬。
             if let Some(mine_entity) = mine {
-                desk.commands.entity(mine_entity).despawn();
+                if thief {
+                    desk.commands.entity(mine_entity).despawn();
+                    desk.thieved.write(crate::msg::ItemThieved {
+                        thief: entity,
+                        item: crate::items::ItemKind::Mine,
+                        tile,
+                    });
+                } else {
+                    desk.commands.entity(mine_entity).despawn();
+                }
+            }
+            if thief && let Some(roadblock_entity) = roadblock {
+                desk.commands.entity(roadblock_entity).despawn();
+                desk.thieved.write(crate::msg::ItemThieved {
+                    thief: entity,
+                    item: crate::items::ItemKind::Roadblock,
+                    tile,
+                });
             }
             if let Some(dog_entity) = dog
                 && mount.is_vehicle()
@@ -290,7 +345,10 @@ pub fn walk_step_system(mut desk: WalkDesk<'_, '_>) {
                 desk.commands.entity(dog_entity).despawn();
             }
 
-            // 优先级：炸弹爆炸 > 地雷 > 恶犬（同一格最多一件，但携带中的炸弹不占格）
+            // 优先级：炸弹爆炸 > 地雷 > 恶犬（同一格最多一件，但携带中的炸弹不占格）。
+            // 小偷偷走的那颗雷不算「踩到」（P12c）：东西都没了，人照常往前走
+            let mine_hit = mine.is_some() && !thief;
+            let dog_hit = dog.is_some();
             let cause = if exploded {
                 Some(HaltCause::TimeBomb)
             } else if mine_hit {

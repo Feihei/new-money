@@ -45,7 +45,9 @@ pub struct ServiceDesk<'w, 's> {
     /// 这块地上立着什么。`None` ＝ 空地（商业空地或住宅）。
     pub facilities: Query<'w, 's, Option<&'static Facility>>,
     /// B 型住宿要把人挪走 —— 拘留的写就在 [`crate::landing::detain`]，这里只递工具。
-    pub positions: Query<'w, 's, &'static mut TokenPosition, With<PlayerId>>,
+    /// 按 `Walker` 收是那条签名的要求（P12）；今天走到这一格的必然是玩家（服务费只有
+    /// 付得起的人挨得到，而恶人没有钱包）。
+    pub positions: Query<'w, 's, &'static mut TokenPosition, With<crate::player::Walker>>,
     pub services: MessageWriter<'w, ServiceCharged>,
     /// 住宿那一下的凭据。与扣款凭据分开写：一笔记的是钱、一笔记的是人。
     pub detained_note: MessageWriter<'w, PlayerDetained>,
@@ -61,6 +63,10 @@ pub struct PropertySink<'w> {
     pub upgrades: MessageWriter<'w, UpgradeOffered>,
     pub builds: MessageWriter<'w, BuildOffered>,
     pub rents: MessageWriter<'w, RentDue>,
+    /// 间谍转付（P12d）。与 `rents` 分开：两条说的是两件事 ——
+    /// 「有人交了租」与「这笔租交错了人」。合一条就得在 `RentDue` 上加一个
+    /// 「其实没付给 owner」的标记位，而 UI 的两句播报读的是不同的消息。
+    pub rerouted: MessageWriter<'w, crate::msg::RentRerouted>,
 }
 
 /// 踩到地产格：三种归属三种走法（无主 / 自己 / 别人），与 Godot 完全一致。
@@ -191,20 +197,30 @@ pub fn settle_property_landing(
             if rent <= 0 {
                 return;
             }
-            let charge = Charge::new(
-                ChargeKind::Rent { land },
-                Some(player),
-                Some(owner_entity),
-                rent,
-            );
+            // 间谍转付（P12d）：判据在账本里（[`Books::rent_rerouted_to`]），
+            // 收款人从地主换成雇主 —— 钱从结算那一刻就走对口袋，不做两段账。
+            // 「无功而返」在这里没有形状：判据不过时 `None`，租金照付地主，
+            // 世界看起来与没有间谍时一模一样 —— 那正是这句话的本意。
+            let spy = books.on_duty_spy();
+            let rerouted_to = books.rent_rerouted_to(player, land, owner_entity);
+            let payee = rerouted_to.unwrap_or(owner_entity);
+            let charge = Charge::new(ChargeKind::Rent { land }, Some(player), Some(payee), rent);
             // `payer` 取成交后那个：被嫁祸卡转手时，收据要说的是**实际付钱的人**
             if let Ok(done) = books.settle(&mut commands, charge) {
                 sink.rents.write(RentDue {
                     payer: done.payer.unwrap_or(player),
-                    owner: owner_entity,
+                    owner: payee,
                     land,
                     amount: done.amount,
                 });
+                if let (Some((spy_entity, employer)), Some(_)) = (spy, rerouted_to) {
+                    sink.rerouted.write(crate::msg::RentRerouted {
+                        spy: spy_entity,
+                        employer,
+                        land,
+                        amount: done.amount,
+                    });
+                }
             }
             pending.offer(player, Pending::RentNotice(land));
         }
@@ -277,7 +293,7 @@ fn settle_service(
             &books.active.def,
             player,
             DetentionPlace::Hotel,
-            bill.stay_days,
+            crate::player::Term::Turns(bill.stay_days),
         ) {
             desk.detained_note.write(PlayerDetained {
                 player,

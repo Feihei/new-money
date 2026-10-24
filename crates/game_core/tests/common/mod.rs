@@ -21,25 +21,26 @@ use game_core::prelude::{
     AuctionStarted, AuctionWon, BailRequested, BankBalance, BankOp, BankOpDone, BankOpRequested,
     BankVisited, BidMove, BidPlaced, BidWithdrawn, BombTransferred, Books, BuildOffered,
     BuildRequested, BuildingLevel, BuyOffered, BuyTicketRequested, CardAim, CardDrawn, CardGained,
-    CardId, CardKind, CardLost, CardPlayed, CardSet, CashChanged, ChairmanTook, ChargeKind,
-    ChargeWaived, ChestOpened, CompanyCharged, CompanyLedgers, CompanyPayout, Correction,
-    Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen, Deck,
-    Detention, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, FacilityBuilt,
-    FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameKind, GameOver, GameRules,
-    GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed, GodLeft,
-    GodPossessed, Hand, IndemnityPaid, Insulation, Insured, Inventory, ItemKind, ItemPlaced,
-    Jackpot, JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken,
-    LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought, LotteryDrawn, LotteryTickets,
-    LotteryWon, Market, MarketClock, MinigameResult, MinigameScore, MortgageDone, MortgageOp,
-    MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, NewsSink, Occupancy,
-    OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision, PlaceItemRequested,
-    PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId,
-    PlayerTeleported, PlotArea, Points, PointsChanged, PolicyBought, Possession, Presence,
-    RedEnvelope, RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue,
-    RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone,
-    ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId,
-    StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
-    Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered,
+    CardId, CardKind, CardLost, CardPlayed, CardSet, CardSnatched, CashChanged, ChairmanTook,
+    ChargeKind, ChargeWaived, ChestOpened, CompanyCharged, CompanyLedgers, CompanyPayout,
+    Correction, Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen,
+    Deck, DepositsRobbed, Detention, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride,
+    FacilityBuilt, FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameKind, GameOver,
+    GameRules, GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed,
+    GodLeft, GodPossessed, Hand, IndemnityPaid, Insulation, Insured, Inventory, ItemKind,
+    ItemPlaced, ItemThieved, Jackpot, JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId,
+    LandStatus, LandTaken, LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought,
+    LotteryDrawn, LotteryTickets, LotteryWon, Market, MarketClock, MinigameResult, MinigameScore,
+    MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap,
+    MoveCapped, NewsSink, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision,
+    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
+    PlayerDetained, PlayerId, PlayerName, PlayerTeleported, PlotArea, Points, PointsChanged,
+    PointsStolen, PolicyBought, Possession, Presence, RedEnvelope, RemoteBuildOffered,
+    RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RentRerouted, RequestRemoteDice, RequestRoll,
+    RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source,
+    StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested,
+    StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TollExtorted,
+    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, VillainHired,
     WalkHalted, WalkStarted, Wallet, deal_to, find_id, fire_news, grant_effects,
 };
 
@@ -378,12 +379,29 @@ struct BookReaders<'w, 's> {
     /// 一条新闻播出去与它点到的人各自怎样。记进 `Ledger` 而不是 `Observed`：
     /// 回合流水那张表是逐字断言用的（B2 的口径），而新闻断言问的是「谁的钱动了」。
     news: MessageReader<'w, 's, game_core::prelude::NewsFired>,
+    // ===== 四大恶人（P12）=====
+    villain_hired: MessageReader<'w, 's, VillainHired>,
+    robbed: MessageReader<'w, 's, DepositsRobbed>,
+    stolen: MessageReader<'w, 's, PointsStolen>,
+    thieved: MessageReader<'w, 's, ItemThieved>,
+    snatched: MessageReader<'w, 's, CardSnatched>,
+    toll: MessageReader<'w, 's, TollExtorted>,
+    rerouted: MessageReader<'w, 's, RentRerouted>,
 }
 
-fn who(players: &Query<&PlayerId>, e: Entity) -> String {
+/// 流水里的名字。**玩家念 `P{n}`，恶人念他的诨名**（P12）。
+///
+/// 四个恶人都没有 `PlayerId`。若这里对他们一律回 `?`，「保释强盗」与「保释小偷」两条流水
+/// 在断言里就长得一模一样 —— 而那正是这一栏要回答的那句话。名字这一位他们本来就挂着
+/// （见 `player::PlayerName` 的注释：它刻意与 `PlayerColor` 分开放），所以读它，
+/// 不在测试里再拼一张「实体→诨名」的第二份真相。
+fn who(players: &Query<&PlayerId>, names: &Query<&PlayerName>, e: Entity) -> String {
     match players.get(e) {
         Ok(id) => format!("P{}", id.0),
-        Err(_) => "?".into(),
+        Err(_) => match names.get(e) {
+            Ok(name) => name.0.clone(),
+            Err(_) => "?".into(),
+        },
     }
 }
 
@@ -409,41 +427,52 @@ fn side_verb(side: game_core::prelude::TradeSide) -> &'static str {
     }
 }
 
-fn collect_flow(mut log: ResMut<Observed>, mut r: FlowReaders, players: Query<&PlayerId>) {
+fn collect_flow(
+    mut log: ResMut<Observed>,
+    mut r: FlowReaders,
+    players: Query<&PlayerId>,
+    names: Query<&PlayerName>,
+) {
     for m in r.turn_started.read() {
         log.0
-            .push(format!("TurnStarted({})", who(&players, m.player)));
+            .push(format!("TurnStarted({})", who(&players, &names, m.player)));
     }
     for m in r.lifted.read() {
         log.0.push(format!(
             "Lifted({}@{},格{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.place.label(),
             m.junction.0
         ));
     }
     for m in r.detention_skipped.read() {
+        // `left` 是 `Option`（P12）：笼中那一条读不出「还剩几回合」，
+        // 而那句话说的是「等保释」，不是 0 —— 0 在回合机上意味着「现在就放人」
+        let left = match m.left {
+            Some(n) => format!("剩{n}"),
+            None => "等保释".to_string(),
+        };
         log.0.push(format!(
-            "DetainSkip({}@{},剩{})",
-            who(&players, m.player),
+            "DetainSkip({}@{},{left})",
+            who(&players, &names, m.player),
             m.place.label(),
-            m.turns_left
         ));
     }
     for m in r.stay_skipped.read() {
         log.0.push(format!(
             "StaySkip({},剩{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.turns_left
         ));
     }
     for m in r.stay_lifted.read() {
-        log.0.push(format!("StayLift({})", who(&players, m.player)));
+        log.0
+            .push(format!("StayLift({})", who(&players, &names, m.player)));
     }
     for m in r.dice_rolled.read() {
         log.0.push(format!(
             "Roll({},{},{}->{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.steps,
             m.from.0,
             m.to.0
@@ -452,20 +481,23 @@ fn collect_flow(mut log: ResMut<Observed>, mut r: FlowReaders, players: Query<&P
     for m in r.walk_started.read() {
         log.0.push(format!(
             "Walk({},{},{}->{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.steps,
             m.from.0,
             m.to.0
         ));
     }
     for m in r.tile_stepped.read() {
-        log.0
-            .push(format!("Step({},{})", who(&players, m.player), m.tile.0));
+        log.0.push(format!(
+            "Step({},{})",
+            who(&players, &names, m.player),
+            m.tile.0
+        ));
     }
     for m in r.player_arrived.read() {
         log.0.push(format!(
             "Arrive({},{}->{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.from.0,
             m.to.0
         ));
@@ -473,17 +505,18 @@ fn collect_flow(mut log: ResMut<Observed>, mut r: FlowReaders, players: Query<&P
     for m in r.walk_halted.read() {
         log.0.push(format!(
             "Halt({},格{},{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.tile.0,
             m.cause.label()
         ));
     }
     for m in r.turn_ended.read() {
-        log.0.push(format!("TurnEnd({})", who(&players, m.player)));
+        log.0
+            .push(format!("TurnEnd({})", who(&players, &names, m.player)));
     }
     for m in r.game_over.read() {
         let winner = match m.winner {
-            Some(w) => who(&players, w),
+            Some(w) => who(&players, &names, w),
             None => "none".into(),
         };
         log.0.push(format!("GameOver({winner})"));
@@ -497,18 +530,19 @@ fn collect_books(
     mut pot_audit: ResMut<JackpotAudit>,
     mut r: BookReaders,
     players: Query<&PlayerId>,
+    names: Query<&PlayerName>,
 ) {
     for m in r.offers.read() {
         log.0.push(format!(
             "BuyOffer({},@{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.land.0
         ));
     }
     for m in r.upgrade_offers.read() {
         log.0.push(format!(
             "UpgradeOffer({},@{}${})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.land.0,
             m.cost
         ));
@@ -516,7 +550,7 @@ fn collect_books(
     for m in r.bought.read() {
         log.0.push(format!(
             "Bought({}@{}${})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.land.0,
             m.price
         ));
@@ -524,17 +558,17 @@ fn collect_books(
     for m in r.lands_taken.read() {
         let from = m
             .from
-            .map_or_else(|| "无主".to_string(), |old| who(&players, old));
+            .map_or_else(|| "无主".to_string(), |old| who(&players, &names, old));
         log.0.push(format!(
             "Take({}:L{}←{from})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.land.0
         ));
     }
     for m in r.upgraded.read() {
         log.0.push(format!(
             "Upgraded({}@{}→{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.land.0,
             m.new_level
         ));
@@ -542,8 +576,8 @@ fn collect_books(
     for m in r.rents.read() {
         log.0.push(format!(
             "Rent({}->{}@L{}${})",
-            who(&players, m.payer),
-            who(&players, m.owner),
+            who(&players, &names, m.payer),
+            who(&players, &names, m.owner),
             m.land.0,
             m.amount
         ));
@@ -551,7 +585,7 @@ fn collect_books(
     for m in r.waived.read() {
         log.0.push(format!(
             "Waive({}${}·{:?})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.saved,
             m.via
         ));
@@ -559,14 +593,14 @@ fn collect_books(
     for m in r.bankrupts.read() {
         log.0.push(format!(
             "Bankrupt({}欠{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.unpaid
         ));
     }
     for m in r.detained.read() {
         log.0.push(format!(
             "Detain({}@{},格{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.place.label(),
             m.junction.0
         ));
@@ -574,7 +608,7 @@ fn collect_books(
     for m in r.teleported.read() {
         log.0.push(format!(
             "Teleport({}→{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.tile.0
         ));
     }
@@ -585,22 +619,25 @@ fn collect_books(
     for m in r.envelopes.read() {
         log.0.push(format!(
             "Envelope({}${})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.amount
         ));
     }
     for m in r.bailed.read() {
         log.0.push(format!(
             "Bail({}←{}@{},{}点券)",
-            who(&players, m.player),
-            who(&players, m.by),
+            who(&players, &names, m.player),
+            who(&players, &names, m.by),
             m.place.label(),
             m.points
         ));
     }
     for m in r.cards.read() {
-        log.0
-            .push(format!("Card({}:{})", who(&players, m.player), m.card.id));
+        log.0.push(format!(
+            "Card({}:{})",
+            who(&players, &names, m.player),
+            m.card.id
+        ));
     }
     // 出牌流水把「谁打的」与「打在谁头上」都写出来 —— 这正是 `CardPlayed` 存在的意义，
     // 断言「A 陷害 B 但被 B 的免罪抵消」要能同时看见这两半
@@ -613,8 +650,8 @@ fn collect_books(
             .count();
         log.0.push(format!(
             "Play({}->{}:{}{})",
-            who(&players, m.player),
-            who(&players, m.victim),
+            who(&players, &names, m.player),
+            who(&players, &names, m.victim),
             m.card.id,
             if blocked > 0 {
                 format!("挡{blocked}")
@@ -626,7 +663,7 @@ fn collect_books(
     for m in r.gained.read() {
         log.0.push(format!(
             "Gain({}:{}){}",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.card.id,
             match &m.pushed_out {
                 Some(lost) => format!("挤掉{}", lost.id),
@@ -637,7 +674,7 @@ fn collect_books(
     for m in r.bank.read() {
         log.0.push(format!(
             "Bank({},存{}贷{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.deposit,
             m.loan
         ));
@@ -645,19 +682,19 @@ fn collect_books(
     for m in r.bank_ops.read() {
         log.0.push(format!(
             "BankOp({}{}{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             op_verb(m.op),
             m.amount
         ));
     }
     for m in r.stock_visit.read() {
         log.0
-            .push(format!("StockVisit({})", who(&players, m.player)));
+            .push(format!("StockVisit({})", who(&players, &names, m.player)));
     }
     for m in r.shop_ops.read() {
         log.0.push(format!(
             "Shop({}{}{}·{}点券)",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             side_verb(m.side),
             m.card.id,
             m.points
@@ -668,7 +705,7 @@ fn collect_books(
     for m in r.scores.read() {
         log.0.push(format!(
             "Arcade({}·{}·{}分→{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.game.label(),
             m.score,
             if m.awarded {
@@ -681,7 +718,7 @@ fn collect_books(
     for m in r.mortgages.read() {
         log.0.push(format!(
             "Mortgage({}{}{}·{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             match m.op {
                 MortgageOp::Take => "押",
                 MortgageOp::Redeem => "赎",
@@ -693,7 +730,7 @@ fn collect_books(
     for m in r.traded.read() {
         log.0.push(format!(
             "Trade({}{}{}{}股@{:.2})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             side_verb(m.side),
             m.stock.0,
             m.shares,
@@ -707,7 +744,7 @@ fn collect_books(
     for m in r.items_placed.read() {
         log.0.push(format!(
             "Place({}:{}→格{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.item.label(),
             m.tile.0
         ));
@@ -715,8 +752,8 @@ fn collect_books(
     for m in r.bombs.read() {
         log.0.push(format!(
             "Bomb({}→{}@格{},剩{})",
-            who(&players, m.from),
-            who(&players, m.to),
+            who(&players, &names, m.from),
+            who(&players, &names, m.to),
             m.tile.0,
             m.steps_left
         ));
@@ -724,19 +761,22 @@ fn collect_books(
     for m in r.chests.read() {
         log.0.push(format!(
             "Chest({}@格{}:{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.tile.0,
             m.item.label()
         ));
     }
     for m in r.remote_used.read() {
-        log.0
-            .push(format!("Remote({},{}步)", who(&players, m.player), m.steps));
+        log.0.push(format!(
+            "Remote({},{}步)",
+            who(&players, &names, m.player),
+            m.steps
+        ));
     }
     for m in r.capped.read() {
         log.0.push(format!(
             "Cap({},{}→{},剩{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.rolled,
             m.moved,
             m.turns_left
@@ -745,7 +785,7 @@ fn collect_books(
     for m in r.mount_changed.read() {
         log.0.push(format!(
             "Mount({},{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.mount.label()
         ));
     }
@@ -757,7 +797,7 @@ fn collect_books(
     for m in r.gods_possessed.read() {
         log.0.push(format!(
             "GodOn({}:{},{}天{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.god.label(),
             m.days,
             match m.replaced {
@@ -775,7 +815,7 @@ fn collect_books(
             .join("/");
         log.0.push(format!(
             "GodDeed({}:{},{:+}{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.god.label(),
             m.cash,
             if cards.is_empty() {
@@ -788,7 +828,7 @@ fn collect_books(
     for m in r.gods_left.read() {
         log.0.push(format!(
             "GodOff({}:{},{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.god.label(),
             m.reason.label()
         ));
@@ -796,7 +836,7 @@ fn collect_books(
     for m in r.cards_lost.read() {
         log.0.push(format!(
             "Lose({}:{}·{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.card.title,
             m.by.label()
         ));
@@ -805,7 +845,7 @@ fn collect_books(
     for m in r.tickets.read() {
         log.0.push(format!(
             "Ticket({},{}号,{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.number,
             m.price
         ));
@@ -824,7 +864,7 @@ fn collect_books(
     for m in r.wins.read() {
         log.0.push(format!(
             "Win({}:{}号,+{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.number,
             m.amount
         ));
@@ -834,10 +874,10 @@ fn collect_books(
     // 谁退出、成交给谁、有没有流标。「拍卖办成了」那句断言要能逐问回答，而不是只看最后一条。
     for m in r.auctions_started.read() {
         let founder =
-            m.by.map_or_else(|| "bank".to_string(), |e| who(&players, e));
+            m.by.map_or_else(|| "bank".to_string(), |e| who(&players, &names, e));
         let from = m
             .seller
-            .map_or_else(|| "-".to_string(), |e| who(&players, e));
+            .map_or_else(|| "-".to_string(), |e| who(&players, &names, e));
         log.0.push(format!(
             "Auction({}:by {founder},from {from},start {},step {},{}人)",
             land(m.land),
@@ -849,7 +889,7 @@ fn collect_books(
     for m in r.bids.read() {
         log.0.push(format!(
             "Bid({},{},{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             land(m.land),
             m.amount
         ));
@@ -857,16 +897,16 @@ fn collect_books(
     for m in r.passes.read() {
         log.0.push(format!(
             "Pass({}:{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             land(m.land)
         ));
     }
     for m in r.sold.read() {
         let founder =
-            m.by.map_or_else(|| "bank".to_string(), |e| who(&players, e));
+            m.by.map_or_else(|| "bank".to_string(), |e| who(&players, &names, e));
         log.0.push(format!(
             "Sold({}:{},{},to {founder})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             land(m.land),
             m.price
         ));
@@ -878,7 +918,7 @@ fn collect_books(
     for m in r.build_offers.read() {
         log.0.push(format!(
             "BuildOffer({},@{}${})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.land.0,
             m.cost
         ));
@@ -886,8 +926,8 @@ fn collect_books(
     for m in r.services.read() {
         log.0.push(format!(
             "Service({}->{}@L{}${},摇{},住{})",
-            who(&players, m.payer),
-            who(&players, m.owner),
+            who(&players, &names, m.payer),
+            who(&players, &names, m.owner),
             m.land.0,
             m.amount,
             m.roll,
@@ -897,7 +937,7 @@ fn collect_books(
     for m in r.built.read() {
         log.0.push(format!(
             "Built({}@{}:{:?}${})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.land.0,
             m.kind,
             m.cost
@@ -907,13 +947,13 @@ fn collect_books(
     for m in r.company_charged.read() {
         log.0.push(format!(
             "Company({}@{}${},摇{},住{}天,董事长{})",
-            who(&players, m.payer),
+            who(&players, &names, m.payer),
             m.stock,
             m.amount,
             m.roll,
             m.stay_days,
             match m.chairman {
-                Some(c) => who(&players, c),
+                Some(c) => who(&players, &names, c),
                 None => "无".into(),
             }
         ));
@@ -921,7 +961,7 @@ fn collect_books(
     for m in r.company_payouts.read() {
         log.0.push(format!(
             "Dividend({}@{}:每股{}×{}股,当月{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.stock,
             m.per_share,
             m.shares,
@@ -932,7 +972,7 @@ fn collect_books(
     for m in r.policies.read() {
         log.0.push(format!(
             "Policy({}@{},{}天${})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.stock,
             m.days,
             m.premium
@@ -941,7 +981,7 @@ fn collect_books(
     for m in r.indemnities.read() {
         log.0.push(format!(
             "Indemnity({}@{},{}天${})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.stock,
             m.days,
             m.amount
@@ -950,26 +990,28 @@ fn collect_books(
     for m in r.freebies.read() {
         log.0.push(format!(
             "Freebie({}@{},{})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.stock,
             m.item
         ));
     }
     for m in r.remote_offered.read() {
-        log.0
-            .push(format!("RemoteOffered({})", who(&players, m.player)));
+        log.0.push(format!(
+            "RemoteOffered({})",
+            who(&players, &names, m.player)
+        ));
     }
     for m in r.fin_drawn.read() {
         log.0.push(format!(
             "FinDraw({}${})",
-            who(&players, m.chairman),
+            who(&players, &names, m.chairman),
             m.amount
         ));
     }
     for m in r.fin_recalled.read() {
         log.0.push(format!(
             "FinRecall({}${})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.amount
         ));
     }
@@ -988,7 +1030,7 @@ fn collect_books(
                         .map(|o| format!("{o:?}"))
                         .collect::<Vec<_>>()
                         .join("+");
-                    format!("{}[{effects}]", who(&players, hit.player))
+                    format!("{}[{effects}]", who(&players, &names, hit.player))
                 })
                 .collect::<Vec<_>>()
                 .join("|"),
@@ -1019,7 +1061,7 @@ fn collect_books(
         log.0.push(format!(
             "News({},播{},{})",
             m.news.id,
-            who(&players, m.broadcaster),
+            who(&players, &names, m.broadcaster),
             body
         ));
     }
@@ -1029,11 +1071,69 @@ fn collect_books(
     for m in r.points.read() {
         log.0.push(format!(
             "Points({}+{}={})",
-            who(&players, m.player),
+            who(&players, &names, m.player),
             m.delta,
             m.balance
         ));
         points_audit.0.push((m.player, m.delta, m.balance));
+    }
+    // ===== 四大恶人（P12）=====
+    for m in r.villain_hired.read() {
+        log.0.push(format!(
+            "VillainHire({:?}→{})",
+            m.kind,
+            who(&players, &names, m.employer)
+        ));
+    }
+    for m in r.robbed.read() {
+        log.0.push(format!(
+            "Robbed({}抢${}·{}人)",
+            who(&players, &names, m.villain),
+            m.total,
+            m.victims
+        ));
+    }
+    for m in r.stolen.read() {
+        log.0.push(format!(
+            "Stolen({}偷{}点券·{}人)",
+            who(&players, &names, m.villain),
+            m.total,
+            m.victims
+        ));
+    }
+    for m in r.thieved.read() {
+        log.0.push(format!(
+            "Thieve({}:{}@格{})",
+            who(&players, &names, m.thief),
+            m.item.label(),
+            m.tile.0
+        ));
+    }
+    for m in r.snatched.read() {
+        log.0.push(format!(
+            "Snatch({}←{}:{})",
+            who(&players, &names, m.victim),
+            who(&players, &names, m.robber),
+            m.card.title
+        ));
+    }
+    for m in r.toll.read() {
+        log.0.push(format!(
+            "Toll({}→{}@{}${})",
+            who(&players, &names, m.hoodlum),
+            who(&players, &names, m.owner),
+            land(m.land),
+            m.amount
+        ));
+    }
+    for m in r.rerouted.read() {
+        log.0.push(format!(
+            "Reroute({}→{}@{}${})",
+            who(&players, &names, m.spy),
+            who(&players, &names, m.employer),
+            land(m.land),
+            m.amount
+        ));
     }
 }
 

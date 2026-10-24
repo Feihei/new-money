@@ -25,7 +25,7 @@ use game_core::prelude::{
     ActiveBoard, Adjustment, BankOp, BidMove, CardEffect, ChargeDomain, CompanyLedgers, Correction,
     DataHandles, Date, Detention, DetentionPlace, GameSeed, GameSession, Gavel, HolidaySet,
     Institution, ItemKind, LandStatus, MarketClock, Mount, NewsId, NewsSet, Pending, Scope, Source,
-    StaySentence, StockSet, TileKind, TradeSide, TurnPhase, date_of,
+    StaySentence, StockSet, Term, TileKind, TradeSide, TurnPhase, date_of,
 };
 
 /// 演示盘上的新闻中心（`prototype.json` 的 13 号格，`(0,4)`）。
@@ -1122,7 +1122,7 @@ fn hold(app: &mut App, player: Entity, at: u32, room: DetentionPlace, days: u32)
     common::place(app, player, at);
     app.world_mut().entity_mut(player).insert(Detention {
         place: room,
-        turns_left: days,
+        term: Term::Turns(days),
     });
 }
 

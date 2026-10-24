@@ -88,6 +88,27 @@ pub struct GameRules {
     ///
     /// 30 是 10-20 拍板时给的单子（监狱与医院同价）—— 4 代原文查不到，所以这是设计值。
     pub bail_points: u32,
+    /// 保释**四大恶人**要花的点券（P12）。与上面那条是**同一张表里的两行**：
+    /// 判据、窗口、流水全在 `bail.rs` 那一份实现里，价钱由 [`crate::settle::Books::bail_price`]
+    /// 一处按「他身上有没有 `Villain`」答 —— 将来价目要分叉，加的是表里的一行，
+    /// 不是第二套流程（10-20 拍板原话）。
+    ///
+    /// 300 是 4 代口径（PLAN §三「四大恶人」行：300 点券保释）。它是 `bail_points` 的十倍：
+    /// 放一个玩家出来是顺水人情，把一个**会替你在环上抢钱**的人放出来是买一件武器，
+    /// 而它贵过一张拍卖卡（40）与三张停留卡（60）正是这条价钱该说的话。
+    pub villain_bail_points: u32,
+    /// 强盗出场抢走全场存款的**百分比**（P12b）。PLAN §三 拍板的 20 —— 而且**含雇主自己**，
+    /// 那是特性不是 bug（验收原话），所以这条参数没有「豁免谁」的第二格。
+    ///
+    /// 用百分比而不是固定数，与 [`poor_cash_divisor`] 那条同一条理由：按比例抢的数额
+    /// 自动跟着钱包走。读它的那一处用整数乘除向下取整（`balance * percent / 100`），
+    /// 与房租、分红、点券那一族同一条取整口径。
+    pub robber_deposit_percent: u32,
+    /// 小偷出场偷走其他玩家点券的**百分比**（P12c）。PLAN §三 拍板「一半」，即 50。
+    /// 与强盗那一条同族（按比例、整数向下取整），只是两件事分开各占一格：
+    /// 抢存款是**全场一刀**（含雇主），偷点券是**挑对象**（不含雇主）—— 两条将来要单独调，
+    /// 合成一条就没有那个自由了。
+    pub thief_points_percent: u32,
     /// 大穷神上身当场拿走现金的**分母**（P6b）：`现金 / 4`。
     ///
     /// 写成分母而不是百分比，是因为这条天生是「按比例抢」而不是「抢一个固定数」——
@@ -156,6 +177,9 @@ impl Default for GameRules {
             mortgage_percent: 50,
             redeem_percent: 110,
             bail_points: 30,
+            villain_bail_points: 300,
+            robber_deposit_percent: 20,
+            thief_points_percent: 50,
             poor_cash_divisor: 4,
             minigames: crate::minigame::Payouts::default(),
             lottery_numbers: 36,

@@ -14,11 +14,12 @@ use std::collections::HashSet;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, ArcadeDeal, Auction, BuildingLevel, BuyTicketRequested, Detention, DetentionPlace,
-    GameKind, GameRules, GameSession, Gavel, God, GodDesk, Inventory, ItemKind, LandId, Listing,
-    Mount, MountChanged, NewsSink, Occupancy, OccupancyKind, Owner, Pending, PendingDecision,
-    PlayerDetained, PlayerId, Points, RemoteBuildOffered, Rng, TileIndex, TokenPosition, TurnOrder,
-    TurnPhase, detain, find_id, fire_news, place,
+    ActiveBoard, ArcadeDeal, Auction, BankBalance, BuildingLevel, BuyTicketRequested, Detention,
+    DetentionPlace, GameKind, GameRules, GameSession, Gavel, God, GodDesk, Hired, Inventory,
+    ItemKind, LandId, Listing, Mount, MountChanged, NewsSink, Occupancy, OccupancyKind, Owner,
+    Pending, PendingDecision, PlayerDetained, PlayerId, Points, RemoteBuildOffered, Rng, Term,
+    TileIndex, TokenPosition, TurnOrder, TurnPhase, Villain, VillainHired, VillainKind, Walker,
+    detain, find_id, fire_news, place,
 };
 
 pub struct DevPlugin;
@@ -37,6 +38,7 @@ pub fn install_if_requested(app: &mut App) {
     let house = ForceHouse::from_env();
     let rbuild = ForceRbuild::from_env();
     let news = ForceNews::from_env();
+    let villain = ForceVillain::from_env();
     if forced.0.is_none()
         && bail.0.is_none()
         && !items.0
@@ -49,6 +51,7 @@ pub fn install_if_requested(app: &mut App) {
         && house.0.is_none()
         && !rbuild.0
         && news.0.is_none()
+        && villain.0.is_none()
     {
         return;
     }
@@ -121,6 +124,12 @@ pub fn install_if_requested(app: &mut App) {
             "开发注入已开启（NM_NEWS={wanted}）：当前玩家的回合里立刻播那一条新闻（不踩格、不推进回合）"
         );
     }
+    if let Some(kind) = villain.0 {
+        info!(
+            "开发注入已开启（NM_VILLAIN）：{} 将被当前玩家保释出场（点券补到够，出场行为随消息分派）",
+            kind.label()
+        );
+    }
     app.add_plugins(DevPlugin);
 }
 
@@ -181,7 +190,6 @@ impl ForceBail {
 /// 面板的「非鼠标入口」是 `NM_ITEMS`，而面板要有东西可放，就得先有道具。
 #[derive(Resource)]
 struct ForceItems(bool);
-
 impl ForceItems {
     fn from_env() -> Self {
         Self(std::env::var_os("NM_ITEMS").is_some())
@@ -248,6 +256,31 @@ impl ForcePlace {
             }
         }
         Self(out)
+    }
+}
+
+/// `NM_VILLAIN=<robber|thief|hoodlum|spy>`：把那一位恶人**保释给当前玩家**。
+///
+/// 保释的正经入口要 300 点券（点券箱攒很久）还要有人走到监狱门口，长跑里几乎不会发生
+/// —— 而恶人的全部行为都发生在「出场之后」，不注入就一张也拍不到。这里走的是
+/// `bail_op_system` 成交那一下的同一组写（摘 `Detention`、挂 `Hired`、插进轮转、发
+/// `VillainHired`），出场行为由 `villain::on_hired_system` 下一帧照常分派 ——
+/// 注入是走后门进同一扇门，不是开另一扇。点券补到够保释价，与 `NM_BAIL` 同一条理由。
+#[derive(Resource)]
+struct ForceVillain(Option<VillainKind>);
+
+impl ForceVillain {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_VILLAIN") else {
+            return Self(None);
+        };
+        match VillainKind::from_key(raw.trim()) {
+            Some(kind) => Self(Some(kind)),
+            None => {
+                warn!("NM_VILLAIN={raw} 不认识，应为 robber|thief|hoodlum|spy");
+                Self(None)
+            }
+        }
     }
 }
 
@@ -328,6 +361,7 @@ impl Plugin for DevPlugin {
             .insert_resource(ForceHouse::from_env())
             .insert_resource(ForceRbuild::from_env())
             .insert_resource(ForceNews::from_env())
+            .insert_resource(ForceVillain::from_env())
             // 回菜单时清掉「已经注入过」：`NM_DETAIN` 配 `NM_MENULOOP` 要能在第二局再注入一次，
             // 而留在 true 就等于「新局什么都没有」，看着像注入失效（跨局残留那类坑的反面）
             .add_systems(OnEnter(crate::scene::Scene::Menu), clear_injected)
@@ -352,6 +386,7 @@ impl Plugin for DevPlugin {
                     // 「楼被征收拆平」，而两条旋钮在同一个并行元组里时次序不保证（坑 36）——
                     // 抢在前面的那一版拍出来是一块本来就没楼的空地，看着像注入失效
                     force_news.after(force_house),
+                    force_villain,
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
@@ -378,6 +413,7 @@ struct Injected {
     house: bool,
     rbuild: bool,
     news: bool,
+    villain: bool,
 }
 
 fn clear_injected(mut done: ResMut<Injected>) {
@@ -389,8 +425,10 @@ fn clear_injected(mut done: ResMut<Injected>) {
 #[derive(SystemParam)]
 struct DetainWriters<'w, 's> {
     commands: Commands<'w, 's>,
-    positions: Query<'w, 's, &'static mut TokenPosition, With<PlayerId>>,
-    held: Query<'w, 's, &'static mut Detention, With<PlayerId>>,
+    // `With<Walker>` 而不是 `With<PlayerId>`：`detain` 的签名按行动者那一族收（P12），
+    // 而这两个注入今天拍的都是玩家
+    positions: Query<'w, 's, &'static mut TokenPosition, With<Walker>>,
+    held: Query<'w, 's, &'static mut Detention, With<Walker>>,
 }
 
 /// 把当前玩家送进那一处，并发**同一条凭据** —— 渲染层读的是 `PlayerDetained` 里那个
@@ -423,7 +461,7 @@ fn force_detention(
         &active.def,
         player,
         place,
-        DAYS,
+        Term::Turns(DAYS),
     ) else {
         done.detention = true;
         warn!("{} 在这张棋盘上没有那条分支，什么都没注入", place.label());
@@ -449,7 +487,8 @@ fn force_detention(
 struct BailScene<'w, 's> {
     active: Res<'w, ActiveBoard>,
     order: Res<'w, TurnOrder>,
-    /// 为了让「保释」那颗按钮在截图里是亮的，注入时把当前玩家的点券补到 100
+    rules: Res<'w, GameRules>,
+    /// 为了让「保释」那颗按钮在截图里是亮的，注入时把当前玩家的点券补到够保一次
     points: Query<'w, 's, &'static mut Points, With<PlayerId>>,
 }
 
@@ -482,7 +521,7 @@ fn force_bail(
         &scene.active.def,
         target,
         place,
-        DAYS,
+        Term::Turns(DAYS),
     ) else {
         done.bail = true;
         warn!("{} 在这张棋盘上没有那条分支，什么都没注入", place.label());
@@ -501,11 +540,68 @@ fn force_bail(
     });
     pending.offer(current, Pending::Bail(sentence.place));
     // 截图要看到一颗**亮着**的「保释」按钮：正经对局里 30 点券要靠点券箱攒，
-    // 而注入场景不经过那一格。只补到够保一次，别顺手把余额写成一个大数
+    // 而注入场景不经过那一格。只补到够保一次，别顺手把余额写成一个大数。
+    // P12a 之后同一排候选里还站着四位 300 的恶人，所以这一句补到「最贵的那一行也按得动」——
+    // 少这一格，`NM_BAIL=jail` 的截图就只会给出四行灰着的「点券不够」，恶人那条路径上不了屏
     if let Ok(mut points) = scene.points.get_mut(current) {
-        points.0 = points.0.max(100);
+        points.0 = points.0.max(30).max(scene.rules.villain_bail_points);
     }
     next.set(TurnPhase::WaitDecision);
+}
+
+/// `NM_VILLAIN` 的场景：那一位恶人被当前玩家保释出场，出场行为下一帧照常分派。
+///
+/// 与 `force_bail` 的差别在**主语**：那条摆窗口等人点，这条直接办成交 ——
+/// 因为要拍的不是窗口，是恶人「在环上替人办事」的世界。存一笔钱进每位玩家的账户
+/// 是同一份摆拍合同：强盗抢的是存款，存款是 0 的图只会拍出「抢走了 0」，
+/// 那张图什么也说不清（与 `NM_BAIL` 补点券那一条同一个理由）。
+// 参数是「把一次保释办成」的全套（轮转、恶人、两位的钱、消息），与注入一族同一条处理
+#[allow(clippy::too_many_arguments)]
+fn force_villain(
+    force: Res<ForceVillain>,
+    mut done: ResMut<Injected>,
+    mut order: ResMut<TurnOrder>,
+    villains: Query<(Entity, &Villain)>,
+    mut players: Query<(Entity, &mut BankBalance), With<PlayerId>>,
+    mut points: Query<&mut Points, With<PlayerId>>,
+    rules: Res<GameRules>,
+    mut commands: Commands,
+    mut hired: MessageWriter<VillainHired>,
+) {
+    let (Some(wanted), false) = (force.0, done.villain) else {
+        return;
+    };
+    let Some(current) = order.current() else {
+        return;
+    };
+    done.villain = true;
+    // 全场各存一笔（摆拍用，见上面的注）：出场那一刀才有东西可抢
+    for (_, mut bank) in players.iter_mut() {
+        bank.deposit += 10_000;
+    }
+    let Some((villain, held)) = villains.iter().find(|(_, v)| v.kind == wanted) else {
+        warn!("场上找不到 {:?}（世界还没装配到恶人？）", wanted);
+        return;
+    };
+    commands.entity(villain).remove::<Detention>();
+    commands.entity(villain).insert(Hired { employer: current });
+    if order.insert_after(villain, current) {
+        debug!("注入：{:?} 接在当前玩家之后进入轮转", wanted);
+    }
+    // 点券补到够保释价 —— 这一笔没有走 spend_points（它说的是「已经付过了」，
+    // 与 NM_BAIL 补到能按那颗按钮是同一个口径），但恶人行与 HUD 要读得出「为什么出得来」
+    if let Ok(mut points) = points.get_mut(current) {
+        points.0 = points.0.max(rules.villain_bail_points);
+    }
+    hired.write(VillainHired {
+        villain,
+        employer: current,
+        kind: wanted,
+    });
+    info!(
+        "注入：{} 被当前玩家保释出场（全场各存 10,000，好让出场行为拍得到）",
+        held.label()
+    );
 }
 
 /// `NM_ITEMS=1` 的那一半：把四种道具各发一个给当前玩家。

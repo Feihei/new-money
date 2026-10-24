@@ -344,7 +344,7 @@ pub fn settle_company_landing(
             &books.active.def,
             player,
             DetentionPlace::Away,
-            bill.stay_days,
+            crate::player::Term::Turns(bill.stay_days),
         ) {
             desk.detained_note.write(PlayerDetained {
                 player,
@@ -386,8 +386,15 @@ pub fn insurance_claim_system(
 ) {
     for notice in detained.read() {
         // 拘留天数从账本那条查询里读（`Books::detained` 是全工程唯一的 `&mut
-        // Detention`，自己再开一条读查询会在参数建立期撞成 B0001 —— P4② 的坑）
-        let Ok(days) = books.detained.get(notice.player).map(|d| d.turns_left) else {
+        // Detention`，自己再开一条读查询会在参数建立期撞成 B0001 —— P4② 的坑）。
+        // 读的是 `term.turns()`：笼中（P12 的恶人）那一条读不出天数，而他没有保单，
+        // 走到这一格只能是数据错 —— 宁可不赔，也不要按一个猜的数赔。
+        let Some(days) = books
+            .detained
+            .get(notice.player)
+            .ok()
+            .and_then(|d| d.term.turns())
+        else {
             continue; // 消息到了组件已被放出来（同帧出狱）：没有可赔的天数
         };
         let Ok(policy) = holds.get(notice.player) else {

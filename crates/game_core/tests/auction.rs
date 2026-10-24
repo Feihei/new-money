@@ -30,7 +30,7 @@ use bevy::prelude::NextState;
 use common::*;
 use game_core::prelude::{
     ActiveBoard, BidMove, CardAim, Detention, DetentionPlace, GameRules, GameSetup, God, LandId,
-    LandStatus, PLAYER_COLORS, Pending, PlayerSetup, TurnPhase,
+    LandStatus, PLAYER_COLORS, Pending, PlayerSetup, Term, TurnPhase,
 };
 
 /// 徐家汇（地块 3，绑在 9 号格上）：名义地价 3800、加盖一层 1900。
@@ -353,7 +353,7 @@ fn a_locked_up_player_is_not_on_the_list() {
         jailed,
         Detention {
             place: DetentionPlace::Hospital,
-            turns_left: 3,
+            term: Term::Turns(3),
         },
     );
 
@@ -467,7 +467,7 @@ fn no_other_bidders_means_no_auction() {
         owner,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 3,
+            term: Term::Turns(3),
         },
     );
 

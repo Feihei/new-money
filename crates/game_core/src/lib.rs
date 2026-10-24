@@ -49,6 +49,7 @@ pub mod shop;
 pub mod status;
 pub mod stock;
 pub mod turn;
+pub mod villain;
 pub mod walk;
 pub mod world;
 
@@ -108,7 +109,7 @@ pub mod prelude {
     pub use crate::items::{Inventory, ItemKind};
     pub use crate::land::{BuildingLevel, Facility, LandId, Mortgaged, Owner};
     pub use crate::landing::{
-        Landed, Landing, LandingDomain, Pending, PendingDecision, classify_landing_system,
+        Landed, Landing, LandingDomain, Mover, Pending, PendingDecision, classify_landing_system,
         close_landing_system, decision_system, detain, domain_of, teleport,
     };
     pub use crate::loader::JsonAssetLoader;
@@ -131,20 +132,21 @@ pub mod prelude {
         AuctionFailed, AuctionMove, AuctionStarted, AuctionWon, BailRequested, BankOp, BankOpDone,
         BankOpRequested, BankVisited, BidMove, BidPlaced, BidWithdrawn, BombTransferred,
         BuildOffered, BuildRequested, BuyOffered, BuyTicketRequested, CardDrawn, CardGained,
-        CardLost, CardNotice, CardPlayed, CashChanged, ChairmanTook, ChargeWaived, ChestOpened,
-        CompanyCharged, CompanyPayout, Decision, DecisionChosen, DetentionLifted, DetentionSkipped,
-        DiceRolled, EffectOutcome, FacilityBuilt, FinancingDrawRequested, FinancingDrawn,
-        FinancingRecalled, GameOver, GiftGiven, GiftsGiven, GodAppeared, GodDeed, GodExit, GodLeft,
-        GodPossessed, IndemnityPaid, ItemPlaced, JackpotChanged, JackpotWhy, LandBought, LandTaken,
-        LandUpgraded, LotteryBought, LotteryDrawn, LotteryWon, MinigameResult, MinigameScore,
-        MortgageDone, MortgageOp, MortgageRequested, MountChanged, MoveCapped, NewsAudience,
-        NewsFired, NewsHit, NewsNotice, PlaceItemRequested, PlayCardRequested, PlayerArrived,
-        PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged,
+        CardLost, CardNotice, CardPlayed, CardSnatched, CashChanged, ChairmanTook, ChargeWaived,
+        ChestOpened, CompanyCharged, CompanyPayout, Decision, DecisionChosen, DepositsRobbed,
+        DetentionLifted, DetentionSkipped, DiceRolled, EffectOutcome, FacilityBuilt,
+        FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GiftGiven, GiftsGiven,
+        GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, IndemnityPaid, ItemPlaced,
+        ItemThieved, JackpotChanged, JackpotWhy, LandBought, LandTaken, LandUpgraded,
+        LotteryBought, LotteryDrawn, LotteryWon, MinigameResult, MinigameScore, MortgageDone,
+        MortgageOp, MortgageRequested, MountChanged, MoveCapped, NewsAudience, NewsFired, NewsHit,
+        NewsNotice, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
+        PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, PointsStolen,
         PolicyBought, RedEnvelope, RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested,
-        RentDue, RequestRemoteDice, RequestRoll, RequestStay, ServiceCharged, ShopOpDone,
-        ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged, StockTradeRequested,
-        StockTraded, StockVisited, TileStepped, TradeSide, TurnEnded, TurnStarted, UpgradeOffered,
-        WalkHalted, WalkStarted,
+        RentDue, RentRerouted, RequestRemoteDice, RequestRoll, RequestStay, ServiceCharged,
+        ShopOpDone, ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged,
+        StockTradeRequested, StockTraded, StockVisited, TileStepped, TollExtorted, TradeSide,
+        TurnEnded, TurnStarted, UpgradeOffered, VillainHired, WalkHalted, WalkStarted,
     };
     pub use crate::news::{
         FieldFilter, NewsDef, NewsId, NewsScope, NewsSet, NewsSink, PlayerPick, find_id, fire_news,
@@ -159,7 +161,7 @@ pub mod prelude {
     pub use crate::player::{
         BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Heading, Insured, Mount,
         MoveCap, PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, Points, START_TILE,
-        StaySentence, TokenPosition, WalkQueue, Wallet,
+        StaySentence, Term, TokenPosition, WalkQueue, Walker, Wallet,
     };
     pub use crate::plot::{PlotArea, area_of, is_in_area};
     pub use crate::property::{
@@ -176,6 +178,11 @@ pub mod prelude {
     pub use crate::status::{LandStatus, Timed, expire_land_status_system};
     pub use crate::stock::{PriceHistory, StockDef, StockHoldings, StockId, StockPrice, StockSet};
     pub use crate::turn::{GameSession, LastRoll, Paused, TurnOrder, TurnPhase, not_paused};
+    pub use crate::villain::{
+        Hired, Villain, VillainKind, custody_of, has_door, hoodlum_toll_system, on_hired_system,
+        robber_snatch_system, spawn_caged_villains, thief_deliver_system, villain_rotation_system,
+        villain_turn_system,
+    };
     pub use crate::walk::{
         WalkClock, WalkPlan, advance_walk_clock_system, plan_walk, walk_step_system,
     };
@@ -187,30 +194,32 @@ use prelude::{
     ActiveBoard, ArcadeDeal, AtmAccess, AuctionFailed, AuctionMove, AuctionStarted, AuctionWon,
     BailRequested, BankOpDone, BankOpRequested, BankVisited, BidPlaced, BidWithdrawn, BoardDef,
     BombTransferred, BuildOffered, BuildRequested, BuyOffered, BuyTicketRequested, CardDrawn,
-    CardGained, CardLost, CardPlayed, CardSet, CashChanged, ChairmanTook, ChargeWaived,
-    ChestOpened, CompanyCharged, CompanyPayout, Corrections, CouponBoxes, DecisionChosen,
-    DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, FacilityBuilt,
-    FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GameRules, GameSeed,
-    GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, IndemnityPaid,
-    ItemPlaced, JackpotChanged, JsonAssetLoader, LandBought, LandTaken, LandUpgraded, Landing,
-    LotteryBought, LotteryDrawn, LotteryWon, MarketClock, MinigameResult, MinigameScore,
-    MortgageDone, MortgageRequested, MountChanged, MoveCapped, NewsFired, Paused, PendingDecision,
-    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
-    PlayerDetained, PlayerTeleported, PointsChanged, PolicyBought, RedEnvelope, RemoteBuildOffered,
-    RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RequestRemoteDice, RequestRoll, RequestStay,
-    ServiceCharged, ShopOpDone, ShopOpRequested, ShopStock, StayLifted, StaySkipped,
-    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
-    TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkHalt, WalkHalted,
-    WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system, age_suspensions_system,
+    CardGained, CardLost, CardPlayed, CardSet, CardSnatched, CashChanged, ChairmanTook,
+    ChargeWaived, ChestOpened, CompanyCharged, CompanyPayout, Corrections, CouponBoxes,
+    DecisionChosen, DepositsRobbed, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride,
+    FacilityBuilt, FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GameRules,
+    GameSeed, GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet,
+    IndemnityPaid, ItemPlaced, ItemThieved, JackpotChanged, JsonAssetLoader, LandBought, LandTaken,
+    LandUpgraded, Landing, LotteryBought, LotteryDrawn, LotteryWon, MarketClock, MinigameResult,
+    MinigameScore, MortgageDone, MortgageRequested, MountChanged, MoveCapped, NewsFired, Paused,
+    PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
+    PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, PointsStolen, PolicyBought,
+    RedEnvelope, RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RentRerouted,
+    RequestRemoteDice, RequestRoll, RequestStay, ServiceCharged, ShopOpDone, ShopOpRequested,
+    ShopStock, StayLifted, StaySkipped, StockPriceChanged, StockSet, StockTradeRequested,
+    StockTraded, StockVisited, TileStepped, TollExtorted, TurnEnded, TurnPhase, TurnStarted,
+    UpgradeOffered, VillainHired, WalkClock, WalkHalt, WalkHalted, WalkStarted,
+    accrue_jackpot_interest_system, advance_walk_clock_system, age_suspensions_system,
     auction_hold_system, auction_move_system, bail_op_system, bank_op_system, begin_game_system,
     build_op_system, decision_system, deliver_calendar_events_system, draw_lottery_system,
     expire_land_status_system, financing_system, finish_halt_system, grant_atm_access_system,
-    insurance_claim_system, land_deity_succession_system, lottery_op_system,
-    market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system, place_item_system,
-    play_card_system, remote_build_system, resolve_halt_system, settle_arcade_landing,
-    settle_god_landing_system, settle_landing_occupancy_system, shop_op_system,
-    tick_insurance_system, top_up_gods_system, trade_request_system, walk_effect_system,
-    walk_step_system, wander_gods_system,
+    hoodlum_toll_system, insurance_claim_system, land_deity_succession_system, lottery_op_system,
+    market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system, on_hired_system,
+    place_item_system, play_card_system, remote_build_system, resolve_halt_system,
+    robber_snatch_system, settle_arcade_landing, settle_god_landing_system,
+    settle_landing_occupancy_system, shop_op_system, thief_deliver_system, tick_insurance_system,
+    top_up_gods_system, trade_request_system, villain_rotation_system, villain_turn_system,
+    walk_effect_system, walk_step_system, wander_gods_system,
 };
 use turn::{
     LastRoll, begin_turn_system, end_turn_system, game_over_system, not_paused, remote_dice_system,
@@ -370,6 +379,14 @@ impl Plugin for CoreGamePlugin {
             // ===== 保释（P4③）=====
             .add_message::<BailRequested>()
             .add_message::<PlayerBailed>()
+            // ===== 四大恶人（P12b–d）=====
+            .add_message::<VillainHired>()
+            .add_message::<DepositsRobbed>()
+            .add_message::<PointsStolen>()
+            .add_message::<ItemThieved>()
+            .add_message::<CardSnatched>()
+            .add_message::<TollExtorted>()
+            .add_message::<RentRerouted>()
             // ===== 抵押与赎回（P3d③）=====
             .add_message::<MortgageRequested>()
             .add_message::<MortgageDone>()
@@ -440,6 +457,13 @@ impl Plugin for CoreGamePlugin {
                     take_stay_system
                         .run_if(in_state(TurnPhase::WaitRoll))
                         .run_if(not_paused),
+                    // 恶人的回合（P12a）：与玩家、AI 发**同一条意图**（`RequestRoll`/`RequestStay`），
+                    // 所以它与上面两条同一个窗口、同一个闸门。它排在两条之后没有语义 ——
+                    // 消息要到下一帧才投递（坑 12），这里的位置只是为了读的时候一眼看出
+                    // 「掷骰、停留、恶人自发意图」是同一个窗口的三个入口
+                    villain_turn_system
+                        .run_if(in_state(TurnPhase::WaitRoll))
+                        .run_if(not_paused),
                     walk_step_system
                         .run_if(in_state(TurnPhase::Walking))
                         .run_if(not_paused),
@@ -507,10 +531,36 @@ impl Plugin for CoreGamePlugin {
             .add_systems(Update, grant_atm_access_system)
             // 天使与恶魔：同一条 `TileStepped` 的 core 侧 reader，注册形状照上面那条 ATM
             // （不设阶段闸门，理由见 `walk_effect_system` 的注）。它带 `Books`，
-            // 所以要 `resource_exists` 挡装配前与回菜单之后的那些帧
+            // 所以要 `resource_exists` 挡装配前与回菜单之后的那些帧。
+            // 恶人行为的三条 reader（P12b/c）与它同住这一组：`hoodlum_toll_system`
+            // 也带 `Books`（两条对 `&mut Wallet` 的访问冲突是调度期硬检查的），
+            // 所以这一组显式 `chain` —— 勒索与神明的脚步互不相干，chain 只是让
+            // 「同一帧读到同一条 TileStepped」的两条 reader 都跑得到。
+            // `robber_snatch_system`/`thief_deliver_system` 不带 `Books`
+            // （前者动的是手牌与随机流，后者是道具栏），本来可以并行，
+            // 但它们读的消息与上面两条同源，串成一条链读起来一眼看出「走路的事在这里」。
+            // `on_hired_system` 读的是 `VillainHired`（保释窗口发的，下一帧才到），
+            // 与这条链先后无语义，放在一起是因为它同样是「恶人的事」。
             .add_systems(
                 Update,
-                walk_effect_system.run_if(resource_exists::<ActiveBoard>),
+                (
+                    walk_effect_system.run_if(resource_exists::<ActiveBoard>),
+                    hoodlum_toll_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
+                    // `robber_snatch_system` 读 `Rng`（装配时才插入）、`thief_deliver_system`
+                    // 读道具栏 —— 门禁与上面两条同款：装配前世界不存在，恶人也不存在
+                    robber_snatch_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
+                    thief_deliver_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
+                    on_hired_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
+                )
+                    .chain(),
             )
             .add_systems(
                 Update,
@@ -657,6 +707,11 @@ impl Plugin for CoreGamePlugin {
                     // ② 次序有语义：必须在 tick **之后**减，否则「停牌 1 天」在当天
                     // tick 之前就成了 0，那一天照常开盘 —— 少挡的正是它要挡的那一天
                     age_suspensions_system,
+                    // 恶人与轮转的那道同步（P12a）。**必须排在 `end_turn_system` 之后**：
+                    // 那条刚把游标推到下一位，这一条才摘掉用完回合的那一位 —— 反过来写，
+                    // 摘除会把游标一起往前带，症状是有人的回合凭空被跳过一次。
+                    // 与坑 36/37 同一条纪律：这种顺序只能由 `chain` 的元素位置说出来。
+                    villain_rotation_system,
                     // 神明过一天：先各自挪一格，再补刷到名额。这两条都要 `&mut Rng`，
                     // 而上面那一组里的行情 tick 也要 —— 所以它们自己成一阶段，
                     // 不能塞进那个并行元组（调度期直接撞成借用冲突）

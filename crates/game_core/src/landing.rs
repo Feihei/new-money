@@ -29,7 +29,7 @@ use crate::board::{BoardDef, GridPos, TileIndex, TileKind};
 use crate::card::CardKind;
 use crate::land::LandId;
 use crate::msg::{Decision, DecisionChosen, LandBought, LandUpgraded};
-use crate::player::{Detention, DetentionPlace, PlayerId, TokenPosition};
+use crate::player::{Detention, DetentionPlace, Term, TokenPosition, Walker};
 use crate::settle::Books;
 use crate::turn::{TurnOrder, TurnPhase};
 use crate::world::ActiveBoard;
@@ -38,13 +38,45 @@ use crate::world::ActiveBoard;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Landed {
     pub player: Entity,
+    /// **谁踩的**（P12）。P1 之前这一格是隐含的：踩格的必然是玩家。恶人上场之后它必须
+    /// 明写，因为「这格归谁结算」从此有两个主语 —— 而它必须在这里答，不能让六条域
+    /// 结算各自再问一次「他是玩家吗」：六处 `if` 里有五处会漏写，漏写的那一侧不报错
+    /// （恶人踩到别人的地既白付了租，又把自己的规则跑了两遍）。
+    pub mover: Mover,
     pub tile: TileIndex,
     pub kind: TileKind,
-    /// 该格的结算域，由 [`domain_of`] 从 `kind` 映射而来。各域 system 认这个而不是 `kind`：
-    /// 「谁该管」只有一个落点，加格类型时才可能被迫回答它。
+    /// 该格的结算域，由 [`domain_of`]（玩家）或 [`Mover::domain`]（恶人）给出。
+    /// 各域 system 认这个而不是 `kind`：「谁该管」只有一个落点，加格类型时才可能被迫回答它。
     pub domain: LandingDomain,
     /// 该格绑定的土地（只有 `TileKind::Property` 有，`BoardDef::validate` 保证）。
     pub land: Option<LandId>,
+}
+
+/// 环上「是谁在踩这一格」。与 [`crate::player::Walker`] 是同一件事的两面：
+/// 那个标记管「回合机要不要看他」，这一位管「他踩到的格归谁结算」。
+///
+/// 为什么带着 `VillainKind` 而不是一个布尔：四种恶人的规则各不相同，而「他踩到哪一格
+/// 会发生什么」正是那句话的内容。放在 `Landed` 上而不是让行为 system 自己再查一次组件，
+/// 是因为解释必须只发生一次（本文件头的第二条）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mover {
+    Player,
+    Villain(crate::villain::VillainKind),
+}
+
+impl Mover {
+    /// 「这格归谁结算」在恶人那一侧的答案：**与格类型无关**。
+    ///
+    /// 四种恶人管的是「踩到别人那块地」与「这一格上有没有人/有没有东西」，而那些问题
+    /// 由 `kind` 各自的行为表回答；`TileKind` 那 18 格对他只有一句话 —— 「轮到你说话」。
+    /// 反过来说，把 `domain_of` 改成「按人分派的两张 18 行表」会得到 36 行里 18 行废话，
+    /// 而将来加第 19 种格的人要在那半张废表里找一个不存在的落点。
+    pub const fn domain(self, kind: TileKind) -> LandingDomain {
+        match self {
+            Self::Player => domain_of(kind),
+            Self::Villain(kind2) => LandingDomain::Villain(kind2),
+        }
+    }
 }
 
 /// 落格归哪个结算域。与流水线里那条 chain 一一对应，`match` 的穷尽性由编译器守住。
@@ -83,6 +115,14 @@ pub enum LandingDomain {
     /// 理由与 P2b 的圣诞/红包同一条（没人要回答「要不要听」），而新闻的玩法本来也是
     /// 「世界变了」这一件事实，不是「你可以选择 ignore」。
     News,
+    /// 踩格的是四大恶人（P12，`villain::settle_villain_landing_system`）。
+    ///
+    /// 它**不是「什么都不做」**，虽然 P12a 落地时它确实什么都不做（恶人先在环上走起来）。
+    /// 单独占一格的理由与上面那条一样：这一格是「谁踩的」那一半的答案，而六个玩家域
+    /// 各自 `filter` 的是自己的那一格，所以恶人踩上去时它们**结构上不会跑** ——
+    /// 不需要六句「他是玩家吗」，也就不存在漏写第五句的那种 bug。
+    /// 带的是哪一种恶人：四种人的规则在 `villain.rs` 各自那张表上回答同一句「他踩到这一格拿什么」。
+    Villain(crate::villain::VillainKind),
     /// 按设计就是什么都不做：路面只是路面，起点刻意不发薪水（PLAN §一）。
     Nothing,
     /// 玩法已在 PLAN 登记、但结算还没到位的格。踩上去 `warn!`，别当成「没有这个格」。
@@ -127,10 +167,14 @@ pub const fn domain_of(kind: TileKind) -> LandingDomain {
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Landing(pub Option<Landed>);
 
-/// 流水线第一段：把当前玩家的逻辑位置翻译成 `(格类型, 结算域, 土地)`。
+/// 流水线第一段：把当前行动者的逻辑位置翻译成 `(是谁, 格类型, 结算域, 土地)`。
+///
+/// 位置查询走 `With<Walker>` 而不是 `With<PlayerId>`（P12）：恶人也是踩到一格要有人解释
+/// 「这一格归谁」，而解释只做一次是本文件的头一条约束。
 pub fn classify_landing_system(
     order: Res<TurnOrder>,
-    positions: Query<&TokenPosition, With<PlayerId>>,
+    positions: Query<&TokenPosition, With<Walker>>,
+    villains: Query<&crate::villain::Villain>,
     active: Res<ActiveBoard>,
     mut landing: ResMut<Landing>,
 ) {
@@ -144,7 +188,13 @@ pub fn classify_landing_system(
     let Some(tile) = active.def.tile(pos.tile.0 as i64) else {
         return;
     };
-    let domain = domain_of(tile.kind);
+    // 两个臂而不是 `Option`：这里回答的是「他是哪一种行动者」，而「查不到恶人组件」
+    // 在类型上就是玩家 —— 将来第三种行动者必须在这里加第三臂，编译器会催
+    let mover = match villains.get(player) {
+        Ok(villain) => Mover::Villain(villain.kind),
+        Err(_) => Mover::Player,
+    };
+    let domain = mover.domain(tile.kind);
     if let LandingDomain::Unimplemented(kind) = domain {
         warn!(
             "格 {}({}) 是 {kind:?} 类型，但这一格还没有结算实现（待办见 .agents/PLAN.md §三）",
@@ -153,6 +203,7 @@ pub fn classify_landing_system(
     }
     landing.0 = Some(Landed {
         player,
+        mover,
         tile: pos.tile,
         kind: tile.kind,
         domain,
@@ -431,33 +482,34 @@ pub fn decision_system(
 /// 查不到接入点（这张棋盘没有那条分支）时返回 `None` 且**什么都不改** —— 不猜一个格子、
 /// 也不回退到起点（`card_effects.gd:76-81` 修过的坑）。
 ///
-/// **更久的那一张赢**：已经要被关 3 天的人再吃一张 2 天，他该待原来那个地方满 3 天。
-/// 写成覆盖就等于替人减刑 —— 与 P3d④c 停留卡同一条理由，所以那条规则在这里也成立，
-/// 而「等长时后来者赢」是这条规则剩下唯一的任意格，由一条用例钉住。
+/// **更久的那一张赢**（[`Detention::kept_against`]）：已经要被关 3 天的人再吃一张 2 天，
+/// 他该待原来那个地方满 3 天。写成覆盖就等于替人减刑 —— 与 P3d④c 停留卡同一条理由，
+/// 所以那条规则在这里也成立，而「等长时后来者赢」是这条规则剩下唯一的任意格，由一条用例钉住。
+/// P12 起「更久」不再只是比数字：笼中（[`Term::UntilBailed`]）那一张赢下一切。
 ///
 /// 两条写都尽量**就地**（`Query<&mut>`），`Commands` 只用于「他身上本来没有这个组件」那一格：
 /// 同一帧两张拘留卡若都走延迟写，第二条读不到第一条，就会各搬一次棋子、各发一份凭据。
 pub fn detain(
     commands: &mut Commands,
-    positions: &mut Query<&mut TokenPosition, With<PlayerId>>,
-    held: &mut Query<&mut Detention, With<PlayerId>>,
+    positions: &mut Query<&mut TokenPosition, With<Walker>>,
+    held: &mut Query<&mut Detention, With<Walker>>,
     def: &BoardDef,
     player: Entity,
     place: DetentionPlace,
-    turns: u32,
+    term: Term,
 ) -> Option<(Detention, TileIndex, Option<GridPos>)> {
-    if let Ok(existing) = held.get_mut(player)
-        && existing.turns_left > turns
+    let incoming = Detention { place, term };
+    if let Ok(existing) = held.get(player)
+        && existing.kept_against(incoming) == *existing
     {
-        let kept = *existing;
-        // 他没换地方，所以接入点还是他现在站着的那格
+        // 原来那一张赢：他没换地方，所以接入点还是他现在站着的那格
         let junction = positions.get(player).ok()?.tile;
-        let end = kept
+        let end = existing
             .place
             .branch()
             .and_then(|kind| def.branch_end(kind))
             .map(GridPos::of);
-        return Some((kept, junction, end));
+        return Some((*existing, junction, end));
     }
     let mut pos = positions.get_mut(player).ok()?;
     let junction = match place.branch() {
@@ -469,22 +521,20 @@ pub fn detain(
         .and_then(|kind| def.branch_end(kind))
         .map(GridPos::of);
     pos.tile = junction;
-    let sentence = Detention {
-        place,
-        turns_left: turns,
-    };
     match held.get_mut(player) {
-        Ok(mut existing) => *existing = sentence,
+        Ok(mut existing) => *existing = incoming,
         Err(_) => {
-            commands.entity(player).insert(sentence);
+            commands.entity(player).insert(incoming);
         }
     }
-    Some((sentence, junction, end))
+    Some((incoming, junction, end))
 }
 
 /// 瞬移：只改逻辑位置，位移动画是表现层的事。
+///
+/// 按 `Walker` 收（P12，与 [`detain`] 同一条签名要求）：今天会被卡的传送打到的仍然只有玩家。
 pub fn teleport(
-    positions: &mut Query<&mut TokenPosition, With<PlayerId>>,
+    positions: &mut Query<&mut TokenPosition, With<Walker>>,
     player: Entity,
     tile: TileIndex,
 ) {

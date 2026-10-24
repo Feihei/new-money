@@ -32,7 +32,7 @@ fn two_players_before_the_roll() -> (App, Entity, Entity) {
 
 /// 还在被拘留就返回剩余回合数。
 fn turns_left(app: &App, player: Entity) -> Option<u32> {
-    detention_of(app, player).map(|d| d.turns_left)
+    detention_of(app, player).and_then(|d| d.term.turns())
 }
 
 #[test]

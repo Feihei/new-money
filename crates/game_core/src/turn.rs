@@ -19,7 +19,8 @@ use crate::msg::{
 };
 use crate::occupancy::Occupancy;
 use crate::player::{
-    Bankrupt, Detention, Heading, Mount, MoveCap, PlayerId, StaySentence, TokenPosition, WalkQueue,
+    Bankrupt, Detention, Heading, Mount, MoveCap, PlayerId, StaySentence, Term, TokenPosition,
+    WalkQueue, Walker,
 };
 use crate::rng::Rng;
 use crate::settle::Books;
@@ -93,6 +94,46 @@ impl TurnOrder {
             }
         }
         None
+    }
+
+    /// 把一位新行动者排到 `after` 那位的**后面**（P12：保释出来的恶人接着雇主的回合走）。
+    /// 已在表里时不重复插，返回是否发生了插入。
+    ///
+    /// 游标跟着让位：插在游标**之前或正中**时 `cursor += 1`，否则它会指到刚插进来的那位身上，
+    /// 症状是**别人的回合被这个新来的人抢走一格**（这一条没人会写第二遍，所以纪律在这里）。
+    pub fn insert_after(&mut self, actor: Entity, after: Entity) -> bool {
+        if self.order.contains(&actor) {
+            return false;
+        }
+        let at = match self.order.iter().position(|e| *e == after) {
+            Some(i) => i + 1,
+            None => self.order.len(),
+        };
+        self.order.insert(at, actor);
+        if at <= self.cursor {
+            self.cursor += 1;
+        }
+        true
+    }
+
+    /// 把一位从轮转里摘掉（P12：恶人回笼）。返回是否发生了摘除。
+    ///
+    /// 游标的三条口径：摘在游标**之前**要退一格（不然会跳过一位）；摘的**正是游标那一位**时
+    /// 游标不动，于是它指向紧跟在他后面的那位 —— 那正是「他的回合刚刚用完」那一帧要的读数，
+    /// 所以调用方必须排在 [`end_turn_system`] 之后（见 `villain::villain_rotation_system` 的注）；
+    /// 退到表尾或表空时归零（`advance_to_active` 自己会再找可行动的那位）。
+    pub fn remove(&mut self, actor: Entity) -> bool {
+        let Some(at) = self.order.iter().position(|e| *e == actor) else {
+            return false;
+        };
+        self.order.remove(at);
+        if at < self.cursor {
+            self.cursor -= 1;
+        }
+        if self.cursor >= self.order.len() {
+            self.cursor = 0;
+        }
+        true
     }
 }
 
@@ -182,6 +223,9 @@ pub struct RollInput<'w, 's> {
     active: Res<'w, ActiveBoard>,
     /// 路障截断发生在入队时（ADR-002 §6）—— 掷骰这一侧只问「路径里第一个路障在哪」。
     occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
+    /// 小偷穿路障（P12c）：判据读的是**走路的那一位**身上有没有那个标记，
+    /// 所以输入包里带一条恶人查询。它不与 `walkers` 撞（`Villain` 不在那个元组里）。
+    villains: Query<'w, 's, &'static crate::villain::Villain>,
 }
 
 /// `begin_turn_system` 要动的那一摞。P6 起了第九个参数，按房规打包而不是挂
@@ -191,9 +235,12 @@ pub struct RollInput<'w, 's> {
 pub struct TurnDesk<'w, 's> {
     commands: Commands<'w, 's>,
     order: ResMut<'w, TurnOrder>,
+    /// **`With<Walker>` 而不是 `With<PlayerId>`**（P12）：受雇的恶人要能轮到、要被跳过、
+    /// 出得了笼。`alive` 读的是「他破产了吗」，而恶人压根没有破产这一说 ——
+    /// 他不在 `Bankrupt` 那一族里，所以「没破产」对他恒真，正是想要的读数。
     players:
-        Query<'w, 's, (Entity, Option<&'static Bankrupt>, &'static TokenPosition), With<PlayerId>>,
-    held: Query<'w, 's, &'static Detention, With<PlayerId>>,
+        Query<'w, 's, (Entity, Option<&'static Bankrupt>, &'static TokenPosition), With<Walker>>,
+    held: Query<'w, 's, &'static Detention, With<Walker>>,
     possessions: Query<'w, 's, &'static mut crate::gods::Possession, With<PlayerId>>,
     /// 修正登记处。**为什么是这么小的一块而不是整个 `Books`**：`Books` 带着
     /// `&mut Detention`（P4② 搬进去的），而上面那格 `held` 读的是同一个组件 ——
@@ -210,8 +257,9 @@ pub struct TurnDesk<'w, 's> {
 
 /// 回合开始的唯一入口：跳过破产者 → 处理拘留 → 否则等掷骰。
 ///
-/// 拘留的递减规则与 `player_data.gd:72-80` 一致：`turns_left` 每次回合开始减一，
+/// 拘留的递减规则与 `player_data.gd:72-80` 一致：`Term::Turns` 每次回合开始减一，
 /// 扣到只剩 1 的那一回合**当场回来并可掷骰**（即判 3 回合 = 跳过 2 个回合）。
+/// `Term::UntilBailed`（P12 的恶人）不扣也不放 —— 见下面那三条出口的注。
 ///
 /// **停留（P4④ 起）不在这里扣**：身上有 `StaySentence` 的人照常进入 `WaitRoll`，只是
 /// 掷骰按钮翻成「停留」，点一下才结束这一回合（`take_stay_system`）。两条计时因此
@@ -274,34 +322,52 @@ pub fn begin_turn_system(
         );
     }
 
-    // 回合开始即扣一格，所以 turns_left==1 表示「最后一格服完，本回合可行动」
     let held = desk.held.get(player).ok().copied();
-    let jail_next = held.filter(|d| d.turns_left > 1).map(|d| Detention {
-        place: d.place,
-        turns_left: d.turns_left - 1,
-    });
 
-    if let Some(next_held) = jail_next {
-        // 先让 UI 显示「谁的回合被跳了」，再发那条凭据（`turn_manager.gd:188-189` 的顺序）
-        writers.turn_started.write(TurnStarted { player });
-        desk.commands.entity(player).insert(next_held);
-        writers.skipped.write(DetentionSkipped {
-            player,
-            place: next_held.place,
-            turns_left: next_held.turns_left,
-        });
-        next.set(TurnPhase::TurnEnd);
-        return;
-    }
-
-    // 走到这里 = 本回合没人被占用：把「最后一格」服完的放出来。
-    if let Some(back) = held.filter(|d| d.turns_left == 1) {
-        desk.commands.entity(player).remove::<Detention>();
-        writers.released.write(DetentionLifted {
-            player,
-            place: back.place,
-            junction: pos.tile,
-        });
+    // 回合开始即扣一格，所以「只剩 1」表示最后一格服完、本回合可行动。
+    // **三条出口写成一张穷尽的 `match` 而不是两个 `filter`**（P12）：`UntilBailed` 那一支
+    // 既不该被扣一格，更不该被当成「钟到 0 就放人」—— 漏写它的后果不是崩，是笼中的恶人
+    // 自己在环上散步，而 `filter(|d| d.turns_left == 1)` 那种写法拦不住它。
+    if let Some(d) = held {
+        match d.term {
+            // 没有钟：跳过本回合，放人只有保释办得出来。今天走到这一格的那位其实不在轮转里
+            // （`villain::villain_rotation_system` 一进笼就把他摘出去了），所以这一支是那道
+            // 同步失灵时的最后一道闸 —— 他站着不动，而不是自己走出来。
+            Term::UntilBailed => {
+                writers.turn_started.write(TurnStarted { player });
+                writers.skipped.write(DetentionSkipped {
+                    player,
+                    place: d.place,
+                    left: None,
+                });
+                next.set(TurnPhase::TurnEnd);
+                return;
+            }
+            Term::Turns(n) if n > 1 => {
+                // 先让 UI 显示「谁的回合被跳了」，再发那条凭据（`turn_manager.gd:188-189` 的顺序）
+                writers.turn_started.write(TurnStarted { player });
+                desk.commands.entity(player).insert(Detention {
+                    place: d.place,
+                    term: Term::Turns(n - 1),
+                });
+                writers.skipped.write(DetentionSkipped {
+                    player,
+                    place: d.place,
+                    left: Some(n - 1),
+                });
+                next.set(TurnPhase::TurnEnd);
+                return;
+            }
+            // 最后一格服完：当场放人，本回合照常行动
+            Term::Turns(_) => {
+                desk.commands.entity(player).remove::<Detention>();
+                writers.released.write(DetentionLifted {
+                    player,
+                    place: d.place,
+                    junction: pos.tile,
+                });
+            }
+        }
     }
     writers.turn_started.write(TurnStarted { player });
     next.set(TurnPhase::WaitRoll);
@@ -317,7 +383,7 @@ pub fn take_stay_system(
     mut commands: Commands,
     order: Res<TurnOrder>,
     mut requests: MessageReader<RequestStay>,
-    mut staying: Query<&mut StaySentence, With<PlayerId>>,
+    mut staying: Query<&mut StaySentence, With<Walker>>,
     mut skipped: MessageWriter<StaySkipped>,
     mut lifted: MessageWriter<StayLifted>,
     mut next: ResMut<NextState<TurnPhase>>,
@@ -409,7 +475,7 @@ pub fn roll_dice_system(
     mut input: RollInput<'_, '_>,
     mut rng: ResMut<Rng>,
     mut clock: ResMut<WalkClock>,
-    mut walkers: Query<RollWalker, With<PlayerId>>,
+    mut walkers: Query<RollWalker, With<Walker>>,
     mut writers: RollWriters<'_, '_>,
     mut next: ResMut<NextState<TurnPhase>>,
     mut last: ResMut<LastRoll>,
@@ -451,6 +517,10 @@ pub fn roll_dice_system(
         rolled,
         cap_turns,
         &input.occupancies,
+        input
+            .villains
+            .get(current)
+            .is_ok_and(|v| v.kind == crate::villain::VillainKind::Thief),
     );
     let mut target = WalkTarget {
         pos: &mut pos,
@@ -564,6 +634,10 @@ pub struct RemoteInput<'w, 's> {
     active: Res<'w, ActiveBoard>,
     occupancies: Query<'w, 's, (Entity, &'static Occupancy)>,
     inventories: Query<'w, 's, &'static mut Inventory, With<PlayerId>>,
+    /// 与 [`RollInput`] 同一条豁免（P12c）：两个入口共用 [`plan_walk`]，
+    /// 判据也共用同一份 —— 恶人今天用不上遥控骰子（他没有道具栏），
+    /// 但「走路的人是谁」这一问不该只在一个入口问得出来。
+    villains: Query<'w, 's, &'static crate::villain::Villain>,
 }
 
 #[derive(SystemParam)]
@@ -577,7 +651,7 @@ pub struct RemoteWriters<'w, 's> {
 pub fn remote_dice_system(
     mut input: RemoteInput<'_, '_>,
     mut clock: ResMut<WalkClock>,
-    mut walkers: Query<RemoteWalker, With<PlayerId>>,
+    mut walkers: Query<RemoteWalker, With<Walker>>,
     mut writers: RemoteWriters<'_, '_>,
     mut next: ResMut<NextState<TurnPhase>>,
     mut last: ResMut<LastRoll>,
@@ -622,6 +696,10 @@ pub fn remote_dice_system(
         steps,
         cap_turns,
         &input.occupancies,
+        input
+            .villains
+            .get(current)
+            .is_ok_and(|v| v.kind == crate::villain::VillainKind::Thief),
     );
     writers.used.write(RemoteDiceUsed {
         player: current,
@@ -646,11 +724,28 @@ pub fn remote_dice_system(
     }
 }
 
+/// `end_turn_system` 的那一条「谁还在场上」查询。独立命名是因为它回答两个问题：
+/// 终局只数 `Has<PlayerId>` 那一位，轮转数全部 —— 类型太长会被 clippy 拆散，
+/// 而拆散后的两半正是函数那条注释要讲的两句话。
+type Movers<'w, 's> = bevy::ecs::system::Query<
+    'w,
+    's,
+    (Entity, Option<&'static Bankrupt>, Has<PlayerId>),
+    With<Walker>,
+>;
+
 /// 回合收尾：发 `TurnEnded`、回合计数、判终局，否则轮转下一位。
+///
+/// 两个谓词分开写（P12），因为它们回答的是两个不同的问题：
+/// - **终局**问的是「还剩几个**玩家**」，所以数的是 `Has<PlayerId>` 那一位 ——
+///   场上有四个恶人不是有人赢了的反面证据，把恶人算进 `living` 会永远算不出终局；
+/// - **轮转**问的是「下一个能行动的是谁」，所以走的是全部 `Walker` ——
+///   用前一个集合去推游标，恶人就被跳过了一格，而「恶人不会动」这件事在画面上
+///   看起来完全像是设计如此。读的就是上面那条 [`Movers`]。
 pub fn end_turn_system(
     mut order: ResMut<TurnOrder>,
     mut session: ResMut<GameSession>,
-    players: Query<(Entity, Option<&Bankrupt>), With<PlayerId>>,
+    movers: Movers<'_, '_>,
     mut ended: MessageWriter<TurnEnded>,
     mut over: MessageWriter<GameOver>,
     mut next: ResMut<NextState<TurnPhase>>,
@@ -661,22 +756,29 @@ pub fn end_turn_system(
     ended.write(TurnEnded { player });
     session.turn_count += 1;
 
-    let living: Vec<Entity> = players
-        .iter()
-        .filter(|(_, bankrupt)| bankrupt.is_none())
-        .map(|(e, _)| e)
-        .collect();
-
+    let alive = |e: Entity| {
+        movers
+            .get(e)
+            .map(|(_, bankrupt, _)| bankrupt.is_none())
+            .unwrap_or(false)
+    };
     // 只剩一人（或零人）→ 终局。对应 `_check_game_over`
-    if living.len() <= 1 {
-        over.write(GameOver {
-            winner: living.first().copied(),
-        });
+    let living: usize = movers
+        .iter()
+        .filter(|(_, bankrupt, is_player)| bankrupt.is_none() && *is_player)
+        .count();
+
+    if living <= 1 {
+        let winner = movers
+            .iter()
+            .find(|(_, bankrupt, is_player)| bankrupt.is_none() && *is_player)
+            .map(|(e, _, _)| e);
+        over.write(GameOver { winner });
         next.set(TurnPhase::Over);
         return;
     }
 
-    order.advance_to_active(|e| living.contains(&e));
+    order.advance_to_active(alive);
     next.set(TurnPhase::TurnStart);
 }
 
@@ -741,5 +843,92 @@ mod tests {
         assert_eq!(order.advance_to_active(|_| false), None);
         assert_eq!(order.current_active(|_| false), None);
         assert_eq!(TurnOrder::new(vec![]).current_active(|_| true), None);
+    }
+
+    /// P12 的进出轮转：游标是一个**下标**而不是一个句柄，所以插一个人和摘一个人
+    /// 都可能让它指错人。指错人的症状不是崩溃，是「有人的回合被跳过一格」——
+    /// 那种 bug 只能靠把三条口径各钉一条测试钉住。
+    #[test]
+    fn inserting_before_the_cursor_moves_the_cursor_so_it_still_points_at_the_same_actor() {
+        let e = ents(3);
+        let mut order = TurnOrder::new(e.clone());
+        order.cursor = 1; // 正在 B 的回合上
+        let x = Entity::from_raw_u32(99).expect("索引不该撞上保留值");
+        assert!(order.insert_after(x, e[0]), "插在 A 之后 = 插到游标正中");
+        assert_eq!(order.order, vec![e[0], x, e[1], e[2]]);
+        assert_eq!(
+            order.current(),
+            Some(e[1]),
+            "游标要跟着让位，否则 B 的回合被 X 抢走"
+        );
+        // B 的回合照常结束，下一位还是原来那位 —— 插在他前面的人不许把他的后继吃掉
+        assert_eq!(order.advance_to_active(|_| true), Some(e[2]));
+        assert_eq!(order.advance_to_active(|_| true), Some(e[0]));
+        // 绕回表头之后轮到 X：插队不等于漏掉，他慢一圈而不是消失
+        assert_eq!(
+            order.advance_to_active(|_| true),
+            Some(x),
+            "X 要绕一圈才轮得到"
+        );
+    }
+
+    #[test]
+    fn inserting_after_the_current_actor_leaves_him_alone_and_repeats_are_refused() {
+        let e = ents(3);
+        let mut order = TurnOrder::new(e.clone());
+        order.cursor = 0; // 正在 A 的回合上 —— 保释就发生在这里
+        let x = Entity::from_raw_u32(98).expect("索引不该撞上保留值");
+        assert!(order.insert_after(x, e[0]));
+        assert_eq!(order.order, vec![e[0], x, e[1], e[2]]);
+        assert_eq!(order.cursor, 0, "插在游标之后不动游标");
+        assert_eq!(order.current(), Some(e[0]));
+        assert_eq!(
+            order.advance_to_active(|_| true),
+            Some(x),
+            "雇主的回合一轮完就轮到他自己保释出来的那位"
+        );
+        // 第二次插同一个人：不新增，也不许把游标推歪
+        assert!(!order.insert_after(x, e[2]));
+        assert_eq!(order.order.len(), 4);
+        assert_eq!(order.cursor, 1);
+        // 插在一个不在表里的人后面 → 接到表尾（恶人的雇主被摘掉之后的退路，不能 panic）
+        let ghost = Entity::from_raw_u32(97).expect("索引不该撞上保留值");
+        let y = Entity::from_raw_u32(96).expect("索引不该撞上保留值");
+        assert!(order.insert_after(y, ghost));
+        assert_eq!(order.order.last(), Some(&y));
+        assert_eq!(order.cursor, 1, "接到表尾也不许动游标");
+    }
+
+    #[test]
+    fn removing_shifts_the_cursor_back_except_when_it_is_the_one_being_removed() {
+        let e = ents(4);
+        // ① 摘在游标之前：游标退一格，指的还是同一个人
+        let mut order = TurnOrder::new(e.clone());
+        order.cursor = 2;
+        assert!(order.remove(e[0]));
+        assert_eq!(order.cursor, 1);
+        assert_eq!(order.current(), Some(e[2]));
+        // ② 摘的正是游标那一位：游标不动，于是指向他的下一位（他的回合已经用完了）
+        let mut order = TurnOrder::new(e.clone());
+        order.cursor = 1;
+        assert!(order.remove(e[1]));
+        assert_eq!(order.cursor, 1);
+        assert_eq!(order.current(), Some(e[2]));
+        // ③ 摘掉游标上最后一格：归零而不是留下一个越下标
+        let mut order = TurnOrder::new(e.clone());
+        order.cursor = 3;
+        assert!(order.remove(e[3]));
+        assert_eq!(order.current(), Some(e[0]));
+        // 摘一个不在表里的人：什么都不改
+        let ghost = Entity::from_raw_u32(95).expect("索引不该撞上保留值");
+        assert!(!order.remove(ghost));
+        assert_eq!(order.cursor, 0);
+        // 全摘光：游标归零、current 读出 None
+        let all = order.order.clone();
+        for a in all {
+            order.remove(a);
+        }
+        assert_eq!(order.current(), None);
+        assert_eq!(order.cursor, 0);
     }
 }

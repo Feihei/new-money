@@ -22,7 +22,7 @@ use common::*;
 use game_core::prelude::{
     CardAim, ChargeKind, Detention, DetentionPlace, GameRules, GameSeed, GameSetup, God, LandId,
     LandStatus, MAX_ON_BOARD, OccupancyKind, PlayerId, Possession, Rival, STARTING_GODS,
-    StaySentence, TileKind, WalkEffect, takes_landing, walk_effect,
+    StaySentence, Term, TileKind, WalkEffect, takes_landing, walk_effect,
 };
 
 /// prototype 的 1 号格挂着 L0 南京路（见 `settle.rs` 顶上那张格子对照表）。
@@ -352,7 +352,7 @@ fn the_god_ages_while_he_is_locked_up() {
     attach_god(&mut app, p0, God::BigFortune, None);
     app.world_mut().entity_mut(p0).insert(Detention {
         place: DetentionPlace::Jail,
-        turns_left: 6,
+        term: Term::Turns(6),
     });
 
     play_turns(&mut app, 9);
@@ -375,8 +375,8 @@ fn the_god_ages_while_he_is_locked_up() {
     );
     let sentence = detain_of(&app, p0).expect("这一批回合还关不住他，前置才有意义");
     assert_eq!(
-        sentence.turns_left,
-        6 - skipped as u32,
+        sentence.term,
+        Term::Turns(6 - skipped as u32),
         "两条计时数的是同一批回合：拘留扣 {skipped}，神也扣 {skipped}"
     );
     assert!(
@@ -895,7 +895,7 @@ fn days_played(card: &str, god: Option<God>, which: Doom) -> u32 {
     play_card(&mut app, p0, card.0, Some(CardAim::Player(p1)));
     settle(&mut app, 3);
     let left = match which {
-        Doom::Jail => detain_of(&app, p1).map(|held| held.turns_left),
+        Doom::Jail => detain_of(&app, p1).and_then(|held| held.term.turns()),
         Doom::Stay => stay_of(&app, p1),
         Doom::Cap => move_cap_of(&app, p1),
     };
@@ -972,7 +972,7 @@ fn the_fortune_god_shrugs_off_every_affliction_while_his_rival_does_not() {
     play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
     settle(&mut app, 3);
     assert_eq!(
-        detain_of(&app, p1).map(|held| held.turns_left),
+        detain_of(&app, p1).and_then(|held| held.term.turns()),
         Some(5),
         "小福神该照常被关进去（PLAN §三 只给大的那一半豁免）"
     );
@@ -1029,7 +1029,7 @@ fn immunity_spends_no_card_layers() {
     play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
     settle(&mut app, 2);
     assert_eq!(
-        detain_of(&app, p1).map(|held| held.turns_left),
+        detain_of(&app, p1).and_then(|held| held.term.turns()),
         Some(5),
         "没有卡也没有神的时候，陷害该照常生效"
     );

@@ -27,7 +27,7 @@ use crate::landing::{PendingDecision, detain};
 use crate::msg::{
     ChestOpened, ItemPlaced, PlaceItemRequested, PlayerArrived, PlayerDetained, WalkHalted,
 };
-use crate::player::{DetentionPlace, PlayerId, TokenPosition};
+use crate::player::{DetentionPlace, PlayerId, TokenPosition, Walker};
 use crate::plot;
 use crate::rng::Rng;
 use crate::settle::Books;
@@ -340,13 +340,23 @@ pub fn spawn_starting_chests(
 /// **读的是 `PlayerArrived.to`，不是最后一个 `TileStepped`**：中断时两者不是同一格，
 /// 而中断的那一格本来就不该触发落脚效果。宝箱是这条 reader 的第一个用户；
 /// P6 的神明落地也接这里。
+///
+/// 小偷（P12c）落脚在宝箱上走的也是这一条 —— 但他不是「开箱」，是「连箱搬走」：
+/// despawn 之后掉落照抽（与玩家同一条掉落子流，箱子不该认人），东西发
+/// `ItemThieved` 给 [`crate::villain::thief_deliver_system`] 送进雇主道具栏。
+/// 其余三种恶人**不开箱也不动箱** —— 偷窃是小偷的职业行为，宝箱留在街上等它的主人。
+// 参数都是同一条 reader 的输入输出（拆一半就得借两次 `Rng`），与 `settle_service`
+// 同一条处理：`allow` 而不是造一个只用一次的参数包
+#[allow(clippy::too_many_arguments)]
 pub fn settle_landing_occupancy_system(
     mut commands: Commands,
     mut arrivals: MessageReader<PlayerArrived>,
     occupancies: Query<(Entity, &Occupancy)>,
+    villains: Query<&crate::villain::Villain>,
     mut inventories: Query<&mut crate::items::Inventory, With<PlayerId>>,
     mut rng: ResMut<Rng>,
     mut opened: MessageWriter<ChestOpened>,
+    mut thieved: MessageWriter<crate::msg::ItemThieved>,
 ) {
     for arrival in arrivals.read() {
         let Some((entity, _)) = occupancies.iter().find(|(_, occ)| {
@@ -356,12 +366,28 @@ pub fn settle_landing_occupancy_system(
         }) else {
             continue;
         };
+        let item = ItemKind::ALL[rng.pick_loot(0..=ItemKind::ALL.len() as u32 - 1) as usize];
+        // 踩到的是小偷 → 连箱搬走（P12c）：拆箱 + 赃物走雇主那一头。
+        // 拆箱必须在这里 —— 小偷没有 `PlayerId`，下面的道具栏查询查不到他；
+        // 把 despawn 放到那一步之后，小偷就变成了「踩到宝箱连箱子都搬不动的人」
+        if villains
+            .get(arrival.player)
+            .is_ok_and(|v| v.kind == crate::villain::VillainKind::Thief)
+        {
+            commands.entity(entity).despawn();
+            thieved.write(crate::msg::ItemThieved {
+                thief: arrival.player,
+                item,
+                tile: arrival.to,
+            });
+            continue;
+        }
+        // 其余三种恶人在这里自然落空 —— 箱子留着等它的主人，「偷窃」只有小偷干得出来
         let Ok(mut inventory) = inventories.get_mut(arrival.player) else {
             continue;
         };
-        let item = ItemKind::ALL[rng.pick_loot(0..=ItemKind::ALL.len() as u32 - 1) as usize];
-        inventory.gain(item, 1);
         commands.entity(entity).despawn();
+        inventory.gain(item, 1);
         opened.write(ChestOpened {
             player: arrival.player,
             tile: arrival.to,
@@ -401,12 +427,16 @@ pub struct WalkHalt {
 ///
 /// **不结算脚下那一格**（不买地、不收租、不抽卡）：中断不是到站，那条分派根本不该跑。
 /// 这里也不碰 `TokenPosition` 之外的位置状态 —— 走步循环已经把逻辑位置改回停下的那一格。
+// 参数都是「把一件停摆结算完」的那一套工具，与 `settle_service` 同一条处理
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_halt_system(
     mut commands: Commands,
     mut halt: ResMut<WalkHalt>,
     mut books: Books<'_, '_>,
-    mut positions: Query<&mut TokenPosition, With<PlayerId>>,
-    mut mounts: Query<&mut crate::player::Mount, With<PlayerId>>,
+    mut positions: Query<&mut TokenPosition, With<Walker>>,
+    mut mounts: Query<&mut crate::player::Mount, With<Walker>>,
+    villains: Query<&crate::villain::Villain>,
+    movers: Query<(Entity, Option<&crate::player::Bankrupt>), With<Walker>>,
     mut detained: MessageWriter<PlayerDetained>,
     mut mounted: MessageWriter<crate::msg::MountChanged>,
 ) {
@@ -424,6 +454,7 @@ pub fn resolve_halt_system(
                 &mut commands,
                 &mut positions,
                 &mut books,
+                &villains,
                 stop.player,
                 DetentionPlace::Hospital,
                 MINE_HOSPITAL_DAYS,
@@ -434,26 +465,29 @@ pub fn resolve_halt_system(
             // 3×3 的命中集合先算完：`def` 是 `books.active` 的借用，不能与 `damage_lands`
             // 的可变借用同时活着
             let lands = plot::lands_around_tile(def, stop.tile, 3);
-            let victims: Vec<Entity> = books
-                .solvent()
-                .into_iter()
-                .map(|(player, _)| player)
-                .filter(|player| {
-                    positions
-                        .get(*player)
-                        .map(|p| within_chebyshev(def, stop.tile, p.tile, 1))
-                        .unwrap_or(false)
+            // 爆心 3×3 里的**每一个还没出局的行动者**（P12 起含受雇的恶人：他从雷区走出来
+            // 却没事，等于告诉玩家「恶人不怕炸弹」，而那不是任何一条规则说过的话）
+            let victims: Vec<Entity> = movers
+                .iter()
+                .filter(|(entity, bankrupt)| {
+                    bankrupt.is_none()
+                        && positions
+                            .get(*entity)
+                            .map(|p| within_chebyshev(def, stop.tile, p.tile, 1))
+                            .unwrap_or(false)
                 })
+                .map(|(entity, _)| entity)
                 .collect();
             // 3×3 降 1 级、保所有权（PLAN §七 拍板）
             books.damage_lands(&lands, LandDamage::Degrade { levels: 1 });
-            // 爆心 3×3 的玩家全部住院 5 天（含携带者）。已经在拘留中的人交给 `detain`
+            // 含携带者。已经在拘留中的人交给 `detain`
             // 的「更久的那一张赢」，这里不另写分支。
             for victim in victims {
                 detain_and_report(
                     &mut commands,
                     &mut positions,
                     &mut books,
+                    &villains,
                     victim,
                     DetentionPlace::Hospital,
                     BOMB_HOSPITAL_DAYS,
@@ -466,7 +500,7 @@ pub fn resolve_halt_system(
 
 /// 毁载具：回到步行并留一条凭据。已经步行的人不发 —— 那条流水说的是「车没了」。
 fn lose_mount(
-    mounts: &mut Query<&mut crate::player::Mount, With<PlayerId>>,
+    mounts: &mut Query<&mut crate::player::Mount, With<Walker>>,
     changed: &mut MessageWriter<crate::msg::MountChanged>,
     player: Entity,
 ) {
@@ -491,15 +525,22 @@ pub fn finish_halt_system(mut next: ResMut<NextState<TurnPhase>>) {
 
 /// 把一个人送进医院并留凭据。抽出来是因为炸弹的 3×3 要对一圈人各做一次，
 /// 而「接入点 + 死胡同格 + 更久的那张赢」只能由 `landing::detain` 那一处算。
+///
+/// `days` 是**玩家**那一份的住院天数；挨这一下的是恶人时它换成「回笼等保释」，
+/// 换算只发生在 [`crate::villain::custody_of`] 那一处（P12）。
+// 与调用方 `resolve_halt_system` 同一条处理：这一把工具拆散了只会让两处各借一遍
+#[allow(clippy::too_many_arguments)]
 fn detain_and_report(
     commands: &mut Commands,
-    positions: &mut Query<&mut TokenPosition, With<PlayerId>>,
+    positions: &mut Query<&mut TokenPosition, With<Walker>>,
     books: &mut Books<'_, '_>,
+    villains: &Query<&crate::villain::Villain>,
     player: Entity,
     place: DetentionPlace,
     days: u32,
     detained: &mut MessageWriter<PlayerDetained>,
 ) {
+    let term = crate::villain::custody_of(villains.get(player).ok(), days);
     let Some((held, junction, end)) = detain(
         commands,
         positions,
@@ -507,7 +548,7 @@ fn detain_and_report(
         &books.active.def,
         player,
         place,
-        days,
+        term,
     ) else {
         return;
     };

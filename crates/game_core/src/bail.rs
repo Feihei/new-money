@@ -20,8 +20,8 @@ use bevy::prelude::*;
 
 use crate::board::{BoardDef, BranchKind, TileIndex};
 use crate::landing::{Landing, LandingDomain, Pending, PendingDecision};
-use crate::msg::{BailRequested, PlayerBailed};
-use crate::player::{Detention, DetentionPlace, PlayerId, TokenPosition};
+use crate::msg::{BailRequested, PlayerBailed, VillainHired};
+use crate::player::{Detention, DetentionPlace, TokenPosition, Walker};
 use crate::settle::Books;
 
 /// 判一笔保释要读的四样东西。面板与规则层读同一份，才会「灰按钮按下去确实没声音」。
@@ -94,9 +94,11 @@ pub fn someone_held(books: &Books<'_, '_>, place: DetentionPlace) -> bool {
 /// 落格分派的那一支：踩到 `type: jail|hospital` 的主环格时把保释窗口摆出来。
 ///
 /// 没人可保就什么都不做 —— 那一格因此与路面一样直接收摊，而不是弹一个「这里没人」的窗口。
+/// P12 起「有没有人」读的是 `Walker` 那一族：**笼中的恶人也算关着人**，
+/// 而这正是「同一张窗口两个价目」的入口 —— 窗口不问他是什么，只问他在不在这一处。
 pub fn settle_bail_landing_system(
     landing: Res<Landing>,
-    held: Query<&Detention, With<PlayerId>>,
+    held: Query<&Detention, With<Walker>>,
     mut pending: ResMut<PendingDecision>,
 ) {
     let Some(landed) = landing.0 else {
@@ -114,14 +116,25 @@ pub fn settle_bail_landing_system(
 /// `bail_op_system` 的输入包：窗口状态、请求、账本与位置。
 ///
 /// `positions` 单独一条而不是塞进 [`Books`]：那条查询在账本里没有别的用户，
-/// 而保释是唯一需要「被放出来的人站在哪一格」的结算。
+/// 而保释是唯一需要「被放出来的人站在哪一格」的结算。按 `Walker` 收（P12）——
+/// 恶人也是被放出来的那一个。
+///
+/// `order` 只在**放出来的是恶人**那一格里动（把他插进轮转，见下面那条注）。
 #[derive(SystemParam)]
 pub struct BailSink<'w, 's> {
     pub books: Books<'w, 's>,
-    pub positions: Query<'w, 's, &'static TokenPosition, With<PlayerId>>,
+    pub positions: Query<'w, 's, &'static TokenPosition, With<Walker>>,
+    pub order: ResMut<'w, crate::turn::TurnOrder>,
+    /// 出场行为的那条入口（P12b/c）。窗口发完就走：强盗抢存款、小偷偷点券
+    /// 由 [`crate::villain::on_hired_system`] 下一帧分派 —— 保释窗口不认识恶人。
+    pub hired: MessageWriter<'w, VillainHired>,
 }
 
 /// 逐笔办保释。窗口留着：同一处关着好几个人时可以一个个放，直到玩家按「离开」。
+///
+/// **一笔的价钱问的是对象，不是窗口**（[`Books::bail_price`]）：监狱门口同时关着
+/// 等保释的恶人（300）与服刑的玩家（30），而这两种人从窗口看出去是同一排候选。
+/// 把价钱写成一个窗口级的常数，面板与规则层就都会「对谁都是同一个价」。
 pub fn bail_op_system(
     mut commands: Commands,
     pending: Res<PendingDecision>,
@@ -132,7 +145,6 @@ pub fn bail_op_system(
     let Some((asker, Pending::Bail(place))) = pending.active() else {
         return;
     };
-    let cost = sink.books.rules.bail_points;
     // `Commands` 的移除在帧末才生效，同一帧的第二条请求会读到「他还关着」——
     // 因此在这一次运行里自己记一份，与 P3d③「同一帧押两遍钱」同一条坑
     let mut freed: Vec<Entity> = Vec::new();
@@ -142,6 +154,7 @@ pub fn bail_op_system(
             continue;
         }
         let target_place = sink.books.detained.get(r.target).ok().map(|d| d.place);
+        let cost = sink.books.bail_price(r.target);
         let facts = BailFacts {
             at_window: true,
             window: place,
@@ -157,7 +170,30 @@ pub fn bail_op_system(
         if !sink.books.spend_points(asker, cost) {
             continue;
         }
+        let villain = sink.books.is_villain(r.target);
         commands.entity(r.target).remove::<Detention>();
+        if villain {
+            // 恶人出来是**来干活的**：从此他跟着雇主走。两处写必须成对 ——
+            // `Hired` 是他「替谁办事」的位，而轮转是他「什么时候动」的事实，
+            // 缺一个就是「有个受雇的人从不行动」或「有个没雇主的人在环上抢钱」。
+            // 插进轮转走的是资源（当场生效），挂组件走的是 `Commands`（帧末生效）——
+            // 中间那一帧他在表里而身上还没有 `Hired`，而那一帧没有任何 system 读他
+            commands
+                .entity(r.target)
+                .insert(crate::villain::Hired { employer: asker });
+            if sink.order.insert_after(r.target, asker) {
+                debug!("保释：{:?} 接在 {:?} 之后进入轮转", r.target, asker);
+            }
+            // 出场行为（P12b/c：强盗抢存款、小偷偷点券）走消息分派 —— 这个窗口
+            // 刻意不认识任何一种恶人的名字，它只管「放人、收钱、发凭据」
+            if let Some(villain) = sink.books.villain_kind(r.target) {
+                sink.hired.write(VillainHired {
+                    villain: r.target,
+                    employer: asker,
+                    kind: villain.kind,
+                });
+            }
+        }
         freed.push(r.target);
         let junction = sink
             .positions

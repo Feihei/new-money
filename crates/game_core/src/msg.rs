@@ -101,12 +101,14 @@ pub struct DetentionLifted {
     pub junction: TileIndex,
 }
 
-/// 仍在被拘留中，本回合跳过。`turns_left` 是已经扣掉本回合之后的剩余值。
+/// 仍在被拘留中，本回合跳过。`left` 是**已经扣掉本回合之后**的剩余回合，
+/// `None` = 他身上那条不是钟而是笼子（[`crate::player::Term::UntilBailed`]，P12 的恶人：
+/// 只有保释办得出来，所以「还剩几天」这一问在这里没有答案）。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DetentionSkipped {
     pub player: Entity,
     pub place: DetentionPlace,
-    pub turns_left: u32,
+    pub left: Option<u32>,
 }
 
 /// 仍在原地停留（停留卡，P3d④c / P4④），本回合被玩家主动拿来「停」。`turns_left` 是
@@ -1248,4 +1250,104 @@ pub struct AuctionFailed {
     pub by: Option<Entity>,
     pub seller: Option<Entity>,
     pub price: i64,
+}
+
+// ===== 四大恶人（P12b–d）=====
+
+/// 一位恶人被保释出来、开始替人办事（P12b）。
+///
+/// 这是**出场行为的入口**，不是身份变化：`Hired` 组件在 `bail_op_system` 里挂、轮转在那一句
+/// `insert_after` 里插，两者都是「他出来了」的结构事实；这条消息说的是「此刻起该跑他那份行为」
+/// —— 强盗抢存款、小偷偷点券都发生在**出场那一帧**，与他在环上走到哪无关。分派在
+/// [`crate::villain::on_hired_system`]：`bail.rs` 发完就走，不认识任何一种恶人的名字。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VillainHired {
+    pub villain: Entity,
+    pub employer: Entity,
+    pub kind: crate::villain::VillainKind,
+}
+
+/// 强盗出场：全场存款被抢走一笔（P12b）。
+///
+/// `total` 进的是**强盗自己的口袋**（世界外）—— 他没有钱包，这笔钱不存在「转给谁」的出口，
+/// 而「含雇主自己」正是 PLAN 拍板的那句特性（不是 bug）。每个玩家少了多少读
+/// [`BankOpDone`]？读不到 —— 这不是银行操作；存款变动的可见凭据只有这一条汇总，
+/// 份额要逐人核对去 dump 的现金栏（顶栏的播报给总数，那是玩家真正要读的数）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepositsRobbed {
+    pub villain: Entity,
+    pub employer: Entity,
+    pub total: i64,
+    /// 被抢的人数（0 存款的人不算 —— 没有什么可抢的）。
+    pub victims: u32,
+}
+
+/// 小偷出场：其他玩家的一半点券进了雇主口袋（P12c）。
+///
+/// 每一位玩家的点券变动各自发过 [`PointsChanged`]（走 [`crate::settle::Books::spend_points`]
+/// 与 `award_points` 那条正路），这一条只说**汇总**：谁偷的、给谁、一共几格。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointsStolen {
+    pub villain: Entity,
+    pub employer: Entity,
+    pub total: u32,
+    /// 被偷的人数（0 点券的人不算）。
+    pub victims: u32,
+}
+
+/// 小偷把路上的一件放置物搬走了（P12c）。
+///
+/// 地雷与路障在**走步经过**那一帧由 `walk_step_system` 发（偷窃必须与地雷的「踩到即炸」
+/// 同帧裁定，晚了人就进笼了）；宝箱在**落脚**那一帧由
+/// `settle_landing_occupancy_system` 发 —— 宝箱开出什么由掉落子流当场抽好，
+/// 消息里带的是**抽到的结果**而不是「一只宝箱」：道具栏里没有「宝箱」这一格，
+/// 「偷来给雇主」落进雇主道具栏的只能是具体的东西。
+///
+/// 雇主由 [`crate::villain::thief_deliver_system`] 查 `Hired` 后收货 —— 发送侧不查：
+/// `walk.rs` 该说的是「这一格少了一件东西」，「该给谁」是恶人模块的家务。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemThieved {
+    pub thief: Entity,
+    pub item: crate::items::ItemKind,
+    pub tile: TileIndex,
+}
+
+/// 强盗与一位玩家擦肩，从他手里抢走一张卡（P12b）。
+///
+/// 「擦肩」的判据与炸弹转让同一条：路径经过**对方当前所在格**的那一步。目标不问雇主 ——
+/// 刀口不对着自己人；但那一格上站着的**每一位**符合条件的玩家都会被抢一张（擦过一圈）。
+/// `card` 是被抢走的那张：受害者与雇主的手牌面板都按签名重建，各自会跟上；
+/// 这一条是给顶栏播报的凭据，也回答「我那张陷害卡去哪了」。
+#[derive(Message, Debug, Clone)]
+pub struct CardSnatched {
+    pub robber: Entity,
+    pub victim: Entity,
+    pub employer: Entity,
+    pub card: CardNotice,
+}
+
+/// 流氓路过别人的地，向地主勒索了地价等额的现金（P12b）。
+///
+/// 钱归**流氓自己**（PLAN §三 拍板的反制窗口：雇主一分拿不到，而流氓没有钱包，
+/// 所以这笔钱在世界外消失 —— `Books::charge` 那条路只扣不加）。地主付不起时走的是
+/// 与租金同一条破产出口：被流氓勒到破产是这条规则字面就允许的事。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TollExtorted {
+    pub hoodlum: Entity,
+    pub land: LandId,
+    pub owner: Entity,
+    pub amount: i64,
+}
+
+/// 间谍把本该付给地主的租金转给了雇主（P12d）。
+///
+/// 这一笔在 [`crate::settle::Books::settle`] 里就已经改了收款人（钱从结算那一刻就走对口袋，
+/// 不做「先给地主再转手」的两段账），[`RentDue`] 的 `owner` 带的同样是实际收款的雇主 ——
+/// 这一条单独存在，是因为「阿土伯的租为什么进了孙小美的口袋」需要一个明说的答案。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RentRerouted {
+    pub spy: Entity,
+    pub employer: Entity,
+    pub land: LandId,
+    pub amount: i64,
 }

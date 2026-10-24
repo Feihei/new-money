@@ -10,7 +10,7 @@ use bevy::app::App;
 use common::*;
 use game_core::prelude::{
     Bankrupt, Detention, DetentionPlace, GameRules, GameSeed, GameSession, GameSetup,
-    PLAYER_COLORS, PlayerSetup, Rng, TurnPhase,
+    PLAYER_COLORS, PlayerSetup, Rng, Term, TurnPhase,
 };
 
 /// 独立掷 `n` 次，用来核对「对局里的点数确实只来自种子」。
@@ -165,7 +165,7 @@ fn jail_skips_two_turns_then_releases() {
         p1,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 3,
+            term: Term::Turns(3),
         },
     );
 

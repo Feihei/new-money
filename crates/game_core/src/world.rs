@@ -154,9 +154,19 @@ pub fn begin_game_system(
     // `Commands` 里、查询一个字也读不到 —— 所以把宝箱已经选中的格交给这一步，
     // 而不是让 `place` 去查一份还不存在的世界。
     let gods = crate::gods::spawn_starting_gods(&mut commands, &def, &mut rng, &chests);
+    // 四大恶人（P12a）。开局全在笼里，而且**不进 `TurnOrder`**：这台回合机里一个回合
+    // 等于日历上的一天，让四位没人保释的恶人各占一格等于把整局的分红与结息按三倍速走完。
+    // 他们出场的唯一入口是保释（`bail::bail_op_system` 那一句 `insert_after`）。
+    let villains = crate::villain::spawn_caged_villains(&mut commands, &def);
+    if !crate::villain::has_door(&def, crate::player::DetentionPlace::Jail) {
+        warn!(
+            "这张棋盘没有通向监狱的门（既没有 `type: jail` 的主环格，也没有挂 jail 分支的地）：\
+             四位恶人开局就在笼里，而那一处永远保不出来"
+        );
+    }
 
     info!(
-        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张 + 新闻 {} 条 + 宝箱 {} 个 + 神明 {} 位（起始现金 {}）· 开局 {epoch}",
+        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张 + 新闻 {} 条 + 宝箱 {} 个 + 神明 {} 位 + 笼中恶人 {} 位（起始现金 {}）· 开局 {epoch}",
         def.board_name,
         def.loop_len(),
         lands.len(),
@@ -168,6 +178,7 @@ pub fn begin_game_system(
         news.0.len(),
         chests.len(),
         gods.len(),
+        villains.len(),
         cfg.rules.start_cash
     );
     match holidays.coverage() {

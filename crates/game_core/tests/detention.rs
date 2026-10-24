@@ -18,7 +18,8 @@ use bevy::asset::Assets;
 use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::prelude::{
-    ActiveBoard, BranchKind, CardKind, CardSet, DataHandles, Detention, DetentionPlace, TurnPhase,
+    ActiveBoard, BranchKind, CardKind, CardSet, DataHandles, Detention, DetentionPlace, Term,
+    TurnPhase,
 };
 
 /// prototype 上的三个格号：5 号是命运格（抽到就是这张卡），2 号挂监狱分支，9 号挂医院分支。
@@ -89,7 +90,7 @@ fn a_trip_to_the_ditch_parks_him_at_the_hospital_junction() {
         detention_of(&app, p0),
         Some(Detention {
             place: DetentionPlace::Hospital,
-            turns_left: 3
+            term: Term::Turns(3)
         }),
         "掉水沟是住院，不是坐牢"
     );
@@ -150,7 +151,7 @@ fn a_trip_abroad_has_no_dead_end_to_park_him_at_so_he_stays_put() {
         detention_of(&app, p0),
         Some(Detention {
             place: DetentionPlace::Away,
-            turns_left: 3
+            term: Term::Turns(3)
         })
     );
     assert!(
@@ -170,7 +171,7 @@ fn a_shorter_detention_keeps_both_the_old_place_and_the_old_count() {
         p0,
         Detention {
             place: DetentionPlace::Hospital,
-            turns_left: 5,
+            term: Term::Turns(5),
         },
     );
     draw_it(&mut app);
@@ -179,7 +180,7 @@ fn a_shorter_detention_keeps_both_the_old_place_and_the_old_count() {
         detention_of(&app, p0),
         Some(Detention {
             place: DetentionPlace::Hospital,
-            turns_left: 5
+            term: Term::Turns(5)
         }),
         "短的那张不该把他换个地方关得更久，也不该让他早出来"
     );
@@ -200,7 +201,7 @@ fn two_detentions_of_equal_length_move_him_to_the_newer_place() {
         p0,
         Detention {
             place: DetentionPlace::Hospital,
-            turns_left: 3,
+            term: Term::Turns(3),
         },
     );
     draw_it(&mut app);
@@ -209,7 +210,7 @@ fn two_detentions_of_equal_length_move_him_to_the_newer_place() {
         detention_of(&app, p0),
         Some(Detention {
             place: DetentionPlace::Jail,
-            turns_left: 3
+            term: Term::Turns(3)
         })
     );
     assert_eq!(tile_of(&app, p0), JAIL_JUNCTION, "换了地方就该搬走");

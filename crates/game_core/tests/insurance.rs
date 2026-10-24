@@ -22,7 +22,7 @@ use common::*;
 use game_core::board::CompanyFee;
 use game_core::prelude::{
     ActiveBoard, CardKind, CardSet, CompanyLedgers, DataHandles, Detention, DetentionPlace,
-    Insured, TurnOrder, TurnPhase,
+    Insured, Term, TurnOrder, TurnPhase,
 };
 
 /// prototype 上的保险公司格。
@@ -169,7 +169,7 @@ fn a_detention_during_the_policy_pays_for_every_day_he_is_held() {
         detention_of(&app, p0),
         Some(Detention {
             place: DetentionPlace::Hospital,
-            turns_left: 3
+            term: Term::Turns(3)
         }),
         "前置：掉进水沟住院 3 天"
     );

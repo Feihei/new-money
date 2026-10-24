@@ -17,8 +17,8 @@ use bevy::app::App;
 use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::prelude::{
-    CardAim, DetentionPlace, Inventory, ItemKind, MoveCap, OccupancyAt, OccupancyKind, TileKind,
-    TokenPosition, TurnPhase,
+    CardAim, DetentionPlace, Inventory, ItemKind, MoveCap, OccupancyAt, OccupancyKind, Term,
+    TileKind, TokenPosition, TurnPhase,
 };
 
 /// 默认阵容里的另一名玩家。
@@ -201,8 +201,8 @@ fn a_mine_sends_its_own_placer_to_the_hospital_for_three_days() {
     );
     let held = detain_of(&app, p0).expect("踩雷该住院");
     assert_eq!(
-        (held.place, held.turns_left),
-        (DetentionPlace::Hospital, 3),
+        (held.place, held.term),
+        (DetentionPlace::Hospital, Term::Turns(3)),
         "地雷 3 天"
     );
     assert_eq!(tile_of(&app, p0), 9, "逻辑位置回到医院的接入点");
@@ -300,7 +300,10 @@ fn a_bomb_blast_hurts_the_ring_and_degrades_buildings_without_seizing_them() {
     );
     for player in [p0, p1] {
         let held = detain_of(&app, player).expect("3×3 里的人都要住院");
-        assert_eq!((held.place, held.turns_left), (DetentionPlace::Hospital, 5));
+        assert_eq!(
+            (held.place, held.term),
+            (DetentionPlace::Hospital, Term::Turns(5))
+        );
     }
     // 一圈建筑各降 1 级，所有权一动不动
     assert_eq!(
@@ -360,7 +363,10 @@ fn a_dog_bites_a_walker_for_three_days_and_stays_on_the_road() {
         events(&app)
     );
     let held = detain_of(&app, p0).expect("被咬该住院");
-    assert_eq!((held.place, held.turns_left), (DetentionPlace::Hospital, 3));
+    assert_eq!(
+        (held.place, held.term),
+        (DetentionPlace::Hospital, Term::Turns(3))
+    );
     assert_eq!(
         tiles_holding(&mut app, OccupancyKind::Dog),
         vec![3],

@@ -112,7 +112,9 @@ fn the_airline_bills_by_the_day_and_sends_him_abroad() {
     // 「费用按天计」与「摇出几离场几天」是同一次摇数的两个读数
     let days = detention_of(&app, p0)
         .expect("B 型要把人送去国外")
-        .turns_left;
+        .term
+        .turns()
+        .expect("出国那一段是一把钟，不是笼子");
     assert!((1..=6).contains(&days));
     assert_eq!(
         page(&app, "stock_005").2,

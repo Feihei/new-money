@@ -12,8 +12,8 @@ use common::*;
 use game_core::economy::dividend_per_share;
 use game_core::prelude::{
     ActiveBoard, BankBalance, Bankrupt, Books, CardEffect, CardKind, DataHandles, Date, Detention,
-    DetentionPlace, GameRules, GameSeed, GameSession, GameSetup, StaySentence, StockId, TileIndex,
-    TileKind, TradeSide, TurnPhase,
+    DetentionPlace, GameRules, GameSeed, GameSession, GameSetup, StaySentence, StockId, Term,
+    TileIndex, TileKind, TradeSide, TurnPhase,
 };
 
 // prototype 的格子对照（`assets/data/boards/prototype.json`）：
@@ -668,7 +668,7 @@ fn a_detain_card_parks_the_token_at_the_junction_and_skips_two_turns() {
         detention_of(&app, p0),
         Some(Detention {
             place: DetentionPlace::Jail,
-            turns_left: 3
+            term: Term::Turns(3)
         }),
         "拘留组件要带着「他在哪儿」—— 那是这三个去处唯一被存下来的差别"
     );

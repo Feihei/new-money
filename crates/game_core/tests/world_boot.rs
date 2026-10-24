@@ -34,10 +34,15 @@ fn land_rows(app: &mut App) -> Vec<(u32, bool)> {
     rows
 }
 
+/// 玩家身上「开局不该有」的标记数。
+///
+/// **按 `PlayerId` 收而不是全场数**（P12）：四位恶人开局就关在笼里，那是这套玩法的起点
+/// 而不是跨局残留。这条用例守的是「玩家没有被莫名关着／破产」，把恶人算进来就变成
+/// 一条永远为红的假警报 —— 而假警报的下一步就是有人来把断言删掉。
 fn status_markers(app: &mut App) -> usize {
     let w = app.world_mut();
-    let mut jq = w.query::<&Detention>();
-    let mut bq = w.query::<&Bankrupt>();
+    let mut jq = w.query_filtered::<&Detention, With<PlayerId>>();
+    let mut bq = w.query_filtered::<&Bankrupt, With<PlayerId>>();
     jq.iter(w).count() + bq.iter(w).count()
 }
 

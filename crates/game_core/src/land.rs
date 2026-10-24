@@ -56,12 +56,27 @@ impl Mortgaged {
 /// 业主踩上去走 `Pending::Build`；建成之后买地、过户、拍卖都**不动它**：
 /// 设施与楼是同一族（破产变卖时「楼留在街上」的同一条口径）。
 ///
-/// 为什么是组件而不是 `Listing` 的一个字段：它只在「这块地」上、跟着地走，
+/// 为什么是组件而不是 `Listing` 的一个字段：它只在「这一块地」上、跟着地走，
 /// 查询形状（`Query<&Facility>` / `Option<&Facility>`）比再开一个集合资源诚实——
 /// 而且同一条 system 里 `Books` 的地块查询带 `&mut Owner`，设施查询只读，
 /// 借用在 Bevy 的访问图上天然相容（`game_core` 不经手，编译器也不拦）。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Facility(pub BuildingKind);
+
+/// 这块地**成功收过几回租**（P12d）。间谍的那句「该地从未有人踩过交费则无功而返」
+/// 读的就是它：`times == 0` 的地他没有案底可探，租金照付地主。
+///
+/// 为什么挂在地的实体上而不是塞进 `Owner`：交过费是**这块地的历史**，不是业主的 ——
+/// 过户（嫁祸卡、土地公夺地）不洗掉它，破产放回市场也不洗掉它（新买主接的是一块
+/// 「街坊都认识」的地）。与 [`Mortgaged`] 同一条「每块地都挂着」的形状：查询不用
+/// 区分「没有组件」与「还没收过」，两种空在规则上必须是同一个答案。
+///
+/// 只在 [`crate::settle::Books::settle`] 里累加，判据是「这一笔 `Rent` 真的收到了钱」
+/// （`amount > 0`）—— 被大福神白嫖掉的那笔不是「交费」，免费的东西不留案底。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RentLedger {
+    pub times: u32,
+}
 
 /// 从棋盘定义铺出 Land 实体，返回 `LandId → Entity` 索引。
 ///
@@ -79,6 +94,7 @@ pub fn spawn_lands(commands: &mut Commands, board: &BoardDef) -> HashMap<LandId,
                 Owner::default(),
                 BuildingLevel::default(),
                 Mortgaged::default(),
+                RentLedger::default(),
                 Gameplay,
             ));
             if let Some(kind) = l.building_kind {

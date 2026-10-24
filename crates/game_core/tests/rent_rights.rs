@@ -17,7 +17,9 @@ mod common;
 use bevy::app::App;
 use bevy::ecs::entity::Entity;
 use common::*;
-use game_core::prelude::{CardAim, CardKind, Detention, DetentionPlace, GameSession, TurnPhase};
+use game_core::prelude::{
+    CardAim, CardKind, Detention, DetentionPlace, GameSession, Term, TurnPhase,
+};
 
 /// 地块 1（汉口路，2 号格）归 P1 且 flat 成 500，P0 站在起点、下一掷两步正好踩上去。
 /// 与 `tests/stay.rs` 同一套前置 —— 那一条测「照样收得到」，这一条测「收不到」。
@@ -76,7 +78,7 @@ fn a_locked_owner_collects_nothing_whatever_the_room_is() {
             p1,
             Detention {
                 place,
-                turns_left: 3,
+                term: Term::Turns(3),
             },
         );
 
@@ -119,7 +121,7 @@ fn a_card_that_parks_him_in_a_room_is_the_same_one_that_stops_his_rent() {
         detention_of(&app, p1),
         Some(Detention {
             place: DetentionPlace::Jail,
-            turns_left: 5
+            term: Term::Turns(5)
         }),
         "卡面判 5 天"
     );
@@ -158,7 +160,7 @@ fn a_player_the_ditch_sent_to_the_hospital_collects_no_rent() {
         detention_of(&app, p0),
         Some(Detention {
             place: DetentionPlace::Hospital,
-            turns_left: 3
+            term: Term::Turns(3)
         }),
         "掉水沟是住院"
     );
@@ -200,7 +202,7 @@ fn index_after_two_turns(lock: bool) -> f32 {
             p1,
             Detention {
                 place: DetentionPlace::Hospital,
-                turns_left: 3,
+                term: Term::Turns(3),
             },
         );
     }
@@ -222,7 +224,7 @@ fn locking_him_out_does_not_reprice_the_whole_board() {
         p1,
         Detention {
             place: DetentionPlace::Hospital,
-            turns_left: 3,
+            term: Term::Turns(3),
         },
     );
 
@@ -248,7 +250,7 @@ fn the_rent_comes_back_the_turn_he_steps_out() {
         p1,
         Detention {
             place: DetentionPlace::Jail,
-            turns_left: 3,
+            term: Term::Turns(3),
         },
     );
     assert_eq!(rent_of(&mut app, 1), 0, "关着的时候报价是 0");
