@@ -15,11 +15,11 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AfflictDomain, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Books,
     BuildingKind, BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind,
-    CompanyCharged, Decision, DetentionPlace, EffectOutcome, Facility, Gavel, Hand, Jackpot,
-    LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets, MortgageDeny, MortgageOp,
-    Owner, Pending, PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf, ShopDeny,
-    ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders, buy_allowed, buyback,
-    counter_plots, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
+    CompanyCharged, Decision, DetentionPlace, EffectOutcome, Facility, Gavel, Hand, Institution,
+    Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets, MortgageDeny,
+    MortgageOp, Owner, Pending, PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf,
+    ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders, buy_allowed,
+    buyback, counter_plots, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -507,7 +507,7 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
                     .join(",")
             );
             format!(
-                "{}|{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}|{}|{}",
                 books.balance(player),
                 bank.deposit,
                 bank.loan,
@@ -523,6 +523,10 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
                     .join(","),
                 bank.financing,
                 fins,
+                // 停摆（P11c②）也必须进签名：柜台是一个窗口而不是一个报价，新闻在开着
+                // 的柜台之后播出来是常事 —— 少这一位，那两颗「借」会一直绿到玩家按下去
+                // 才发现借不动（截图就是这么翻出来的）
+                books.session.suspensions.days_left(Institution::Bank),
             )
         }
         // 百货柜台与银行同一条理由：它是一个窗口，每一笔买卖都要重烤三位 ——
@@ -1230,6 +1234,10 @@ fn bank_modal(
     // 还清要一次掏够：现金不够就灰着，别让「还 3000」在只有 2000 时静默失败
     let clear_debt = bank.loan.min(cash);
     let rules = *books.rules;
+    // 新闻「银行停止放款」（P11c②）：只挡借这一颗，存取与还款照旧亮着 ——
+    // 「还可借」那一行因此不是报一个借不到的数，而是说出为什么借不到
+    let halted = books.session.suspensions.days_left(Institution::Bank);
+    let lending_open = halted == 0;
 
     frame(
         commands,
@@ -1292,8 +1300,14 @@ fn bank_modal(
                     rows,
                     &font.0,
                     "还可借",
-                    &comma(headroom),
-                    if headroom > 0 {
+                    // 停摆时这一行不报那个借不到的数，报的是「为什么借不到、哪天再来」：
+                    // 一个 0 会被读成「你没地产可押」，那是另一件完全不同的事
+                    &if lending_open {
+                        comma(headroom)
+                    } else {
+                        format!("停止放款（剩 {halted} 天）")
+                    },
+                    if lending_open && headroom > 0 {
                         col::GAIN
                     } else {
                         col::BANKRUPT
@@ -1334,7 +1348,8 @@ fn bank_modal(
                 p,
                 font,
                 BankOp::Borrow,
-                true,
+                // 四颗里只有这一颗问停摆（其余三颗传 `true`，柜台既然开着就办得动）
+                lending_open,
                 ("借", 5_000, headroom >= 5_000),
                 ("借到上限", headroom, headroom > 0),
             );

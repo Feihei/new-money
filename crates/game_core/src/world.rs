@@ -197,6 +197,8 @@ pub fn begin_game_system(
         // 「这一局还没播过新闻」是新的一份，不是上一局那一条的延续
         // （`news::draw` 读它来避开上一条，留着旧值会让新局第一播就躲开一条没播过的）
         last_news: None,
+        // 机构停摆也是「这一局」的规矩：留着上一局的停牌，新局第一天股市就不开盘（P11c②）
+        suspensions: Default::default(),
         bank_vault: 0,
     });
     commands.insert_resource(MarketClock::default());

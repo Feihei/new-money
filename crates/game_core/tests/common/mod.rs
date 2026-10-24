@@ -1010,6 +1010,11 @@ fn collect_books(
                     .join("+");
                 format!("地{at}[{touched}]{effects}")
             }
+            // 机构档（P11c②）：没有承受者也没有地块，带的是「哪一家、还剩几天」。
+            // 那个天数是**叠完之后**世界上的数，所以这一行读得出「短的那条不减刑」
+            game_core::prelude::NewsAudience::Institution { what, days } => {
+                format!("机构{what:?}[剩{days}天]")
+            }
         };
         log.0.push(format!(
             "News({},播{},{})",

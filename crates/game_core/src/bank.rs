@@ -20,6 +20,7 @@ use bevy::prelude::*;
 
 use crate::board::{TileIndex, TileKind};
 use crate::company::{FINANCE_STOCK, chairman_of};
+use crate::institution::Institution;
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
 use crate::market::MarketClock;
 use crate::msg::{
@@ -47,11 +48,17 @@ impl AtmAccess {
 /// 哪种操作要在哪个窗口才准办。纯函数，表驱动测试打在 [`op_windows`] 上。
 ///
 /// **银行全年无休**（10-20 实报更正）：周末与节假日只挡股市，只要停到银行格就能办。
-/// P2④ 那版在这里还有一个 `open` 位，现已整条退役 —— 「有卡就能办」因此也没有例外。
-pub fn bank_op_allowed(op: BankOp, atm: bool, counter: bool) -> bool {
+/// P2④ 那版在这里还有一个 `open` 位，现已整条退役 —— 「有卡就能办」因此没有日历上的例外。
+///
+/// ⚠️ 10-24（P11c②）开的那个例外**不是**日历例外，而是一条新闻：`lending_open` 为假时
+/// 只有 [`BankOp::Borrow`] 被挡，**存取款与还款照办**。这两格原来合成一条 `Borrow | Repay`，
+/// 拆开写就是这次的设计本身：「停止放款」说的是「不借新的」，不是「不许还钱」——
+/// 把还款一起挡掉等于凭空给欠债的人多记一笔逾期，而那句惩罚没有任何一条规则配得上它。
+pub fn bank_op_allowed(op: BankOp, atm: bool, counter: bool, lending_open: bool) -> bool {
     match op {
         BankOp::Deposit | BankOp::Withdraw => atm || counter,
-        BankOp::Borrow | BankOp::Repay => counter,
+        BankOp::Repay => counter,
+        BankOp::Borrow => counter && lending_open,
     }
 }
 
@@ -152,8 +159,20 @@ pub fn bank_op_system(
     }
     for r in requests.read() {
         let at_counter = pending.active() == Some((r.player, Pending::BankTeller));
-        if !bank_op_allowed(r.op, atm.allows(r.player), at_counter) {
-            debug!("银行操作被拒：{:?} 此刻办不了 {:?}", r.player, r.op);
+        // 停摆读的是**世界此刻**那一位（与面板同一个函数），不是请求里带的数：
+        // 请求由表现层递进来，让它自带「银行开不开」等于让它替规则层做决定
+        let lending_open = !books.session.suspensions.halted(Institution::Bank);
+        if !bank_op_allowed(r.op, atm.allows(r.player), at_counter, lending_open) {
+            debug!(
+                "银行操作被拒：{:?} 此刻办不了 {:?}（放款{}）",
+                r.player,
+                r.op,
+                if lending_open {
+                    "开着"
+                } else {
+                    "被新闻停了"
+                }
+            );
             continue;
         }
         let moved = match r.op {
@@ -239,28 +258,41 @@ mod tests {
         // 「周末与节假日只挡股市」那条由 `tests/finance.rs` 的集成用例钉着
         for cash_op in [BankOp::Deposit, BankOp::Withdraw] {
             assert!(
-                bank_op_allowed(cash_op, true, false),
+                bank_op_allowed(cash_op, true, false, true),
                 "{cash_op:?} 路过 ATM 该能办"
             );
             assert!(
-                bank_op_allowed(cash_op, false, true),
+                bank_op_allowed(cash_op, false, true, true),
                 "{cash_op:?} 柜台里该能办"
             );
             assert!(
-                !bank_op_allowed(cash_op, false, false),
+                !bank_op_allowed(cash_op, false, false, true),
                 "{cash_op:?} 两个窗口都没有还放行 —— 这就是凭空印钱"
             );
+            // 停摆也挡不住存取：新闻说的是「不借新的」，不是「银行关门」
+            assert!(
+                bank_op_allowed(cash_op, false, true, false),
+                "{cash_op:?} 被停摆挡住了 —— 停止放款不该管储户的钱"
+            );
         }
-        // 借贷只在柜台：ATM 上按不出贷款
+        // 借只在柜台且只在没停摆时；还**只**看柜台（停摆不许挡还款）
         for credit_op in [BankOp::Borrow, BankOp::Repay] {
             assert!(
-                !bank_op_allowed(credit_op, true, false),
+                !bank_op_allowed(credit_op, true, false, true),
                 "{credit_op:?} 不该在 ATM 办成"
             );
-            assert!(bank_op_allowed(credit_op, false, true));
-            assert!(bank_op_allowed(credit_op, true, true));
-            assert!(!bank_op_allowed(credit_op, false, false));
+            assert!(bank_op_allowed(credit_op, false, true, true));
+            assert!(bank_op_allowed(credit_op, true, true, true));
+            assert!(!bank_op_allowed(credit_op, false, false, true));
         }
+        assert!(
+            !bank_op_allowed(BankOp::Borrow, false, true, false),
+            "停止放款还放得出钱，这条新闻就白播了"
+        );
+        assert!(
+            bank_op_allowed(BankOp::Repay, false, true, false),
+            "停摆期间不许还钱 —— 那是替欠债的人多记一笔逾期"
+        );
         assert!(matches!(op, BankOp::Deposit));
     }
 

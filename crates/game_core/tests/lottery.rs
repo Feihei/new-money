@@ -25,7 +25,8 @@ use bevy::ecs::entity::Entity;
 use bevy::prelude::NextState;
 use common::*;
 use game_core::prelude::{
-    ActiveBoard, Date, GameRules, GameSeed, GameSetup, Jackpot, Pending, Rng, TurnPhase,
+    ActiveBoard, Date, GameRules, GameSeed, GameSetup, Jackpot, Pending, Rng, StaySentence,
+    TurnPhase,
 };
 
 /// 主环格数与彩票中心那一格（`prototype.json` 的 19 号；P8 追加在环尾，
@@ -188,7 +189,15 @@ fn play_until_tick(app: &mut App, want: u32) {
             // 换到别的阶段就把它撤掉 —— 忘了撤就等于此后再也不掷骰，整圈空转到超时。
             TurnPhase::WaitRoll if !pending => {
                 let cur = current(app);
-                roll(app, cur);
+                // 被停留按住的人那颗按钮翻成了「停留」（P4④）：脚手架要像真人一样按它，
+                // 否则规则层拒掉掷骰、这里就原地空转到超时。新闻池每长一条，抽到
+                // 「豪雨袭城」的种子的分布就挪一次 —— P11c② 就是把这一格从 `play_turns`
+                // 抄过来补上的（症状是「推到第 45 天失败，停在 tick 35」）
+                if app.world().entity(cur).get::<StaySentence>().is_some() {
+                    stay(app, cur);
+                } else {
+                    roll(app, cur);
+                }
                 pending = true;
             }
             _ => pending = false,

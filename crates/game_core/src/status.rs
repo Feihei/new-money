@@ -46,13 +46,23 @@ impl<T: Copy> Timed<T> {
     }
 }
 
-/// 地块上的限时状态。**不许出现第四种**：新增一种要同时决定它怎么改租金、
-/// 挡不挡加盖、被谁抵消（这三问各有一张穷尽表在等着它）。
+/// 地块上的限时状态。**每加一种都要当场回答三问**：它怎么改租金、挡不挡加盖、被谁抵消
+/// （这三问各有一张穷尽表在等着它，`_` 一处都不许写）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LandStatus {
     /// 涨价：租金翻倍（4 代的「涨价卡」，路面发红）。
     PriceHike,
+    /// 调跌：租金减半（新闻「这一带地价调跌」，P11c②，路面发暗）。
+    ///
+    /// ⚠️ 它动的是**租金**那一维，与 `PriceHike` 同一条（`GameRules::drop_rent_divisor`）。
+    /// 「地价」是 4 代给这条新闻起的名字，而我们世界里的地价本身是 `land_price × 物价指数`
+    /// 算出来的（[`crate::settle::Books::market_value`]），一条会自己到期的状态**不去改它**：
+    /// 改了就会让同一块地在五天内有三种价（买价、押价、起拍价都跟着漂），而到期那天又漂回去 ——
+    /// 那笔账没人对得上。4 代究竟动哪个数查无记载，已记进 PLAN §七 待实报。
+    ///
+    /// 与 `PriceHike` 互为抵消对：单槽位让「先涨后跌」「先跌后涨」都是后盖前，不留优先级表。
+    PriceDrop,
     /// 查封：不收租、也不能加盖（法院贴条子，路面发蓝）。与 `PriceHike` 互为抵消对 ——
     /// 单槽位的替换就是那对关系，见模块头。
     Sealed,
@@ -63,6 +73,7 @@ impl LandStatus {
     pub fn label(&self) -> &'static str {
         match self {
             LandStatus::PriceHike => "涨价",
+            LandStatus::PriceDrop => "调跌",
             LandStatus::Sealed => "查封",
         }
     }
@@ -101,9 +112,10 @@ mod tests {
 
     #[test]
     fn every_status_has_a_word_for_the_trail() {
-        // 顶栏流水与 dump 面板都说的是这一句。穷尽匹配（没有 `_`）保证第四种状态
+        // 顶栏流水与 dump 面板都说的是这一句。穷尽匹配（没有 `_`）保证新一种状态
         // 出生时必须当场给它一个人话名字，而不是在 UI 里显示成 `PriceHike`
         assert_eq!(LandStatus::PriceHike.label(), "涨价");
+        assert_eq!(LandStatus::PriceDrop.label(), "调跌");
         assert_eq!(LandStatus::Sealed.label(), "查封");
     }
 }

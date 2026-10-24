@@ -16,12 +16,12 @@ use game_core::prelude::{
     BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, ChairmanTook, ChargeWaived,
     ChestOpened, CompanyCharged, DetentionLifted, DetentionSkipped, FacilityBuilt, FinancingDrawn,
     FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed,
-    IndemnityPaid, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn, LotteryWon,
-    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience,
-    NewsFired, NewsScope, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName,
-    PointsChanged, PolicyBought, RemoteDiceUsed, ServiceCharged, ShopOpDone, StayLifted,
-    StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide, TurnOrder,
-    TurnPhase, WalkHalted,
+    IndemnityPaid, Institution, ItemPlaced, LandId, LandTaken, LotteryBought, LotteryDrawn,
+    LotteryWon, MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped,
+    NewsAudience, NewsFired, NewsScope, Paused, PendingDecision, PlayerBailed, PlayerBankrupt,
+    PlayerName, PointsChanged, PolicyBought, RemoteDiceUsed, ServiceCharged, ShopOpDone,
+    StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TradeSide,
+    TurnOrder, TurnPhase, WalkHalted,
 };
 
 use super::dialog::describe;
@@ -1060,6 +1060,10 @@ pub(crate) fn hint_from_events(
                     &outcomes.iter().map(describe).collect::<Vec<_>>().join("；"),
                 )
             }
+            // 机构档（P11c②）：没有人名列表也没有地块清单，主语是「哪一家」
+            NewsAudience::Institution { what, days } => {
+                news_institution_headline(&m.news.title, *what, *days)
+            }
         });
     }
     for m in notices.over.read() {
@@ -1101,6 +1105,9 @@ fn news_headline(title: &str, scope: NewsScope, hits: &[(String, String)]) -> St
         // 地档不从这里过（它走 [`news_ground_headline`]）。这一格写出来是为了这张表不许有 `_`：
         // 有人把人档的句子接到地档上时，症状得是一句念得出的话而不是编译期之外的空白
         NewsScope::Around => ("这一带".to_string(), "地可打".to_string()),
+        // 机构档也不从这里过（它走 [`news_institution_headline`]）。同上：这一格存在的理由
+        // 是这张表不许有 `_`，接错档时症状得是一句念得出的话
+        NewsScope::Institution(_) => ("全场".to_string(), "机构可停".to_string()),
     };
     match hits.len() {
         // 一条新闻播出去而场上没人被点到：这不是「什么都没发生」的静默失效，而是
@@ -1150,6 +1157,23 @@ fn news_ground_headline(title: &str, center: Option<&str>, lands: &[String], dee
             lands.join("、")
         ),
     }
+}
+
+/// 一条**机构档**新闻在顶栏那一行怎么说（P11c②）：「号外「股市临时停牌」：股市 停牌 5 天」。
+///
+/// 第三个函数而不是给上面两个加参数：人档念「谁、各挨多少」，地档念「哪几块」，
+/// 这一档念「哪一家、停几天、哪天恢复」。三档要的东西没有交集，合成一个带可选参数的
+/// 函数就会得到「人名、地块、机构全为空」那种说不出话的形状（与 [`news_ground_headline`]
+/// 文件头那条同一条理由）。
+///
+/// 天数读的是**世界上**那一个（`NewsAudience::Institution::days`），所以叠加那天
+/// 这句话与浮层那句「剩 N 天」是同一个数。
+fn news_institution_headline(title: &str, what: Institution, days: u32) -> String {
+    format!(
+        "号外「{title}」：{} {} {days} 天",
+        what.label(),
+        what.halt_phrase()
+    )
 }
 
 // ===== P6e①：神明那六句话 =====
@@ -1298,6 +1322,7 @@ mod tests {
                 last_gift_year: None,
                 last_envelope_year: None,
                 last_news: None,
+                suspensions: Default::default(),
                 bank_vault: 0,
             })
             .insert_resource(MarketClock::default())
@@ -2336,6 +2361,48 @@ mod tests {
                 deed
             ),
             "号外「政府强制征收」：王府井 把 L5 强制上架"
+        );
+    }
+
+    /// 机构档那一句（P11c②）：主语是「哪一家」，而「停的是哪项能力」必须上屏。
+    /// 「银行 3 天」是一句答不出「那我还能不能借钱」的话，而那一问正是玩家下一手要问的。
+    #[test]
+    fn an_institution_news_names_the_house_and_the_capability() {
+        use game_core::prelude::Institution;
+        assert_eq!(
+            news_institution_headline("股市临时停牌", Institution::StockMarket, 3),
+            "号外「股市临时停牌」：股市 停牌 3 天"
+        );
+        assert_eq!(
+            news_institution_headline("银行停止放款", Institution::Bank, 5),
+            "号外「银行停止放款」：银行 停止放款 5 天"
+        );
+    }
+
+    /// 机构档走完整条接线。这一条与上面那条纯函数用例的分别是它**读得到** `audience`
+    /// 里那个天数：漏接线的形状是顶栏停在上一行（看着像新闻没播），而不是编译失败。
+    #[test]
+    fn an_institution_news_reaches_the_bar() {
+        let (mut app, me, _foe, hint) = notices_app();
+        send(
+            &mut app,
+            NewsFired {
+                broadcaster: me,
+                news: NewsNotice {
+                    id: "news_017".into(),
+                    title: "银行停止放款".into(),
+                    desc: "三天不借新钱".into(),
+                    scope: NewsScope::Institution(game_core::prelude::Institution::Bank),
+                    audience: NewsAudience::Institution {
+                        what: game_core::prelude::Institution::Bank,
+                        days: 3,
+                    },
+                },
+            },
+        );
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "号外「银行停止放款」：银行 停止放款 3 天"
         );
     }
 

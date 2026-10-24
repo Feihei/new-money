@@ -22,9 +22,10 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::query::With;
 use common::*;
 use game_core::prelude::{
-    ActiveBoard, Adjustment, BidMove, CardEffect, ChargeDomain, CompanyLedgers, Correction,
-    DataHandles, Date, Detention, DetentionPlace, GameSeed, GameSession, Gavel, ItemKind,
-    LandStatus, Mount, NewsId, NewsSet, Scope, Source, StaySentence, StockSet, TileKind, TurnPhase,
+    ActiveBoard, Adjustment, BankOp, BidMove, CardEffect, ChargeDomain, CompanyLedgers, Correction,
+    DataHandles, Date, Detention, DetentionPlace, GameSeed, GameSession, Gavel, HolidaySet,
+    Institution, ItemKind, LandStatus, MarketClock, Mount, NewsId, NewsSet, Pending, Scope, Source,
+    StaySentence, StockSet, TileKind, TradeSide, TurnPhase, date_of,
 };
 
 /// 演示盘上的新闻中心（`prototype.json` 的 13 号格，`(0,4)`）。
@@ -1659,6 +1660,226 @@ fn a_requisition_takes_the_house_and_the_land_and_pays_nothing() {
         total_assets(&mut app, 1.0),
         total_before - price,
         "全场现资产该正好少了那一块地的价钱（这就是那条通缩闸门的单位）：{line}"
+    );
+    assert_cash_audit(&mut app, START);
+}
+
+// ===== P11c②：机构档（停牌 / 停止放款）与地价调跌 =====
+
+/// 世界上这一家还剩几天停摆。读的是 `Books`，所以与规则层那句判据同一个来源 ——
+/// 测试自己数天数就会与世界上那个数各漂一次。
+fn suspended_for(app: &mut App, what: Institution) -> u32 {
+    let out = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sink = out.clone();
+    run_op(app, move |books, _| {
+        *sink.lock().unwrap() = Some(books.session.suspensions.days_left(what));
+    });
+    out.lock().unwrap().expect("Books 读得到停摆那一格")
+}
+
+/// 把锚点往前挪，直到「今天」是个开市日。
+///
+/// 跑回合必然撞上周末与节假日（P2b 之后日历是真的），而这条用例问的是
+/// 「停摆到期之后放不放行」—— 被日历挡在外面的那一笔答不了这个问题。
+/// 挪不到就响：那是夹具或节假日表错了，不是规则错了（比悄悄少一条断言好）。
+fn open_the_market(app: &mut App) {
+    for _ in 0..10 {
+        let tick = app.world().resource::<MarketClock>().tick;
+        let epoch = app.world().resource::<GameSession>().epoch;
+        let closed = app
+            .world()
+            .resource::<HolidaySet>()
+            .is_market_closed(date_of(tick, epoch));
+        if !closed {
+            return;
+        }
+        app.world_mut().resource_mut::<GameSession>().epoch = epoch.add_days(-1);
+    }
+    panic!("往前挪了十天还找不到一个开市日");
+}
+
+/// 停牌这几天：**下单不受理、行情也不往前走**，而到期自己复牌。
+///
+/// 两条都要，因为「停牌」在玩家耳朵里是两件事合成的一件：他按不动那颗买按钮，
+/// 而复牌时看到的价不该是他没参与却变了的价。所以这里挡的不只是窗口，还有 `advance_prices`。
+///
+/// 前置那两笔是**非空跑守卫**（本项目犯过五次的那条）：不先证明「开盘时这一笔真的成交、
+/// 一个 tick 价格真的会动」，下面那两条否定式断言就是永远不响的断言。
+#[test]
+fn a_suspended_market_refuses_orders_and_freezes_the_prices() {
+    let (mut app, p0) = step_onto_once();
+    // 日历钉死：锚点由会话种子抽，随机落在周末或节假日时**前置那一笔**就会被休市挡掉，
+    // 症状看着像「停牌这条新闻没生效」，而其实是夹具根本没开盘（P11b② 那条 `pin_calendar`
+    // 的同一条学费，这次是为了开盘而不是为了躲红包）
+    pin_calendar(&mut app);
+    let id = "stock_001";
+    make_current(&mut app, p0);
+
+    trade(&mut app, p0, id, TradeSide::Buy, 1);
+    settle(&mut app, 3);
+    assert_eq!(shares_of(&mut app, p0, id), 1, "前置：开盘时这一笔该成交");
+    let live = price_of(&mut app, id);
+    run_market_tick(&mut app);
+    assert_ne!(
+        price_of(&mut app, id),
+        live,
+        "前置：一个 tick 的价格会走随机游走（否则下面那条「冻住」是空的）"
+    );
+
+    let line = fired(&mut app, p0, "news_016");
+    // 机构档的「办成了什么」全在这一格里（哪一家、剩几天），它不带 `EffectOutcome` 清单 ——
+    // 那一族没有承受者也没有地块，再列一份就是同一个数说两遍
+    assert!(line.contains("机构StockMarket[剩3天]"), "{line}");
+    assert_eq!(suspended_for(&mut app, Institution::StockMarket), 3);
+
+    trade(&mut app, p0, id, TradeSide::Buy, 1);
+    settle(&mut app, 3);
+    assert_eq!(
+        shares_of(&mut app, p0, id),
+        1,
+        "停牌那天还受理了一笔下单 —— 规则层没读停摆那一格"
+    );
+
+    let frozen = price_of(&mut app, id);
+    for _ in 0..3 {
+        run_market_tick(&mut app);
+    }
+    assert_eq!(
+        price_of(&mut app, id),
+        frozen,
+        "停牌期间行情动了：玩家复牌时看到的是一张他没参与却变了的价"
+    );
+
+    // 到期那一半：撤掉载体（不然路上还会再抽到新闻，把停摆重新续上），再跑过三个回合末
+    retile(&mut app, NEWS, TileKind::Road);
+    let want = turn_count(&app) + 5;
+    play_turns(&mut app, want);
+    assert_eq!(
+        suspended_for(&mut app, Institution::StockMarket),
+        0,
+        "五个回合末之后早该复牌（一天＝一个回合末，与涨价同一把尺）"
+    );
+    make_current(&mut app, p0);
+    open_the_market(&mut app);
+    trade(&mut app, p0, id, TradeSide::Buy, 1);
+    settle(&mut app, 3);
+    assert_eq!(
+        shares_of(&mut app, p0, id),
+        2,
+        "复牌之后买不动 —— 到期没真的放行"
+    );
+    assert_cash_audit(&mut app, START);
+}
+
+/// 停止放款**只挡借**：存取款与还款照办。
+///
+/// 这条用例的重心在后半：一条「银行停摆」的新闻很容易整块短路掉柜台，而那样一来
+/// 欠着钱的人平白多一笔还不上的逾期 —— 没有任何一条规则配得上那笔惩罚。
+/// 所以「借不动」与「还得掉」两条必须同时红过才算有牙（red-check 里真的一起翻过）。
+#[test]
+fn a_suspended_bank_stops_lending_but_not_repaying_or_cash_moves() {
+    let (mut app, p0) = ready_on(6, 2, DecisionPolicy::Hold);
+    own(&mut app, ANCHOR, Some(0), 2, false);
+    roll(&mut app, p0);
+    settle(&mut app, 8);
+    assert_eq!(
+        pending_of(&app),
+        Some((p0, Pending::BankTeller)),
+        "前置没做到：踩到银行格却没开出柜台"
+    );
+
+    bank_ask(&mut app, p0, BankOp::Borrow, 5_000);
+    settle(&mut app, 3);
+    assert_eq!(bank_of(&mut app, p0).1, 5_000, "前置：开盘时借得动");
+
+    let line = fired(&mut app, p0, "news_017");
+    assert!(
+        line.contains("机构Bank[剩3天]"),
+        "凭据要说得出停的是银行、几天：{line}"
+    );
+
+    bank_ask(&mut app, p0, BankOp::Borrow, 5_000);
+    settle(&mut app, 3);
+    assert_eq!(
+        bank_of(&mut app, p0).1,
+        5_000,
+        "停止放款还放得出钱，这条新闻就白播了"
+    );
+
+    bank_ask(&mut app, p0, BankOp::Repay, 5_000);
+    settle(&mut app, 3);
+    assert_eq!(
+        bank_of(&mut app, p0).1,
+        0,
+        "还款被一起挡了 —— 停摆期间不许还钱是惩罚"
+    );
+
+    bank_ask(&mut app, p0, BankOp::Deposit, 1_000);
+    settle(&mut app, 3);
+    assert_eq!(
+        bank_of(&mut app, p0).0,
+        1_000,
+        "存款也被挡了 —— 银行没有关门"
+    );
+    assert_cash_audit(&mut app, START);
+}
+
+/// 同一家再挨一条：**不累加**，答案还是那一个数。
+///
+/// 「更久的那一张赢」这一格由 `institution.rs` 的单测钉（那里能摆出 5 与 3 两个数），
+/// 这一条只钉另一件在集成上才会显形的事：凭据与世界上那个数是同一个,
+/// 播两次不会把停摆读成 6 天，也不会把第二条播成一句静默的空标题。
+#[test]
+fn two_suspensions_of_the_same_institution_do_not_stack() {
+    let (mut app, p0) = step_onto_once();
+    let first = fired(&mut app, p0, "news_016");
+    let second = fired(&mut app, p0, "news_016");
+    assert!(first.contains("剩3天"), "{first}");
+    assert!(
+        second.contains("剩3天"),
+        "同一家挨两条不该累加成 6 天：{second}"
+    );
+    assert_eq!(
+        suspended_for(&mut app, Institution::StockMarket),
+        3,
+        "凭据念 3 而世界上是别的数 —— 两处各算了一遍"
+    );
+    // 另一家不受牵连：两条停摆写在同一份资源里，串台是最省事的写错方式
+    assert_eq!(suspended_for(&mut app, Institution::Bank), 0);
+}
+
+/// 地价调跌：整条街盖上 `PriceDrop`，而**后播的那条盖掉前一条**（单槽位，不留优先级表）。
+///
+/// 租金那个数（÷2）由 `economy.rs` 的单测钉；这里钉的是新闻这一侧的两件事：
+/// 清单是脚下那一整条街，以及「涨价 ⇄ 调跌」在结构上就是替换。
+#[test]
+fn a_price_drop_news_stamps_the_street_and_a_later_hike_replaces_it() {
+    let (mut app, p0) = step_onto_once();
+    own(&mut app, ANCHOR, Some(1), 3, false);
+    own(&mut app, 5, Some(1), 3, false);
+
+    let line = fired(&mut app, p0, "news_015");
+    let (_center, lands) = ground(&line);
+    assert_eq!(
+        lands,
+        vec!["L4".to_string(), "L5".to_string()],
+        "整条街都调跌：{line}"
+    );
+    for land in STREET {
+        let (status, days) = status_of(&mut app, land).expect("刚播完，这一格该挂着调跌");
+        assert_eq!(status, LandStatus::PriceDrop, "L{land} 盖的是调跌");
+        assert!(
+            days > 0 && days <= 5,
+            "L{land} 的天数在条目那一格之内：{days}"
+        );
+    }
+
+    // 后盖前：隔壁那条街刚涨过价，这一条把它换掉而不是叠上去
+    fired(&mut app, p0, "news_006");
+    assert_eq!(
+        status_of(&mut app, ANCHOR).map(|(s, _)| s),
+        Some(LandStatus::PriceHike),
+        "涨价没盖掉调跌 —— 那就是两张状态表在租金那一格里打架"
     );
     assert_cash_audit(&mut app, START);
 }

@@ -127,6 +127,10 @@ pub fn calculate_rent(def: &BoardDef, land: &LandView, all: &[LandView], rules: 
     // 这种规则时只有一处要改
     match land.status {
         Some(LandStatus::PriceHike) => rent * rules.hike_rent_multiplier,
+        // 调跌是涨价的镜像，但**不是一条「乘 0.5」**：这套账全程整数，除数只有一条
+        // 取整口径（向下），而乘 0.5 再取整在垄断加成之上会差一块钱。两者谁也不叠加谁 ——
+        // 单槽位让「先涨后跌」读成「后盖前」，这里永远只有一种状态在场
+        Some(LandStatus::PriceDrop) => rent / rules.drop_rent_divisor,
         Some(LandStatus::Sealed) | None => rent,
     }
 }
@@ -577,6 +581,37 @@ mod tests {
             calculate_rent(&def, &land, &all, &r),
             60,
             "组内有他人 → 不翻倍"
+        );
+    }
+
+    /// 调跌（P11c②）是涨价的镜像，但它是**除**不是「乘 0.5」：这套账全程整数，
+    /// 一条取整口径写清楚比两个数各自凑近更重要（垄断 120 ÷ 2 = 60，若写成乘除数会得 240）。
+    ///
+    /// 第二问也要答：调跌**不挡业主自己加盖** —— 它动的是「别人付多少」，
+    /// 与涨价同一格答案（查封挡，因为那是法院贴条子）。
+    #[test]
+    fn a_dropped_street_halves_the_rent_and_still_builds() {
+        let def = board();
+        let r = rules();
+        let all = stamped(
+            world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]),
+            0,
+            Some(LandStatus::PriceDrop),
+        );
+        assert_eq!(
+            calculate_rent(&def, &at(&all, 0), &all, &r),
+            120 / r.drop_rent_divisor,
+            "调跌除在垄断加成之后（与涨价乘的位置同一条）"
+        );
+        assert_eq!(
+            calculate_rent(&def, &at(&all, 1), &all, &r),
+            120,
+            "调跌也是按块盖的，没盖到的那块照旧"
+        );
+        let me = PlayerId(0);
+        assert!(
+            can_upgrade(&at(&all, 0), me, &all, cost(&def, &at(&all, 0)), 99_999, &r),
+            "调跌动的是「别人付多少」，不该挡住业主自己加盖"
         );
     }
 

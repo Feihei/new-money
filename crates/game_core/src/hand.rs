@@ -253,6 +253,9 @@ fn unmet_precondition(
             | CardEffect::MoveCap { .. }
             | CardEffect::LandStatus { .. }
             | CardEffect::Damage { .. }
+            // 停摆不会落空：它写的是一条规矩上的数，而「已经在停」只是把它延长
+            // （今天也没有卡能走到这一格 —— `CardSet::validate` 把这条效果挡在卡池外）
+            | CardEffect::Suspend { .. }
             | CardEffect::BuyLand => None,
         };
         if why.is_some() {

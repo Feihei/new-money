@@ -23,6 +23,15 @@ pub struct GameRules {
     /// 与 [`monopoly_rent_multiplier`] 分开两个数：它们是两个规则，会各自被改
     /// （将来「涨价不叠加垄断」这种话一说出口，共用一个数就得先拆开）。
     pub hike_rent_multiplier: i64,
+    /// 调跌期间的租金**除数**（新闻「这一带地价调跌」，P11c②）。2 = 租金减半。
+    ///
+    /// 与上面那个倍数分开设，而不是写成 `0.5` 的乘数：这套账全程整数，乘 0.5 要引入
+    /// 浮点再取整，而「取整前乘还是取整后乘」在垄断加成之上会差一块钱。除数只有一条
+    /// 取整口径（整数除法向下取整），租金 15 调跌成 7 而不是 7.5 —— 少的那一块是房东出的，
+    /// 与「涨价翻倍」同样不追求公平。
+    ///
+    /// 两个数不共用一个：涨价翻倍与调跌减半是两个规则，会各自被改。
+    pub drop_rent_divisor: i64,
     /// 存款利率（**每月**），月末那一天发。P2④ 之前它是「每回合 3%」并且挂在踩银行格上，
     /// 一天一回合的口径下等于日复利 3%（一个月 12 天就涨四成），那不是我想要的银行。
     pub deposit_rate: f32,
@@ -132,6 +141,7 @@ impl Default for GameRules {
             max_building_level: 5,
             monopoly_rent_multiplier: 2,
             hike_rent_multiplier: 2,
+            drop_rent_divisor: 2,
             deposit_rate: 0.10,
             loan_rate: 0.15,
             max_loan_ratio: 2.0,

@@ -126,6 +126,12 @@ pub struct GameSession {
     /// 它也必须在**开局**归零（`world::begin_game_system` 造的就是新的一份）——
     /// 留着上一局那一条，新局第一次踩新闻中心会**避开一条它这局从没播过的新闻**。
     pub last_news: Option<crate::news::NewsId>,
+    /// 机构停摆登记处（P11c②）：股市停牌 / 银行停止放款，各自还剩几天。
+    ///
+    /// 它是**全局规矩**而不是某个人的状态，所以进 `GameSession`（与 `last_news` 同一条理由：
+    /// 必须进存档，且开局由 `begin_game_system` 造的新的一份归零 —— 留着上一局的停牌，
+    /// 新局第一格股市就凭空不开盘）。
+    pub suspensions: crate::institution::Suspensions,
     /// 银行储备（P10d②）：存款存进来多少、取款取走多少，这条流水是**融资三件套**
     /// 的地基 —— 4 代口径里银行不是印钞机，库里只有储户放进去的钱；取款时库不够，
     /// 差额由「银行保险」的董事长兜底（`bank.rs` 的融资规则 ②）。

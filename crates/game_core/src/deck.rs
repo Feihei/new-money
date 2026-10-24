@@ -611,6 +611,16 @@ pub fn apply_effects(
                 };
                 outcomes.push(EffectOutcome::Auctioned { lands });
             }
+            CardEffect::Suspend { what, days } => {
+                // 三条来路（卡／命运／新闻）里今天只有新闻走得通：`CardSet::validate` 把卡挡在
+                // 池外，而命运与机会池没有条目带它。这一格因此**不读 aim、不读 victim** ——
+                // 它改的是一条规矩，谁站在这儿都一样。
+                //
+                // 这里**不推凭据**：机构档的承受者既不是人也不是地，那条新闻的「办成了什么」
+                // 全在 `NewsAudience::Institution{what, days}` 那一格里（一家、几天）。
+                // 再发一条 `EffectOutcome` 就是同一个数存两处，而两处会各自漂
+                let _ = sink.books.session.suspensions.suspend(*what, *days);
+            }
             CardEffect::Reverse => {
                 // 与入狱同一条形状：它先过护身。被抵消的那次不该留下半个掉头 ——
                 // 「方向没变」与「方向变了又变回来」在流水上是两件事

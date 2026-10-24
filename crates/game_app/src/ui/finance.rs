@@ -14,7 +14,7 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    AtmAccess, BankOp, Books, DataHandles, GameRules, HolidaySet, MarketClock, Paused,
+    AtmAccess, BankOp, Books, DataHandles, GameRules, HolidaySet, Institution, MarketClock, Paused,
     PendingDecision, PriceHistory, StockId, StockPrice, StockSet, TradeSide, TurnOrder, TurnPhase,
     date_of, days_until_dividend,
 };
@@ -22,7 +22,7 @@ use game_core::prelude::{
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, SECONDARY, UiAction, border_color, button, can_bank_op, can_trade,
-    counter_of, info_row, is_market_open, label,
+    counter_of, info_row, label, market_state,
 };
 use crate::render::DevFont;
 
@@ -121,8 +121,25 @@ pub(crate) fn sync_atm_panel(
     let deposit = books.bank_of(player).deposit;
     // 窗口判据在外面算好：`with_children` 的闭包拿不到 `Books` 那类借用，
     // 而这两句本来也只依赖状态资源，不依赖余额
-    let deposit_window = can_bank_op(BankOp::Deposit, &view.paused, &view.pending, &view.atm);
-    let withdraw_window = can_bank_op(BankOp::Withdraw, &view.paused, &view.pending, &view.atm);
+    //
+    // `lending_open` 这一格 ATM 面板用不到（它只有存与取两颗），传进去是为了
+    // 「哪一颗在什么时候亮」这一问只有一处答案 —— 在这里现读世界，而不是让
+    // `can_bank_op` 自己猜一个 true（那等于把停摆那条判据在 ATM 这一侧悄悄抹掉）
+    let lending_open = !books.session.suspensions.halted(Institution::Bank);
+    let deposit_window = can_bank_op(
+        BankOp::Deposit,
+        &view.paused,
+        &view.pending,
+        &view.atm,
+        lending_open,
+    );
+    let withdraw_window = can_bank_op(
+        BankOp::Withdraw,
+        &view.paused,
+        &view.pending,
+        &view.atm,
+        lending_open,
+    );
 
     let mut root = commands.spawn((
         BoardUi,
@@ -250,13 +267,15 @@ pub(crate) fn sync_stock_panel(
         return;
     }
     let player = view.order.as_ref().and_then(|o| o.current());
-    let trading_hours = is_market_open(&view.clock, &books.session, &view.holidays);
+    // 休市与停牌是两件事（P11c②）：`Halt` 带的是「哪一条挡的」，下面那句人话据此选词，
+    // 而 `tradable` 只问开不开
+    let halt = market_state(&view.clock, &books.session, &view.holidays);
     let tradable = player.is_some_and(|p| {
         can_trade(
             *view.phase.get(),
             &view.paused,
             &view.pending,
-            trading_hours,
+            halt.is_open(),
         ) && same_actor(p, &view.pending)
     });
     let set = view.sets.get(&view.data.stocks);
@@ -285,7 +304,7 @@ pub(crate) fn sync_stock_panel(
 
     let cash = player.map_or(0, |p| books.balance(p));
     let stamp = format!(
-        "{}|{cash}|{tradable}|{}",
+        "{}|{cash}|{tradable}|{halt:?}|{}",
         view.clock.tick,
         rows.iter()
             .map(|(id, _, price, _, held)| format!("{id}:{price}:{held}"))
@@ -334,16 +353,15 @@ pub(crate) fn sync_stock_panel(
         ));
         p.spawn(label(
             &font.0,
-            // 三句各有各的「不能」，混成一句就会把休市说成「你不会操作」
+            // 四句各有各的「不能」，混成一句就会把休市说成「你不会操作」：
+            // 停牌那句自带剩余天数（词由 core 的 `Halt::why` 给，与规则层同源）
             format!(
                 "现金 ${cash} — {}",
-                if !trading_hours {
-                    "股市休市，下单不受理"
-                } else if tradable {
-                    "掷骰前可买卖"
+                halt.why().unwrap_or_else(|| if tradable {
+                    "掷骰前可买卖".to_string()
                 } else {
-                    "只在掷骰前可买卖"
-                }
+                    "只在掷骰前可买卖".to_string()
+                })
             ),
             size::ROW,
             if tradable { col::MUTED } else { col::BANKRUPT },

@@ -11,7 +11,7 @@ use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::economy::dividend_per_share;
 use game_core::prelude::{
-    BankBalance, Bankrupt, Books, CardEffect, CardKind, DataHandles, Date, Detention,
+    ActiveBoard, BankBalance, Bankrupt, Books, CardEffect, CardKind, DataHandles, Date, Detention,
     DetentionPlace, GameRules, GameSeed, GameSession, GameSetup, StaySentence, StockId, TileIndex,
     TileKind, TradeSide, TurnPhase,
 };
@@ -775,9 +775,13 @@ fn forty_turns_keep_the_ledger_consistent() {
         "要么跑满 40 回合，要么提前终局，实际 {turns} 回合、阶段 {:?}",
         phase(&app)
     );
-    // `TileIndex` 是 newtype：这里顺手用它确认全员都在主环上
+    // `TileIndex` 是 newtype：这里顺手用它确认全员都在主环上。
+    // 环长从世界上读而不是写死一个数 —— 这一格原来写的是 `tile < 19`，那是 P8 之前的环长；
+    // P8 加彩票中心、P11 加新闻中心之后 19 号是**在主环上**的，写死的数每加一格就要重数一遍，
+    // 而它错的方式是「40 回合长跑恰好没人踩到那一格」时才不响
+    let ring = app.world().resource::<ActiveBoard>().def.tiles.len() as u32;
     for (entity, _, _, tile) in roster(&mut app) {
-        assert!(tile < 19, "{entity:?} 掉出了主环：{tile}");
+        assert!(tile < ring, "{entity:?} 掉出了主环：{tile} / 环长 {ring}");
         let _ = TileIndex(tile);
     }
 }

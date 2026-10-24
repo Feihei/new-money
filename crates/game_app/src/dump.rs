@@ -18,11 +18,11 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiCon
 use game_core::prelude::{
     ActiveBoard, ArcadeDeal, AtmAccess, Auction, BankBalance, Bankrupt, BuildingLevel, CardKind,
     CompanyLedgers, Corrections, CouponBoxes, Deck, DeckOrder, Detention, Facility, GameRules,
-    GameSeed, GameSession, Gavel, Hand, Heading, HolidaySet, Insulation, Insured, Inventory,
-    Jackpot, LandId, LandStatus, Landing, LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap,
-    Occupancy, OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName, Points,
-    Possession, Shelf, ShopStock, StaySentence, StockHoldings, Timed, TurnOrder, TurnPhase, Wallet,
-    resists,
+    GameSeed, GameSession, Gavel, Hand, Heading, HolidaySet, Institution, Insulation, Insured,
+    Inventory, Jackpot, LandId, LandStatus, Landing, LotteryTickets, MarketClock, Mortgaged, Mount,
+    MoveCap, Occupancy, OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName,
+    Points, Possession, Shelf, ShopStock, StaySentence, StockHoldings, Timed, TurnOrder, TurnPhase,
+    Wallet, resists,
 };
 
 use crate::asset_root;
@@ -232,6 +232,7 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             row(ui, "状态", format_state(&view));
             row(ui, "落格", format_landing(&view));
             row(ui, "新闻", format_news(&view));
+            row(ui, "停摆", format_suspensions(&view));
             row(ui, "待决", format_pending(&view));
             row(ui, "资格", format_access(&view));
             row(ui, "牌堆", format_decks(&view));
@@ -281,6 +282,29 @@ fn format_news(view: &DumpView) -> String {
         })
         .unwrap_or_else(|| "还没播过".to_string());
     format!("上一条 {last} · 池 {pool} 条")
+}
+
+/// 机构停摆那一栏（P11c②）：哪一家停着、还剩几天。
+///
+/// 全都没停也写一句「两家都开着」而不是空着 —— 这一栏的全部用途是回答「为什么点不动
+/// 那颗按钮」，而空栏既可能是「没停」也可能是「面板没读到」，那两种在排查时差一整趟。
+fn format_suspensions(view: &DumpView) -> String {
+    let Some(session) = &view.session else {
+        return "世界未装配".to_string();
+    };
+    let halted = [Institution::StockMarket, Institution::Bank]
+        .iter()
+        .filter_map(|what| {
+            let days = session.suspensions.days_left(*what);
+            (days > 0).then(|| format!("{}{}剩{days}天", what.label(), what.halt_phrase()))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if halted.is_empty() {
+        "两家都开着".to_string()
+    } else {
+        halted
+    }
 }
 
 fn format_session(view: &DumpView) -> String {

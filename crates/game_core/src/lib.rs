@@ -26,6 +26,7 @@ pub mod deck;
 pub mod economy;
 pub mod gods;
 pub mod hand;
+pub mod institution;
 pub mod items;
 pub mod land;
 pub mod landing;
@@ -103,6 +104,7 @@ pub mod prelude {
         takes_landing, top_up_gods_system, walk_effect, walk_effect_system, wander_gods_system,
     };
     pub use crate::hand::{CardAim, Hand, PlayWindow, card_notice, deal_to, play_card_system};
+    pub use crate::institution::{Institution, Suspensions, age_suspensions_system};
     pub use crate::items::{Inventory, ItemKind};
     pub use crate::land::{BuildingLevel, Facility, LandId, Mortgaged, Owner};
     pub use crate::landing::{
@@ -115,8 +117,8 @@ pub mod prelude {
         draw_lottery_system, lottery_op_system, settle_lottery_landing,
     };
     pub use crate::market::{
-        Market, MarketClock, market_tick_on_turn_end_system, settle_market_landing,
-        trade_request_system,
+        Halt, Market, MarketClock, market_halt, market_tick_on_turn_end_system,
+        settle_market_landing, trade_request_system,
     };
     pub use crate::minigame::{
         ArcadeDeal, GameKind, Payout, Payouts, minigame_score_system, settle_arcade_landing,
@@ -199,9 +201,9 @@ use prelude::{
     ServiceCharged, ShopOpDone, ShopOpRequested, ShopStock, StayLifted, StaySkipped,
     StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
     TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, WalkClock, WalkHalt, WalkHalted,
-    WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system, auction_hold_system,
-    auction_move_system, bail_op_system, bank_op_system, begin_game_system, build_op_system,
-    decision_system, deliver_calendar_events_system, draw_lottery_system,
+    WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system, age_suspensions_system,
+    auction_hold_system, auction_move_system, bail_op_system, bank_op_system, begin_game_system,
+    build_op_system, decision_system, deliver_calendar_events_system, draw_lottery_system,
     expire_land_status_system, financing_system, finish_halt_system, grant_atm_access_system,
     insurance_claim_system, land_deity_succession_system, lottery_op_system,
     market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system, place_item_system,
@@ -649,6 +651,12 @@ impl Plugin for CoreGamePlugin {
                         // 都不相交，所以放进这组并行元组里，谁先跑都不改结果
                         expire_land_status_system,
                     ),
+                    // 机构停摆过一天（P11c②）。**单独一个阶段**，两个理由叠在一起：
+                    // ① 它碰 `GameSession`，而上面那条行情 tick 经 `Books` 也碰 ——
+                    // 同阶段并跑会在调度期撞成借用冲突（§6.1 坑 33）；
+                    // ② 次序有语义：必须在 tick **之后**减，否则「停牌 1 天」在当天
+                    // tick 之前就成了 0，那一天照常开盘 —— 少挡的正是它要挡的那一天
+                    age_suspensions_system,
                     // 神明过一天：先各自挪一格，再补刷到名额。这两条都要 `&mut Rng`，
                     // 而上面那一组里的行情 tick 也要 —— 所以它们自己成一阶段，
                     // 不能塞进那个并行元组（调度期直接撞成借用冲突）

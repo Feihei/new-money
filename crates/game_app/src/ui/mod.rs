@@ -27,11 +27,11 @@ use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionMove, BailRequested, BankOp, BankOpRequested, BidMove,
     BuildRequested, BuildingKind, BuyTicketRequested, CardAim, CardId, Decision, DecisionChosen,
-    FinancingDrawRequested, GameKind, GameSession, HolidaySet, ItemKind, LandId, MarketClock,
-    MinigameResult, MortgageOp, MortgageRequested, Paused, Pending, PendingDecision,
+    FinancingDrawRequested, GameKind, GameSession, Halt, HolidaySet, Institution, ItemKind, LandId,
+    MarketClock, MinigameResult, MortgageOp, MortgageRequested, Paused, Pending, PendingDecision,
     PlaceItemRequested, PlayCardRequested, RemoteUpgradeRequested, RequestRemoteDice, RequestRoll,
     RequestStay, ShopOpRequested, StaySentence, StockId, StockTradeRequested, TileIndex, TradeSide,
-    TurnOrder, TurnPhase, bank_op_allowed, date_of,
+    TurnOrder, TurnPhase, bank_op_allowed, date_of, market_halt,
 };
 
 use theme::{col, layout, size};
@@ -427,15 +427,22 @@ pub(crate) fn auction_customer(pending: &PendingDecision) -> Option<Entity> {
     }
 }
 
-/// 今天股市开盘吗。**只反问股市**（P2b）：周末 ∪ 节假日休市，银行全年无休。
-/// 规则层 `market::trade_request_system` 读的是同一个 `HolidaySet::is_market_closed`；
-/// UI 只负责在玩家按下之前把按钮灰掉并写明为什么。
-pub(crate) fn is_market_open(
+/// 今天开盘吗，以及**不开的话是哪一条挡的**（P11c② 起有两条判据：日历休市与新闻停牌）。
+/// **只反问股市**（P2b）：银行全年无休。
+///
+/// 这里不再是一个 `bool`：面板那句「为什么灰」要说得出是哪一条（「周末本来不开」与
+/// 「上面发了话」玩家的下一手不一样），而规则层读的是同一个 [`market_halt`]。
+/// 判据本身在 core（`market::market_halt`），这里只做一次取数 —— 两处各写一遍
+/// 那个 `||` 就会有一处漏问第二个来源。
+pub(crate) fn market_state(
     clock: &MarketClock,
     session: &GameSession,
     holidays: &HolidaySet,
-) -> bool {
-    !holidays.is_market_closed(date_of(clock.tick, session.epoch))
+) -> Halt {
+    market_halt(
+        holidays.is_market_closed(date_of(clock.tick, session.epoch)),
+        session.suspensions.days_left(Institution::StockMarket),
+    )
 }
 
 /// 此刻能不能办这一笔银行操作。面板着色与派发共用这一句（同 `can_roll` 的理由）。
@@ -443,18 +450,23 @@ pub(crate) fn is_market_open(
 /// 与规则层同构但不完全等价：这里多挡一条「挂着别的模态时不办」。买地/升级/收据/卡面
 /// 的内容是弹出那一刻烤死的，中途改钱包会让它显示过期数字 —— 那些遮罩本来也压住了浮层。
 /// 真正的权限仍由 `bank::bank_op_system` 判，这里只管「该不该亮」。
+///
+/// `lending_open` 由调用方从世界上读（`session.suspensions`）：这一格与规则层同一句判据，
+/// 而「银行停止放款」只挡 [`BankOp::Borrow`] —— 还款不许一起挡，理由写在
+/// `bank::bank_op_allowed` 那三格分开的注释里。
 pub(crate) fn can_bank_op(
     op: BankOp,
     paused: &Paused,
     pending: &PendingDecision,
     atm: &AtmAccess,
+    lending_open: bool,
 ) -> bool {
     if paused.0 {
         return false;
     }
     let counter = counter_of(pending).is_some();
     let other_modal_up = pending.active().is_some() && !counter;
-    !other_modal_up && bank_op_allowed(op, atm.0.is_some() || counter, counter)
+    !other_modal_up && bank_op_allowed(op, atm.0.is_some() || counter, counter, lending_open)
 }
 
 /// 这笔操作的**主语**是谁：柜台优先（那就是柜台的客人），否则是 ATM 卡的持有人。
@@ -855,11 +867,16 @@ fn dispatch_ui_actions(
         let Ok(action) = widgets.actions.get(entity) else {
             continue;
         };
-        // 休市只挡股市（P2b）。银行派发不看这一条 —— 柜台全年开
+        // 休市与停牌都只挡股市（P2b / P11c②）。银行派发不看这一条 —— 柜台全年开，
+        // 它自己的那条停摆只挡「借」，就在下面那一格里问
         let market_open = gate
             .session
             .as_ref()
-            .is_some_and(|session| is_market_open(&gate.clock, session, &gate.holidays));
+            .is_some_and(|session| market_state(&gate.clock, session, &gate.holidays).is_open());
+        let lending_open = gate
+            .session
+            .as_ref()
+            .is_none_or(|session| !session.suspensions.halted(Institution::Bank));
         match action {
             UiAction::NewGame => next_scene.set(crate::scene::Scene::Board),
             UiAction::BackToMenu => next_scene.set(crate::scene::Scene::Menu),
@@ -912,7 +929,7 @@ fn dispatch_ui_actions(
             }
             // 银行操作：主语是柜台的客人，或 ATM 卡的持有人（两者不会同时挂着别人）
             UiAction::BankOp { op, amount } => {
-                if !can_bank_op(*op, &gate.paused, &gate.pending, &gate.atm) {
+                if !can_bank_op(*op, &gate.paused, &gate.pending, &gate.atm, lending_open) {
                     continue;
                 }
                 if let Some(player) = bank_op_subject(&gate.pending, &gate.atm) {
@@ -1455,6 +1472,7 @@ mod tests {
                     last_gift_year: None,
                     last_envelope_year: None,
                     last_news: None,
+                    suspensions: Default::default(),
                     bank_vault: 0,
                 })
                 .insert_resource(pending)
@@ -1864,11 +1882,31 @@ mod tests {
         ] {
             let needs_counter = matches!(op, BankOp::Borrow | BankOp::Repay);
             assert_eq!(
-                can_bank_op(op, &paused, &pending, &atm),
+                can_bank_op(op, &paused, &pending, &atm, true),
                 !needs_counter,
                 "{op:?} 的窗口判据漂了"
             );
         }
+        // 停摆（P11c②）：柜台里只有「借」那一颗灭，其余三颗照亮。这一格与规则层
+        // `bank::bank_op_allowed` 那三格分开写的是同一句话 —— 停止放款不许挡还款
+        let counter = {
+            let mut p = PendingDecision::default();
+            p.offer(
+                Entity::from_raw_u32(7).expect("7 不是保留值"),
+                Pending::BankTeller,
+            );
+            p
+        };
+        for op in [BankOp::Deposit, BankOp::Withdraw, BankOp::Repay] {
+            assert!(
+                can_bank_op(op, &paused, &counter, &AtmAccess(None), false),
+                "{op:?} 被停摆挡住了 —— 银行没有关门"
+            );
+        }
+        assert!(
+            !can_bank_op(BankOp::Borrow, &paused, &counter, &AtmAccess(None), false),
+            "停止放款还借得出去，这条新闻就白播了"
+        );
         // 股市反过来：休市就不亮
         assert!(can_trade(TurnPhase::WaitRoll, &paused, &pending, true));
         assert!(!can_trade(TurnPhase::WaitRoll, &paused, &pending, false));

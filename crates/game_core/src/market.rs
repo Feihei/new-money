@@ -26,6 +26,7 @@ use crate::calendar::{HolidaySet, date_of, is_dividend_day};
 use crate::company::CompanyLedgers;
 use crate::data::DataHandles;
 use crate::economy;
+use crate::institution::Institution;
 use crate::landing::{Landed, Landing, LandingDomain};
 use crate::msg::{
     CompanyPayout, StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TradeSide,
@@ -40,6 +41,62 @@ use crate::turn::TurnOrder;
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MarketClock {
     pub tick: u32,
+}
+
+/// 今天受理下单吗。**两条判据合成一句**（P11c②）：日历休市（周末∪节假日）与新闻停牌。
+///
+/// 为什么合成一个带名字的枚举而不是两处各写一个 `||`：面板那句「为什么灰」必须说得出
+/// 是哪一条挡的 —— 「今天本来不开盘」与「上面发了话，这几天不开」在玩家耳朵里是两件事
+/// （前者他知道哪天恢复，后者不知道），而规则层只问开不开。两处各自 `||` 的话，
+/// 早晚有一处忘了问第二个来源。`finance.rs` 那句「三句各有各的『不能』」是同一条纪律。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Halt {
+    /// 开盘
+    Open,
+    /// 日历休市（周末 ∪ 节假日）
+    Calendar,
+    /// 新闻停牌，带**世界上剩余的天数**（不是条目上那个数）：面板那句要说「剩几天」，
+    /// 而玩家真正要的是哪天恢复
+    News { days: u32 },
+}
+
+impl Halt {
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    /// 灰按钮与浮层那一句「为什么不能下单」。开盘没有理由可说 → `None`。
+    ///
+    /// 词归 core 管（与 `OpenDeny::label`、`ShopDeny::label` 同一条分工）：这四句与规则层
+    /// 的判据是同一件事的两种说法，分两处写就会有一处改了另一处忘了改。
+    pub fn why(self) -> Option<String> {
+        match self {
+            Self::Open => None,
+            Self::Calendar => Some("股市休市，下单不受理".to_string()),
+            Self::News { days } => Some(format!("股市停牌（剩 {days} 天），下单不受理")),
+        }
+    }
+}
+
+/// 两条判据都成立时报**日历**那一条：它是常态、每周都来，玩家自己算得出哪天恢复；
+/// 停牌是这一局才有的例外，先说常态再说例外那句才读得下去。
+///
+/// `suspended_for` 传的是世界上剩余的停摆天数（`0` = 没停），所以这一句同时答了
+/// 「开不开」与「不开还剩几天」—— 让调用方再问一次 `days_left` 就是第二个真相来源。
+///
+/// ⚠️ 停牌的天数按**回合**数（与涨价、查封同一把尺），不按交易日 —— 所以一个跨周末的
+/// 停牌实际挡住的交易日比条目上那个数少。选这一把尺的理由在 [`crate::status::Timed`]：
+/// 「一天＝一个回合结束」全项目只有一处定义，另开一根「交易日」的钟就会有两把尺子。
+pub fn market_halt(closed_by_calendar: bool, suspended_for: u32) -> Halt {
+    if closed_by_calendar {
+        Halt::Calendar
+    } else if suspended_for > 0 {
+        Halt::News {
+            days: suspended_for,
+        }
+    } else {
+        Halt::Open
+    }
 }
 
 /// 市场侧的运行时访问：股票实体 + 静态定义 + 随机流。
@@ -98,7 +155,18 @@ impl<'w, 's> Market<'w, 's> {
     ) {
         self.clock.tick += 1;
         let date = date_of(self.clock.tick, books.session.epoch);
-        if !self.holidays.is_market_closed(date) {
+        // 停牌这几天行情**也不往前走**（不只是不受理下单）：价格冻在停牌那一刻才是「停牌」
+        // 那句话的意思 —— 只挡下单而让价格继续随机游走，玩家复牌时看到的是一张
+        // 自己没参与却变了的行情表。分红照发（它在下面，不受这一条管）
+        if market_halt(
+            self.holidays.is_market_closed(date),
+            books
+                .session
+                .suspensions
+                .days_left(Institution::StockMarket),
+        )
+        .is_open()
+        {
             self.advance_prices(books);
         }
         self.pay_dividends(books, ledgers, commands, date);
@@ -264,14 +332,22 @@ pub fn trade_request_system(
     let Some(current) = order.current() else {
         return;
     };
-    // 周末与节假日休市（P2b）：不开盘就不许下单。只挡股市 —— 银行全年无休。
+    // 周末与节假日休市（P2b）、新闻停牌（P11c②）：不开盘就不许下单。只挡股市 ——
+    // 银行全年无休（它的停摆另问一处，见 `bank::bank_op_allowed`）。
     // 挡在这里而不是 `economy::buy_plan` 里 —— 成交函数不该知道今天是星期几。
-    if market
-        .holidays
-        .is_market_closed(date_of(market.tick_count(), books.session.epoch))
+    if !market_halt(
+        market
+            .holidays
+            .is_market_closed(date_of(market.tick_count(), books.session.epoch)),
+        books
+            .session
+            .suspensions
+            .days_left(Institution::StockMarket),
+    )
+    .is_open()
     {
         for r in requests.read() {
-            debug!("交易被拒：周末股市休市（{:?} {}）", r.player, r.stock.0);
+            debug!("交易被拒：股市没开盘（{:?} {}）", r.player, r.stock.0);
         }
         return;
     }
@@ -281,5 +357,45 @@ pub fn trade_request_system(
             continue;
         }
         market.trade(&mut books, current, &r.stock, r.side, r.shares);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 两条判据各自与同时成立时各念哪一句（P11c②）。
+    ///
+    /// 「同时成立」那一格是这条用例的存在理由：随机锚点真的会让停牌那几天撞上周末 ——
+    /// 第一张截图就是这么拍成「股市休市」的。两句都是真话时选哪句是**设计**，
+    /// 而设计要有测试钉住，否则下一次改动会悄悄换掉它。
+    #[test]
+    fn the_calendar_wins_over_the_news_and_both_say_why() {
+        assert_eq!(market_halt(false, 0), Halt::Open);
+        assert_eq!(market_halt(false, 3), Halt::News { days: 3 });
+        assert_eq!(market_halt(true, 0), Halt::Calendar);
+        assert_eq!(
+            market_halt(true, 3),
+            Halt::Calendar,
+            "周末又停牌时该念日历：那条是常态、玩家自己算得出哪天恢复"
+        );
+
+        assert_eq!(Halt::Open.why(), None, "开盘没有理由可说");
+        assert_eq!(
+            Halt::Calendar.why().as_deref(),
+            Some("股市休市，下单不受理")
+        );
+        // 停牌那一句自带剩余天数 —— 玩家这一问是「哪天再来看」，而休市的答案是每周都有的
+        assert_eq!(
+            Halt::News { days: 2 }.why().as_deref(),
+            Some("股市停牌（剩 2 天），下单不受理")
+        );
+    }
+
+    #[test]
+    fn only_the_open_answer_says_trading_is_allowed() {
+        assert!(Halt::Open.is_open());
+        assert!(!Halt::Calendar.is_open());
+        assert!(!Halt::News { days: 1 }.is_open());
     }
 }

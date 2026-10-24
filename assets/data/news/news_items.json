@@ -96,5 +96,26 @@
 		"desc": "播报者脚下最近那一块地房屋同灭、土地收回，业主拿不到一分补偿",
 		"scope": "around",
 		"effects": [{"action": "damage", "depth": {"clear": {"seize": true}}, "area": "one"}]
+	},
+	{
+		"id": "news_015",
+		"title": "这一带地价调跌",
+		"desc": "播报者脚下那一整条街的过路费减半 5 天——与「这一带地价调涨」互为抵消，后播的那条盖掉前一条",
+		"scope": "around",
+		"effects": [{"action": "land_status", "status": "price_drop", "days": 5, "area": "street"}]
+	},
+	{
+		"id": "news_016",
+		"title": "股市临时停牌",
+		"desc": "接下来 3 天股市不开盘：下单不受理、行情也不往前走，价格冻在停牌那一刻（分红照发）",
+		"scope": {"institution": "stock_market"},
+		"effects": [{"action": "suspend", "what": "stock_market", "days": 3}]
+	},
+	{
+		"id": "news_017",
+		"title": "银行停止放款",
+		"desc": "接下来 3 天银行不受理新贷款——存款、取款与还款照办，欠着的钱不会因为这条新闻变成逾期",
+		"scope": {"institution": "bank"},
+		"effects": [{"action": "suspend", "what": "bank", "days": 3}]
 	}
 ]

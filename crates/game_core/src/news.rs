@@ -115,6 +115,19 @@ pub enum NewsScope {
     /// 与 `Damage{area}` 各自带那一格，这一档只给中心。两处各写一份迟早会分叉，
     /// 而「全场拆房」那种写法里的「全场」是地不是人 —— 它该写成 `Around` + `area: whole`。
     Around,
+    /// 某一家机构：这条改的不是谁的钱、也不是哪块地，而是**一条规矩这几天还作不作数**
+    /// （P11c②「股市临时停牌」「银行停止放款」）。
+    ///
+    /// PLAN §三 那行原文写的是「某类地产（股市/银行）」，落地时定成了**机构**：
+    /// 那两条新闻扫不到任何一块具体的地（街上每块地的租金与归属都不变），
+    /// 也点不到任何一个人（没人被扣钱），所以「某类地产」那个词在这里没有答案 ——
+    /// 有答案的说法是「某一处制度」。
+    ///
+    /// 它带一个 `Institution` 而不是做成无参的一档（与 `Around` 对照）：`Around` 的中心
+    /// 由**播报者**算出来（锚在他脚下），而「哪一家」算不出来 —— 数据不写就是猜。
+    /// 于是「筛的是银行、停的是股市」这一条坏数据由 [`mismatch`] 在加载期拒掉，
+    /// 与 `Release{place}` 对 `EveryoneIf(Detained(place))` 那条是同一条判据的两个方向。
+    Institution(crate::institution::Institution),
 }
 
 /// 一条效果落在**人**身上还是**地**上 —— [`mismatch`] 的那张配对表用的就是这一位。
@@ -122,8 +135,10 @@ pub enum NewsScope {
 enum Family {
     /// 承受者是一个人（钱、停走、离场、护身…）
     People,
-    /// 锚点是一块地（盖状态、打损害）
+    /// 锚点是一块地（盖状态、打损害、拍公有地）
     Ground,
+    /// 改的是一条规矩（停摆：不打人也不打地，P11c②）
+    Institution,
     /// 今天两档都不属于它。写出来而不是并进前两格，是因为「它为什么不行」每条各有一句
     Neither,
 }
@@ -152,6 +167,10 @@ const fn family_of(effect: &CardEffect) -> Family {
         // 业主而是一片公有地，与 `Damage`／`LandStatus` 同一族。
         // 而它挑客：只拍范围内**无主**的那几块（[`only_public`]），有主的地根本不在它范围内
         CardEffect::Auction { .. } => Family::Ground,
+        // 停摆改的是规矩，不是谁的钱、哪块地（P11c②）。第三族不是把 `Neither` 换个名字：
+        // `Neither` 说的是「这一条新闻今天没法装配」，而这一条装配得好好的 ——
+        // 它只是需要一个自己的作用域（[`NewsScope::Institution`]）
+        CardEffect::Suspend { .. } => Family::Institution,
         // 购地卡：买哪块无主地是玩家按下去那一刻定的，而新闻不替人挑地（挑地是它的玩法本体）
         CardEffect::BuyLand => Family::Neither,
     }
@@ -164,9 +183,10 @@ const fn family_of(effect: &CardEffect) -> Family {
 /// 于是玩家看见顶栏播出一条标题、世界却没变。那种「说了没做」的形状与 P1 那条
 /// 「踩上去什么都不发生必须是数据错误」是同一条纪律。
 fn mismatch(scope: NewsScope, effect: &CardEffect) -> Option<&'static str> {
-    // 先问那一条**跨两档**的一致性：`Release` 自带的 `place` 必须与作用域筛的那一处对上。
-    // 它在族上是「打人」的，光看族放得过去，而「筛的是医院、放的是监狱」这一条新闻
-    // 是真写得出来的 —— 那种写法会真的把监狱里的人放出来，因为动词自己带着地点。
+    // 先问那两条**跨两档**的一致性：动词自带的那个位必须与作用域筛/点的那一格对上。
+    // 它们在族上分别属于「打人」「改规矩」，光看族放得过去，而
+    // 「筛的是医院、放的是监狱」与「点的是银行、停的是股市」这两条新闻是真写得出来的 ——
+    // 那种写法会真的办成动词自己说的那件事，因为地点/机构是动词带进来的。
     if let CardEffect::Release { place } = effect {
         return match scope {
             NewsScope::EveryoneIf(FieldFilter::Detained(there)) if there == *place => None,
@@ -176,17 +196,35 @@ fn mismatch(scope: NewsScope, effect: &CardEffect) -> Option<&'static str> {
             _ => Some("它放的是关在某一处的人，而这一条的作用域没筛那一处"),
         };
     }
+    if let CardEffect::Suspend { what, .. } = effect {
+        return match scope {
+            NewsScope::Institution(there) if there == *what => None,
+            NewsScope::Institution(_) => Some("它停的那一家与作用域点的那一家不是同一家机构"),
+            _ => Some("它改的是一家机构的规矩，而这一条的作用域没点机构"),
+        };
+    }
     match scope {
         NewsScope::Everyone | NewsScope::One(_) | NewsScope::EveryoneIf(_) => {
             match family_of(effect) {
                 Family::People => None,
                 Family::Ground => Some("它打在一块地上，而这一条的作用域是人"),
+                Family::Institution => Some("它改的是一条规矩，而这一条的作用域是人"),
                 Family::Neither => Some("它要的是玩家当场挑一块地，新闻不替人挑"),
             }
         }
         NewsScope::Around => match family_of(effect) {
             Family::Ground => None,
             Family::People => Some("它打在一个人的身上，而这一条的作用域是一片地"),
+            Family::Institution => Some("它改的是一条规矩，而这一条的作用域是一片地"),
+            Family::Neither => Some("它要的是玩家当场挑一块地，新闻不替人挑"),
+        },
+        NewsScope::Institution(_) => match family_of(effect) {
+            // 走到这里的不可能是同族那一条 —— 「同一家」那一格由上面那个 `if let` 答完了，
+            // 不同家的也答完了。这一格写出来是为了这张表不许有 `_`：有人把上面那条
+            // 跨档一致性摘掉时，症状得是一句念得出的拒绝理由而不是放行
+            Family::Institution => Some("它停的那一家与作用域点的那一家不是同一家机构"),
+            Family::People => Some("它打在一个人的身上，而这一条的作用域是一家机构"),
+            Family::Ground => Some("它打在一块地上，而这一条的作用域是一家机构"),
             Family::Neither => Some("它要的是玩家当场挑一块地，新闻不替人挑"),
         },
     }
@@ -289,6 +327,11 @@ impl NewsSet {
                     // 一记「谁都不打」的损害不是新闻，是空转：中心与范围都是数据给的，
                     // 算出零块只可能是盘上没地（那一条新闻本来就不该上池子）
                     CardEffect::Damage { .. } => {}
+                    // 停 0 天与地块状态那一条同理：它会播出一条标题、留一条「停牌 0 天」的
+                    // 流水，而规矩一刻也没停过
+                    CardEffect::Suspend { days: 0, .. } => {
+                        errs.push(format!("新闻 {} 的停摆天数是 0", n.id));
+                    }
                     _ => {}
                 }
             }
@@ -455,11 +498,17 @@ fn people(scope: NewsScope, actor: Entity, sink: &mut CardSink) -> Vec<Entity> {
                 .collect()
         }
         // 地档没有「哪几个人」这一问：它的锚是一块地，答案在 [`ground_anchor`] 那里。
-        // 这一格今天走不到（`fire_news` 先按作用域分开了两条路），写出来是为了
+        // 这一格今天走不到（`fire_news` 先按作用域分开了三条路），写出来是为了
         // **这张表不许有 `_`** —— 有人把 `Around` 接进人档时，症状得是一声 warn，
         // 而不是「播了一条谁都没点到的新闻」
         NewsScope::Around => {
             warn!("地档新闻走进了人档的取数：这一条该由 ground_anchor 回答锚点");
+            Vec::new()
+        }
+        // 机构档同理：它问的是「哪一家」，答案在条目自己身上（[`NewsScope::Institution`]
+        // 带的那一格），而不在任何人身上。今天也走不到
+        NewsScope::Institution(_) => {
+            warn!("机构档新闻走进了人档的取数：这一条改的是规矩，没有承受者可点");
             Vec::new()
         }
     }
@@ -591,10 +640,35 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
                 outcomes,
             }
         }
+        NewsScope::Institution(what) => {
+            // 这一档既没有「谁挨的」也没有「哪几块」：动词自己带着「哪一家」，而它写的是一条
+            // 规矩上的数。`victim` 传 `actor` 只为让签名成立（与地档同一条理由），
+            // `aim` 给 `None`（这一族不读地块目标，[`mismatch`] 保证走到这里的只有停摆那一条）
+            //
+            // `apply_effects` 的返回值在这里**不另存一份**：那条 `Suspended` 凭据与下面
+            // audience 里那个数是同一件事，存两处就有各自漂的一天
+            apply_effects(
+                &mut sink.card,
+                actor,
+                &effects,
+                &news_id,
+                None,
+                crate::auction::Gavel::Public,
+            );
+            // 天数读**世界上的**那一个而不是条目上的：叠加时「更久的那一张赢」，
+            // 报条目那个数会念出一个世界不认的答案
+            NewsAudience::Institution {
+                what,
+                days: sink.card.books.session.suspensions.days_left(what),
+            }
+        }
     };
     let readout = match &audience {
         NewsAudience::People(hits) => format!("点到 {} 个人", hits.len()),
         NewsAudience::Ground { lands, .. } => format!("扫到 {} 块地", lands.len()),
+        NewsAudience::Institution { what, days } => {
+            format!("{} {} 剩 {days} 天", what.label(), what.halt_phrase())
+        }
     };
     info!("新闻「{title}」（{news_id}）：由 {actor:?} 播出，{readout}");
     sink.fired.write(NewsFired {
@@ -647,7 +721,9 @@ fn verb_area(effect: &CardEffect) -> Option<crate::plot::PlotArea> {
         | CardEffect::Stay { .. }
         | CardEffect::MoveCap { .. }
         | CardEffect::SummonGod
-        | CardEffect::BanishGod => None,
+        | CardEffect::BanishGod
+        // 停摆扫不到任何一块地：街上每块地的租金、归属、楼都没变
+        | CardEffect::Suspend { .. } => None,
     }
 }
 
@@ -681,7 +757,8 @@ fn only_public(effect: &CardEffect) -> bool {
         | CardEffect::Stay { .. }
         | CardEffect::MoveCap { .. }
         | CardEffect::SummonGod
-        | CardEffect::BanishGod => false,
+        | CardEffect::BanishGod
+        | CardEffect::Suspend { .. } => false,
     }
 }
 
@@ -873,6 +950,84 @@ mod tests {
         }
     }
 
+    /// 机构档（P11c②）那一格的四问，缺一问就漏一种坏数据：
+    /// - 同一家过：那条新闻进得了池子
+    /// - **点的是银行、停的是股市**要拒：动词自己带着「哪一家」，那种写法会真的
+    ///   让银行不放款，而标题播的是股市 —— 与 `Release`／`Detained` 那条同一条判据
+    /// - 人档三兄弟各拒一次：「全场 + 停牌」看着像一句人话而它没有承受者
+    /// - 机构档 + 打人的动词要拒：那一档上没有人可挨这一下
+    #[test]
+    fn an_institution_news_needs_its_own_scope() {
+        use crate::institution::Institution;
+        let halt_bank = || CardEffect::Suspend {
+            what: Institution::Bank,
+            days: 3,
+        };
+        let right = NewsSet(vec![news(
+            "news_halt",
+            NewsScope::Institution(Institution::Bank),
+            vec![halt_bank()],
+        )]);
+        assert!(
+            right.validate().is_ok(),
+            "同一家该过：{:?}",
+            right.validate()
+        );
+
+        let crossed = NewsSet(vec![news(
+            "news_halt",
+            NewsScope::Institution(Institution::StockMarket),
+            vec![halt_bank()],
+        )]);
+        let errs = crossed.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("不是同一家机构")),
+            "串了家还放行：{errs:?}"
+        );
+
+        for scope in [
+            NewsScope::Everyone,
+            NewsScope::One(PlayerPick::Richest),
+            NewsScope::EveryoneIf(FieldFilter::OnFoot),
+            NewsScope::Around,
+        ] {
+            let set = NewsSet(vec![news("news_halt", scope, vec![halt_bank()])]);
+            let errs = set.validate().unwrap_err();
+            assert!(
+                errs.iter()
+                    .any(|e| e.contains("没点机构") || e.contains("不是同一家机构")),
+                "{scope:?} + 停摆该被拒：{errs:?}"
+            );
+        }
+
+        let wrong_verb = NewsSet(vec![cash_news(
+            "news_cash",
+            NewsScope::Institution(Institution::Bank),
+            100,
+        )]);
+        let errs = wrong_verb.validate().unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("作用域是一家机构")),
+            "机构档收了打人的动词：{errs:?}"
+        );
+    }
+
+    /// 停 0 天与「盖 0 天的状态」同一条：它会播出一条标题而规矩一刻也没停。
+    #[test]
+    fn a_suspension_of_zero_days_is_a_data_error() {
+        use crate::institution::Institution;
+        let set = NewsSet(vec![news(
+            "news_halt",
+            NewsScope::Institution(Institution::Bank),
+            vec![CardEffect::Suspend {
+                what: Institution::Bank,
+                days: 0,
+            }],
+        )]);
+        let errs = set.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("停摆天数是 0")), "{errs:?}");
+    }
+
     #[test]
     fn a_ground_verb_is_the_one_that_carries_a_land_area() {
         // 「打在地上」「带一片范围」「范围内挑不挑客」是同一条判断的三半，各住在一张表里。
@@ -937,6 +1092,10 @@ mod tests {
             CardEffect::BanishGod,
             CardEffect::Auction {
                 area: PlotArea::Box { side: 3 },
+            },
+            CardEffect::Suspend {
+                what: crate::institution::Institution::StockMarket,
+                days: 3,
             },
         ]
     }

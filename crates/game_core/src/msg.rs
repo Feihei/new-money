@@ -850,6 +850,17 @@ pub enum NewsAudience {
         lands: Vec<crate::land::LandId>,
         outcomes: Vec<EffectOutcome>,
     },
+    /// 机构档：一次改一条规矩（P11c②）。既没有人挨它（谁的钱包都没动）也没有地挨它
+    /// （街上哪一块都一样），所以前两族的字段在这里都没有答案 ——
+    /// 硬塞进 `People` 会得到「承受者填谁」那一格，硬塞进 `Ground` 会得到一个假锚点。
+    ///
+    /// `days` 是**叠完之后**世界上的剩余天数（不是条目上那个数），因为顶栏那句要念的
+    /// 就是「从现在起停几天」；`outcomes` 不带 —— 这一条只有一条动词、一个数，
+    /// 再列一份「办成了什么」的清单就是把同一个数说两遍。
+    Institution {
+        what: crate::institution::Institution,
+        days: u32,
+    },
 }
 
 /// 一条新闻落在一个人头上的那些事。文案由 UI 从 `outcomes` 生成，结算层不拼字符串
