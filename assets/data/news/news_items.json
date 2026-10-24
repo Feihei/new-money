@@ -82,5 +82,19 @@
 		"desc": "所有住院的人立刻出院，从那条分支的接入点继续走",
 		"scope": {"everyone_if": {"detained": "hospital"}},
 		"effects": [{"action": "release", "place": "hospital"}]
+	},
+	{
+		"id": "news_013",
+		"title": "公有土地公开拍卖",
+		"desc": "播报者脚下那一整条街还没有主人的地一块块挂牌竞价，所得归银行——有主的地不在名单上",
+		"scope": "around",
+		"effects": [{"action": "auction", "area": "street"}]
+	},
+	{
+		"id": "news_014",
+		"title": "政府强制征收",
+		"desc": "播报者脚下最近那一块地房屋同灭、土地收回，业主拿不到一分补偿",
+		"scope": "around",
+		"effects": [{"action": "damage", "depth": {"clear": {"seize": true}}, "area": "one"}]
 	}
 ]

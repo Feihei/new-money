@@ -270,6 +270,10 @@ const FREE_PASS_DOMAINS: &[ChargeDomain] = &[ChargeDomain::Rent, ChargeDomain::P
 /// 为它一个去给 `CardSink` 加「当前回合玩家」之类的位置参数是把判据塞错地方：
 /// 出牌人与回合玩家在两处判据里本来就可能不一致（P3a 那条「主语只认当前回合玩家」写在
 /// `play_card_system`，不在这里）。
+///
+/// `player` 到这里只活成一件事：[`crate::auction::Gavel::Card`] 的那一位。再往下传给
+/// `apply_effects` 就成了一个没人读的形参（P11c① 之后编译器会直接报 unused），所以它在
+/// 这一层就被收进槌里。
 pub fn apply_card(
     sink: &mut CardSink,
     player: Entity,
@@ -277,7 +281,14 @@ pub fn apply_card(
     def: &CardDef,
     aim: Option<crate::hand::CardAim>,
 ) -> Vec<EffectOutcome> {
-    apply_effects(sink, player, victim, &def.effects, &def.id, aim)
+    apply_effects(
+        sink,
+        victim,
+        &def.effects,
+        &def.id,
+        aim,
+        crate::auction::Gavel::Card(player),
+    )
 }
 
 /// 一组效果打在 `victim` 头上，返回每条效果的凭据。上面那两条入口（抽卡 / 出牌）之外，
@@ -290,13 +301,18 @@ pub fn apply_card(
 /// id 各有各的命名空间，而一条效果的含义不该随它从哪副池里来而变。
 /// `effects` 收切片而不是收 `&CardDef`：新闻项与卡面的字段表本来就不同（新闻带 `scope`、
 /// 不带 `kind`/`target`/`cost_points`），共用的是**动词**那一层，不是「一条数据」那一层。
+///
+/// `gavel` 只有一条动词读它（[`crate::card::CardEffect::Auction`]），而那条的**含义**确实随
+/// 来路变：同一句 `auction`，从拍卖卡来是「拍别人手里那块地、钱归我」，从新闻中心来是
+/// 「把这一带的公有地挂牌、钱归银行」。由调用方显式交进来而不是在这里猜（「开槌人==承受者」
+/// 那种巧合在两条路径下都成立过，而第三条入口一加它就会静默选错一侧）。
 pub fn apply_effects(
     sink: &mut CardSink,
-    player: Entity,
     victim: Entity,
     effects: &[CardEffect],
     source: &str,
     aim: Option<crate::hand::CardAim>,
+    gavel: crate::auction::Gavel,
 ) -> Vec<EffectOutcome> {
     let mut outcomes = Vec::new();
     for effect in effects {
@@ -550,17 +566,50 @@ pub fn apply_effects(
                     None => warn!("{} 打出去了却没买下这块地：出牌判据与账本分叉了", source),
                 }
             }
-            CardEffect::Auction => {
+            CardEffect::Auction { area } => {
                 // 拍哪块地同样来自**请求**，不在卡面上（与 `BuyLand` 同一条理由）。
                 // 出牌那道门已经问过 `can_open`（`unmet_precondition`），所以走到这里
                 // 只剩「把这一槌许下去」—— 真正开场由 `auction::auction_hold_system` 做，
                 // 因为它才拿得到座位序（`TurnOrder`），而「先问谁」是拍卖机的事不是这张卡的事
-                let Some(crate::hand::CardAim::Land(land)) = aim else {
+                let Some(crate::hand::CardAim::Land(center)) = aim else {
                     debug!("{} 要拍卖地，但这次没有地块目标", source);
                     continue;
                 };
-                sink.books.auction.requested = Some((land, player));
-                outcomes.push(EffectOutcome::Auctioned { land });
+                let lands = match gavel {
+                    // 卡那一槌：只拍挑中那一块（`area` 在卡面数据里缺省成 `One`），
+                    // 而它走 `requested` 那一条快道 —— 拍卖卡是掷骰前打的，那一槌排在
+                    // 任何清算之前（`next_lot` 的优先级）
+                    crate::auction::Gavel::Card(founder) => {
+                        sink.books.auction.requested = Some(crate::auction::Listing {
+                            land: center,
+                            gavel: crate::auction::Gavel::Card(founder),
+                        });
+                        vec![center]
+                    }
+                    // 新闻那条「公开拍卖公有土地」：范围内**本来无主**的每一块各挂一场，
+                    // 排队由拍卖机自己做（一次一块），所得归银行
+                    crate::auction::Gavel::Public => {
+                        let found = sink.books.public_lands(center, *area);
+                        for land in found.clone() {
+                            sink.books
+                                .auction
+                                .standby
+                                .push_back(crate::auction::Listing { land, gavel });
+                        }
+                        found
+                    }
+                    // 清算那一槌不由任何一条数据发出：它是 `Books::bankrupt` 直接写
+                    // `liquidation` 那份料的结果，走的是拍卖机自己的路。这一格不许省，
+                    // 否则「哪条池子里真出现清算拍卖」这件事会在某次改动后静默选成 `Public`
+                    crate::auction::Gavel::Liquidation(_) => {
+                        warn!(
+                            "{} 要替一场清算敲槌：清算的上拍由拍卖机自己排，不该经过这里",
+                            source
+                        );
+                        Vec::new()
+                    }
+                };
+                outcomes.push(EffectOutcome::Auctioned { lands });
             }
             CardEffect::Reverse => {
                 // 与入狱同一条形状：它先过护身。被抵消的那次不该留下半个掉头 ——

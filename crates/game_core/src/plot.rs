@@ -35,6 +35,15 @@ pub enum PlotArea {
     Whole,
 }
 
+/// 卡面不带范围时的默认值。写成 `Default` 而不是给每一条效果都补一个 `area` 字段：
+/// 拍卖卡（P9）的 JSON 里本来就没有这一格，而它的语义就是「只打挑中那一块」——
+/// 出牌请求已经带了那一块是哪个。新闻（P11c）则在数据里显式写范围。
+impl Default for PlotArea {
+    fn default() -> Self {
+        Self::One
+    }
+}
+
 /// 这块地在不在 `area` 里。`hub` 是中心地块的定义。
 pub fn is_in_area(hub: &LandDef, other: &LandDef, area: PlotArea) -> bool {
     match area {

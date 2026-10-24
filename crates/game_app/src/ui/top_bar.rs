@@ -1131,6 +1131,11 @@ fn news_headline(title: &str, scope: NewsScope, hits: &[(String, String)]) -> St
 ///
 /// 「哪几块」是这条的存在理由：PLAN §四 那句「外星人拆了哪几块」要的就是地块名列表，
 /// 而 `Razed{lands: 2}` 那个数答不出「我家那块在不在里面」。
+///
+/// 两种单块形状分开走（P11c① 加的判据）：**锚点自己就在清单里**时（`One` 那一档的征收与
+/// 山洪），它就是这句话的主语，直接说「西单 夷为平地…」；锚点只是中心、被打的是旁边那几块
+/// 时（公有地拍卖拍的是**无主**的那些，中心那块常常正主人在场），主语得换成清单 ——
+/// 否则念出来是「王府井 把西单挂上拍卖台」，一句把两个地块绑错的话。
 fn news_ground_headline(title: &str, center: Option<&str>, lands: &[String], deed: &str) -> String {
     let head = format!("号外「{title}」");
     match center {
@@ -1138,7 +1143,7 @@ fn news_ground_headline(title: &str, center: Option<&str>, lands: &[String], dee
         // 空手要说得出为什么空，否则玩家以为自己按错了
         None => format!("{head}：这一带没有地可打"),
         Some(at) if lands.is_empty() => format!("{head}：{at} 一带没有地"),
-        Some(at) if lands.len() == 1 => format!("{head}：{at} {deed}"),
+        Some(at) if lands.len() == 1 && lands[0] == at => format!("{head}：{at} {deed}"),
         Some(at) => format!(
             "{head}：{at} 一带 {} 块 —— {} {deed}",
             lands.len(),
@@ -2301,6 +2306,36 @@ mod tests {
         assert_eq!(
             news_ground_headline("外星人攻打地球", Some("南京路"), &[], deed),
             "号外「外星人攻打地球」：南京路 一带没有地"
+        );
+    }
+
+    /// 锚点**不在**清单里的那一种（P11c① 的公有地拍卖）。
+    ///
+    /// 上面那条「一块就说那块」的形状成立的前提是锚点自己就是被打的那一块（`One` 那一档）。
+    /// 拍卖不成立：锚是播报者脚下那块地，而它**有主**，于是清单里只剩旁边那块无主的。
+    /// 那一格要是继续走「{at} {deed}」，念出来是「王府井 把 L5 挂上拍卖台」——
+    /// 一句话把两个地块绑错，而玩家只会以为自己的地被卖了。
+    #[test]
+    fn a_ground_news_whose_anchor_was_not_hit_names_the_list() {
+        let deed = "把 L5 强制上架";
+        assert_eq!(
+            news_ground_headline(
+                "公有土地公开拍卖",
+                Some("王府井"),
+                &["西单".to_string()],
+                deed
+            ),
+            "号外「公有土地公开拍卖」：王府井 一带 1 块 —— 西单 把 L5 强制上架"
+        );
+        // 锚点就是那一块时仍旧走短的那一句（征收与山洪的形状不许被上面那条改坏）
+        assert_eq!(
+            news_ground_headline(
+                "政府强制征收",
+                Some("王府井"),
+                &["王府井".to_string()],
+                deed
+            ),
+            "号外「政府强制征收」：王府井 把 L5 强制上架"
         );
     }
 

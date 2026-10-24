@@ -210,7 +210,7 @@ fn unmet_precondition(
                 }
                 Some(_) => None,
             },
-            CardEffect::Auction => {
+            CardEffect::Auction { .. } => {
                 // 这张卡**会落空**，而落空的四种样子在画面上长得一模一样（按钮按下去没声音）。
                 // 问的正是拍卖那一道唯一闸门 `can_open`：押着的地、查封中的地、自己的地、
                 // 场上没有别人可出价 —— 四条都从它回来，于是「面板说能拍」与「规则层肯开场」
@@ -218,7 +218,7 @@ fn unmet_precondition(
                 let Some(CardAim::Land(land)) = aim else {
                     return Some(crate::auction::OpenDeny::Unowned.label().to_string());
                 };
-                crate::auction::can_open(&sink.books, land, Some(opener), None)
+                crate::auction::can_open(&sink.books, land, crate::auction::Gavel::Card(opener))
                     .err()
                     .map(|why| why.label().to_string())
             }

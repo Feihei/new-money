@@ -60,9 +60,62 @@ pub struct Auction {
     /// 而楼还在地上（[`Books::bankrupt`]，10-22 实报）—— 这里记的是「哪几块本来是他的」，
     /// 不是「它们值多少」，后者随时能从世界上读回来。
     pub liquidation: Vec<LiquidationPlan>,
-    /// 拍卖卡开的那一槌：`(地块, 开槌的人)`。
-    pub requested: Option<(LandId, Entity)>,
+    /// 拍卖卡刚许下的那一槌（新闻那条走 [`Auction::standby`]，因为它的块集合当场就定得下来）。
+    pub requested: Option<Listing>,
     pub resume: Option<TurnPhase>,
+}
+
+/// 这一槌是**谁**开的 —— 「所得归谁」与「无主的地凭什么上拍」两句都由它一次答完。
+///
+/// 为什么不是两个 `Option<Entity>`（开槌人 + 原主）：那两个位今天能摆出四种组合，而其中
+/// 「无原主 + 无开槌人」那一格在旧口径里是**上不了拍**的（[`OpenDeny::Unowned`] 正是为它建的）。
+/// 新闻「公开拍卖公有土地」要的恰恰是那一格 —— 所以把三条来路写成三个变体，让「这一槌凭什么敲」
+/// 在类型上有名字，而不是由调用方传两个 `None` 碰运气（那两个 `None` 与「忘了填」读起来一模一样）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gavel {
+    /// 拍卖卡：出牌人当场挑一块**别人手里**的地，所得归他（10-22 拍板）
+    Card(Entity),
+    /// 破产清算：死者名下的地。原主由这一格带进来（此刻世界上它已无主），所得归银行
+    Liquidation(Entity),
+    /// 新闻「公开拍卖公有土地」：地本来就没有主人，政府挂牌，所得归银行。
+    ///
+    /// ✅ 10-24 拍板那两句：钱归银行，而且**不进任何公司的当月损益账**（`LedgerEntry` 只有
+    /// 保费／服务费／保险赔付三个写入点），所以它与命运罚款是同一个对手方 —— 离开牌桌。
+    Public,
+}
+
+impl Gavel {
+    /// 谁开的槌。只有拍卖卡那一位拿钱，其余两条归银行（`None` 就是「桌上没人收这笔」）。
+    pub const fn by(self) -> Option<Entity> {
+        match self {
+            Self::Card(founder) => Some(founder),
+            Self::Liquidation(_) | Self::Public => None,
+        }
+    }
+
+    /// 这块地本来在谁手里 —— 顶栏那句「从谁手里拍走」念的是它。`owner` 是世界上**此刻**的业主。
+    pub fn seller_of(self, owner: Option<Entity>) -> Option<Entity> {
+        match self {
+            // 清算那一条：地刚从死者名下摘掉，世界上的 `Owner` 已经是 `None`，
+            // 所以「原主」只能由这一格带进来（[`Books::bankrupt`] 摘归属不摘楼）
+            Self::Liquidation(dead) => Some(dead),
+            // 公有地没有原主。那一格留 `None` 而不是塞一个假业主：面板那句要念「政府挂牌」，
+            // 「从无主手里拍走」是一句会让人觉得漏了谁的话
+            Self::Public => None,
+            Self::Card(_) => owner,
+        }
+    }
+}
+
+/// 一块要挂拍的地。三条来路（拍卖卡那一槌、新闻拍的那几块公有地、清算现抽的那几块）
+/// 都写成形，而**它们各自带的就是「这一槌凭什么敲」**。
+///
+/// 这块表上**没有层数**那一格：楼跟着地一起站在街上，起拍价由 [`Books::market_value`]
+/// 现场读世界上那几层（见模块头第二条）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Listing {
+    pub land: LandId,
+    pub gavel: Gavel,
 }
 
 /// 一处破产清算留下的料。
@@ -78,26 +131,16 @@ pub struct LiquidationPlan {
     pub plots: Vec<LandId>,
 }
 
-/// 一块要挂拍的地。三条来源（拍卖卡那一槌、排着队的下一块、清算现抽的那几块）都写成形。
-///
-/// `seller` 是原来那位业主 —— 清算场里地已经无主了，「从谁手里拍走的」这句话只能由这里带进来。
-/// 这块表上**没有层数**那一格：楼跟着地一起站在街上，起拍价由 [`Books::market_value`]
-/// 现场读世界上那几层（见模块头第二条）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Listing {
-    pub land: LandId,
-    pub seller: Option<Entity>,
-}
-
 /// 正在进行的这一场。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lot {
     pub land: LandId,
-    /// 谁开的槌。`None` = 破产变卖，所得**归银行** —— 死者已离场，而不另立债权账本的理由见
-    /// PLAN §七 那一行（4 代本来就没有债权移交，我们只补「变卖」那半句）。
-    pub by: Option<Entity>,
+    /// 这一槌谁开的 —— 见 [`Gavel`]。「所得归谁」由它答，所以这里不再另存一个 `by`：
+    /// 那两个位会各自漂（一块公有地既能写成 `by: None` 也能写成 `Gavel::Public` 的时候，
+    /// 就轮到读它们的那两处各猜一次）。
+    pub gavel: Gavel,
     /// 这块地原来是谁的（`Entity` 而不是 `PlayerId`，与 `msg.rs` 文件头那条同一条纪律）。
-    /// 顶栏那句「从谁手里拍走」与 dump 念的是它。
+    /// 顶栏那句「从谁手里拍走」与 dump 念的是它；`None` = 公有地，那里念的是「政府挂牌」。
     pub seller: Option<Entity>,
     /// 起拍价（已过物价）。还没人认价时 [`Lot::next_amount`] 就是它
     pub opening: i64,
@@ -127,6 +170,12 @@ impl Lot {
     pub fn bidder(&self) -> Option<Entity> {
         self.pool.get(self.turn).copied()
     }
+
+    /// 谁开的槌（`None` = 公家或死者，所得归银行）。转给 [`Gavel::by`] —— 面板与流水要问的
+    /// 是这一句，而「三种来路各有哪一格」那一层不该漏到读它的人面前。
+    pub fn by(&self) -> Option<Entity> {
+        self.gavel.by()
+    }
 }
 
 impl Auction {
@@ -152,8 +201,14 @@ impl Auction {
 /// 开不成场的原因。灰按钮的文案与规则层的拒绝共用这一张表（同 `ShopDeny`/`LotteryDeny`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenDeny {
-    /// 这块地没有业主 —— 无主地本来就能直接买（踩到那一格，或购地卡），不必绕一台拍卖机
+    /// 这块地没有业主 —— 无主地本来就能直接买（踩到那一格，或购地卡），不必绕一台拍卖机。
+    /// 这是**拍卖卡与破产清算**那两条的判据；新闻「公开拍卖公有土地」拍的就是无主地，
+    /// 所以它挨的是下面那条反过来的问句（见 [`Gavel::Public`]）
     Unowned,
+    /// 这块地**有**主人 —— [`Gavel::Public`] 那一槌唯一的上不了拍的理由：政府只挂牌卖自己的地。
+    /// 与 `Unowned` 是同一条问句的两个答案，所以两条分开写而不是合成一条「归属不对」：
+    /// 面板与 `warn!` 要念得出的是「这块已经卖过了」还是「这块根本没人挂」
+    Private,
     /// 开槌的人自己的地。拍自己的地等于把左口袋卖给自己，而所得还归自己
     OwnLand,
     /// 押在银行里的地。与恶魔夺地同一口径（`Books::take_land` 也拒这一格）：带着债的地过户，
@@ -170,6 +225,7 @@ impl OpenDeny {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Unowned => "这块地还没有主人",
+            Self::Private => "这块地已有主人，公有地拍卖只拍无主的",
             Self::OwnLand => "不能拍卖自己的地",
             Self::Mortgaged => "这块地押在银行",
             Self::Sealed => "这块地被查封",
@@ -270,26 +326,32 @@ pub fn seat_order(order: &TurnOrder, eligible: &[Entity]) -> Vec<Entity> {
     pool
 }
 
-/// 这块地此刻能不能上拍。**唯一的闸门**，两条入口（拍卖卡、破产清算）都问它 ——
-/// 「面板那颗按钮亮不亮」与「规则层认不认」因此不可能分叉。
+/// 这块地此刻能不能上拍。**唯一的闸门**，三条入口（拍卖卡、破产清算、新闻那条公有地）
+/// 都问它 —— 「面板那颗按钮亮不亮」与「规则层肯开场」因此不可能分叉。
 ///
 /// 只读、且不依赖座位序（见 [`bidders`] 上面那段），于是它既能在出牌前当「会不会落空」
 /// 那一问（卡不白扣，与 P6d 那两张符同一条纪律），也能在建场前用。
 ///
-/// `seller` 让两条入口问出相反的那一句「有没有主人」：拍卖卡拍的是**别人手里**的地（无主地
-/// 本来就能直接买，绕一台拍卖机只是多一步），而清算场里那块地刚从死者名下摘掉、此刻本就无主
-/// —— 那边的原主只能由队列带进来，不然每一块都会被判成 `Unowned` 而一处也拍不成。
-pub fn can_open(
-    books: &Books<'_, '_>,
-    land: LandId,
-    by: Option<Entity>,
-    seller: Option<Entity>,
-) -> Result<(), OpenDeny> {
+/// 「有没有主人」这一问的答案**按来路相反**，而那句相反就写在 [`Gavel`] 上：拍卖卡拍的是
+/// 别人手里的地（无主地本来就能直接买，绕一台拍卖机只是多一步），清算场里那块地刚从死者名下
+/// 摘掉、此刻本就无主，而新闻那条「公开拍卖公有土地」**要的就是无主地**。
+/// 旧版用 `seller.is_none() && view.owner.is_none()` 表达同一件事，它在两条来路下都对，
+/// 第三条一加就露出形状：那一句把「没有原主」同时当成了「不许拍」与「正常状态」。
+pub fn can_open(books: &Books<'_, '_>, land: LandId, gavel: Gavel) -> Result<(), OpenDeny> {
     let view = books.view(land).ok_or(OpenDeny::Unowned)?;
-    if seller.is_none() && view.owner.is_none() {
-        return Err(OpenDeny::Unowned);
+    match gavel {
+        Gavel::Public => {
+            if view.owner.is_some() {
+                return Err(OpenDeny::Private);
+            }
+        }
+        Gavel::Card(_) if view.owner.is_none() => return Err(OpenDeny::Unowned),
+        Gavel::Card(_) | Gavel::Liquidation(_) => {}
     }
-    if by.is_some_and(|founder| books.owner_of(land) == Some(founder)) {
+    if gavel
+        .by()
+        .is_some_and(|founder| books.owner_of(land) == Some(founder))
+    {
         return Err(OpenDeny::OwnLand);
     }
     if view.mortgaged {
@@ -298,7 +360,7 @@ pub fn can_open(
     if view.status == Some(LandStatus::Sealed) {
         return Err(OpenDeny::Sealed);
     }
-    if bidders(books, by).is_empty() {
+    if bidders(books, gavel.by()).is_empty() {
         return Err(OpenDeny::NoBidder);
     }
     Ok(())
@@ -307,25 +369,29 @@ pub fn can_open(
 /// 建一场。起拍价读的是这块地**此刻**在世界上的样子（地价 + 地上那一栋楼，再过物价）——
 /// [`Books::market_value`] 与 [`Books::buy_price`] 用的是同一条式子，所以「起拍=买下它本来
 /// 要付的钱」不是注释而是代码事实。破产的那几层不用带进来：它们从没被摘掉（模块头第二条）。
+///
+/// 「谁开的槌」与「原来在谁手里」两句都从 `listing.gavel` 推，不再由调用方各传一个
+/// `Option<Entity>`：那样三条来路要各自记住「我该传什么」，而传错的两种形状（多传一个假业主、
+/// 少传一个真开槌人）在画面上分别是「顶栏凭空多出一个卖家」与「钱凭空进了某人的钱包」。
 pub fn open(
     books: &Books<'_, '_>,
     order: &TurnOrder,
     rules: &GameRules,
     listing: &Listing,
-    by: Option<Entity>,
 ) -> Result<Lot, OpenDeny> {
     let land = listing.land;
-    can_open(books, land, by, listing.seller)?;
+    let gavel = listing.gavel;
+    can_open(books, land, gavel)?;
     let opening = books.market_value(land).ok_or(OpenDeny::Unowned)?;
     Ok(Lot {
         land,
-        by,
-        seller: listing.seller.or(books.owner_of(land)),
+        gavel,
+        seller: gavel.seller_of(books.owner_of(land)),
         opening,
         step: step_of(opening, rules.auction_step_percent),
         high: opening,
         leader: None,
-        pool: seat_order(order, &bidders(books, by)),
+        pool: seat_order(order, &bidders(books, gavel.by())),
         turn: 0,
     })
 }
@@ -490,6 +556,7 @@ pub fn auction_move_system(mut desk: AuctionDesk<'_, '_>, mut moves: MessageRead
 /// 落槌那一段：过户、收钱、写凭据，再决定这台机器是空着还是接着排下一块。
 fn settle(desk: &mut AuctionDesk<'_, '_>, lot: &Lot, close: Close) {
     let land = lot.land;
+    let by = lot.by();
     match close.sold_to {
         Some(buyer) => {
             // 钱可能真的不够：拍卖期间他仍能动 ATM（那块浮层不阻断回合），把钱借出去或存进去
@@ -497,14 +564,14 @@ fn settle(desk: &mut AuctionDesk<'_, '_>, lot: &Lot, close: Close) {
             // **流标**（地不转手）—— 与 `decision_system` 里「买地付不出就什么也不发生」
             // 同一条既有口径，而不是「先扣钱再退钱」那种两段式
             if desk.books.auction_sale(buyer, land, close.price).is_some() {
-                if let Some(founder) = lot.by {
+                if let Some(founder) = by {
                     desk.books.credit(founder, close.price);
                 }
                 desk.won.write(AuctionWon {
                     player: buyer,
                     land,
                     price: close.price,
-                    by: lot.by,
+                    by,
                     seller: lot.seller,
                 });
                 let who = desk
@@ -515,16 +582,18 @@ fn settle(desk: &mut AuctionDesk<'_, '_>, lot: &Lot, close: Close) {
                 info!(
                     "拍卖落槌：{who} 以 {} 元拍得 {land:?}（{}）",
                     close.price,
-                    if lot.by.is_some() {
-                        "所得归开槌的人"
-                    } else {
-                        "所得归银行"
+                    match lot.gavel {
+                        Gavel::Card(_) => "所得归开槌的人",
+                        // 两句各自说清是**谁**的钱离开了牌桌：清算那句的主体是死者，
+                        // 公有地那句的主体是政府 —— 两者都不进公司账，但玩家听到的不是同一件事
+                        Gavel::Liquidation(_) => "所得归银行（破产变卖）",
+                        Gavel::Public => "所得归银行（公有地挂牌）",
                     }
                 );
             } else {
                 desk.failed.write(AuctionFailed {
                     land,
-                    by: lot.by,
+                    by,
                     seller: lot.seller,
                     price: close.price,
                 });
@@ -537,7 +606,7 @@ fn settle(desk: &mut AuctionDesk<'_, '_>, lot: &Lot, close: Close) {
         None => {
             desk.failed.write(AuctionFailed {
                 land,
-                by: lot.by,
+                by,
                 seller: lot.seller,
                 price: close.price,
             });
@@ -548,11 +617,11 @@ fn settle(desk: &mut AuctionDesk<'_, '_>, lot: &Lot, close: Close) {
     // 因为 [`auction_hold_system`] 同一帧就会把下一场挂上，中间插一次「回合收尾」
     // 会让那块地没人来拍。
     if desk.books.auction.standby.is_empty() && desk.books.auction.liquidation.is_empty() {
-        desk.books.auction.resume = Some(match lot.by {
+        desk.books.auction.resume = Some(match lot.gavel {
             // 拍卖卡是掷骰前打的，拍完他还要接着走
-            Some(_) => TurnPhase::WaitRoll,
-            // 清算发生在落格结算里，拍完这一回合就该收尾
-            None => TurnPhase::TurnEnd,
+            Gavel::Card(_) => TurnPhase::WaitRoll,
+            // 清算与新闻都发生在落格结算里，拍完这一回合就该收尾
+            Gavel::Liquidation(_) | Gavel::Public => TurnPhase::TurnEnd,
         });
     }
     desk.books.auction.lot = None;
@@ -578,7 +647,7 @@ pub fn auction_hold_system(mut desk: AuctionDesk<'_, '_>, mut rng: ResMut<Rng>) 
     if let Some(lot) = fresh {
         desk.started.write(AuctionStarted {
             land: lot.land,
-            by: lot.by,
+            by: lot.by(),
             seller: lot.seller,
             opening: lot.opening,
             step: lot.step,
@@ -614,13 +683,17 @@ pub fn auction_hold_system(mut desk: AuctionDesk<'_, '_>, mut rng: ResMut<Rng>) 
 /// 下一场该开哪一块。三条来源按优先级：**拍卖卡许下的那一槌** → **排着队的下一块** →
 /// **死者留下的一处新清算**（现选、现排队、再取第一块）。
 ///
+/// 队列里混得下两种来路（清算抽出来的那几块与新闻挂上来的那几块公有地），因为「这一块凭什么
+/// 上拍」写在 [`Listing::gavel`] 里而不是在字段位置里 —— 用位置表达的话，两条队列就得并成一条
+/// 带标签的，而那条带标签的迟早与 `can_open` 那三格分叉。
+///
 /// 开不成就跳过这一块而不是卡住整台机器 —— 「一块押着的地把一场清算永久停住」比它要防的
 /// 那个错误难查得多，而 `warn!` 会替玩家把这件事说出口。
 fn next_lot(desk: &mut AuctionDesk<'_, '_>, rng: &mut Rng) -> Option<Lot> {
     let rules = desk.rules();
-    if let Some((land, by)) = desk.books.auction.requested.take() {
-        let listing = Listing { land, seller: None };
-        return match open(&desk.books, &desk.order, &rules, &listing, Some(by)) {
+    if let Some(listing) = desk.books.auction.requested.take() {
+        let land = listing.land;
+        return match open(&desk.books, &desk.order, &rules, &listing) {
             Ok(lot) => Some(lot),
             Err(why) => {
                 warn!("拍卖开不成（{land:?}）：{}", why.label());
@@ -634,15 +707,15 @@ fn next_lot(desk: &mut AuctionDesk<'_, '_>, rng: &mut Rng) -> Option<Lot> {
         for land in pick_lots(rng, &plan.plots, rules.liquidation_lots) {
             desk.books.auction.standby.push_back(Listing {
                 land,
-                seller: Some(plan.dead),
+                gavel: Gavel::Liquidation(plan.dead),
             });
         }
     }
     while let Some(listing) = desk.books.auction.standby.pop_front() {
-        match open(&desk.books, &desk.order, &rules, &listing, None) {
+        match open(&desk.books, &desk.order, &rules, &listing) {
             Ok(lot) => return Some(lot),
             Err(why) => {
-                warn!("变卖拍卖开不成（{:?}）：{}", listing.land, why.label());
+                warn!("拍卖开不成（{:?}）：{}", listing.land, why.label());
             }
         }
     }
@@ -687,10 +760,38 @@ mod tests {
         Entity::from_raw_u32(9).expect("索引不该撞上保留值")
     }
 
+    /// 三条来路各答两句：钱进谁的钱包（[`Gavel::by`]）与顶栏那句「从谁手里拍走」
+    /// （[`Gavel::seller_of`]）。公有地那一条**两格都是 `None`** —— 那不是缺了两个数，
+    /// 那正是 ✅ 10-24 拍板的全部内容：没人敲槌（所以没人收钱）、没人卖地
+    /// （所以那句「从谁手里」不该出现在屏幕上）。
+    ///
+    /// 最后那一格是这条用例的牙齿：`seller_of` 拿到「此刻的业主」时不许把他说成卖家 ——
+    /// 公有地一旦有了主人就根本不该站在这个台上（`OpenDeny::Private` 是同一句话的另一半），
+    /// 而「把现任业主写成原主」的下一步就是「顶栏念了一句凭空多出的话」。
+    #[test]
+    fn each_gavel_answers_who_gets_the_money_and_who_sold_it() {
+        let (owner, dead, founder) = (one(), two(), three());
+        assert_eq!(Gavel::Card(founder).by(), Some(founder));
+        assert_eq!(Gavel::Card(founder).seller_of(Some(owner)), Some(owner));
+        assert_eq!(Gavel::Liquidation(dead).by(), None, "清算没有开槌的人");
+        assert_eq!(
+            Gavel::Liquidation(dead).seller_of(None),
+            Some(dead),
+            "清算场里世界上已经没有业主，原主只能由槌带进来"
+        );
+        assert_eq!(Gavel::Public.by(), None, "公有地的所得不进任何玩家的钱包");
+        assert_eq!(Gavel::Public.seller_of(None), None);
+        assert_eq!(
+            Gavel::Public.seller_of(Some(owner)),
+            None,
+            "政府挂牌不认「此刻的业主」当卖家"
+        );
+    }
+
     fn lot() -> Lot {
         Lot {
             land: LandId(1),
-            by: None,
+            gavel: Gavel::Liquidation(seller()),
             seller: Some(seller()),
             opening: 2_000,
             step: 200,

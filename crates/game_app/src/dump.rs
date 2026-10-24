@@ -18,10 +18,11 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiCon
 use game_core::prelude::{
     ActiveBoard, ArcadeDeal, AtmAccess, Auction, BankBalance, Bankrupt, BuildingLevel, CardKind,
     CompanyLedgers, Corrections, CouponBoxes, Deck, DeckOrder, Detention, Facility, GameRules,
-    GameSeed, GameSession, Hand, Heading, HolidaySet, Insulation, Insured, Inventory, Jackpot,
-    LandId, LandStatus, Landing, LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap, Occupancy,
-    OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName, Points, Possession,
-    Shelf, ShopStock, StaySentence, StockHoldings, Timed, TurnOrder, TurnPhase, Wallet, resists,
+    GameSeed, GameSession, Gavel, Hand, Heading, HolidaySet, Insulation, Insured, Inventory,
+    Jackpot, LandId, LandStatus, Landing, LotteryTickets, MarketClock, Mortgaged, Mount, MoveCap,
+    Occupancy, OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName, Points,
+    Possession, Shelf, ShopStock, StaySentence, StockHoldings, Timed, TurnOrder, TurnPhase, Wallet,
+    resists,
 };
 
 use crate::asset_root;
@@ -534,12 +535,14 @@ fn format_auction(view: &DumpView) -> String {
             }
         );
     };
-    // 「槌是谁敲的」与「从谁手里拍走」两句话把两种入口分开：破产清算没有开槌的人，
-    // 而这两种情况的钱去的是不同的地方（归那位玩家 / 归银行），省一句就分不清
-    let struck = lot.by.map_or_else(
-        || "破产变卖".to_string(),
-        |founder| format!("槌 {}", who_are(view, founder)),
-    );
+    // 「槌是谁敲的」与「从谁手里拍走」两句话把三种入口分开：清算与公有地都没有开槌的人，
+    // 而它们的钱去的是同一个地方（银行）却来自不同的事（死者留下 / 政府挂牌）——
+    // 省一句就分不清，而这一栏的全部用途就是让人看出「钱为什么是这个数」
+    let struck = match lot.gavel {
+        Gavel::Card(founder) => format!("槌 {}", who_are(view, founder)),
+        Gavel::Liquidation(_) => "破产变卖".to_string(),
+        Gavel::Public => "公有地挂牌".to_string(),
+    };
     let seller = lot
         .seller
         .map_or_else(|| "无主".to_string(), |former| who_are(view, former));

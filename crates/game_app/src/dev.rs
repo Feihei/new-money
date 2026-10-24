@@ -15,8 +15,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, ArcadeDeal, Auction, BuildingLevel, BuyTicketRequested, Detention, DetentionPlace,
-    GameKind, GameRules, GameSession, God, GodDesk, Inventory, ItemKind, LandId, Mount,
-    MountChanged, NewsSink, Occupancy, OccupancyKind, Owner, Pending, PendingDecision,
+    GameKind, GameRules, GameSession, Gavel, God, GodDesk, Inventory, ItemKind, LandId, Listing,
+    Mount, MountChanged, NewsSink, Occupancy, OccupancyKind, Owner, Pending, PendingDecision,
     PlayerDetained, PlayerId, Points, RemoteBuildOffered, Rng, TileIndex, TokenPosition, TurnOrder,
     TurnPhase, detain, find_id, fire_news, place,
 };
@@ -348,7 +348,10 @@ impl Plugin for DevPlugin {
                     force_auction,
                     force_house,
                     force_rbuild,
-                    force_news,
+                    // 新闻排在盖楼之后：`NM_HOUSE=0:3 NM_NEWS=news_014` 那一张要拍的是
+                    // 「楼被征收拆平」，而两条旋钮在同一个并行元组里时次序不保证（坑 36）——
+                    // 抢在前面的那一版拍出来是一块本来就没楼的空地，看着像注入失效
+                    force_news.after(force_house),
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
@@ -804,7 +807,10 @@ fn force_auction(force: Res<ForceAuction>, mut desk: HammerWriters<'_, '_>) {
         warn!("NM_AUCTION={land} 场上没有不是这块地主人的玩家，没人能敲这一槌");
         return;
     };
-    desk.auction.requested = Some((id, founder));
+    desk.auction.requested = Some(Listing {
+        land: id,
+        gavel: Gavel::Card(founder),
+    });
     info!("注入：地块 {land} 挂上拍卖台，开槌的是 {founder:?}（他不参与竞价）");
 }
 

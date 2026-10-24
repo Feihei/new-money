@@ -22,9 +22,9 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::query::With;
 use common::*;
 use game_core::prelude::{
-    ActiveBoard, Adjustment, CardEffect, ChargeDomain, Correction, DataHandles, Date, Detention,
-    DetentionPlace, GameSeed, GameSession, ItemKind, LandStatus, Mount, NewsId, NewsSet, Scope,
-    Source, StaySentence, TileKind, TurnPhase,
+    ActiveBoard, Adjustment, BidMove, CardEffect, ChargeDomain, CompanyLedgers, Correction,
+    DataHandles, Date, Detention, DetentionPlace, GameSeed, GameSession, Gavel, ItemKind,
+    LandStatus, Mount, NewsId, NewsSet, Scope, Source, StaySentence, StockSet, TileKind, TurnPhase,
 };
 
 /// 演示盘上的新闻中心（`prototype.json` 的 13 号格，`(0,4)`）。
@@ -158,6 +158,39 @@ fn net_for(hits: &str, who: &str) -> i64 {
 /// 这一串流水里 `who` 一共收支多少。
 fn net_over(lines: &[String], who: &str) -> i64 {
     lines.iter().map(|l| net_for(&parts(l).2, who)).sum()
+}
+
+/// 这一串流水里 `who` **真的掏出去**了多少（只加 `Lost(...)` 那几笔，取正数）。
+///
+/// 它存在的唯一理由是把「净额」与「动过」分开：P11c① 把池子加到 14 条之后，一条用例撞上
+/// 「三条 +1500 补贴配一条 −3000 罚金」—— 净额是 **+1500**，于是那句 `cash < before` 红了，
+/// 而红的是池子的运气而不是这条要钉的那件事。这条要挡的世界是
+/// 「凭据写了钱、钱包没动」（两边都一动没动照样对得平，见 [`net_for`] 上面那段），
+/// 那一问只有**支出总额**答得住，净额答不住。
+fn paid_over(lines: &[String], who: &str) -> i64 {
+    lines
+        .iter()
+        .map(|line| {
+            parts(line)
+                .2
+                .split('|')
+                .filter(|seg| seg.split('[').next().unwrap_or_default() == who)
+                .flat_map(|seg| {
+                    seg.split('[')
+                        .nth(1)
+                        .unwrap_or_default()
+                        .trim_end_matches(']')
+                        .split('+')
+                })
+                .filter_map(|one| {
+                    one.strip_prefix("Lost(")?
+                        .strip_suffix(')')?
+                        .parse::<i64>()
+                        .ok()
+                })
+                .sum::<i64>()
+        })
+        .sum()
 }
 
 /// 一次正常的踩格：P0 站在 12 号，下一手是 1 点。
@@ -899,8 +932,8 @@ fn a_one_shot_free_pass_waives_exactly_one_news_fine() {
         "补贴照领、第二刀照挨：{lines:?}"
     );
     assert!(
-        cash_of(&mut app, p1) < before,
-        "P1 的钱这一趟真的少了（否则上面那句相等是两边都一动没动）：{lines:?}"
+        paid_over(&lines, "P1") > 0,
+        "P1 这一趟一分都没掏过，上面那句相等就成了两边都一动没动：{lines:?}"
     );
     assert_cash_audit(&mut app, START);
 }
@@ -1316,6 +1349,316 @@ fn a_hospital_news_does_not_empty_the_jail() {
         detain_of(&app, p1).map(|d| d.place),
         Some(DetentionPlace::Jail),
         "医院的消息不放监狱的人 —— 他还得待在里面：{line}"
+    );
+    assert_cash_audit(&mut app, START);
+}
+
+// ===== P11c①：公有地拍卖与强制征收 =====
+//
+// PLAN §四 第二批那五条里依赖 P9 的两条。它们共用「这一带」那一档做锚点，而答案正好相反：
+// 一条把**无主**的地挂上台（钱离开牌桌，✅ 10-24 拍板归银行），一条把**有主**的地连楼收回
+// （资产从物价指数的分子里被摘掉）。后者就是那句「增长不上限，但要有一点防止过快的平衡」
+// 在这批里的落点 —— 它是这池新闻里目前唯一的通缩闸门。
+//
+// 这一组全走 `common::broadcast`（点名播那一条，不碰随机流）：这里断言的都是**前后差值**
+// （少了哪一块、谁付了多少），而「反复踩到抽中」会把前面那几轮的副作用一起算进差值里。
+
+/// 全体公司的当月账页读数 `(股票id, 条目数, 净额)` —— 股票名单从资产里读，不在测试里抄。
+///
+/// 它问的是 ✅ 10-24 那句拍板的后半句：公有地拍卖的所得**不进损益账**，所以它不会在 15 号
+/// 按持股比例变成一笔分红。进了的话「归银行」就悄悄变成「归股东」，而那笔钱没人记得是谁的。
+fn company_pages(app: &App) -> Vec<(String, usize, i64)> {
+    let ids: Vec<String> = app
+        .world()
+        .resource::<Assets<StockSet>>()
+        .get(&app.world().resource::<DataHandles>().stocks)
+        .expect("股票池没加载")
+        .0
+        .iter()
+        .map(|s| s.id.clone())
+        .collect();
+    let ledgers = app.world().resource::<CompanyLedgers>();
+    ids.into_iter()
+        .map(|id| {
+            let page = ledgers.find(&id);
+            (
+                id,
+                page.map_or(0, |p| p.entries.len()),
+                page.map_or(0, |p| p.net()),
+            )
+        })
+        .collect()
+}
+
+/// 那一整条街摆成「中心那块是他的两层楼、街尾那块无主」。
+fn one_public_one_private(app: &mut App) {
+    own(app, ANCHOR, Some(0), 2, false);
+    own(app, 5, None, 0, false);
+}
+
+/// 两块都无主（要拍两场那一条用）。
+fn two_public(app: &mut App) {
+    own(app, ANCHOR, None, 1, false);
+    own(app, 5, None, 0, false);
+}
+
+/// 点名播一条，返回它那一行流水。`broadcast` 返回 `false` 就是 id 写错 —— 必须当场响，
+/// 否则症状是「后面每一条断言都绿」：什么都没播，所以什么都没变。
+fn fired(app: &mut App, p0: Entity, id: &str) -> String {
+    assert!(
+        broadcast(app, p0, id),
+        "{id} 不在新闻池里（改名没改到这条用例）"
+    );
+    settle(app, 2);
+    news_lines(app).pop().expect("刚播过一条")
+}
+
+/// 此刻该出价的那一位（与 `tests/auction.rs` 同名那条同一形状：先读机器，再替**那一位**按按钮）。
+fn bidder(app: &App) -> Entity {
+    lot_of(app)
+        .expect("前置：拍卖正在进行")
+        .bidder()
+        .expect("名单上没人可问的那一帧不该被读到")
+}
+
+/// 替「此刻该出价的那一位」喊一声加一档，返回他这一刻认下的数。
+fn bid(app: &mut App) -> i64 {
+    let amount = lot_of(app).expect("前置：拍卖正在进行").next_amount();
+    let player = bidder(app);
+    auction_ask(app, player, BidMove::Raise);
+    amount
+}
+
+/// 公有地那一槌只拍**无主**的那几块：中心那块是他的，所以清单里只有街尾那块。
+///
+/// 最容易写成的那一版是「范围内的每一块都挂上台」，而它的症状是玩家看见自己的地被挂牌。
+/// 这条新闻不替业主卖地 —— `OpenDeny::Private` 是同一句话在拍卖机那一侧的另一半，
+/// 而这里钉的是新闻这一侧：**凭据那份清单与真挂上台的是同一个集合**。
+#[test]
+fn a_public_auction_lists_only_the_ownerless_plots() {
+    let (mut app, p0) = step_onto_once();
+    one_public_one_private(&mut app);
+    let line = fired(&mut app, p0, "news_013");
+    let (center, lands) = ground(&line);
+    assert_eq!(center, format!("L{ANCHOR}"), "锚点是脚下最近那块地：{line}");
+    assert_eq!(
+        lands,
+        vec!["L5".to_string()],
+        "有主的 L4 不该出现在公有地名单上：{line}"
+    );
+    assert!(
+        line.contains("Auctioned"),
+        "凭据要说得出这一槌敲下去了：{line}"
+    );
+
+    let opened: Vec<String> = ledger(&app)
+        .into_iter()
+        .filter(|l| l.starts_with("Auction(L5:"))
+        .collect();
+    assert_eq!(opened.len(), 1, "无主那块该开出一场：{opened:?}");
+    // `by bank` = 没有开槌的人，`from -` = 没有原主。两格各挡一种冒充：破产清算那条是
+    // `by bank,from P?`（钱同样归银行，但它说的是「死者留下的」而不是「政府挂牌」）
+    assert!(
+        opened[0].contains("by bank,from -"),
+        "公有地的开场行要念得出「公家挂牌、无原主」：{}",
+        opened[0]
+    );
+    assert_eq!(
+        plot_state(&mut app, ANCHOR),
+        (Some(0), 2, false),
+        "他那块地连层数都没动：{line}"
+    );
+    assert_cash_audit(&mut app, START);
+}
+
+/// 一块公有地真被拍走时：**买家的钱少了、没有别人的钱多、那块地归他、公司账页一行没变**。
+///
+/// 这四句合起来才是 ✅ 10-24 那两句拍板的可执行形式。「归银行」在代码里不是一个收款人，
+/// 而是一笔**没有 credit 的 debit** —— 所以断言不能只写「买家付了」（那笔钱也可能进了某位
+/// 玩家或某个公司账页，而那两种都不是这条新闻说的事）。
+#[test]
+fn the_public_auction_money_leaves_the_table() {
+    let (mut app, p0) = step_onto_once();
+    let rows = roster(&mut app);
+    let ps: Vec<Entity> = rows.iter().map(|(e, ..)| *e).collect();
+    let ids: Vec<u32> = rows.iter().map(|(_, id, ..)| *id).collect();
+    one_public_one_private(&mut app);
+    // 脚手架的自动玩家对拍卖一律答「放弃」（长跑用例靠它不被挂死），而这一条要真拍走一块地
+    set_policy(&mut app, DecisionPolicy::Hold);
+    let line = fired(&mut app, p0, "news_013");
+
+    let lot = lot_of(&app).expect("公有地该开出一场拍卖：{line}");
+    assert_eq!(lot.gavel, Gavel::Public, "这一槌是公家敲的：{line}");
+    assert_eq!(
+        (lot.seller, lot.by()),
+        (None, None),
+        "既没有原主也没有开槌的人 —— 两种冒充都不许：{line}"
+    );
+    let price = lot.opening;
+    let before: Vec<i64> = ps.iter().map(|e| cash_of(&mut app, *e)).collect();
+    let pages = company_pages(&app);
+
+    let buyer = bidder(&app);
+    let paid = bid(&mut app);
+    assert_eq!(paid, price, "没人认价时，第一个合法喊价就是起拍本身");
+    // 其余每一位放弃，直到落槌（两人桌：P0 认下起拍、P1 放弃，当场成交）
+    for _ in 0..6 {
+        if lot_of(&app).is_none() {
+            break;
+        }
+        let other = bidder(&app);
+        auction_ask(&mut app, other, BidMove::Withdraw);
+    }
+    assert!(lot_of(&app).is_none(), "这一场该已经散了");
+    settle(&mut app, 2);
+
+    let at = ps.iter().position(|e| *e == buyer).expect("买家在名单上");
+    let after: Vec<i64> = ps.iter().map(|e| cash_of(&mut app, *e)).collect();
+    assert_eq!(after[at], before[at] - price, "买家付的就是落槌那一个数");
+    for i in 0..ps.len() {
+        if i == at {
+            continue;
+        }
+        assert_eq!(
+            after[i], before[i],
+            "除买家之外没有人的钱变多 —— 那笔钱离开了牌桌（归银行＝没有 credit 的那一步）"
+        );
+    }
+    assert_eq!(plot_state(&mut app, 5).0, Some(ids[at]), "那块公有地归买家");
+    assert_eq!(
+        company_pages(&app),
+        pages,
+        "这笔所得没进任何公司的当月账：它不会在 15 号变成一笔分红"
+    );
+    let want = format!("Sold(P{}:L5,{price},to bank)", ids[at]);
+    assert!(
+        ledger(&app).contains(&want),
+        "流水要说得出这笔钱去了哪：{:?}",
+        ledger(&app)
+    );
+    assert_cash_audit(&mut app, START);
+}
+
+/// 两块公有地是**两场**拍卖，一场散完才开下一场；机器空了才把回合交出去。
+///
+/// 这条钉的是「新闻挂上来的那几块走的是同一台轮转式机器」：一次挂两块而机器只开一场，
+/// 第二块就永远站在台上没人问。`Auction::holds_turn` 那条判据同时挡着「拍完就走人」那种
+/// 收尾（坑 37 那一族：两处写同一个 `NextState` 时不许赌顺序，要让占着回合的那一侧先表态）。
+#[test]
+fn two_public_plots_go_up_one_at_a_time_and_the_turn_survives_it() {
+    let (mut app, p0) = step_onto_once();
+    two_public(&mut app);
+    let line = fired(&mut app, p0, "news_013");
+    let (_center, lands) = ground(&line);
+    assert_eq!(
+        lands,
+        vec![format!("L{ANCHOR}"), "L5".to_string()],
+        "两块都无主，两块都该在名单上：{line}"
+    );
+
+    // 一帧一帧喂：机器一空、且回合机已经把「等一个人回答」那一格交出去才停。
+    // 判据里带上 phase 而不是多给几帧：把交还会晚一帧这件事写成 sleep，那条 hang 就只在
+    // 帧数不够时红 —— 而这里要问的恰恰是「它到底交不交还」。
+    // 多出来的帧会让下一位玩家开始走路、踩到别的东西，而这一条要数的是「这台机器开了几场」。
+    let mut handed_back = false;
+    for _ in 0..60 {
+        settle(&mut app, 1);
+        let idle = auction_of(&app);
+        if idle.lot.is_none()
+            && idle.standby.is_empty()
+            && idle.liquidation.is_empty()
+            && phase(&app) != TurnPhase::WaitDecision
+        {
+            handed_back = true;
+            break;
+        }
+    }
+    assert!(
+        handed_back,
+        "60 帧之后这台机器还没把回合交出去：{:?}",
+        ledger(&app)
+    );
+    let lines = ledger(&app);
+    let opened: Vec<&String> = lines.iter().filter(|l| l.starts_with("Auction(")).collect();
+    assert_eq!(opened.len(), 2, "两块就该开两场（一次一块）：{opened:?}");
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with("Unsold(")).count(),
+        2,
+        "全员放弃＝两块都流标：{lines:?}"
+    );
+    let idle = auction_of(&app);
+    assert!(
+        idle.lot.is_none() && idle.standby.is_empty() && idle.liquidation.is_empty(),
+        "这台机器转完就该彻底空着：{idle:?}"
+    );
+    for land in [ANCHOR, 5] {
+        assert_eq!(
+            plot_state(&mut app, land).0,
+            None,
+            "流标不转手：L{land} 还是无主"
+        );
+    }
+    assert_ne!(
+        phase(&app),
+        TurnPhase::WaitDecision,
+        "拍完两块之后回合不该还停在「等一个人回答」上（回合机被新闻挂死的形状）"
+    );
+    assert_cash_audit(&mut app, START);
+}
+
+/// 强制征收：**房屋同灭、土地收回、业主一分补偿都拿不到**，而全场现资产正好少那一块的价钱。
+///
+/// 最后那半句是这条用例的全部理由，也是 ✅ 10-24 那句「有一点平衡防止过快」的落点：
+/// 物价指数读的是「全员现资产总和」（`economy::price_index`），而这里动的是**资产本身** ——
+/// 楼平了、业主换成无主，那一块就从分子里消失了。它不是转账（没有 credit），也不是税
+/// （税收的是钱，地还在他名下）。差值按**确切的一个数**断言而不是「小了一点」：那个数由
+/// `market_value` 现读（起拍价同一条式子），改地块数据时先在这里红。
+#[test]
+fn a_requisition_takes_the_house_and_the_land_and_pays_nothing() {
+    let (mut app, p0) = step_onto_once();
+    let p1 = roster(&mut app)[1].0;
+    own(&mut app, ANCHOR, Some(0), 3, false);
+    own(&mut app, 5, Some(1), 2, false);
+    // 把指数摆回 1.0：`market_value` 与 `total_assets` 两处要按同一条单位读，
+    // 而前面那几轮的补贴会把指数推高（缩放本身另有用例钉）
+    set_price_index(&mut app, 1.0);
+    let price = market_value(&mut app, ANCHOR);
+    let total_before = total_assets(&mut app, 1.0);
+    let owner_cash = cash_of(&mut app, p0);
+    let other_cash = cash_of(&mut app, p1);
+
+    let line = fired(&mut app, p0, "news_014");
+    let (center, lands) = ground(&line);
+    assert_eq!(center, format!("L{ANCHOR}"), "锚点是脚下最近那块地：{line}");
+    assert_eq!(
+        lands,
+        vec![format!("L{ANCHOR}")],
+        "「一栋」就是阶梯上 `One` 那一格，隔壁那块不在范围内：{line}"
+    );
+    assert!(
+        line.contains("Razed { lands: 1, seized: 1 }"),
+        "一块、且那一块连地收回：{line}"
+    );
+    assert_eq!(
+        plot_state(&mut app, ANCHOR),
+        (None, 0, false),
+        "楼平了、地收回：{line}"
+    );
+    assert_eq!(
+        plot_state(&mut app, 5),
+        (Some(1), 2, false),
+        "范围只那一块，隔壁那位不动：{line}"
+    );
+    assert!(
+        !line.contains("Gained") && !line.contains("Lost"),
+        "征收不赔钱也不收款 —— 这一条上不该有任何一笔现金：{line}"
+    );
+    assert_eq!(cash_of(&mut app, p0), owner_cash, "业主的钱包一分没动");
+    assert_eq!(cash_of(&mut app, p1), other_cash, "旁人更没动");
+    assert_eq!(
+        total_assets(&mut app, 1.0),
+        total_before - price,
+        "全场现资产该正好少了那一块地的价钱（这就是那条通缩闸门的单位）：{line}"
     );
     assert_cash_audit(&mut app, START);
 }

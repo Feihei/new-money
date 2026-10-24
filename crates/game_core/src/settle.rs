@@ -520,6 +520,21 @@ impl<'w, 's> Books<'w, 's> {
         area_of(&self.active.def, center, area)
     }
 
+    /// 一片范围里**无主**的那几块 —— 新闻「公开拍卖公有土地」要打的那一份（P11c①）。
+    ///
+    /// 「公有」这一句只在这里说一次：拍卖那一槌的执行侧（`deck::apply_effects`）与凭据侧
+    /// （`news::touched`，那份「到底挂了几块」的清单）读的是同一个集合。分开写的话两侧会
+    /// 各自漂 —— 而漂出来的形状是「顶栏念 3 块、拍卖机只开场 2 场」。
+    ///
+    /// 有主的地不在其中，**不是**「这次没拍到」：那条新闻不替业主卖地（`OpenDeny::Private`
+    /// 是同一句话的另一半，由拍卖机在开场那一刻再问一次）。
+    pub fn public_lands(&self, center: LandId, area: PlotArea) -> Vec<LandId> {
+        self.area_of(center, area)
+            .into_iter()
+            .filter(|land| self.owner_of(*land).is_none())
+            .collect()
+    }
+
     /// 打一次建筑损害（P2② 的「拆房 / 征收」动词，形状见 [`crate::damage`]）。
     ///
     /// 抵押本金只在**夺地**那一刻清：抵押中的地被 `Degrade` 或 `Clear{seize:false}` 打过

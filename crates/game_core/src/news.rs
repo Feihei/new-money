@@ -147,12 +147,13 @@ const fn family_of(effect: &CardEffect) -> Family {
         | CardEffect::SummonGod
         | CardEffect::BanishGod => Family::People,
         CardEffect::LandStatus { .. } | CardEffect::Damage { .. } => Family::Ground,
+        // 拍卖那一槌打在**地**上（P11c①）。它当年被关在 `Neither` 里等的就是那一句答案：
+        // 「无主的地谁挨这一槌」→ ✅ 10-24 拍板：政府挂牌、所得归银行，于是承受者不是某个
+        // 业主而是一片公有地，与 `Damage`／`LandStatus` 同一族。
+        // 而它挑客：只拍范围内**无主**的那几块（[`only_public`]），有主的地根本不在它范围内
+        CardEffect::Auction { .. } => Family::Ground,
         // 购地卡：买哪块无主地是玩家按下去那一刻定的，而新闻不替人挑地（挑地是它的玩法本体）
         CardEffect::BuyLand => Family::Neither,
-        // 拍卖卡：那一槌要问的是**业主**（承受者与开槌人是两个人）。PLAN §四 把它列在
-        // 第二批的「公开拍卖公有土地」，而无主的地没有业主 —— 那条新闻得先回答
-        // 「无主的地谁挨这一槌」（所得归银行？像破产清算那样），所以今天不放它进池子
-        CardEffect::Auction => Family::Neither,
     }
 }
 
@@ -550,11 +551,14 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
                     player: target,
                     outcomes: apply_effects(
                         &mut sink.card,
-                        actor,
                         target,
                         &effects,
                         &news_id,
                         None,
+                        // 人档今天拿不到拍卖那一槌（[`mismatch`] 把 `Auction` 留在地档），
+                        // 所以这一格是一条走不到的路。它写 `Public` 而不是留空位：
+                        // 「新闻中心这一播」开的槌就是公家那一把，与地档同一句
+                        crate::auction::Gavel::Public,
                     ),
                 });
             }
@@ -570,14 +574,16 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
                 None => Vec::new(),
             };
             // `victim` 那一格对地块类动词是死的（[`mismatch`] 保证走到这里的只有地块类动词），
-            // 传 `actor` 只为让签名成立 —— 地档没有「谁挨的」，只有「谁开的广播」
+            // 传 `actor` 只为让签名成立 —— 地档没有「谁挨的」，只有「谁开的广播」。
+            // `Gavel::Public` 是这条新闻的**身份**而不是一个占位：新闻不替某个玩家敲槌，
+            // 它替公家挂牌 —— 所得因此归银行（✅ 10-24 拍板），而不是归刚踩到那一格的玩家
             let outcomes = apply_effects(
                 &mut sink.card,
-                actor,
                 actor,
                 &effects,
                 &news_id,
                 center.map(crate::hand::CardAim::Land),
+                crate::auction::Gavel::Public,
             );
             NewsAudience::Ground {
                 center,
@@ -625,7 +631,9 @@ fn ground_anchor(actor: Entity, sink: &mut CardSink) -> Option<crate::land::Land
 /// （[`a_ground_verb_is_the_one_that_carries_a_land_area`] 数的是两条表已登记的那些对不对得上）。
 fn verb_area(effect: &CardEffect) -> Option<crate::plot::PlotArea> {
     match effect {
-        CardEffect::LandStatus { area, .. } | CardEffect::Damage { area, .. } => Some(*area),
+        CardEffect::LandStatus { area, .. }
+        | CardEffect::Damage { area, .. }
+        | CardEffect::Auction { area } => Some(*area),
         CardEffect::AddCash { .. }
         | CardEffect::DeductCash { .. }
         | CardEffect::Levy { .. }
@@ -639,8 +647,41 @@ fn verb_area(effect: &CardEffect) -> Option<crate::plot::PlotArea> {
         | CardEffect::Stay { .. }
         | CardEffect::MoveCap { .. }
         | CardEffect::SummonGod
-        | CardEffect::BanishGod
-        | CardEffect::Auction => None,
+        | CardEffect::BanishGod => None,
+    }
+}
+
+/// 范围内的这一块地，这条动词**要不要**（P11c① 加的第三问）。
+///
+/// 为什么范围要两张表而不是一张：`Auction` 带一个 `area`，却只拍其中**无主**的那几块 ——
+/// 「这一带有几块地」与「这一带有几块公有地」在这块盘上是两个差很多的数（开局几乎全部无主，
+/// 中盘只剩边角几块）。合写一张表的话，凭据那份清单去念一个没有发生的数：
+/// 顶栏播「公有地拍卖：9 块」而拍卖机只开场 2 场。
+///
+/// 也不许写成 `Auction => true | _ => false` 之外再漏一条：新的地块类动词必须**当场**回答
+/// 「你挑不挑客」。下面那些打在人身上的动词今天问不到（[`verb_area`] 对它们是 `None`），
+/// 但这一格照样要表态 —— 有人把某条动词挪去地档而这里没改，症状就是它悄悄把有主的也扫进清单。
+fn only_public(effect: &CardEffect) -> bool {
+    match effect {
+        CardEffect::Auction { .. } => true,
+        CardEffect::LandStatus { .. } | CardEffect::Damage { .. } => false,
+        CardEffect::AddCash { .. }
+        | CardEffect::DeductCash { .. }
+        | CardEffect::Levy { .. }
+        | CardEffect::Detain { .. }
+        | CardEffect::Release { .. }
+        | CardEffect::MoveTo { .. }
+        | CardEffect::Insulate { .. }
+        | CardEffect::FreePass { .. }
+        // 购地卡今天连范围都没有，而它**确实**只挑无主的地 —— 那条判据住在
+        // `Books::buy_price`（无主 + 付得起），不在这里。这一格填 `false` 说的是
+        // 「这张表管不到它」，不是「它不挑客」
+        | CardEffect::BuyLand
+        | CardEffect::Reverse
+        | CardEffect::Stay { .. }
+        | CardEffect::MoveCap { .. }
+        | CardEffect::SummonGod
+        | CardEffect::BanishGod => false,
     }
 }
 
@@ -650,16 +691,26 @@ fn verb_area(effect: &CardEffect) -> Option<crate::plot::PlotArea> {
 /// 与 `Razed{lands}`，与卡池共用同一套形状），而新闻要说得出「外星人拆了哪几块」——
 /// 那句话里没有块数就没有「我家那块在不在里面」。清单由这里算而不是从 `damage` 里挤出来，
 /// 是为了不把 `DamageTally` 的 `Copy` 破掉（它被飞弹、炸弹、恶魔与测试共用）。
+///
+/// 挑客的那一条读 [`crate::settle::Books::public_lands`] —— 与执行侧（`deck::apply_effects`
+/// 的拍卖那一槌）同一个集合，所以「清单上几块」与「挂上台几块」在结构上是同一个数。
 fn touched(
     sink: &mut CardSink,
     center: crate::land::LandId,
     effects: &[CardEffect],
 ) -> Vec<crate::land::LandId> {
-    let mut lands: Vec<crate::land::LandId> = effects
-        .iter()
-        .filter_map(verb_area)
-        .flat_map(|area| sink.books.area_of(center, area))
-        .collect();
+    let mut lands: Vec<crate::land::LandId> = Vec::new();
+    for effect in effects {
+        let Some(area) = verb_area(effect) else {
+            continue;
+        };
+        let found = if only_public(effect) {
+            sink.books.public_lands(center, area)
+        } else {
+            sink.books.area_of(center, area)
+        };
+        lands.extend(found);
+    }
     lands.sort();
     lands.dedup();
     lands
@@ -773,30 +824,61 @@ mod tests {
     }
 
     #[test]
-    fn the_two_land_choosing_verbs_belong_to_neither_side() {
-        // 购地卡与拍卖卡都要有人**当场挑一块地**（那是它们各自的玩法本体），而新闻不替人挑。
-        // 这一格写在这里而不是悄悄放进人档：`Auction` 是 PLAN §四 第二批那条
-        // 「公开拍卖公有土地」的必经之路，它得先回答「无主的地谁挨这一槌」
-        for (id, effect) in [
-            ("news_grab", CardEffect::BuyLand),
-            ("news_auction", CardEffect::Auction),
+    fn the_land_choosing_card_verb_still_belongs_to_neither_side() {
+        // 购地卡要有人**当场挑一块无主地**（那是它的玩法本体），而新闻不替人挑。
+        // P11c① 之前这张表上有两位（购地 + 拍卖），拍卖那一位被搬去地档 —— 搬的理由写在
+        // [`family_of`] 里那句「无主的地谁挨这一槌」已经答上。这条用例留在原地挡另一条：
+        // 「新闻顺手替玩家挑一块地买下来」今天仍然写不出来
+        for scope in [NewsScope::Everyone, NewsScope::Around] {
+            let set = NewsSet(vec![news("news_grab", scope, vec![CardEffect::BuyLand])]);
+            let errs = set.validate().unwrap_err();
+            assert!(
+                errs.iter().any(|e| e.contains("玩家当场挑一块地")),
+                "news_grab 在 {scope:?} 下居然过了：{errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_public_auction_is_a_ground_news() {
+        // P11c① 那条「公开拍卖公有土地」的形状：地档 + 拍卖那一槌。三格各问一次，
+        // 缺任一格都会漏掉一种坏数据：
+        // - 地档过：这条新闻进得了池子（进不去的话 PLAN 第二批那一条永远落不了地）
+        // - 人档拒：点名一位玩家 + 拍卖 = 「新闻替他挑了一块公有地」，那种挑法没人按过按钮
+        // - 筛过的人档也拒：`EveryoneIf` 的答案是「几个人」，不是「几块地」
+        let auction = || CardEffect::Auction {
+            area: crate::plot::PlotArea::Box { side: 3 },
+        };
+        let right = NewsSet(vec![news(
+            "news_public",
+            NewsScope::Around,
+            vec![auction()],
+        )]);
+        assert!(
+            right.validate().is_ok(),
+            "地档 + 拍卖该过：{:?}",
+            right.validate()
+        );
+        for scope in [
+            NewsScope::Everyone,
+            NewsScope::One(PlayerPick::Richest),
+            NewsScope::EveryoneIf(FieldFilter::OnFoot),
         ] {
-            for scope in [NewsScope::Everyone, NewsScope::Around] {
-                let set = NewsSet(vec![news(id, scope, vec![effect.clone()])]);
-                let errs = set.validate().unwrap_err();
-                assert!(
-                    errs.iter().any(|e| e.contains("玩家当场挑一块地")),
-                    "{id} 在 {scope:?} 下居然过了：{errs:?}"
-                );
-            }
+            let set = NewsSet(vec![news("news_public", scope, vec![auction()])]);
+            let errs = set.validate().unwrap_err();
+            assert!(
+                errs.iter().any(|e| e.contains("作用域是人")),
+                "{scope:?} + 拍卖该红在「作用域是人」上：{errs:?}"
+            );
         }
     }
 
     #[test]
     fn a_ground_verb_is_the_one_that_carries_a_land_area() {
-        // 「打在地上」与「带一片范围」是同一条判断的两半，各住在一张表里。这里把每一条动词
-        // 都问一遍两半是否一致 —— 半截登记在画面上的形状是「标题播了、地也拆了，
-        // 而那份「哪几块」是空的」。编译期那一半牙齿在两张都不带 `_` 的 match 上
+        // 「打在地上」「带一片范围」「范围内挑不挑客」是同一条判断的三半，各住在一张表里。
+        // 这里把每一条动词都问一遍三半是否一致 —— 半截登记在画面上的形状有两种：
+        // 「标题播了、地也拆了，而那份『哪几块』是空的」，以及「清单写 9 块而拍卖机只开场 2 场」。
+        // 编译期那一半牙齿在三张都不带 `_` 的 match 上
         for effect in all_verbs() {
             let ground = matches!(family_of(&effect), Family::Ground);
             assert_eq!(
@@ -805,11 +887,16 @@ mod tests {
                 "{effect:?} 两条表读数不一致：地档={ground} 范围={:?}",
                 verb_area(&effect)
             );
+            assert!(
+                !only_public(&effect) || ground,
+                "{effect:?} 挑客却不打在地上：那句「只拍无主」没人读得到"
+            );
         }
     }
 
-    /// 每一条动词各取一个样本。列在这里而不是靠宏：要的是「这两张表对同一批东西说过话」，
-    /// 而漏列一条的后果由 [`family_of`] / [`verb_area`] 的穷尽 match 挡（新变体两处都得表态）。
+    /// 每一条动词各取一个样本。列在这里而不是靠宏：要的是「这几张表对同一批东西说过话」，
+    /// 而漏列一条的后果由 [`family_of`] / [`verb_area`] / [`only_public`] 的穷尽 match 挡
+    /// （新变体每张都得表态）。
     fn all_verbs() -> Vec<CardEffect> {
         use crate::player::DetentionPlace;
         use crate::plot::PlotArea;
@@ -848,7 +935,9 @@ mod tests {
             CardEffect::MoveCap { turns: 3 },
             CardEffect::SummonGod,
             CardEffect::BanishGod,
-            CardEffect::Auction,
+            CardEffect::Auction {
+                area: PlotArea::Box { side: 3 },
+            },
         ]
     }
 
@@ -911,8 +1000,9 @@ mod tests {
     #[test]
     fn a_tax_rate_must_be_between_one_and_a_hundred_percent() {
         // 0% 是一条不收钱的新闻（它照样会播标题、留一条 0 元流水），>100% 是「抽的比基数
-        // 还多」—— 那该写成定额扣钱而不是百分比。100% 合法：那是「全部充公」，
-        // PLAN §四 第二批那条「强制征收」用的就是这个位置
+        // 还多」—— 那该写成定额扣钱而不是百分比。100% 合法：那是「全额充公」，
+        // 一条「把名下地价全部收走」的税（注意它**不是** PLAN §四 第二批那条「强制征收」：
+        // 那条收的是**地本身**，走 `Damage{Clear{seize}}` 而不是税，见 `news_014`）
         for percent in [0, 101, 250] {
             let set = NewsSet(vec![news(
                 "news_tax",

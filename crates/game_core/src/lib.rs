@@ -54,7 +54,7 @@ pub mod world;
 pub mod prelude {
     pub use crate::afflict::{AfflictDomain, Affliction, Insulation};
     pub use crate::auction::{
-        Auction, AuctionDesk, BidDeny, BidFacts, LiquidationPlan, Listing, Lot, OpenDeny,
+        Auction, AuctionDesk, BidDeny, BidFacts, Gavel, LiquidationPlan, Listing, Lot, OpenDeny,
         auction_hold_system, auction_move_system, bid_allowed, bidders, can_open, close_if_done,
         open, record_raise, record_withdraw, seat_order, step_of,
     };

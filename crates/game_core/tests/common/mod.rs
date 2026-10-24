@@ -31,16 +31,16 @@ use game_core::prelude::{
     Jackpot, JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken,
     LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought, LotteryDrawn, LotteryTickets,
     LotteryWon, Market, MarketClock, MinigameResult, MinigameScore, MortgageDone, MortgageOp,
-    MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, Occupancy, OccupancyAt,
-    OccupancyKind, Owner, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
-    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerTeleported,
-    PlotArea, Points, PointsChanged, PolicyBought, Possession, Presence, RedEnvelope,
-    RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RequestRemoteDice,
-    RequestRoll, RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone, ShopOpRequested,
-    ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged,
-    StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition,
-    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, WalkHalted,
-    WalkStarted, Wallet, deal_to, grant_effects,
+    MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, NewsSink, Occupancy,
+    OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision, PlaceItemRequested,
+    PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId,
+    PlayerTeleported, PlotArea, Points, PointsChanged, PolicyBought, Possession, Presence,
+    RedEnvelope, RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue,
+    RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone,
+    ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId,
+    StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
+    Timed, TokenPosition, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered,
+    WalkHalted, WalkStarted, Wallet, deal_to, find_id, fire_news, grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -1555,6 +1555,56 @@ fn run_market_tick_system(
     }
     req.0 = false;
     market.tick_at_turn_end(&mut books, &mut ledgers, &mut commands);
+}
+
+/// 点名播一条新闻（走 `NM_NEWS` 那同一条入口 `fire_news`）。
+///
+/// 为什么要有它而不是用「反复踩新闻中心直到抽中那一条」：后者会为它前面那几轮**付出全部副作用**
+/// （税、补贴、停走、拆房都真落过一遍），于是「这条新闻让全场资产少了多少」这类**前后差值**断言
+/// 根本没有一个干净的前置。P11c① 那两条（公有地拍卖、强制征收）问的都是差值，所以这里给一条
+/// 不碰随机流、只播指定那一条的入口 —— 它与旋钮走的是同一个函数，不是绕过落格那条路的捷径：
+/// 「踩到才播」那一条由本文件其它用例真走到。
+///
+/// 返回值是「这条 id 真的在池子里吗」：调用方**必须**断言它是 `true`，否则 id 写错的症状是
+/// 后面每一条断言都绿（什么都没播，所以什么都没变）。
+#[derive(Resource)]
+pub struct CastReq(Option<(Entity, String)>);
+
+#[derive(Resource, Default)]
+pub struct CastOut(pub bool);
+
+fn cast_system(mut sink: NewsSink, mut req: ResMut<CastReq>, mut out: ResMut<CastOut>) {
+    let Some((player, wanted)) = req.0.take() else {
+        return;
+    };
+    let Some(set) = sink.pool() else {
+        return;
+    };
+    let Some(id) = find_id(set, &wanted) else {
+        return;
+    };
+    out.0 = fire_news(&mut sink, player, id);
+}
+
+pub fn broadcast(app: &mut App, player: Entity, wanted: &str) -> bool {
+    app.insert_resource(CastReq(Some((player, wanted.into()))));
+    app.insert_resource(CastOut::default());
+    // 与 `run_market_tick` 同一条一次性纪律：挂过的 system 每帧还在跑，靠旗标让它空转
+    app.add_systems(Update, cast_system);
+    app.update();
+    app.world().resource::<CastOut>().0
+}
+
+/// 这块地此刻的身价（起拍价那条式子：地价 + 已盖的每一层，再过物价）。
+pub fn market_value(app: &mut App, land: u32) -> i64 {
+    let out = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sink = out.clone();
+    run_op(app, move |books, _| {
+        *sink.lock().unwrap() = books.market_value(LandId(land));
+    });
+    out.lock()
+        .unwrap()
+        .expect("prototype 里有这块地，就读得到身价")
 }
 
 /// 一次建筑损害请求（[`run_damage`] 的载体）。

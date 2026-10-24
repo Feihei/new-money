@@ -15,9 +15,9 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AfflictDomain, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Books,
     BuildingKind, BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind,
-    CompanyCharged, Decision, DetentionPlace, EffectOutcome, Facility, Hand, Jackpot, LandId,
-    LandStatus, LandType, Lot, LotteryDeny, LotteryTickets, MortgageDeny, MortgageOp, Owner,
-    Pending, PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf, ShopDeny,
+    CompanyCharged, Decision, DetentionPlace, EffectOutcome, Facility, Gavel, Hand, Jackpot,
+    LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets, MortgageDeny, MortgageOp,
+    Owner, Pending, PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf, ShopDeny,
     ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders, buy_allowed, buyback,
     counter_plots, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
 };
@@ -309,7 +309,7 @@ pub(crate) fn sync_modal(
             cash: books.balance(player),
             denied_by_god: books.acquire_denied(player),
             queued: books.auction.standby.len() + books.auction.liquidation.len(),
-            eligible: bidders(&books, lot.by),
+            eligible: bidders(&books, lot.by()),
             lot,
         }),
         _ => None,
@@ -2202,20 +2202,22 @@ fn auction_modal(
                 size::ROW,
                 col::MUTED,
             ));
-            // 槌是谁敲的、钱最后归谁：这两句在两种入口上是相反的，而玩家按下之前必须知道
-            // 自己是在替别人抬价还是在抢一块无主的地
+            // 槌是谁敲的、钱最后归谁：这三句在三种入口上是不同的事，而玩家按下之前必须知道
+            // 自己是在替别人抬价、在抢一块死者留下的地，还是在抢一块政府挂牌的公有地
             p.spawn(center_label(
                 &font.0,
-                match lot.by {
-                    Some(founder) => format!(
+                match lot.gavel {
+                    Gavel::Card(founder) => format!(
                         "{} 敲的槌 —— 他不能参与，而谁拍走那笔钱就归他",
                         seat(names, founder)
                     ),
-                    None => format!(
+                    Gavel::Liquidation(dead) => format!(
                         "{} 破产变卖 —— 所得归银行，不发给任何玩家",
-                        lot.seller
-                            .map_or_else(|| "一块地".to_string(), |e| seat(names, e))
+                        seat(names, dead)
                     ),
+                    // 「公有地」那一句要说清**没有原主**：面板上其余两处都念得出一个卖家，
+                    // 这一处念不出，而念不出与漏印是两种读感
+                    Gavel::Public => "公有地政府挂牌 —— 没有原主，所得归银行".to_string(),
                 },
                 size::SMALL,
                 col::KEY,
@@ -3111,9 +3113,15 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
         // 那句人话的映射已经有一份，别再抄第二份
         EffectOutcome::Released { place, .. } => format!("提前{}", place.back_verb()),
         EffectOutcome::Teleported { name, .. } => format!("移动到「{name}」"),
-        // 拍卖卡的那一槌。卡面上不写价钱也不写谁会拍走 —— 那两个数在 `AuctionStarted`
-        // 与 `AuctionWon` 上，而这条凭据要说的是「这一槌敲下去了、拍的是哪块地」
-        EffectOutcome::Auctioned { land } => format!("把 L{} 强制上架", land.0),
+        // 拍卖那一槌（卡 P9 / 新闻「公开拍卖公有土地」P11c①）。卡面上不写价钱也不写谁会拍走 ——
+        // 那两个数在 `AuctionStarted` 与 `AuctionWon` 上，而这条凭据要说的是
+        // 「这一槌敲下去了、拍的是哪几块地」。零块是一句要说得出的人话：那条新闻播了，
+        // 而这一带的地全都有主（不写「0 块」那种读数，玩家会去找那块被拍走的地）
+        EffectOutcome::Auctioned { lands } => match lands.len() {
+            0 => "这一带没有可拍的公有地".to_string(),
+            1 => format!("把 L{} 强制上架", lands[0].0),
+            n => format!("把 {n} 块公有地挂上拍卖台"),
+        },
         // 数据写了个棋盘上不存在的格名：如实报出来，别退成一句漂亮话把数据错误藏起来
         EffectOutcome::UnknownTile { name } => format!("数据错误：找不到「{name}」"),
         EffectOutcome::Blocked { domain } => {
