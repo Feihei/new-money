@@ -15,7 +15,6 @@ use crate::player::Heading;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TileKind {
-    Start,
     Property,
     Bank,
     Stock,
@@ -26,6 +25,11 @@ pub enum TileKind {
     Lottery,
     GodDeity,
     Neutral,
+    /// 普通路格：踩上去什么都不发生（`landing::domain_of` 的 `Nothing` 那一格）。
+    ///
+    /// 这一族原来还有一位 `TileKind::Start`，10-26 实报之后整格删掉 —— 起点是 Monopoly
+    /// 桌游的产物，大富翁 4 的环上没有它，开局玩家随机落位（见 `player::spawn_players`）。
+    /// 演示盘那格「起点」因此改成了一条普通路，环长与其余格号一律不动。
     Road,
     Transport,
     /// 点券箱：一次性拾取、按回合冷却刷新（`.agents/PLAN.md` §五，实现见 `coupon.rs`）。

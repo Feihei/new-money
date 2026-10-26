@@ -19,7 +19,7 @@ use game_core::prelude::{
 // prototype 的格子对照（`assets/data/boards/prototype.json`）：
 // 1 南京路(L0 brown 1500) / 2 汉口路(L1 brown 1500，挂监狱分支) /
 // 4-5 外滩(L2 orange 4400) / 7 徐家汇(L3 red 3800) / 9 王府井(L4 yellow 2800) /
-// 11 西单(L5 yellow 3000)；3 命运 / 6 银行 / 8 机会 / 10 中央银行 / 0 起点。
+// 11 西单(L5 yellow 3000)；3 命运 / 6 银行 / 8 机会 / 10 中央银行 / 0 骑楼(普通路)。
 
 fn me(app: &mut App) -> Entity {
     roster(app)[0].0
@@ -696,18 +696,42 @@ fn a_detain_card_parks_the_token_at_the_junction_and_skips_two_turns() {
     assert_eq!(detention_of(&app, p0), None);
 }
 
+/// `move_to` 的两条行为：真的把人挪走并发一条瞬移凭据，而**落到新格子不再触发一次结算**。
+///
+/// 牌池里今天没有任何一张卡用它 —— 10-26 起点整格删掉，原来那条 fate_002「回到起点领
+/// $2000」跟着退场，下一个已拍板的使用者是 P10 研究所 3 级的传送机。机制的用例不该因为
+/// 数据里暂时没人用它就一起删掉，所以照下面 [`a_card_naming_a_missing_tile_says_so_instead_of_guessing`]
+/// 同一条办法**就地改资产内容**：把命运池第二张改成「去那条路 + 领 2000」。
 #[test]
 fn move_to_card_sends_the_token_without_settling_the_new_tile() {
     let (mut app, p0) = ready_on(0, 5, DecisionPolicy::DeclineAll); // 命运格
-    stack_card(&mut app, CardKind::Fate, 1); // fate_002 回到起点 +2000
+    // 目标格现读：这张盘上唯一那条普通路（10-26 之前它是「起点」）
+    let target = kind_tile(&app, game_core::prelude::TileKind::Road);
+    let street = app
+        .world()
+        .resource::<game_core::prelude::ActiveBoard>()
+        .def
+        .tiles[target as usize]
+        .name
+        .clone();
+    {
+        let w = app.world_mut();
+        let handles = w.resource::<DataHandles>().clone();
+        let mut sets = w.resource_mut::<bevy::asset::Assets<game_core::prelude::CardSet>>();
+        sets.get_mut(&handles.fate).expect("命运牌已加载").0[1].effects = vec![
+            CardEffect::MoveTo { tile_name: street },
+            CardEffect::AddCash { amount: 2000 },
+        ];
+    }
+    stack_card(&mut app, CardKind::Fate, 1);
     land(&mut app);
 
     let led = ledger(&app);
     assert!(
-        led.contains(&"Teleport(P0→0)".to_string()),
+        led.contains(&format!("Teleport(P0→{target})")),
         "瞬移要有凭据：{led:?}"
     );
-    assert_eq!(tile_of(&app, p0), 0);
+    assert_eq!(tile_of(&app, p0), target);
     assert_eq!(
         cash_of(&mut app, p0),
         22_000,
@@ -743,7 +767,7 @@ fn a_card_naming_a_missing_tile_says_so_instead_of_guessing() {
     assert_eq!(
         tile_of(&app, p0),
         chance,
-        "格名找不到时不该猜一个位置（Godot 曾把「找不到」回退成 0=起点）"
+        "格名找不到时不该猜一个位置（Godot 曾把「找不到」回退成 0 号格）"
     );
     assert_eq!(cash_of(&mut app, p0), 20_000, "效果失效就不该有别的副作用");
 }

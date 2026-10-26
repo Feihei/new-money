@@ -21,7 +21,8 @@ group_color = {
     "green": "#43a047", "blue": "#1e88e5",
 }
 road_type_color = {
-    "start": "#43a047", "fate": "#8e24aa", "bank": "#1e88e5",
+    # 没有 "start"：10-26 起这张棋盘没有起点格，普通路走下面的 `road_color`
+    "fate": "#8e24aa", "bank": "#1e88e5",
     "chance": "#00acc1", "jail": "#b71c1c", "hospital": "#ad1457",
 }
 road_color = "#90a4ae"

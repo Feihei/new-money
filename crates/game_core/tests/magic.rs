@@ -76,6 +76,12 @@ fn at_the_witch() -> (App, Entity, Entity) {
     app.insert_resource(DecisionPolicy::Hold);
     let p0 = boot_to_wait_roll(&mut app);
     let p1 = other(&mut app, p0);
+    // 这份夹具的性别前提由夹具自己写死：**P0 男、P1 女**。下面三十来条用例里
+    // `AllGirls` 是「选到 p1」的手段而不是 subject，它不该跟着演示盘的默认阵容走 ——
+    // 阵容换人（10-26 从阿土伯／孙小美换成姬百年／范一文）当时就把这一批全部翻面，
+    // 症状是一堆 `[p0] != [p1]`，而魔法屋的规则一个字没动
+    insert(&mut app, p0, (Gender::Male,));
+    insert(&mut app, p1, (Gender::Female,));
     clear_gods(&mut app);
     let face = Rng::new(seed.0).roll_die();
     let at = kind_tile(&app, TileKind::Magic);
@@ -650,8 +656,9 @@ fn bank_cash_misses_the_one_who_is_already_liquid() {
 /// 抽命运 3 张 = **间接效果**，所以神明的修正吃得到（PLAN §三 那一行的落地方式）。
 ///
 /// A/B 两条同一份前置、只差身上那位神。命运是**定序**发的（P3d①），所以三张牌就是牌堆
-/// 头三行：fate_001 入狱、fate_002 回起点领 2000、fate_003 缴税 5000。
-/// - 没神：现金 20000 + 2000 − 5000 = 17000，牢判 3 天；
+/// 头三行：fate_001 入狱、fate_003 缴税 5000、fate_004 银行利息 4000。
+/// （编号里缺的那位是 fate_002「回到起点」—— 10-26 起点整格删掉时一起退场，编号不复用。）
+/// - 没神：现金 20000 − 5000 + 4000 = 19000，牢判 3 天；
 /// - 大衰神：罚钱加倍（−10000）、得钱作废（+0）→ 10000，而那张「入狱」的天数被
 ///   `doom_days` 乘成 6。
 ///
@@ -665,14 +672,14 @@ fn the_fate_spell_draws_three_and_the_god_taxes_them() {
         plain.fates,
         vec![
             "Card(P1:fate_001)",
-            "Card(P1:fate_002)",
-            "Card(P1:fate_003)"
+            "Card(P1:fate_003)",
+            "Card(P1:fate_004)"
         ],
         "三张牌要按定序发，还要各自留下一条卡面凭据（顶栏念的就是这一行）"
     );
     assert_eq!(doomed.fates, plain.fates, "神不该改变抽到什么牌");
 
-    assert_eq!(plain.cash, 17_000, "没神：+2000 与 −5000 照卡面走");
+    assert_eq!(plain.cash, 19_000, "没神：−5000 与 +4000 照卡面走");
     assert_eq!(doomed.cash, 10_000, "大衰神：罚钱加倍、得钱作废");
 
     assert_eq!(

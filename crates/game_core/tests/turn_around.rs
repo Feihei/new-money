@@ -7,7 +7,8 @@
 //!
 //! - 倒着走踩到的格，与正着走踩到的格，走的是同一条落格流水线（不是第二套规则）；
 //! - 骰面还是骰面：`Roll(P0,3,5->2)` 里那个 3 不该变成 -3（方向不是点数的一部分）；
-//! - 回绕在负方向上同样成立（越过起点回到环尾），而起点不发薪水所以这里没有套利；
+//! - 回绕在负方向上同样成立（越过环首回到环尾），而这张盘没有「过某一格发钱」那一条，
+//!   所以这里没有套利（10-26 之前那个读数挂在「起点」上，现在那一格是一条普通路）；
 //! - 翻两次 = 原样（这一位不是「层数」）；
 //! - 它是「事」不是「钱」，所以免罪挡得掉它，且挡掉时不留半条流水。
 
@@ -90,10 +91,11 @@ fn a_reversed_player_walks_the_same_ring_backwards_and_the_die_stays_positive() 
 }
 
 #[test]
-fn walking_backwards_wraps_past_the_start_to_the_other_end_of_the_ring() {
-    // 从 1 号倒着走五步：0（起点）→ 19（彩票中心）→ 18（游乐场）→ 17（百货公司）→ 16（西单）。
-    // 回绕用的是同一个 `rem_euclid`，而「倒着越过起点」不发薪水（`domain_of(Start) = Nothing` 早就拍板过），
-    // 所以这里没有「反复擦过起点捞一笔」的套利。
+fn walking_backwards_wraps_past_the_ring_head_to_the_other_end_of_the_ring() {
+    // 从 1 号倒着走五步：0（骑楼，10-26 之前那一格叫起点）→ 19（彩票中心）→ 18（游乐场）
+    // → 17（百货公司）→ 16（西单）。
+    // 回绕用的是同一个 `rem_euclid`，而「倒着越过环首」不发钱（`domain_of(Road) = Nothing`），
+    // 所以这里没有「反复擦过某一格捞一笔」的套利。
     // 五步而不是四步（环每加一格就要重数一次，P11 后环长 20）：四步落在 17 百货公司，
     // 那会开出柜台窗口；三步落在 18 游乐场，开一局小游戏。两条窗口各属于 `tests/shop.rs`／
     // `tests/minigame.rs`，不该混进这条只问「绕不绕得回去」的用例里 —— 终点选在一块无主地产上，
@@ -111,9 +113,9 @@ fn walking_backwards_wraps_past_the_start_to_the_other_end_of_the_ring() {
     assert_eq!(
         tile_of(&app, p0),
         (1 + len - 5) % len,
-        "倒着越过起点该绕到环尾，不是停在 0"
+        "倒着越过环首该绕到环尾，不是停在 0"
     );
-    assert_eq!(cash_of(&mut app, p0), 20_000, "擦过起点一分钱都不发");
+    assert_eq!(cash_of(&mut app, p0), 20_000, "擦过任何一格一分钱都不发");
 }
 
 #[test]

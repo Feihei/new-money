@@ -140,7 +140,9 @@ pub fn begin_game_system(
         .0
         .unwrap_or_else(|| Date::new(EPOCH_YEAR, rng.pick_epoch_month(), 1));
     let lands = land::spawn_lands(&mut commands, &def);
-    let players = player::spawn_players(&mut commands, &cfg.setup, &cfg.rules);
+    // 开局落位在 `spawn_players` 里抽（4 代没有起点格），走 `pick_start` 那条子流 ——
+    // 所以「这一局有几个人、各坐在哪」不挪动牌序、骰点、行情与宝箱
+    let players = player::spawn_players(&mut commands, &cfg.setup, &cfg.rules, &def, &mut rng);
     spawn_stocks(&mut commands, &stocks);
     for deck in [
         Deck::dealt(CardKind::Chance, chance, &mut rng),

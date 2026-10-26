@@ -3,7 +3,8 @@
 use bevy::prelude::*;
 use serde::Deserialize;
 
-use crate::board::TileIndex;
+use crate::board::{BoardDef, TileIndex};
+use crate::rng::Rng;
 use crate::rules::GameRules;
 use crate::world::Gameplay;
 
@@ -387,7 +388,7 @@ impl Default for WalkQueue {
         Self {
             path: VecDeque::new(),
             done: 0,
-            from: START_TILE,
+            from: NO_WALK_YET,
         }
     }
 }
@@ -403,9 +404,12 @@ impl WalkQueue {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bankrupt;
 
-/// 起始格：主环 0 号（prototype 里是「起点」）。Godot 端同样假定 `tile_index = 0`
-/// （`game_state.gd:42`），棋盘校验保证主环非空。
-pub const START_TILE: TileIndex = TileIndex(0);
+/// 「还没有走过任何一段」时 [`WalkQueue::from`] 的占位读数。
+///
+/// 它不是「起点」—— 这张棋盘没有起点（10-26 实报，4 代没有那一格）。0 号格在通过
+/// `BoardDef::validate` 的盘上必然存在，而这一位在 `plan_walk` 之前不会被任何人读到：
+/// `PlayerArrived::from` 只在真的走完一段之后才发。
+const NO_WALK_YET: TileIndex = TileIndex(0);
 
 /// 玩家性别（P13 魔法屋「所有女生／所有男生」两条筛选条件的唯一来源）。
 ///
@@ -432,19 +436,25 @@ pub struct GameSetup {
 }
 
 impl Default for GameSetup {
-    /// 默认阵容与 Godot `board.gd:341-344` 一致：阿土伯 vs 孙小美。
+    /// 默认阵容从 `CHARACTERS.md` §五 首发十二人里取两位：**姬百年**（资本层，世袭
+    /// 收租房东）对**范一文**（素人层，报名表被风吹进修车铺的越南师傅）。
+    ///
+    /// 换掉的是 Godot 端的阿土伯 vs 孙小美（`board.gd:341-344`）—— 那两位的形象与名字
+    /// 属于大宇（`CHARACTERS.md` §九 IP 边界），而这一位要上屏、要被截图、要写进宣传。
+    /// 挑这一对还有一层：`PLAYER_COLORS[0]` 是红、`[1]` 是蓝，与档案里「酒红」「机油蓝」
+    /// 两档本色对得上，而一资本一素人正是演示盘想说的那句话。
     fn default() -> Self {
         Self {
             players: vec![
                 PlayerSetup {
-                    name: "阿土伯".into(),
+                    name: "姬百年".into(),
                     color: PLAYER_COLORS[0],
-                    gender: Gender::Male,
+                    gender: Gender::Female,
                 },
                 PlayerSetup {
-                    name: "孙小美".into(),
+                    name: "范一文".into(),
                     color: PLAYER_COLORS[1],
-                    gender: Gender::Female,
+                    gender: Gender::Male,
                 },
             ],
         }
@@ -452,7 +462,23 @@ impl Default for GameSetup {
 }
 
 /// 铺出玩家实体，返回实体句柄（回合序 `TurnOrder` 用）。
-pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRules) -> Vec<Entity> {
+///
+/// **开局落位在这里抽**：4 代没有起点格（10-26 实报，见 [`crate::board::TileKind::Road`]
+/// 那条注），每人独立在主环上抽一格，两个人叠在同一格是合法结果（同格站位偏移是表现层
+/// `slot_offset` 的事）。抽到的那一格**不触发任何落格事件** —— 这一条不需要写成
+/// 「如果是开局就不结算」：触发挂在 `Landed`/`TileStepped` 上，而装配这一帧还没有人走路，
+/// 补一个 `if` 反而是第二份真相。第一次掷骰之后落到的那一格才第一次结算，正是 4 代的口径。
+///
+/// 抽号走 `pick_start` 那条专用子流，所以「这一局有几个人、各坐在哪」不挪动牌堆、骰点、
+/// 行情与宝箱。前提：`def` 已经过 `BoardDef::validate`（主环非空）。
+pub fn spawn_players(
+    commands: &mut Commands,
+    setup: &GameSetup,
+    rules: &GameRules,
+    def: &BoardDef,
+    rng: &mut Rng,
+) -> Vec<Entity> {
+    let ring = def.loop_len() - 1;
     setup
         .players
         .iter()
@@ -484,7 +510,10 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
                         crate::items::Inventory::starting(),
                     ),
                     (
-                        TokenPosition { tile: START_TILE },
+                        // 开局坐哪一格：见函数头
+                        TokenPosition {
+                            tile: TileIndex(rng.pick_start(0..=ring)),
+                        },
                         WalkQueue::default(),
                         // 开局恒正向：转向卡是玩家身上的事，不是棋盘的事（见 [`Heading`]）
                         Heading::default(),

@@ -1,19 +1,37 @@
-//! 棋子视觉：一颗把逻辑位置插值出来的球。对应 Godot `player_token.gd`。
+//! 棋子视觉：一颗把逻辑位置插值出来的球，或一条站着的剪纸人。对应 Godot `player_token.gd`。
 //!
 //! §4.6 的红线在这一层最要紧：core 在**掷骰那一帧**就把 `TokenPosition` 落定到终点，
 //! 这里读 `TileStepped` 把同一次移动展开成逐格动画。于是渲染既不等待逻辑，
 //! 也不被逻辑等待 —— Godot 那三处 `await token.arrived` 的形态在这里没有落点。
+//!
+//! 球与人共用同一条位移：sprite 只换掉网格与材质，并把脚底烘进顶点而不是实体的
+//! `Transform`（见 [`sheet_frames`]），所以下面那套插值不必知道这一颗画的是什么。
 
 use std::f32::consts::PI;
 
-use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy::{ecs::system::SystemParam, prelude::*, render::mesh::VertexAttributeValues};
 use game_core::prelude::{
     ActiveBoard, BoardDef, Detention, DetentionLifted, GameRules, PlayerBailed, PlayerColor,
-    PlayerDetained, PlayerId, PlayerTeleported, TileIndex, TileStepped, TokenPosition, Villain,
-    VillainKind,
+    PlayerDetained, PlayerId, PlayerName, PlayerTeleported, TileIndex, TileStepped, TokenPosition,
+    Villain, VillainKind,
 };
 
-use super::{Rendered, dim, flat};
+use super::{Rendered, billboard_rot, dim, flat};
+use crate::art;
+
+/// 一条横条的切法：八帧 128×128（`.agents/CHARACTERS.md` §十二 那条「抠底→描白边→打横条」
+/// 的产物形状）。横条改了帧数要回来改这两个数，否则 uv 窗口切到隔壁帧去。
+const STRIP_FRAMES: usize = 8;
+const STRIP_CELL_PX: f32 = 128.0;
+
+/// 一颗棋子身上的八帧。放在组件里而不是做成共享资源：换帧要按人错开相位，
+/// 而「哪一帧」这件事除了他自己没有别人关心。
+#[derive(Component)]
+pub(crate) struct Sheet {
+    frames: Vec<Handle<Mesh>>,
+    /// 起播相位。同桌几人同相位时，一眼看去像同一个人复制了几份
+    phase: f32,
+}
 
 /// 一颗视觉棋子。`pub` 是给相机模块的：rig 要跟的就是它的位置。
 #[derive(Component)]
@@ -22,6 +40,10 @@ pub struct TokenVisual {
     pub player: Entity,
     /// 同格多人时的分角偏移（只含 XZ），见 [`slot_offset`]
     slot: Vec3,
+    /// 站姿高度：球按球心（`dim::TOKEN_REST_Y`），人按脚底（`dim::TOKEN_FEET_Y`）。
+    /// 存在这一颗棋子上而不是取一个全局值，是因为素材缺某一条横条时同一桌上会
+    /// 同时站着人和球
+    lift: f32,
 }
 
 /// 本段视觉位移：`from → to`，`t` 走到 `dur` 即到位。
@@ -80,31 +102,74 @@ fn rest_tile(b: &BoardDef, pos: TileIndex, held: Option<&Detention>) -> Option<V
     b.tile_world_pos(pos.0 as i64)
 }
 
+/// 装配一颗棋子要动用的三个资产写入器。捏成一个结构体是为了让 [`spawn_token`]
+/// 的签名剩下「往谁身上装」与「装成什么样」两件事。
+struct Geo<'a> {
+    meshes: &'a mut Assets<Mesh>,
+    mats: &'a mut Assets<StandardMaterial>,
+    server: &'a AssetServer,
+}
+
+/// 一颗棋子的外观与落点。`at` 已经含了分角偏移与 `lift`。
+struct Look<'a> {
+    /// 他挂在谁身上（`TokenVisual::player`）
+    entity: Entity,
+    slot: Vec3,
+    lift: f32,
+    at: Vec3,
+    color: Color,
+    /// 有横条就画剪纸人，没有就画球（缺文件与 `NM_ART=0` 都走这一支）
+    strip: Option<&'a str>,
+    phase: f32,
+}
+
+/// 装配棋子时要读的「环上行动者」那一份状态。命名一下：这个六元组已经过了 clippy 的
+/// 「类型太复杂」那条线，而拆成两条查询就会让「他站在哪一格」在两处各算一遍。
+type Holders<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static PlayerId,
+        &'static PlayerName,
+        &'static PlayerColor,
+        &'static TokenPosition,
+        Option<&'static Detention>,
+    ),
+>;
+
 pub(crate) fn spawn_token_visuals(
     mut commands: Commands,
     active: Res<ActiveBoard>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
-    players: Query<(
-        Entity,
-        &PlayerId,
-        &PlayerColor,
-        &TokenPosition,
-        Option<&Detention>,
-    )>,
+    server: Res<AssetServer>,
+    players: Holders<'_, '_>,
     villains: Query<(Entity, &Villain, &TokenPosition, Option<&Detention>)>,
 ) {
     let b = &active.def;
-    for (player, pid, color, pos, held) in &players {
-        let at = rest_pos(b, pos.tile, held, slot_offset(pid.0));
+    let mut geo = Geo {
+        meshes: &mut meshes,
+        mats: &mut mats,
+        server: &server,
+    };
+    for (player, pid, name, color, pos, held) in &players {
+        let seat = pid.0 as usize;
+        let strip = art::strip_for(&name.0, seat);
+        let lift = stand(strip.is_some());
+        let slot = slot_offset(pid.0);
         spawn_token(
             &mut commands,
-            &mut meshes,
-            &mut mats,
-            player,
-            slot_offset(pid.0),
-            Color::srgb(color.0[0], color.0[1], color.0[2]),
-            at,
+            &mut geo,
+            Look {
+                entity: player,
+                slot,
+                lift,
+                at: rest_pos(b, pos.tile, held, slot, lift),
+                color: Color::srgb(color.0[0], color.0[1], color.0[2]),
+                strip: strip.as_deref(),
+                phase: seat as f32 * 0.37,
+            },
         );
     }
     // 恶人的棋子与玩家的分开两条查询、共用同一个构造：他们没有 `PlayerId`，
@@ -115,50 +180,145 @@ pub(crate) fn spawn_token_visuals(
             .position(|k| *k == villain.kind)
             .unwrap_or(0) as u32;
         let offset = slot_offset(slot);
-        let at = rest_pos(b, pos.tile, held, offset);
+        let lift = stand(false);
         spawn_token(
             &mut commands,
-            &mut meshes,
-            &mut mats,
-            entity,
-            offset,
-            villain_color(villain.kind),
-            at,
+            &mut geo,
+            Look {
+                entity,
+                slot: offset,
+                lift,
+                at: rest_pos(b, pos.tile, held, offset, lift),
+                color: villain_color(villain.kind),
+                // 四位恶人**不上 sprite**：`assets/sprite/` 烘的是 CHARACTERS.md §四
+                // 那十二位，而「强盗／小偷／流氓／间谍」不在里面。按座位去领会抢走
+                // 某一位有名有姓的人的脸，宁可让这一桌混着两种形状
+                strip: None,
+                phase: 0.0,
+            },
         );
     }
 }
 
-/// 这一颗棋子 resting 的世界坐标（缺格位时退到原点而不是猜一格）。
-fn rest_pos(b: &BoardDef, tile: TileIndex, held: Option<&Detention>, offset: Vec3) -> Vec3 {
-    let at = rest_tile(b, tile, held).unwrap_or(Vec3::ZERO) + offset;
-    Vec3::new(at.x, dim::TOKEN_REST_Y, at.z)
+/// 站姿高度：球取球心，人取脚底。
+fn stand(sprite: bool) -> f32 {
+    if sprite {
+        dim::TOKEN_FEET_Y
+    } else {
+        dim::TOKEN_REST_Y
+    }
 }
 
-fn spawn_token(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    entity: Entity,
-    slot: Vec3,
-    color: Color,
-    at: Vec3,
-) {
-    commands.spawn((
+/// 这一颗棋子 resting 的世界坐标（缺格位时退到原点而不是猜一格）。
+fn rest_pos(
+    b: &BoardDef,
+    tile: TileIndex,
+    held: Option<&Detention>,
+    offset: Vec3,
+    lift: f32,
+) -> Vec3 {
+    let at = rest_tile(b, tile, held).unwrap_or(Vec3::ZERO) + offset;
+    Vec3::new(at.x, lift, at.z)
+}
+
+fn spawn_token(commands: &mut Commands, geo: &mut Geo, look: Look) {
+    let mut token = commands.spawn((
         TokenVisual {
-            player: entity,
-            slot,
+            player: look.entity,
+            slot: look.slot,
+            lift: look.lift,
         },
-        Mesh3d(meshes.add(Sphere::new(dim::TOKEN_R))),
-        MeshMaterial3d(flat(mats, color)),
-        Transform::from_translation(at),
+        Transform {
+            translation: look.at,
+            // 球是各向同性的，转不转都一样；sprite 必须正对相机，否则同一张图
+            // 在屏幕上是斜的一条
+            rotation: if look.strip.is_some() {
+                billboard_rot()
+            } else {
+                Quat::IDENTITY
+            },
+            ..default()
+        },
         Motion {
-            from: at,
-            to: at,
+            from: look.at,
+            to: look.at,
             t: 0.0,
             dur: 0.0,
         },
         Rendered,
     ));
+    match look.strip {
+        Some(strip) => {
+            let frames = sheet_frames(geo.meshes);
+            token.insert((
+                Mesh3d(frames[0].clone()),
+                MeshMaterial3d(sheet_material(strip, geo)),
+                Sheet {
+                    frames,
+                    phase: look.phase,
+                },
+            ));
+        }
+        None => {
+            token.insert((
+                Mesh3d(geo.meshes.add(Sphere::new(dim::TOKEN_R))),
+                MeshMaterial3d(flat(geo.mats, look.color)),
+            ));
+        }
+    }
+}
+
+/// 一条横条 → 八帧网格。几何全同，只有 uv 窗口差一格。
+fn sheet_frames(meshes: &mut Assets<Mesh>) -> Vec<Handle<Mesh>> {
+    let h = dim::TOKEN_SPRITE_H;
+    (0..STRIP_FRAMES)
+        .map(|k| {
+            let mut mesh = Mesh::from(Rectangle::new(h, h));
+            // 脚底当原点：`animate_tokens` 每帧写的是「站在哪一格」，把 h/2 烘进顶点
+            // 而不是实体的 `Transform`，那条插值才不需要知道自己画的是球还是人
+            if let Some(VertexAttributeValues::Float32x3(positions)) =
+                mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+            {
+                for p in positions.iter_mut() {
+                    p[1] += h / 2.0;
+                }
+            }
+            meshes.add(mesh.with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uv_window(k)))
+        })
+        .collect()
+}
+
+/// 第 `k` 帧在横条里的 uv 窗口。顶点顺序照 `Rectangle` 的生成顺序：tr, tl, bl, br。
+fn uv_window(k: usize) -> Vec<[f32; 2]> {
+    // 内缩半个纹素：不缩的话双线性过滤会把左右两帧的颜色渗进这一帧
+    let full = STRIP_FRAMES as f32 * STRIP_CELL_PX;
+    let u0 = (k as f32 * STRIP_CELL_PX + 0.5) / full;
+    let u1 = ((k + 1) as f32 * STRIP_CELL_PX - 0.5) / full;
+    [[u1, 0.0], [u0, 0.0], [u0, 1.0], [u1, 1.0]].to_vec()
+}
+
+fn sheet_material(strip: &str, geo: &mut Geo) -> Handle<StandardMaterial> {
+    geo.mats.add(StandardMaterial {
+        base_color_texture: Some(geo.server.load(strip.to_owned())),
+        // sprite 更是天生不需要光：明暗已经画死在那八张图里了
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        // 朝向算错一步就整块被背面剔除；两侧都画才看得出是算错了
+        cull_mode: None,
+        ..default()
+    })
+}
+
+/// 横条放帧。按墙钟而不是帧计数：`PresentMode::AutoNoVsync` 下两者差得远，
+/// 而 8fps 是这批图烘出来时的观感（`.agents/CHARACTERS.md` §十二）。
+pub(crate) fn animate_sprites(time: Res<Time>, mut sheets: Query<(&mut Mesh3d, &Sheet)>) {
+    for (mut mesh, sheet) in &mut sheets {
+        let frame =
+            ((time.elapsed_secs() + sheet.phase) * dim::SPRITE_FPS) as usize % sheet.frames.len();
+        if mesh.0.id() != sheet.frames[frame].id() {
+            mesh.0 = sheet.frames[frame].clone();
+        }
+    }
 }
 
 fn tile_world(b: &BoardDef, tile: TileIndex) -> Option<Vec3> {
@@ -253,7 +413,7 @@ fn retarget(
         mo.from = tr.translation;
         mo.to = Vec3::new(
             tile_world.x + visual.slot.x,
-            dim::TOKEN_REST_Y,
+            visual.lift,
             tile_world.z + visual.slot.z,
         );
         mo.t = 0.0;

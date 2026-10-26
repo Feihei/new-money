@@ -29,6 +29,7 @@ use super::{
     BoardUi, ButtonSpec, SECONDARY, UiAction, building_label, button, info_row, label, overlay,
     panel, separator,
 };
+use crate::art;
 use crate::render::{DevFont, palette};
 
 /// 模态根节点，兼作「现在挂着的是哪个问题」与「上次写成什么样」两份记录。
@@ -157,6 +158,45 @@ pub(crate) fn remember_drawn_card(
     }
 }
 
+/// 开发用：`NM_DECISION=card` 时补一条真卡的 [`CardDrawn`]。
+///
+/// 那条开关的契约是「只写 [`PendingDecision`]」，于是卡面模态弹出来的是 [`fallback_note`]
+/// 那一张空壳 —— 而这一屏正是卡面图（`assets/cards/`）唯一的非鼠标入口。判据同 `NM_SHOP`：
+/// 进不了截图的界面等于没做完。
+///
+/// 发**机会池第一张**而不是随机一张：这一屏要核对的是图与文各占哪一栏，换一张卡不该
+/// 连图一起换掉。`outcomes` 留空 —— 它是排版前置，不是一笔结算，伪造一条会让顶栏流水说谎。
+///
+/// 不必与 [`remember_drawn_card`]、[`sync_modal`] 争先后：卡 id 进了模态签名（见
+/// [`sync_modal`] 里那一段），所以这一条晚一帧到屏幕上就只是重建一次那一屏。
+pub(crate) fn dev_seed_card(
+    order: Option<Res<TurnOrder>>,
+    shelf: Shelf<'_>,
+    mut drawn: MessageWriter<CardDrawn>,
+    mut done: Local<bool>,
+) {
+    if *done || std::env::var("NM_DECISION").ok().as_deref() != Some("card") {
+        return;
+    }
+    let Some(player) = order.as_ref().and_then(|o| o.current()) else {
+        return;
+    };
+    let Some(def) = shelf.set(CardKind::Chance).and_then(|set| set.0.first()) else {
+        return;
+    };
+    drawn.write(CardDrawn {
+        player,
+        card: CardNotice {
+            id: def.id.clone(),
+            kind: def.kind,
+            title: def.title.clone(),
+            desc: def.desc.clone(),
+            outcomes: Vec::new(),
+        },
+    });
+    *done = true;
+}
+
 /// 记下最近一笔服务费。排在 [`sync_modal`] 之前 —— 收据弹出来的那一帧就要读得到它
 /// （与 [`remember_drawn_card`] 同一条时序理由）。
 pub(crate) fn remember_service(
@@ -205,8 +245,9 @@ pub(crate) struct ModalView<'w, 's> {
     /// 回合机此刻在问谁。第一步那一屏的「走路的人」要按规则层同一个读数筛
     /// （`magic_filter_system` 读的是同一句 `order.current()`）
     order: Res<'w, TurnOrder>,
-    /// 他手里有哪几个号。与 `hands` 同一形：只有彩票柜台用得上
-    tickets: Query<'w, 's, &'static LotteryTickets, With<PlayerId>>,
+    /// 他手里有哪几个号。与 `hands` 同一形：只有彩票柜台用得上。
+    /// 带 `Entity` 是因为独占那一格要问「**谁**占着这个号」，而 `iter()` 交的是数据项本身
+    tickets: Query<'w, 's, (Entity, &'static LotteryTickets), With<PlayerId>>,
     open: Query<'w, 's, (Entity, &'static ModalRoot)>,
 }
 
@@ -219,6 +260,7 @@ pub(crate) struct ModalView<'w, 's> {
 pub(crate) fn sync_modal(
     mut commands: Commands,
     font: Res<DevFont>,
+    server: Res<AssetServer>,
     desk: game_core::magic::FilterDesk<'_, '_>,
     names: Query<&PlayerName>,
     view: ModalView<'_, '_>,
@@ -295,8 +337,9 @@ pub(crate) fn sync_modal(
             held: view
                 .tickets
                 .get(player)
-                .map(|tickets| tickets.numbers.clone())
+                .map(|(_, tickets)| tickets.numbers.clone())
                 .unwrap_or_default(),
+            taken: tickets_by_others(books, &names, &view.tickets, player),
             pot: view.jackpot.pot,
             last_draw: view.jackpot.last_draw,
         }),
@@ -361,7 +404,7 @@ pub(crate) fn sync_modal(
         _ => None,
     };
     let stamp = want.map_or(String::new(), |(player, about)| {
-        modal_stamp(
+        let mut stamp = modal_stamp(
             about,
             books,
             player,
@@ -377,7 +420,16 @@ pub(crate) fn sync_modal(
                 magic: &magic_rows,
                 draft: magic_draft.as_ref(),
             },
-        )
+        );
+        // 卡面这一屏的内容不在 `Pending` 里，而在 `RecentCard` 那份记忆里（消息驱动的
+        // 收据都是这个形状）。签名里带上卡 id，于是「记忆比模态晚一帧到」不会把兜底说明
+        // 钉在屏幕上 —— 重建判据本来就有这一格，只是卡面以前是空的
+        if about == Pending::Card
+            && let Some(card) = view.memory.0.as_ref()
+        {
+            stamp.push_str(&card.id);
+        }
+        stamp
     });
     // 两边都是 `None` 时相等：没有待决事项、也没有模态，正是常态
     if view
@@ -407,7 +459,7 @@ pub(crate) fn sync_modal(
                 rent_modal(&mut commands, &font, books, &names, player, land, stamp);
             }
             Pending::Card => {
-                card_modal(&mut commands, &font, &view.memory, player, stamp);
+                card_modal(&mut commands, &font, &server, &view.memory, player, stamp);
             }
             Pending::BankTeller => {
                 bank_modal(&mut commands, &font, books, player, stamp, &plots, &fins);
@@ -642,18 +694,26 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-        // 彩票柜台同一条：现金（买不买得起）、已有哪几个号（哪几颗该带 ✓）、奖池（那句
-        // 「奖池 N」的读数）。少一位就是一次静默过期 —— 买完一注之后号还亮着，
-        // 玩家会以为那张券没买成，再按一次才是真买成了
+        // 彩票柜台同一条：现金（买不买得起）、已有哪几个号（哪几颗该带 ✓）、别人占走的
+        // 哪几个号（哪几颗该灰、名字写在下面那一行）、奖池（那句「奖池 N」的读数）。
+        // 少一位就是一次静默过期 —— 买完一注之后号还亮着，玩家会以为那张券没买成，
+        // 再按一次才是真买成了
         Pending::Lottery => {
             let desk = extra.lottery;
             format!(
-                "{}|{}|{}",
+                "{}|{}|{}|{}",
                 desk.map(|d| d.cash).unwrap_or(0),
                 desk.map(|d| d
                     .held
                     .iter()
                     .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","))
+                    .unwrap_or_default(),
+                desk.map(|d| d
+                    .taken
+                    .iter()
+                    .map(|(n, _)| n.to_string())
                     .collect::<Vec<_>>()
                     .join(","))
                     .unwrap_or_default(),
@@ -1210,6 +1270,7 @@ fn rent_modal(
 fn card_modal(
     commands: &mut Commands,
     font: &DevFont,
+    server: &AssetServer,
     memory: &RecentCard,
     player: Entity,
     stamp: String,
@@ -1226,32 +1287,53 @@ fn card_modal(
         CardKind::Item => ("道具", col::CHANCE),
     };
     let effect = outcome_line(&card.outcomes);
+    let face = art::card_face(&card.id).map(|path| server.load(path));
 
     frame(
         commands,
         (player, Pending::Card),
         stamp,
-        layout::CARD_PANEL,
+        if face.is_some() {
+            layout::CARD_PANEL_ART
+        } else {
+            layout::CARD_PANEL
+        },
         col::BORDER_CARD,
         |p| {
-            p.spawn(center_label(
-                &font.0,
-                format!("【{type_text}】"),
-                size::BODY,
-                accent,
-            ));
-            p.spawn(center_label(
-                &font.0,
-                card.title.clone(),
-                size::CARD_TITLE,
-                accent,
-            ));
-            p.spawn(separator());
-            if !card.desc.is_empty() {
-                p.spawn(label(&font.0, card.desc.clone(), size::NAME, col::BODY));
-            }
-            if !effect.is_empty() {
-                p.spawn(label(&font.0, effect, size::BODY, col::RESULT));
+            if let Some(face) = face {
+                // 卡面在左、文案在右。不叠在图上是因为面板底色是半透明的
+                // （`col::PANEL`），字压在画上两头都读不清
+                p.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    column_gap: Val::Px(layout::CARD_ART_GAP),
+                    align_items: AlignItems::FlexStart,
+                    ..default()
+                })
+                .with_children(|line| {
+                    line.spawn((
+                        ImageNode {
+                            image: face,
+                            image_mode: NodeImageMode::Stretch,
+                            ..default()
+                        },
+                        Node {
+                            width: Val::Px(layout::CARD_ART[0]),
+                            height: Val::Px(layout::CARD_ART[1]),
+                            ..default()
+                        },
+                    ));
+                    line.spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        flex_grow: 1.0,
+                        row_gap: Val::Px(10.0),
+                        ..default()
+                    })
+                    .with_children(|words| {
+                        card_words(words, font, type_text, accent, card, &effect)
+                    });
+                });
+            } else {
+                card_words(p, font, type_text, accent, card, &effect);
             }
             button_row(p, |line| {
                 button(
@@ -1269,6 +1351,37 @@ fn card_modal(
             });
         },
     )
+}
+
+/// 卡面模态的文字那一叠。有图与没图两条路共用它 —— 差别只在它是面板的直接子节点，
+/// 还是横排里图右边的那一列。
+fn card_words(
+    p: &mut ChildSpawnerCommands,
+    font: &DevFont,
+    type_text: &str,
+    accent: Color,
+    card: &CardNotice,
+    effect: &str,
+) {
+    p.spawn(center_label(
+        &font.0,
+        format!("【{type_text}】"),
+        size::BODY,
+        accent,
+    ));
+    p.spawn(center_label(
+        &font.0,
+        card.title.clone(),
+        size::CARD_TITLE,
+        accent,
+    ));
+    p.spawn(separator());
+    if !card.desc.is_empty() {
+        p.spawn(label(&font.0, card.desc.clone(), size::NAME, col::BODY));
+    }
+    if !effect.is_empty() {
+        p.spawn(label(&font.0, effect.to_string(), size::BODY, col::RESULT));
+    }
 }
 
 /// 一张兜底说明。`Pending` 与消息对不上时（测试里没抽过牌却被挂着、土地数据缺行）
@@ -2015,14 +2128,21 @@ fn shop_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &ShopRow) {
     });
 }
 
-/// 彩票柜台那一屏的读数。收成一块而不是九个参数（房规 §六 坑 8），而且这几样本来就是
-/// 「这一屏该亮哪几颗按钮」这一件事：现金、一注的价、号码池、已有哪几个号。
+/// 彩票柜台那一屏的读数。收成一块而不是十个参数（房规 §六 坑 8），而且这几样本来就是
+/// 「这一屏该亮哪几颗按钮」这一件事：现金、一注的价、号码池、已有哪几个号、别人占了哪几个。
 /// 奖池与上次开出的号只用于说明文字，不进判据。
 pub(crate) struct LotteryDesk {
     pub cash: i64,
     pub price: i64,
     pub numbers: u32,
     pub held: Vec<u8>,
+    /// 别人手里占着的号 → 占着它的人（P8 的号码独占，10-26 实报）。
+    ///
+    /// 这是**公开信息**，而且必须公开：独占之后的判据是「这颗号属于别人，买不成」，
+    /// 玩家按下之前有权知道是哪一颗、被谁抢了。P8 初版写过「谁买了什么在这一局里从来
+    /// 不是公开信息」—— 那句话在没有独占的旧规则下成立（各买各的，说出来没有用），
+    /// 而它随那条规则一起作废。
+    pub taken: Vec<(u8, String)>,
     /// 奖池现在多少。它是这一屏的标题级读数（「奖池 N」），不是判据 —— 池子动多少
     /// 由规则层算，面板只念
     pub pot: i64,
@@ -2030,42 +2150,77 @@ pub(crate) struct LotteryDesk {
     pub last_draw: Option<u8>,
 }
 
+/// 别人手里占着的号 → `(号, 持有人)`。判据与 `lottery_op_system` 里那次扫描是同一条：
+/// **只数还活着的人**（`Books::is_bankrupt`）—— 破产者兑不出钱，他那张旧凭证既不该被
+/// 面板说成「占着」，也不该真的替全场锁死一个号码（两处读同一个 `is_bankrupt`，
+/// 灰按钮与扣钱因此不可能分叉）。
+fn tickets_by_others(
+    books: &Books,
+    names: &Query<&PlayerName>,
+    tickets: &Query<(Entity, &LotteryTickets), With<PlayerId>>,
+    player: Entity,
+) -> Vec<(u8, String)> {
+    let mut rows: Vec<(u8, String)> = Vec::new();
+    for (holder, held) in tickets.iter() {
+        if holder == player || books.is_bankrupt(holder) {
+            continue;
+        }
+        let who = names
+            .get(holder)
+            .map(|n| n.0.clone())
+            .unwrap_or_else(|_| "？".to_string());
+        for number in &held.numbers {
+            rows.push((*number, who.clone()));
+        }
+    }
+    rows.sort_by_key(|(number, _)| *number);
+    rows
+}
+
 impl LotteryDesk {
-    /// 号码池里每一个号此刻买不买得成，连同它灰着的那句话。
+    /// 这颗号此刻灰着的那句话。
     ///
-    /// 判据一律走规则层那张 [`buy_allowed`]，面板不许自己发明一套「能不能买」。
-    /// `at_counter` 恒为 `true` —— 柜台既然开着，`NoCounter` 在这一屏永远碰不到，
-    /// 而它在派发那一侧是真的会挡（见 `ui::mod` 的 `lottery_customer`）。
-    fn rows(&self) -> Vec<(u8, Option<&'static str>)> {
+    /// 判据一律走规则层那张 [`buy_allowed`]，面板不许自己发明一套「能不能买」——
+    /// `Taken` 那一格读的就是上面那份公开读数，所以「这颗号买不成」在面板与规则层是
+    /// 同一个来源。`at_counter` 恒为 `true` —— 柜台既然开着，`NoCounter` 在这一屏永远
+    /// 碰不到，而它在派发那一侧是真的会挡（见 `ui::mod` 的 `lottery_customer`）。
+    fn deny(&self, number: u32) -> Option<LotteryDeny> {
+        let n = number as u8;
+        buy_allowed(
+            true,
+            number,
+            self.numbers,
+            self.held.contains(&n),
+            self.taken.iter().any(|(t, _)| *t == n),
+            self.cash,
+            self.price,
+        )
+        .err()
+    }
+
+    fn rows(&self) -> Vec<(u8, Option<LotteryDeny>)> {
         (1..=self.numbers.max(1))
-            .map(|n| {
-                let why = buy_allowed(
-                    true,
-                    n,
-                    self.numbers,
-                    self.held.contains(&(n as u8)),
-                    self.cash,
-                    self.price,
-                )
-                .err()
-                .map(LotteryDeny::label);
-                (n as u8, why)
-            })
+            .map(|n| (n as u8, self.deny(n)))
             .collect()
     }
 
     /// 是不是**所有**买不成的号都因为同一句话。是的话这一句写在方格阵下面一次，
     /// 而不是在 36 颗按钮旁边各贴一遍 —— 贴 36 遍等于没贴。
     ///
-    /// 「每颗灰按钮都得带一句为什么」这条（§6.1 坑 27）在这里换成了两种可见形状：
+    /// 「每颗灰按钮都得带一句为什么」这条（§6.1 坑 27）在这里换成了三种可见形状：
     /// 「已经买过」写在那颗号上（带 ✓，而他的号全列在下面一行），
-    /// 「现金不够」写在方格阵下面那一行。剩下的 `BadNumber` 在这一屏碰不到 ——
-    /// 按钮本来就是按号码池建的。
+    /// 「被别人买走」**一格一个人**、说不出全池通用的一句，所以单独成行（`taken` 那一行，
+    /// 号与名字都在）；剩下的 `BadNumber` 在这一屏碰不到 —— 按钮本来就是按号码池建的。
+    /// 于是这一行实际只可能念出「现金不够」那一句，而它管的还是**没有主的那些号**。
     fn one_reason(&self) -> Option<&'static str> {
         let mut only = None;
-        for (_, why) in self.rows() {
-            // 有一颗是亮的 → 「为什么按不动」就不止一句话了，`?` 在这里就是那一格
-            let why = why?;
+        for number in 1..=self.numbers.max(1) {
+            let why = match self.deny(number) {
+                // 有一颗是亮的 → 「为什么按不动」就不止一句话了
+                None => return None,
+                Some(LotteryDeny::Taken) => continue,
+                Some(why) => why.label(),
+            };
             if only.is_some() && only != Some(why) {
                 return None;
             }
@@ -2073,13 +2228,32 @@ impl LotteryDesk {
         }
         only
     }
+
+    /// 「已被买走：3（姬百年）· 17（范一文）」。一个号都没被占时这行整条不写 ——
+    /// 空着的解释行读起来像面板坏了（与百货那句「被买空了」同一课）。
+    fn taken_line(&self) -> Option<String> {
+        if self.taken.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "已被买走：{}",
+            self.taken
+                .iter()
+                .map(|(n, who)| format!("{n}（{who}）"))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        ))
+    }
 }
 
 /// 彩票中心柜台（P8）：**踩到**彩票格才开，与百货同一个形状。
 ///
 /// 号码是 6×6 的方格阵而不是 36 行清单：这一屏要做的是「挑一个号」，
-/// 读起来该像一张奖券。已经买过的号**亮着带 ✓**而不是从池里消失 —— 消失了玩家会以为
-/// 那个号被别人买走了，而「谁买了什么」在这一局里从来不是公开信息。
+/// 读起来该像一张奖券。已经买过的号**亮着带 ✓**而不是从池里消失 —— 它自己那张券
+/// 是他这一期的凭据，从池里抹掉就成了「我的号怎么没了」。
+///
+/// 别人占走的号**灰着**，而「谁占了哪个号」写在方格阵下面那一行（见 [`LotteryDesk::taken`]
+/// 那条）：号码独占之后这句话必须公开，否则一颗按不动的按钮只能让人猜规则。
 fn lottery_modal(
     commands: &mut Commands,
     font: &DevFont,
@@ -2090,6 +2264,7 @@ fn lottery_modal(
 ) -> Entity {
     let rows = desk.rows();
     let blocked = desk.one_reason();
+    let taken_line = desk.taken_line();
     frame(
         commands,
         (player, Pending::Lottery),
@@ -2153,6 +2328,10 @@ fn lottery_modal(
             }
             if let Some(reason) = blocked {
                 p.spawn(label(&font.0, reason, size::ROW, col::JAILED));
+            }
+            // 独占的那几颗各带一个名字，塞不进「全池同一句」那一条，所以单独一行
+            if let Some(line) = taken_line {
+                p.spawn(label(&font.0, line, size::ROW, col::JAILED));
             }
             p.spawn(separator());
             p.spawn(label(
@@ -3538,5 +3717,79 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
                 sent
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LotteryDeny, LotteryDesk};
+
+    /// 柜台前那位口袋里有钱、号码池是默认的 36 个、一注 1000。
+    /// 面板这一侧的判据全部由 `LotteryDesk` 的字段决定，所以构造它不需要世界。
+    fn desk(taken: Vec<(u8, String)>) -> LotteryDesk {
+        LotteryDesk {
+            cash: 20_000,
+            price: 1_000,
+            numbers: 36,
+            held: Vec::new(),
+            taken,
+            pot: 1_000,
+            last_draw: None,
+        }
+    }
+
+    /// 别人占走的号：那颗按钮灰着、那句话**来自规则层那张拒绝表**（这一格是「判据只写一次」
+    /// 在表现层的落点 —— 面板断到的就是柜台真会拒的），而「是谁占的」写在方格阵下面那一行。
+    /// `one_reason` 在这里必须**不**把那句话当成全池通用的一句：一格一个人，而其余三十五颗还亮着。
+    #[test]
+    fn a_taken_number_is_grey_while_the_rest_stay_lit() {
+        let d = desk(vec![(7, "姬百年".into())]);
+        let rows = d.rows();
+        assert_eq!(rows[0].1, None, "1 号没人占，该是亮的");
+        assert_eq!(
+            rows[6].1.map(LotteryDeny::label),
+            Some("这个号已经被别人买走了"),
+            "7 号该灰着并说出为什么"
+        );
+        assert_eq!(d.one_reason(), None, "还有亮的号 → 没有全池共用的一句");
+        let line = d.taken_line().expect("被占走的号要单独成行");
+        assert!(
+            line.contains('7') && line.contains("姬百年"),
+            "那一行要说得出是哪一颗、被谁：{line}"
+        );
+    }
+
+    /// 独占之后「现金不够」那一行**仍然要说得出**：`one_reason` 对 `Taken` 是 `continue`
+    /// 而不是 `return None`。写成后者会同时弄丢两句话 —— 那既不是「一句通用的话」也说不清
+    /// 那两颗被点名的号，玩家看到的就是一整片灰按钮与一句沉默（§6.1 坑 27 的 UI 版）。
+    #[test]
+    fn broke_and_taken_still_read_as_one_sentence_for_the_untaken_numbers() {
+        let mut d = desk(vec![(7, "姬百年".into()), (8, "范一文".into())]);
+        d.cash = 999;
+        assert_eq!(
+            d.one_reason(),
+            Some("现金不够"),
+            "没有主的那些号，理由只有一个"
+        );
+        let rows = d.rows();
+        for n in [6, 7] {
+            assert_eq!(
+                rows[n].1.map(LotteryDeny::label),
+                Some("这个号已经被别人买走了"),
+                "{} 号被占着，它不进上面那一行",
+                n + 1
+            );
+        }
+        assert_eq!(
+            d.taken_line().unwrap().matches('（').count(),
+            2,
+            "两个号两个人，都得点名"
+        );
+    }
+
+    /// 一个号都没被占时那一行**整条不写**（百货那次「空着的解释行读起来像面板坏了」同一课）。
+    #[test]
+    fn an_empty_take_list_says_nothing() {
+        assert!(desk(Vec::new()).taken_line().is_none());
     }
 }

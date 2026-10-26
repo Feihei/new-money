@@ -31,8 +31,8 @@
 {
   "id": 0,
   "col": 1, "row": 1,
-  "type": "start",
-  "name": "起点",
+  "type": "road",
+  "name": "骑楼",
   "data": {},
   "land_id": 0,
   "branch": { "type": "jail", "tiles": [ {"col":5,"row":1,"type":"jail","name":"监狱","data":{}} ] }
@@ -49,7 +49,8 @@
 | `land_id` | int? | **仅 property 道路格**有；指向 `lands[]` 的土地 |
 | `branch` | object? | **可选**；存在即为分支接入点 |
 
-**道路格 `type` 取值**：`start` / `road` / `chance` / `fate` / `bank` / `stock` / `coupon` / `shop` / `arcade` / `transport` / `property` / `company`(P10d①) / `jail`(接入点) / `hospital`(接入点) ……
+**道路格 `type` 取值**：`road` / `chance` / `fate` / `bank` / `stock` / `coupon` / `shop` / `arcade` / `transport` / `property` / `company`(P10d①) / `jail`(接入点) / `hospital`(接入点) ……
+- **没有 `start`**。10-26 实报：起点是 Monopoly 桌游的产物，大富翁 4 的环上没有那一格，开局玩家在主环上随机落位且不触发落格事件（`TileKind::Start` 与它那条「什么都不发」的特判一起删掉，演示盘那格改成了一条普通 `road`）。
 - `property` 道路格：**必带 `land_id`**，落到此格经 `land_id` 触发土地的购买/收租/升级。
 - 拐角格必须是 `fate`/`bank`/`news` 等特殊类型，**不绑土地**（无 `land_id`）。
 - `jail` / `hospital` 作为**分支尽头格**时只是地址，不是触发器：踩不到（`walk_path` 从不进分支），人被关着时棋子停在那里（10-20 拍板，P4④）。作为**主环格**时它是保释入口：踩上去开保释窗口，花 `GameRules::bail_points`（30）点券把关在对应分支里的人放出来，没人可保就与路面一样收摊（P4③）。
@@ -169,7 +170,7 @@
   "cell_size": 2.0,
   "grid_cols": 8, "grid_rows": 8,
   "loop": [
-    {"id":0,"col":1,"row":1,"type":"start","name":"起点","data":{}},
+    {"id":0,"col":1,"row":1,"type":"road","name":"骑楼","data":{}},
     {"id":1,"col":2,"row":1,"type":"property","name":"商业街","land_id":0,"data":{}},
     {"id":2,"col":3,"row":1,"type":"property","name":"住宅区","land_id":1,"data":{}},
     {"id":3,"col":4,"row":1,"type":"fate","name":"命运","data":{}},

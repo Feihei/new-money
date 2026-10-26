@@ -167,7 +167,7 @@ pub mod prelude {
     pub use crate::player::{
         BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Gender, Heading, Insured,
         Mount, MoveCap, PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, Points,
-        START_TILE, StaySentence, Term, TokenPosition, WalkQueue, Walker, Wallet,
+        StaySentence, Term, TokenPosition, WalkQueue, Walker, Wallet,
     };
     pub use crate::plot::{PlotArea, area_of, is_in_area};
     pub use crate::property::{

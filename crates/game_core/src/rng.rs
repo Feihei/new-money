@@ -96,6 +96,13 @@ const VILLAIN_TAG: u64 = 0x7A1A_0000_0000_0011;
 /// 而发下哪张卡是玩家会回头对的事（「上次同种子也该是这张」），同一颗种子必须
 /// 两次发下同一张。
 const MAGIC_TAG: u64 = 0x9A61_C000_0000_0012;
+/// 开局落位（10-26 起：4 代没有起点格，玩家开局在环上各抽一格）。
+///
+/// 单独一条的理由与前面每一条同形，而这里多一层**装配期**：取数发生在 `begin_game_system`
+/// 里，比第一次掷骰还早，而且排在牌堆装配与宝箱刷出**之间** —— 并进任何一条已有的流，
+/// 「这一局有几个人」都会挪动第一张机会牌、第一手骰点与宝箱位置。那三样都是截图核对与
+/// 回放的对齐点，而「谁坐在哪」是这一串里最不该牵动别人的一个读数。
+const START_TAG: u64 = 0x57A3_0000_0000_0013;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +138,7 @@ pub struct Rng {
     news: ChaCha8Rng,
     villain: ChaCha8Rng,
     magic: ChaCha8Rng,
+    start: ChaCha8Rng,
 }
 
 impl Rng {
@@ -156,6 +164,7 @@ impl Rng {
             news: ChaCha8Rng::seed_from_u64(seed ^ NEWS_TAG),
             villain: ChaCha8Rng::seed_from_u64(seed ^ VILLAIN_TAG),
             magic: ChaCha8Rng::seed_from_u64(seed ^ MAGIC_TAG),
+            start: ChaCha8Rng::seed_from_u64(seed ^ START_TAG),
         }
     }
 
@@ -217,6 +226,13 @@ impl Rng {
     /// 宝箱刷在哪一格（宝箱位置子流）。
     pub fn pick_spawn(&mut self, span: RangeInclusive<u32>) -> u32 {
         self.spawn.random_range(span)
+    }
+
+    /// 开局把人放到环上哪一格（落位子流）。调用方给 `0..=环长-1`。
+    ///
+    /// **每人独立抽一次**，所以两个人落在同一格是合法结果（同格的站位偏移是表现层的事）。
+    pub fn pick_start(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.start.random_range(span)
     }
 
     /// 宝箱开出哪一种道具（掉落子流）。

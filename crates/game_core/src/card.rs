@@ -552,9 +552,16 @@ mod tests {
                 "没有任何一张卡会把人送去{place:?} —— 那一格是死的"
             );
         }
-        assert!(has(
-            |e| matches!(e, CardEffect::MoveTo { tile_name } if tile_name == "起点")
-        ));
+        // `MoveTo` 是这张表上**唯一**没有数据使用者的动作：10-26 起点整格删掉之后，
+        // 原来那条「回到起点领 $2000」跟着退场。留它不是因为舍不得，是因为已经有一位
+        // 拍过板的真生产者在路上 —— 研究所 3 级的**传送机**（10-26 实报，P10 的车行与
+        // 研究所那一站）要把自己、别的玩家或路上的放置物瞬移到视野里指定的那一格。
+        // 在它落地之前，这一格的证据只有 `tests/settle.rs` 那两条行为用例；**哪天牌池里
+        // 出现了 move_to，就把下面这条反向断言删掉**，它存在的唯一目的是让豁免不会过期
+        assert!(
+            !has(|e| matches!(e, CardEffect::MoveTo { .. })),
+            "牌池里出现了 `move_to` —— 上面那条豁免该销掉了"
+        );
         assert!(has(|e| matches!(e, CardEffect::Insulate { .. })));
         assert!(has(|e| matches!(e, CardEffect::LandStatus { .. }),));
         assert!(has(|e| matches!(e, CardEffect::FreePass { .. })));

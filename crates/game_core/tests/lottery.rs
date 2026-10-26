@@ -1,4 +1,4 @@
-//! P8 乐透的验收：买券进池、每月 15 号开奖、没人猜中就滚到下个月。
+//! P8 乐透的验收：买券进池、号码独占、每月 15 号开奖、没人猜中就滚到下个月。
 //!
 //! PLAN §四 P8 那行的验收原话是三句，这个文件一格一句：
 //!
@@ -8,6 +8,14 @@
 //!   一个人持有中奖号时整池归他，而**别人的券也一起作废**（一期一结）；
 //! - **每笔进池的钱都能从流水追溯** → 几乎每条用例末尾一句 [`assert_pot_audit`]：
 //!   它是第三张账（池子不是任何人的钱包，`assert_cash_audit` 读不到它）。
+//!
+//! 第四句是 10-26 实报补进来的，而它改的就是上面第二句的**来路**：
+//!
+//! - **一个号全场只有一张** → [`a_number_another_player_holds_cannot_be_bought`] 与
+//!   [`only_one_player_can_hold_the_winning_number`]：独占才是「独得」的真正保证 ——
+//!   没有它，中奖号可以被两个人同时持有，「独得」就得让位给均分与余数留池。
+//!   [`a_taken_number_is_free_again_after_the_period_closes`] 钉的是这件事的另一半：
+//!   占号的是**券**而不是别张表，所以一期一结把券清掉的那一刻，号就重新能买了。
 //!
 //! 号码怎么控制得住：开奖号来自 `Rng` 的乐透子流，而**开局装配一个数都不取这条流**，
 //! `draw_lottery_system` 是它唯一的读者 —— 所以「这个月开几号」在对局开始前就定了，
@@ -25,8 +33,8 @@ use bevy::ecs::entity::Entity;
 use bevy::prelude::NextState;
 use common::*;
 use game_core::prelude::{
-    ActiveBoard, Date, GameRules, GameSeed, GameSetup, Jackpot, Pending, Rng, StaySentence,
-    TurnPhase,
+    ActiveBoard, Bankrupt, Date, GameRules, GameSeed, GameSetup, Jackpot, PLAYER_COLORS, Pending,
+    PlayerSetup, Rng, StaySentence, TurnPhase,
 };
 
 /// 主环格数与彩票中心那一格（`prototype.json` 的 19 号；P8 追加在环尾，
@@ -81,7 +89,7 @@ fn seed_two_draws() -> (GameSeed, u8, u8) {
     panic!("一万颗种子里没有一颗前两次开奖不同，乐透那条流可疑");
 }
 
-/// 装配到「P0 刚踩上彩票中心、柜台窗口挂着没人答」。
+/// 装配到「P0 刚踩上彩票中心、柜台窗口挂着没人答」，阵容由调用方给。
 ///
 /// 种子由调用方给（用例要控制开奖号），所以前置不靠 `ready_on` 挑骰点，而是反过来：
 /// 先读这颗种子的第一掷，再把他摆到「走 face 步正好落到 14 号」那一格。踩到柜台这一步
@@ -89,8 +97,8 @@ fn seed_two_draws() -> (GameSeed, u8, u8) {
 ///
 /// 开局那两位神在这里清掉：他们会站在路上某格，而「走过去踩到柜台」这一路上撞见财神的话，
 /// 附身当场搬一笔钱，下面那些现金差值就不再只等于票价。清场不影响奖池（两条账互不相干）。
-fn at_the_counter(seed: GameSeed, rules: GameRules) -> (App, Entity, Entity) {
-    let mut app = boot(GameSetup::default(), rules, seed);
+fn at_the_setup(seed: GameSeed, rules: GameRules, setup: GameSetup) -> (App, Entity, Entity) {
+    let mut app = boot(setup, rules, seed);
     app.insert_resource(DecisionPolicy::Hold);
     pin_epoch(&mut app, Date::new(2048, 1, 1));
     let p0 = boot_to_wait_roll(&mut app);
@@ -109,6 +117,26 @@ fn at_the_counter(seed: GameSeed, rules: GameRules) -> (App, Entity, Entity) {
         ledger(&app)
     );
     (app, p0, p1)
+}
+
+/// 默认那套规则下的柜台前置（双人盘）。
+fn at_the_counter(seed: GameSeed, rules: GameRules) -> (App, Entity, Entity) {
+    at_the_setup(seed, rules, GameSetup::default())
+}
+
+/// 三人盘的柜台前置。
+///
+/// 为什么要第三人：`turn.rs` 里 `living <= 1` 一到就终局，两人盘上「让一个人破产」等于
+/// 「这一局结束了」—— 回合机再也不回掷骰前，而破产那一条用例要走的正是
+/// **他死了之后**另一个人重新踩到柜台。第三人买不到任何东西，只是让局继续转。
+fn three_at_counter() -> (App, Entity, Entity) {
+    let mut setup = GameSetup::default();
+    setup.players.push(PlayerSetup {
+        name: "王小二".into(),
+        color: PLAYER_COLORS[2],
+        gender: game_core::player::Gender::Male,
+    });
+    at_the_setup(GameSeed::default(), rules(), setup)
 }
 
 /// 默认种子（`GameSeed::default()`）的柜台前置。
@@ -308,7 +336,10 @@ fn a_number_outside_the_pool_costs_nothing() {
 }
 
 /// 同一个号一人只有一张：第二张拒掉，池子也不重复进钱。
-/// 均分按**人**不按张，所以多买同号没有玩法上的意义，规则层干脆不给。
+/// 这一格挡的是**同一个人**重复按同一个号，而「另一个人来按这个号」是另一条拒绝
+/// （`LotteryDeny::Taken`，下面那两条）。P8 初版给这一格的理由是「均分按人，多买同号
+/// 没有玩法意义」，那个理由已经随独占一起没了 —— 留下来的理由更硬：规则层那条 `buy` 是先扣钱
+/// 再发券，判据若漏了这一格，重复按号的人**钱照样被扣**而券一张不多。
 #[test]
 fn the_same_number_cannot_be_bought_twice_by_one_person() {
     let (mut app, p0, _p1) = at_counter();
@@ -332,20 +363,65 @@ fn the_same_number_cannot_be_bought_twice_by_one_person() {
     assert_pot_audit(&mut app, 0);
 }
 
-/// 两个人可以持同一个号（均分那一格的前置），而第二个人也是靠自己踩到柜台买到的。
+/// **号码独占**（4 代口径，10-26 实报）：甲买走的号，乙就买不成了 —— 而乙**换个号照买**。
+/// 后面那半句是这条用例的牙齿：只断「乙没买到 7 号」的话，它与「乙压根没站在柜台前」
+/// 「乙被规则层随便一条拒绝挡在门外」三种缺陷长得分不清（P3d② 那次翻出的假用例就是
+/// 这个形状 —— 拒的是钱而不是窗口，短路掉判据也不会红）。
 #[test]
-fn two_people_can_hold_the_same_number() {
+fn a_number_another_player_holds_cannot_be_bought() {
     let (mut app, p0, p1) = at_counter();
     let price = rules().ticket_price;
     buy(&mut app, p0, 7);
     leave_the_counter(&mut app);
 
     back_to_the_counter(&mut app, p1);
+    let before = cash_of(&mut app, p1);
+    buy(&mut app, p1, 7);
+    assert_eq!(
+        cash_of(&mut app, p1),
+        before,
+        "被占走的这一注不能扣钱：{:?}",
+        ledger(&app)
+    );
+    assert!(tickets_of(&app, p1).is_empty(), "乙手里不该多出那张 7 号");
+    assert_eq!(tickets_of(&app, p0), vec![7], "甲那一张仍然是他的");
+    assert_eq!(pot_of(&app), price, "池子只进了甲那一注");
+
+    // 同一趟柜台里换一个号：买得成。这一句把上面三条从「乙被挡在门外」里分出来
+    buy(&mut app, p1, 8);
+    assert_eq!(tickets_of(&app, p1), vec![8], "8 号没人占，乙该买得到");
+    assert_eq!(cash_of(&mut app, p1), before - price);
+    assert_eq!(pot_of(&app), 2 * price);
+    assert_pot_audit(&mut app, 0);
+}
+
+/// 独占是「还赢得到的人之间」的独占：破产的人兑不出钱，他手里那张旧凭证不该替全场
+/// 锁死一个号码 —— 否则他死后那个号就永远买不成，池子也就永远开不出去。
+///
+/// 直插 `Bankrupt` 组件而不走完整清算（与 `company.rs` 那条同一手法）：这一条验的只是
+/// `taken` 那道筛子，而清算要扯上拍卖机与回合终局，会把要问的那句话淹掉。
+#[test]
+fn a_bankrupt_player_does_not_hold_a_number_hostage() {
+    let (mut app, p0, p1) = three_at_counter();
+    let price = rules().ticket_price;
+    buy(&mut app, p0, 7);
+    leave_the_counter(&mut app);
+    insert(&mut app, p0, Bankrupt);
+
+    back_to_the_counter(&mut app, p1);
     buy(&mut app, p1, 7);
 
-    assert_eq!(tickets_of(&app, p0), vec![7]);
-    assert_eq!(tickets_of(&app, p1), vec![7]);
-    assert_eq!(pot_of(&app), 2 * price);
+    assert_eq!(
+        tickets_of(&app, p1),
+        vec![7],
+        "死者占着的号该重新能买：{:?}",
+        ledger(&app)
+    );
+    assert_eq!(
+        pot_of(&app),
+        2 * price,
+        "甲那一注的钱早就进了池，不随他退场"
+    );
     assert_pot_audit(&mut app, 0);
 }
 
@@ -407,8 +483,8 @@ fn the_winner_takes_the_whole_pot_and_every_ticket_is_void() {
     let led = ledger(&app);
     assert!(
         led.iter()
-            .any(|l| l == &format!("Draw({winning}号,1人,各{},池{})", 2 * price, 2 * price)),
-        "开奖那条流水要说得出号、人数、每人多少、池中原有多少：{led:?}"
+            .any(|l| l == &format!("Draw({winning}号,P0,池{})", 2 * price)),
+        "开奖那条流水要说得出号、谁独得、池中原有多少：{led:?}"
     );
     assert!(
         led.iter()
@@ -423,31 +499,42 @@ fn the_winner_takes_the_whole_pot_and_every_ticket_is_void() {
     assert_cash_audit(&mut app, 20_000);
 }
 
-/// 多人同持中奖号时**整数均分**，除不尽的那一块留在池里 —— 它与「无人猜中就累积」
-/// 共用同一条路，所以既不该凭空消失也不该四舍五入。
+/// **独占就是「独得」的来路**（10-26 实报）：两个人抢同一个中奖号时第二个人买不成，于是
+/// 开奖那一刻在结构上只可能有一位持有者 —— 整池归他，连对手那张陪跑号的钱也一起归他。
 ///
-/// 一注的价钱配成 999 就为了这个：三注 = 2997，两个人分 → 各 1498、余 1。
-/// 用 1000 也能测均分，但那一格整除，余数分支一次都不会走到。
+/// P8 在这一格写的是「整数均分、`ticket_price` 配成 999 专门走到余数那一支」。独占之后
+/// 那个分支不是「不必再测」，而是**写不出来**：`holders` 换成 `find`，池子整个清零，
+/// 没有「每人多少」也没有「余数留给谁」。这里留着两个号、两笔钱，就是为了证明
+/// 那个形状真的消失了 —— 池子空得干干净净，而钱只进一个人的钱包。
 #[test]
-fn two_holders_split_the_pot_and_the_remainder_stays() {
-    let rules = GameRules {
-        ticket_price: 999,
-        ..GameRules::instant()
-    };
-    let price = rules.ticket_price;
+fn only_one_player_can_hold_the_winning_number() {
     let seed = GameSeed::default();
+    let price = rules().ticket_price;
     let winning = draw_number(seed, 36, 1);
     let spare = if winning == 36 { 1 } else { winning + 1 };
-    let (mut app, p0, p1) = at_the_counter(seed, rules);
+    let (mut app, p0, p1) = at_the_counter(seed, rules());
 
-    // 甲两注（中奖号 + 一个陪跑的号）、乙一注（中奖号）→ 池子 2997、两个中奖人
     buy(&mut app, p0, winning);
-    buy(&mut app, p0, spare);
     leave_the_counter(&mut app);
     back_to_the_counter(&mut app, p1);
+    let before = cash_of(&mut app, p1);
     buy(&mut app, p1, winning);
+    assert_eq!(
+        cash_of(&mut app, p1),
+        before,
+        "抢同一个号的那一笔不该扣钱：{:?}",
+        ledger(&app)
+    );
+    assert!(tickets_of(&app, p1).is_empty(), "乙手里没多出那张中奖号");
+    // 换个号照买 —— 这一句把「被独占挡住」与「这一趟他什么都买不成」分清楚
+    buy(&mut app, p1, spare);
+    assert_eq!(
+        cash_of(&mut app, p1),
+        before - price,
+        "陪跑那一张是买成了的"
+    );
     leave_the_counter(&mut app);
-    assert_eq!(pot_of(&app), 3 * price);
+    assert_eq!(pot_of(&app), 2 * price, "池里是甲的中奖号 + 乙的陪跑号");
 
     play_until_tick(&mut app, 14);
     assert_eq!(today(&app), Date::new(2048, 1, 15), "前置的日子算错了");
@@ -455,19 +542,60 @@ fn two_holders_split_the_pot_and_the_remainder_stays() {
     let led = ledger(&app);
     assert!(
         led.iter()
-            .any(|l| l == &format!("Draw({winning}号,2人,各1498,池{})", 3 * price)),
-        "两个人同持中奖号 → 各得整数那一半：{led:?}"
+            .any(|l| l == &format!("Draw({winning}号,P0,池{})", 2 * price)),
+        "开奖那一条写的是「谁独得、池里多少」，不再是人数与每人多少：{led:?}"
     );
-    // 两个人各有一条 1498 的到账流水（凭据与 `CashChanged` 是两条消息，只断凭据不够）
-    for who in [p0, p1] {
-        assert!(
-            paid_him(&app, who, 1_498),
-            "{who:?} 到账的那一笔：{:?}",
-            last_cash_move(&app, who)
-        );
-    }
-    assert_eq!(pot_of(&app), 1, "除不尽的那一块留在池里，不发也不抹掉");
+    assert!(
+        paid_him(&app, p0, 2 * price),
+        "整池（含乙那张陪跑号的钱）该进甲一个人的钱包：{:?}",
+        last_cash_move(&app, p0)
+    );
+    assert!(
+        !led.iter().any(|l| l.starts_with("Win(P1")),
+        "乙手里那个号不是中奖号，不该有中奖凭据：{led:?}"
+    );
+    assert_eq!(pot_of(&app), 0, "独得之后池子是空的 —— 没有余数可留");
     assert!(tickets_of(&app, p0).is_empty() && tickets_of(&app, p1).is_empty());
+    assert_pot_audit(&mut app, 0);
+}
+
+/// 占号的就是**券**，不是另立的一张「号码 → 人」登记表。所以一期一结把券清掉的那一刻，
+/// 那个号重新能买。
+///
+/// 这一条钉的是「两处真相只有一份」：规则层若另存一张登记，清券那一步就会漏了它，
+/// 症状是奖池都发完了、面板上那个号还写着「已被 甲 买下」而谁也买不成。
+#[test]
+fn a_taken_number_is_free_again_after_the_period_closes() {
+    let seed = GameSeed::default();
+    let price = rules().ticket_price;
+    let winning = draw_number(seed, 36, 1);
+    let (mut app, p0, p1) = at_the_counter(seed, rules());
+
+    buy(&mut app, p0, winning);
+    leave_the_counter(&mut app);
+    back_to_the_counter(&mut app, p1);
+    buy(&mut app, p1, winning);
+    assert!(
+        tickets_of(&app, p1).is_empty(),
+        "前置：这个号此刻被甲占着，乙该买不成"
+    );
+    leave_the_counter(&mut app);
+
+    play_until_tick(&mut app, 14);
+    assert!(
+        tickets_of(&app, p0).is_empty(),
+        "前置：开奖把甲那张券清掉了（一期一结）"
+    );
+
+    back_to_the_counter(&mut app, p1);
+    buy(&mut app, p1, winning);
+    assert_eq!(
+        tickets_of(&app, p1),
+        vec![winning],
+        "换了期，同一个号该重新能买：{:?}",
+        ledger(&app)
+    );
+    assert_eq!(pot_of(&app), price, "新一期的池子从零开始，只这一注");
     assert_pot_audit(&mut app, 0);
 }
 
@@ -496,8 +624,8 @@ fn an_unwon_month_rolls_the_pot_and_it_earns_interest() {
     let led = ledger(&app);
     assert!(
         led.iter()
-            .any(|l| l == &format!("Draw({first}号,0人,各0,池{price})")),
-        "流局也要有一条开奖流水：{led:?}"
+            .any(|l| l == &format!("Draw({first}号,没人,池{price})")),
+        "流局也要有一条开奖流水（写「没人」而不是 0 人：这一行说的是没有一个人独得）：{led:?}"
     );
     assert!(
         !led.iter().any(|l| l.starts_with("Win(")),

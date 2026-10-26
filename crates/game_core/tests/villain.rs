@@ -81,7 +81,7 @@ fn player_no(app: &mut App, no: u32) -> Entity {
         .unwrap_or_else(|| panic!("场上没有 P{no}"))
 }
 
-/// 小偷保释、路上清干净、挪到起点（tile 0）—— 「路上有什么」由各用例自己摆。
+/// 小偷保释、路上清干净、挪到 0 号格（tile 0）—— 「路上有什么」由各用例自己摆。
 fn bailed_thief_at_start(app: &mut App, employer: Entity) -> Entity {
     let thief = villain_of(app, VillainKind::Thief);
     bail_villain(app, employer, thief);
@@ -349,7 +349,7 @@ fn the_hoodlum_extorts_the_land_price_from_the_owner_and_keeps_it() {
     set_points(&mut app, p0, 500);
     let hoodlum = villain_of(&mut app, VillainKind::Hoodlum);
     bail_villain(&mut app, p0, hoodlum);
-    // 流氓从起点（tile 0）走出一步，踩进南京路
+    // 流氓从 0 号格走出一步，踩进南京路
     place(&mut app, hoodlum, 0);
     walk_exact(&mut app, hoodlum, 1);
 

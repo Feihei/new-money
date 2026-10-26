@@ -7,16 +7,6 @@
 		"effects": [{"action": "detain", "place": "jail", "turns": 3}]
 	},
 	{
-		"id": "fate_002",
-		"type": "fate",
-		"title": "命运",
-		"desc": "回到起点，获得 $2000",
-		"effects": [
-			{"action": "move_to", "tile_name": "起点"},
-			{"action": "add_cash", "amount": 2000}
-		]
-	},
-	{
 		"id": "fate_003",
 		"type": "fate",
 		"title": "命运",

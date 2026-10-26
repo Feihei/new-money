@@ -21,7 +21,7 @@ use game_core::prelude::{
     CardAim, CardKind, Detention, DetentionPlace, GameSession, Term, TurnPhase,
 };
 
-/// 地块 1（汉口路，2 号格）归 P1 且 flat 成 500，P0 站在起点、下一掷两步正好踩上去。
+/// 地块 1（汉口路，2 号格）归 P1 且 flat 成 500，P0 站在 0 号格（夹具钉住的座位）、下一掷两步正好踩上去。
 /// 与 `tests/stay.rs` 同一套前置 —— 那一条测「照样收得到」，这一条测「收不到」。
 fn p1s_lot_a_step_away() -> (App, Entity, Entity) {
     let (mut app, p0, p1) = two_of_them(0, 2);

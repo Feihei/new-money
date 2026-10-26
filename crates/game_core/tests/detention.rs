@@ -243,7 +243,7 @@ fn an_insulated_victim_shrugs_off_a_trip_abroad_too() {
 #[test]
 fn a_board_without_that_branch_sends_nobody_there() {
     // 数据把送去的地方写在卡上，棋盘却可能没有那条分支（自定义盘）。这时**什么都不改**：
-    // 不猜一个格子、也不回退到起点。卡照样抽掉了（那是牌堆的事），但流水里不该有一条 Detain
+    // 不猜一个格子、也不回退到 0 号格。卡照样抽掉了（那是牌堆的事），但流水里不该有一条 Detain
     let (mut app, p0, _) = about_to_draw("fate_007");
     app.world_mut().resource_mut::<ActiveBoard>().def.tiles[HOSPITAL_JUNCTION as usize].branch =
         None;

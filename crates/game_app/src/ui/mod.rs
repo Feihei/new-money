@@ -80,6 +80,8 @@ impl Plugin for UiPlugin {
                         top_bar::refresh_top_bar.in_set(UiSet::Live),
                         top_bar::hint_from_events.in_set(UiSet::Live),
                         player_hud::refresh_player_hud.in_set(UiSet::Live),
+                        // `NM_DECISION=card` 的模态要补一条真卡才有内容可截（见它的注释）
+                        dialog::dev_seed_card.in_set(UiSet::Live),
                         dialog::remember_drawn_card.in_set(UiSet::Live),
                         dialog::remember_service.in_set(UiSet::Live),
                         dialog::remember_company.in_set(UiSet::Live),
@@ -2339,6 +2341,9 @@ mod tests {
             // `step_arcade` 要读键盘（接财宝的 ← →）。`MinimalPlugins` 不带 `InputPlugin`，
             // 少了它不是「键盘那半条不灵」而是这条 system 整个建不出来 —— 与消息同一条坑
             .add_plugins(bevy::input::InputPlugin)
+            // 菜单现在会问一句「有没有背景图」，那一问要的是 `AssetServer`。同上一条：
+            // 少它不是「背景不画」而是 `spawn_menu` 整个建不出来
+            .add_plugins(bevy::asset::AssetPlugin::default())
             .add_plugins(StatesPlugin)
             .add_plugins(crate::scene::ScenePlugin)
             .add_plugins(UiPlugin)

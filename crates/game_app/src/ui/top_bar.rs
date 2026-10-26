@@ -681,16 +681,24 @@ pub(crate) fn hint_from_events(
         ));
     }
     for m in notices.drawn.read() {
-        line = Some(if m.winners == 0 {
-            format!(
+        // 开奖那一句**两种结果各一句话** —— 「没人猜中」是一条真消息，不是什么都没发生，
+        // 而滚存下去的那个数字是玩家下一期要不要再买一注的判断依据。
+        //
+        // 有人猜中时这里就点名：号码独占（10-26 实报）之后一个号至多一位持有者，所以
+        // 「谁独得了这一期」总说得出一个名字，而不再是一个人数。点名也让这一句在
+        // **没有** [`LotteryWon`] 的那一格里仍然完整可读（池子为 0 时规则层不发中奖凭据，
+        // 顶栏就只剩这一行）—— 两条同时出现的帧里，盖住它的是「谁拿到了钱」那一条。
+        line = Some(match m.winner {
+            None => format!(
                 "乐透开出 {} 号 —— 没人猜中，奖池 {} 滚到下月",
                 m.number, m.pot
-            )
-        } else {
-            format!(
-                "乐透开出 {} 号 —— {} 人猜中，各领 {}",
-                m.number, m.winners, m.each
-            )
+            ),
+            Some(winner) => format!(
+                "乐透开出 {} 号 —— {} 独得奖池 {}",
+                m.number,
+                name(&names, winner),
+                m.pot
+            ),
         });
     }
     for m in notices.won.read() {
@@ -1947,6 +1955,7 @@ mod tests {
 
     /// 乐透（P8）：开奖那一句要区分「有人猜中」与「流局」，因为流局不是一句「什么都没发生」——
     /// 那一期的钱还躺在池里，而玩家下一期要不要再买一注读的就是这个数。
+    /// 有人猜中那一句**点名**：号码独占之后中奖号只有一位持有者，「独得」说的是他。
     #[test]
     fn a_draw_announces_both_outcomes() {
         let (mut app, _me, _foe, hint) = notices_app();
@@ -1954,8 +1963,7 @@ mod tests {
             &mut app,
             LotteryDrawn {
                 number: 7,
-                winners: 0,
-                each: 0,
+                winner: None,
                 pot: 3_000,
             },
         );
@@ -1964,20 +1972,18 @@ mod tests {
             "乐透开出 7 号 —— 没人猜中，奖池 3000 滚到下月"
         );
 
-        let (mut app, _me, _foe, hint) = notices_app();
+        let (mut app, me, _foe, hint) = notices_app();
         send(
             &mut app,
             LotteryDrawn {
                 number: 7,
-                winners: 2,
-                each: 1_500,
+                winner: Some(me),
                 pot: 3_000,
             },
         );
-        let said = hint_of(&mut app, hint);
-        assert!(
-            said.contains("2 人猜中") && said.contains("各领 1500"),
-            "均分那一句得说得出人数与每人多少：{said}"
+        assert_eq!(
+            hint_of(&mut app, hint),
+            "乐透开出 7 号 —— 阿土伯 独得奖池 3000"
         );
     }
 
@@ -1990,8 +1996,7 @@ mod tests {
             &mut app,
             LotteryDrawn {
                 number: 11,
-                winners: 1,
-                each: 2_000,
+                winner: Some(me),
                 pot: 2_000,
             },
         );

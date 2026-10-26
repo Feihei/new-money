@@ -303,23 +303,25 @@ pub fn place_item_system(mut desk: PlaceDesk<'_, '_>, mut claimed: Local<HashSet
 
 // ===== 开局宝箱 =====
 
-/// 开局在环上撒 [`STARTING_CHESTS`] 个宝箱（不含起点）。位置走**专用随机子流**，
+/// 开局在环上撒 [`STARTING_CHESTS`] 个宝箱。位置走**专用随机子流**，
 /// 所以「这一局宝箱在哪儿」不会挪动骰子、牌堆与行情。
+///
+/// 候选是**整条主环**。10-26 之前这里排除 0 号格，理由是「起点没人会落脚，撒在那儿等于
+/// 少撒一个」；起点整格删掉之后那条豁免没有了对象，0 号现在是一条普通路。
 pub fn spawn_starting_chests(
     commands: &mut Commands,
     def: &BoardDef,
     rng: &mut Rng,
 ) -> Vec<TileIndex> {
     let n = def.loop_len() as usize;
-    if n <= 1 {
+    if n == 0 {
         return Vec::new();
     }
-    let want = STARTING_CHESTS.min(n - 1);
+    let want = STARTING_CHESTS.min(n);
     let mut picked: Vec<usize> = Vec::new();
     while picked.len() < want {
-        // 候选是 1..n（排除 0 号起点），用部分 Fisher-Yates 不放回
-        let span = (n - 1) as u32;
-        let at = 1 + rng.pick_spawn(0..=span - 1) as usize;
+        // 部分 Fisher-Yates：不放回，所以两颗宝箱不会叠在同一格
+        let at = rng.pick_spawn(0..=n as u32 - 1) as usize;
         if !picked.contains(&at) {
             picked.push(at);
         }

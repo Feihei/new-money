@@ -4,7 +4,7 @@
   "grid_cols": 8,
   "grid_rows": 8,
   "loop": [
-	{ "id": 0,  "col": 1, "row": 1, "type": "start",    "name": "起点",     "data": {} },
+	{ "id": 0,  "col": 1, "row": 1, "type": "road",     "name": "骑楼",     "data": {} },
 	{ "id": 1,  "col": 2, "row": 1, "type": "property", "name": "南京路",   "land_id": 0, "data": {} },
 	{ "id": 2,  "col": 3, "row": 1, "type": "property", "name": "汉口路",   "land_id": 1, "data": {},
 	  "branch": { "type": "jail", "tiles": [ { "col": 4, "row": 0, "type": "jail", "name": "监狱", "data": {} } ] } },

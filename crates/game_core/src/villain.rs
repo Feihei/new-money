@@ -149,14 +149,15 @@ pub fn has_door(def: &BoardDef, place: DetentionPlace) -> bool {
 ///
 /// 逻辑位置放**接入点**而不是死胡同格 —— 与 [`crate::landing::detain`] 给玩家的口径同一条
 /// （core 拥有逻辑位置，死胡同格只是表现层把棋子挪过去的视觉停车位）。这张棋盘没有那条
-/// 分支时退到起点，位置仍然可读，而那件事由 [`has_door`] 在装配那一句 `warn!` 出来。
+/// 分支时退到环上第一格（0 号，10-26 起它是一条普通路而不是起点），位置仍然可读，
+/// 而那件事由 [`has_door`] 在装配那一句 `warn!` 出来。
 pub fn spawn_caged_villains(commands: &mut Commands, def: &BoardDef) -> Vec<Entity> {
     let junction = |place: DetentionPlace| {
         place
             .branch()
             .and_then(|kind| def.branch_junction(kind))
             .map(|t| TileIndex(t.id))
-            .unwrap_or(crate::player::START_TILE)
+            .unwrap_or(TileIndex(0))
     };
     VillainKind::ALL
         .iter()

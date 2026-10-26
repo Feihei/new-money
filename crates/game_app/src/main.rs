@@ -13,6 +13,7 @@ use bevy::{
 use game_core::CoreGamePlugin;
 use game_core::prelude::{DataHandles, Date, EpochOverride, GameSeed, TurnPhase};
 
+mod art;
 mod autopilot;
 mod dev;
 mod dump;

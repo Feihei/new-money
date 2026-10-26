@@ -1065,7 +1065,8 @@ pub fn land_deity_succession_system(
 // ===== 刷出与漫游 =====
 
 /// 找一格把这位神放下去。走 [`place`] 那道唯一闸门，所以「一格一件」不在这里判第二遍。
-/// 起点（0 号）不参与 —— 与开局宝箱同一条理由。
+///
+/// 候选是整条主环 —— 10-26 之前排除 0 号（起点，「没人会落脚」），那条豁免跟着起点一起删了。
 fn place_one(
     commands: &mut Commands,
     def: &BoardDef,
@@ -1074,12 +1075,12 @@ fn place_one(
     rng: &mut Rng,
     god: God,
 ) -> Option<TileIndex> {
-    let span = def.loop_len().saturating_sub(1);
+    let span = def.loop_len();
     if span == 0 {
         return None;
     }
     for _ in 0..SPAWN_TRIES {
-        let tile = TileIndex(1 + rng.pick_god(0..=span - 1));
+        let tile = TileIndex(rng.pick_god(0..=span - 1));
         if place(
             commands,
             existing.clone(),

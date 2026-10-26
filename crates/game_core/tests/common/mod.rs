@@ -896,10 +896,13 @@ fn collect_books(
         pot_audit.0.push((m.delta, m.why, m.balance));
     }
     for m in r.draws.read() {
-        log.0.push(format!(
-            "Draw({}号,{}人,各{},池{})",
-            m.number, m.winners, m.each, m.pot
-        ));
+        // 中奖那一格写**人**而不是人数（P8 的号码独占让「几个人分」这一问不存在），
+        // 而流局写「没人」—— 这一行是「谁独得了这一期」的唯一可断言形状
+        let won = m
+            .winner
+            .map_or_else(|| "没人".to_string(), |w| who(&players, &names, w));
+        log.0
+            .push(format!("Draw({}号,{won},池{})", m.number, m.pot));
     }
     for m in r.wins.read() {
         log.0.push(format!(
@@ -1354,6 +1357,11 @@ pub fn run_until_world(app: &mut App) -> bool {
 /// 走到 `WaitRoll` 并确认世界已装配 —— 绝大多数用例的前置。
 ///
 /// 末尾多跑两帧：消息是帧末批量投递的，`WaitRoll` 当帧写的 `TurnStarted` 要下一帧才读得到。
+///
+/// **顺手把每个人都摆到 0 号格**（[`pin_seats`]）。生产的开局落位是抽的（10-26 起 4 代
+/// 没有起点格），而这一层夹具要的是「他站在哪一格」可读 —— 让三十几条用例各写一遍摆位，
+/// 漏写那一条的症状是「偶发地少一步多一步」。随机落位本身由
+/// `world_boot::the_opening_deal_is_seeded_and_settles_nothing` 钉，那条**不走**这个夹具。
 pub fn boot_to_wait_roll(app: &mut App) -> Entity {
     assert!(run_until_world(app), "棋盘资产没能在时限内装配成世界");
     assert!(
@@ -1361,8 +1369,17 @@ pub fn boot_to_wait_roll(app: &mut App) -> Entity {
         "状态机没能进入 WaitRoll，实际停在 {:?}",
         phase(app)
     );
+    pin_seats(app);
     settle(app, 2);
     current(app)
+}
+
+/// 把每名玩家摆到主环 0 号格。见 [`boot_to_wait_roll`] 那条注释；用例自己要用
+/// [`place`] / [`stand_to`] 覆盖它是常态，这里只负责给一个**已知**的起点读数。
+pub fn pin_seats(app: &mut App) {
+    for (player, ..) in roster(app) {
+        place(app, player, 0);
+    }
 }
 
 /// 空跑几帧，让已写入的消息进入流水。

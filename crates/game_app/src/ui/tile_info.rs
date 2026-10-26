@@ -214,7 +214,6 @@ fn spawn_card(
 /// 格子类型的中文名。`TileKind` 在规则层是枚举，屏幕上要给人话，映射属于表现层。
 fn kind_name(kind: TileKind) -> &'static str {
     match kind {
-        TileKind::Start => "起点",
         TileKind::Property => "地产",
         TileKind::Bank => "银行",
         TileKind::Stock => "证券交易",

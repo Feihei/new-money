@@ -112,6 +112,9 @@ pub mod col {
 
     // ===== 主菜单（main_menu.tscn）=====
     pub const MENU_BG: Color = Color::srgb(0.12, 0.12, 0.16); // :21
+    /// 有背景图时按钮那一叠底下的垫板。底色取 `MENU_BG` 那一档、压到八成不透明：
+    /// 牌楼那张画的正中是白天空，黄标题直接落上去就读不出来了
+    pub const MENU_SCRIM: Color = Color::srgba(0.10, 0.10, 0.14, 0.80);
     pub const MENU_TITLE: Color = Color::srgb(1.00, 0.85, 0.20); // :38
     pub const MENU_FOOTER: Color = Color::srgb(0.50, 0.50, 0.55); // :79
 }
@@ -148,6 +151,13 @@ pub mod layout {
     pub const UPGRADE_PANEL: [f32; 3] = [400.0, -200.0, -180.0];
     pub const RENT_PANEL: [f32; 3] = [380.0, -190.0, -150.0];
     pub const CARD_PANEL: [f32; 3] = [420.0, -210.0, -170.0];
+    /// 卡面带图时的那一块：宽出一张卡面加一条间隙，横向偏移跟着减半（面板靠
+    /// `left: 50%` + translation 居中，宽度改了偏移不改就会歪着弹）
+    pub const CARD_PANEL_ART: [f32; 3] = [560.0, -280.0, -170.0];
+    /// 卡面竖图的屏上尺寸。原图 896×1184（比例 0.757），这里保持比例不裁切 ——
+    /// 那张图自带剪纸边框，压成横幅就是把边框切掉
+    pub const CARD_ART: [f32; 2] = [150.0, 198.0];
+    pub const CARD_ART_GAP: f32 = 18.0;
     /// 弹层按钮：买地/升级成对（`property_dialog.gd:194,202`），收据与卡面各一颗（`:123`、`:148`）
     pub const MODAL_BUTTON: [f32; 2] = [140.0, 42.0];
     pub const OK_BUTTON: [f32; 2] = [160.0, 42.0];
@@ -176,6 +186,8 @@ pub mod layout {
     /// 主菜单：VBox 宽 320、gap 16（`main_menu.tscn:23-33`）
     pub const MENU_WIDTH: f32 = 320.0;
     pub const MENU_GAP: f32 = 16.0;
+    /// 按钮那一叠底下的垫板内边距（横 24、纵 30）。只在有背景图时看得见
+    pub const MENU_PAD: f32 = 24.0;
     pub const MENU_BUTTON_H: f32 = 48.0;
     pub const PAUSE_PANEL: [f32; 2] = [320.0, 280.0];
 
@@ -275,8 +287,11 @@ pub mod layout {
     /// 号码是 6×6 的方格阵，不是 36 行清单：一注 1000、36 个号，玩家在这块屏上做的事
     /// 是「挑一个号」，读起来该像一张奖券而不是一张表。
     /// 宽 = 6 × 号码按钮 + 5 × 缝 + 内边距 ×2 = 324 + 30 + 48 ≈ 400，取 420 留出描边。
-    /// 顶部偏移与百货同档（行数由内容撑开，底部别压住 HUD）。
-    pub const LOTTERY_PANEL: [f32; 3] = [420.0, -210.0, -230.0];
+    /// 顶部偏移与百货同档（**高度由内容撑开**，底部别压住 HUD）。y 那一格从 -230 提到 -260：
+    /// 方格阵下面现在最多有**两句**各自成行的解释（「现金不够」与「已被买走：号（谁）」——
+    /// 后者是 10-26 号码独占新增的那一行），而 `panel` 是「左上角钉住、往下长」的居中法，
+    /// 多一行就是把底沿往 HUD 那边推 20 像素。
+    pub const LOTTERY_PANEL: [f32; 3] = [420.0, -210.0, -260.0];
     /// 一颗号按钮。字只有两位，但要够大到拇指点得着（32 高与道具那颗同行）
     pub const LOTTERY_NUMBER_BUTTON: [f32; 2] = [50.0, 32.0];
     pub const LOTTERY_CELL_GAP: f32 = 6.0;

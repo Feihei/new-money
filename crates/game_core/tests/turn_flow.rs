@@ -95,6 +95,10 @@ fn same_seed_replays_the_same_match() {
     let play = |seed: GameSeed| {
         let mut app = boot(GameSetup::default(), GameRules::instant(), seed);
         assert!(run_until_world(&mut app));
+        // 先钉座位：这条要复现的是**掷骰序列**，而开局落位是抽的（10-26 起没有起点格）。
+        // 让它参与进来只会把断言变成「这一颗种子的落位恰好走到那几格」——
+        // 随机落位本身由 `world_boot::the_opening_deal_is_seeded_and_settles_nothing` 钉
+        pin_seats(&mut app);
         play_turns(&mut app, 6);
         events(&app)
             .into_iter()
@@ -160,6 +164,9 @@ fn jail_skips_two_turns_then_releases() {
     // 判 3 格：跳过 2 个回合，第 3 次轮到他时当场回来（player_data.gd:72-80 的规则）
     let mut app = boot_default();
     assert!(run_until_world(&mut app));
+    // 下面那句「被拘留期间不该移动」断言的是他还站在 0 号格，而开局落位是抽的 ——
+    // 先把座位钉住，让这条用例的前置与它声称的那一件事一致
+    pin_seats(&mut app);
     let p1 = roster(&mut app)[1].0;
     insert(
         &mut app,

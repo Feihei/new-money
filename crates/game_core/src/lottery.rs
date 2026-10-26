@@ -1,6 +1,8 @@
 //! 乐透（P8）：奖池、买券、每月 15 号开奖。
 //!
-//! 四代口径（PLAN §三「乐透」行）：1000 元/注、1–36 选一号、一人可持多号、每月 15 号开奖。
+//! 四代口径（PLAN §三「乐透」行）：1000 元/注、1–36 选一号、一人可持多号、**一个号全场
+//! 只有一张**（10-26 实报的号码独占，它才是「奖金必然某位玩家独得」的那条来路）、
+//! 每月 15 号开奖。
 //! 这一块真正的设计决定只有两条，都在「钱从哪来、到哪去」上：
 //!
 //! - **奖池只有两条来源**（10-22 拍板）：买券的钱**全额**进池 + 月末利息滚存。
@@ -44,9 +46,12 @@ pub struct Jackpot {
     pub last_draw: Option<u8>,
 }
 
-/// 一个人手上这一期的彩票号。**一人可持多号**（4 代口径），而同一个号一人只有一张：
-/// 两张同号既没有额外玩法（均分按**人**不按张），又会让面板多出一格「你已经有了」的灰按钮，
-/// 所以它在 [`LotteryTickets::add`] 上就是不接受。
+/// 一个人手上这一期的彩票号。**一人可持多号**（4 代口径），而**一个号全场只有一张**
+/// （10-26 实报的独占）：[`LotteryTickets::add`] 挡的是同一个人重复按同一个号，
+/// 跨个人的那一半由 [`buy_allowed`] 的 [`LotteryDeny::Taken`] 挡。
+///
+/// 独占换来的东西就是这个模块的形状：中奖号**至多一位持有者**，于是「独得奖池」在结构上
+/// 成立，不需要均分、不需要余数留池，而这两个分支也再也写不出来。
 #[derive(Component, Debug, Default, Clone, PartialEq, Eq)]
 pub struct LotteryTickets {
     pub numbers: Vec<u8>,
@@ -79,6 +84,10 @@ pub enum LotteryDeny {
     BadNumber,
     /// 这个号你已经有了
     AlreadyHeld,
+    /// 这个号被**别人**占着（4 代的号码独占，10-26 实报）。它排在 `TooBroke` **之前**：
+    /// 钱不够与号被占是两件事，而被占走的那个号即使有钱也买不成 —— 反过来写的话，
+    /// 一个缺钱的人按到别人的号会得到一句与他该问的判断无关的「现金不够」。
+    Taken,
     /// 现金不够
     TooBroke,
 }
@@ -91,6 +100,7 @@ impl LotteryDeny {
             Self::NoCounter => "先踩到彩票中心",
             Self::BadNumber => "没有这个号",
             Self::AlreadyHeld => "这个号你已经买过了",
+            Self::Taken => "这个号已经被别人买走了",
             Self::TooBroke => "现金不够",
         }
     }
@@ -99,13 +109,20 @@ impl LotteryDeny {
 /// 这一注此刻买不买得成。判据全部由调用方查好再传进来（同 `shop_op_allowed`），于是这张表
 /// 既能被 system 用，也能在单测里逐格断言。
 ///
-/// 顺序是刻意的：先问**窗口**，再问**号码本身**，最后才问钱。窗口不对时后面三条都不必查，
-/// 而 UI 上也只有这一种情况需要把整块面板灰掉。
+/// 顺序是刻意的：先问**窗口**，再问**号码本身**（在不在池里、归谁），最后才问钱。
+/// 窗口不对时后面几条都不必查，而 UI 上也只有这一种情况需要把整块面板灰掉。
+///
+/// `taken` 是「这个号被**另一个还赢得到的人**占着」。这一格只数活着的人，与
+/// [`draw_lottery_system`] 发奖时筛的是同一批人（[`Books::solvent`]）：破产者手里那张旧
+/// 凭证既兑不出钱，也不该替全场锁死一个号码，否则「这一期的池子永远开不成」就是他离场
+/// 留下的后遗症。两处读同一个 `is_bankrupt`，于是「一个号至多一位能中奖的持有者」这件事
+/// 不会因为一个人死了而破。
 pub fn buy_allowed(
     at_counter: bool,
     number: u32,
     numbers: u32,
     held: bool,
+    taken: bool,
     cash: i64,
     price: i64,
 ) -> Result<(), LotteryDeny> {
@@ -117,6 +134,9 @@ pub fn buy_allowed(
     }
     if held {
         return Err(LotteryDeny::AlreadyHeld);
+    }
+    if taken {
+        return Err(LotteryDeny::Taken);
     }
     if cash < price {
         return Err(LotteryDeny::TooBroke);
@@ -148,9 +168,24 @@ pub struct TicketDesk<'w, 's> {
     pub pending: Res<'w, PendingDecision>,
     pub phase: Res<'w, State<TurnPhase>>,
     pub jackpot: ResMut<'w, Jackpot>,
-    pub tickets: Query<'w, 's, &'static mut LotteryTickets, With<PlayerId>>,
+    /// 各人手里的号。带上 `Entity` 而不是只 `With<PlayerId>`：独占那一格要问的是
+    /// 「**谁**占着这个号」，而 `Query::iter()` 交的是数据项本身、不给句柄。
+    pub tickets: Query<'w, 's, (Entity, &'static mut LotteryTickets), With<PlayerId>>,
     pub bought: MessageWriter<'w, LotteryBought>,
     pub pot: MessageWriter<'w, JackpotChanged>,
+}
+
+impl<'w, 's> TicketDesk<'w, 's> {
+    /// 这个号被**别的活着的人**占着没有 —— [`buy_allowed`] 那个 `taken` 位怎么查出来的。
+    ///
+    /// 这里刻意**不另立一张「号码 → 人」的表**：券本身就是唯一真相，占号的人就是手里
+    /// 真有那张券的人。另立一张就多了第二份真相，而它失配的症状恰好是这条规则要防的那件事
+    /// —— 两个人手里出现同一个号。
+    fn taken(&self, player: Entity, number: u8) -> bool {
+        self.tickets.iter().any(|(holder, tickets)| {
+            holder != player && tickets.holds(number) && !self.books.is_bankrupt(holder)
+        })
+    }
 }
 
 /// 办一笔买券。**不改回合状态** —— 买券是玩家站在柜台前的自由动作，回合仍然由「离开」
@@ -171,12 +206,13 @@ pub fn lottery_op_system(
         let held = desk
             .tickets
             .get(r.player)
-            .is_ok_and(|tickets| tickets.holds(r.number));
+            .is_ok_and(|(_, tickets)| tickets.holds(r.number));
         if let Err(why) = buy_allowed(
             at_counter,
             r.number as u32,
             rules.lottery_numbers,
             held,
+            desk.taken(r.player, r.number),
             desk.books.balance(r.player),
             rules.ticket_price,
         ) {
@@ -200,7 +236,7 @@ fn buy(desk: &mut TicketDesk<'_, '_>, player: Entity, number: u8, price: i64) {
     if desk.books.debit(player, price).is_err() {
         return;
     }
-    let Some(mut tickets) = desk.tickets.get_mut(player).ok() else {
+    let Some((_, mut tickets)) = desk.tickets.get_mut(player).ok() else {
         // 没有这个组件的人买不了券（开局装配就带着它，这里只是不为不可能留分支）
         return;
     };
@@ -243,9 +279,11 @@ pub struct DrawDesk<'w, 's> {
 /// （与 `apply_month_end_interest_system` 同一条顺序理由 —— 放在它前面会用昨天的日历判断
 /// 今天该不该开奖，15 号那天正好错开）。
 ///
-/// 均分按**人**：多人同持中奖号时整数均分、余数留在池里。PLAN 验收那句「中奖独得奖池」
-/// 说的是单人持有那一格，而两人同持时「独得」在语义上写不出来 —— 均分是这条规则剩下的
-/// 唯一读法，余数留池则与「无人猜中就累积」共用同一条路。
+/// **中奖独得整池，没有均分**。这不是「实现了独得」而是「均分写不出来」：号码独占
+/// （[`buy_allowed`] 的 `Taken`）保证一个号至多只有一位还活着的持有者，而这里筛的正是
+/// 活着的那批 —— 所以那份名单在结构上只可能是空的或一个人的，`holders: Vec<_>` 与它的
+/// 均分、余数留池一起换成了下面那一次 `find`。P8 当时那一套是替一个不该存在的分支写的
+/// 代码，10-26 实报独占之后整条删掉，余数没有地方可留。
 pub fn draw_lottery_system(mut desk: DrawDesk<'_, '_>) {
     let rules = *desk.books.rules;
     let today = date_of(desk.clock.tick, desk.books.session.epoch);
@@ -255,48 +293,37 @@ pub fn draw_lottery_system(mut desk: DrawDesk<'_, '_>) {
     // 号码池被配成 0 时夹成 1：这个数一旦从设置或存档里读进来，`1..=0` 是一次当场崩掉的
     // 空区间，而它换来的只是「只有一个号」——与 `poor_cash_divisor` 同一条处理
     let number = desk.rng.pick_lottery(1..=rules.lottery_numbers.max(1)) as u8;
-    let holders: Vec<Entity> = desk
+    let winner = desk
         .books
         .solvent()
         .into_iter()
         .map(|(player, _)| player)
-        .filter(|player| {
+        .find(|player| {
             desk.tickets
                 .get(*player)
                 .is_ok_and(|tickets| tickets.holds(number))
-        })
-        .collect();
-    let winners = holders.len() as u32;
+        });
     let pot = desk.jackpot.pot;
-    let each = if winners == 0 {
-        0
-    } else {
-        pot / winners as i64
-    };
-    let paid = each * winners as i64;
 
-    for player in &holders {
-        // `credit` 对 `amount <= 0` 什么都不做，所以池子小过人数时这里不会凭空发钱；
-        // 而 0 元也不该发一条「你赢了」的凭据 —— 与「0 点券不发 PointsChanged」同一条
-        if each > 0 {
-            desk.books.credit(*player, each);
+    if let Some(winner) = winner {
+        // `credit` 对 `amount <= 0` 什么都不做，而 0 元也不该发一条「你赢了」的凭据 ——
+        // 与「0 点券不发 PointsChanged」同一条（这一格只在 `ticket_price` 被配成 0 时碰得到）
+        if pot > 0 {
+            desk.books.credit(winner, pot);
             desk.won.write(LotteryWon {
-                player: *player,
+                player: winner,
                 number,
-                amount: each,
+                amount: pot,
+            });
+            desk.jackpot.pot = 0;
+            desk.pot.write(JackpotChanged {
+                delta: -pot,
+                balance: 0,
+                why: JackpotWhy::PaidOut,
             });
         }
-    }
-    if paid > 0 {
-        desk.jackpot.pot -= paid;
-        desk.pot.write(JackpotChanged {
-            delta: -paid,
-            balance: desk.jackpot.pot,
-            why: JackpotWhy::PaidOut,
-        });
-    }
-    if winners > 0 {
-        // 一期一结：有人猜中就把**全场**的券清掉，不只是中奖那几张（模块头第三条决定）
+        // 一期一结：有人猜中就把**全场**的券清掉，不只是中奖那一张（模块头第三条决定）。
+        // 清号同时也是独占的**换期**：这一期占着 7 号的人，下期不必继续占着它。
         for mut tickets in &mut desk.tickets {
             tickets.numbers.clear();
         }
@@ -304,14 +331,16 @@ pub fn draw_lottery_system(mut desk: DrawDesk<'_, '_>) {
     desk.jackpot.last_draw = Some(number);
     desk.drawn.write(LotteryDrawn {
         number,
-        winners,
-        each,
+        winner,
         pot,
     });
-    if winners == 0 {
-        info!("乐透 {today} 开出 {number} 号，没人猜中：奖池 {pot} 元与所有人的券都留到下月");
-    } else {
-        info!("乐透 {today} 开出 {number} 号：{winners} 人各得 {each} 元（池中原有 {pot} 元）");
+    match winner {
+        Some(winner) => {
+            info!("乐透 {today} 开出 {number} 号：{winner:?} 独得整池 {pot} 元，全场券作废")
+        }
+        None => {
+            info!("乐透 {today} 开出 {number} 号，没人猜中：奖池 {pot} 元与所有人的券都留到下月")
+        }
     }
 }
 
@@ -369,24 +398,35 @@ mod tests {
     /// 号码的两种写法都要能被认出来：`1..=36` 是闭区间，越界与 0 都得拒。
     /// 这一格有牙是因为 `BadNumber` 排在 `TooBroke` **之前** —— 反过来写的话，
     /// 一个身无分文的人按 0 号会得到「现金不够」，而真正的原因是那个号不存在。
+    ///
+    /// `Taken` 同样排在钱之前，理由一样：别人占着的号，有钱也买不成。
     #[test]
     fn the_gate_asks_the_window_then_the_number_then_the_money() {
-        let ok = |number| buy_allowed(true, number, 36, false, 5_000, 1_000);
+        let ok = |number| buy_allowed(true, number, 36, false, false, 5_000, 1_000);
         assert_eq!(ok(1), Ok(()));
         assert_eq!(ok(36), Ok(()));
         assert_eq!(ok(0), Err(LotteryDeny::BadNumber));
         assert_eq!(ok(37), Err(LotteryDeny::BadNumber));
         // 窗口不在时，号码与钱都不必问
         assert_eq!(
-            buy_allowed(false, 99, 36, true, 0, 1_000),
+            buy_allowed(false, 99, 36, true, true, 0, 1_000),
             Err(LotteryDeny::NoCounter)
         );
         assert_eq!(
-            buy_allowed(true, 7, 36, true, 5_000, 1_000),
+            buy_allowed(true, 7, 36, true, false, 5_000, 1_000),
             Err(LotteryDeny::AlreadyHeld)
         );
         assert_eq!(
-            buy_allowed(true, 7, 36, false, 999, 1_000),
+            buy_allowed(true, 7, 36, false, true, 5_000, 1_000),
+            Err(LotteryDeny::Taken)
+        );
+        // 一个又穷又被占的号：报的是「号没了」而不是「钱不够」
+        assert_eq!(
+            buy_allowed(true, 7, 36, false, true, 999, 1_000),
+            Err(LotteryDeny::Taken)
+        );
+        assert_eq!(
+            buy_allowed(true, 7, 36, false, false, 999, 1_000),
             Err(LotteryDeny::TooBroke)
         );
     }
@@ -403,16 +443,26 @@ mod tests {
     }
 
     /// 每一格灰按钮都得有话可说 —— 一句空文案与「按不动但没理由」是同一个缺陷。
+    /// 五格互不相同也是这一条：面板把理由写在方格阵下面那一行时，撞了就说不清是哪一种。
     #[test]
     fn every_denial_reads_as_a_sentence() {
-        for why in [
+        let mut labels: Vec<&str> = [
             LotteryDeny::NoCounter,
             LotteryDeny::BadNumber,
             LotteryDeny::AlreadyHeld,
+            LotteryDeny::Taken,
             LotteryDeny::TooBroke,
-        ] {
-            assert!(!why.label().is_empty(), "{why:?} 没有文案");
+        ]
+        .iter()
+        .map(|why| why.label())
+        .collect();
+        for why in labels.iter() {
+            assert!(!why.is_empty(), "有的拒绝没有文案：{why:?}");
         }
+        labels.sort_unstable();
+        let all = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), all, "两种拒绝同名：{labels:?}");
     }
 
     /// 奖池那三格的文案互不相同：`NM_DUMP` 与顶栏都直接念它，撞了就没法说清一笔钱哪来的。

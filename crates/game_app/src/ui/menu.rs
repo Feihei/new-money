@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 use super::theme::{col, layout, size};
 use super::{ButtonSpec, MenuPiece, SECONDARY, UiAction, button, label, separator};
+use crate::art;
 use crate::render::DevFont;
 
 /// 菜单自带一台相机。
@@ -22,7 +23,8 @@ pub fn spawn_menu_camera(mut commands: Commands) {
     ));
 }
 
-pub fn spawn_menu(mut commands: Commands, font: Res<DevFont>) {
+pub fn spawn_menu(mut commands: Commands, font: Res<DevFont>, server: Res<AssetServer>) {
+    let bg = art::menu_bg();
     // 整屏底色（`main_menu.tscn:14-21` 的 ColorRect），同时充当居中容器
     commands
         .spawn((
@@ -38,14 +40,49 @@ pub fn spawn_menu(mut commands: Commands, font: Res<DevFont>) {
             GlobalZIndex(10),
         ))
         .with_children(|screen| {
+            // 背景图排在按钮那一叠之前，且 `ZIndex(-1)`：那张牌楼的正中是一片白天空，
+            // 而标题是黄的 —— 不垫一块板就看不见「新游戏」四个字（见下面 `scrim`）
+            if let Some(bg) = &bg {
+                screen.spawn((
+                    ImageNode {
+                        image: server.load(bg.clone()),
+                        // 1920×1088 的画铺满任意比例的窗口：先看感觉，裁切与构图等素材定稿再谈
+                        image_mode: NodeImageMode::Stretch,
+                        ..default()
+                    },
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    ZIndex(-1),
+                ));
+            }
+            // 没有背景图时这块板保持全透明：与素材上路前逐像素同一张画面
+            let scrim = if bg.is_some() {
+                col::MENU_SCRIM
+            } else {
+                Color::NONE
+            };
             screen
-                .spawn(Node {
-                    width: Val::Px(layout::MENU_WIDTH),
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Stretch,
-                    row_gap: Val::Px(layout::MENU_GAP),
-                    ..default()
-                })
+                .spawn((
+                    Node {
+                        // `BoxSizing::BorderBox` 是 Bevy 的默认：`width` 含 padding，
+                        // 所以这一块板要比按钮宽出两份内边距
+                        width: Val::Px(layout::MENU_WIDTH + 2.0 * layout::MENU_PAD),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Stretch,
+                        row_gap: Val::Px(layout::MENU_GAP),
+                        padding: UiRect::axes(
+                            Val::Px(layout::MENU_PAD),
+                            Val::Px(layout::MENU_PAD * 1.25),
+                        ),
+                        border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
+                        ..default()
+                    },
+                    BackgroundColor(scrim),
+                ))
                 .with_children(|stack| {
                     stack.spawn(label(&font.0, "暴富", size::MENU_TITLE, col::MENU_TITLE));
                     stack.spawn(label(&font.0, "New Money", size::BODY, col::MUTED));

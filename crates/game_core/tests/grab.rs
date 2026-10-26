@@ -52,7 +52,7 @@ const L3_STOREY: i64 = 1900;
 
 #[test]
 fn buying_a_plot_from_the_other_side_of_the_ring_costs_exactly_a_normal_purchase() {
-    // P0 站在起点（0 号格），买下的是 7 号格上那块地 —— 中间隔着一整条路。
+    // P0 站在 0 号格（夹具钉住的座位），买下的是 7 号格上那块地 —— 中间隔着一整条路。
     // 这张卡买的就是这个「不用走过去」，而价钱、归属、等级、流水都该与走过去买一模一样
     let (mut app, p0, _p1) = two_players_before_the_roll();
     grab(&mut app, p0, 3);
@@ -63,7 +63,7 @@ fn buying_a_plot_from_the_other_side_of_the_ring_costs_exactly_a_normal_purchase
         "刚买下的空地：归 P0、还是 Lv0（级数重判：0=空地，`Books::buy` 不再钳层）、没押着"
     );
     assert_eq!(cash_of(&mut app, p0), 20_000 - L3_PRICE, "扣的是名义地价");
-    // 人还在起点：这张卡买的就是「不必走过去」
+    // 人还在 0 号格：这张卡买的就是「不必走过去」
     assert_eq!(tile_of(&app, p0), 0);
     assert!(hand_of(&app, p0).is_empty(), "打出去就该把占的那格还回来");
     assert_eq!(

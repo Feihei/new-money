@@ -7,8 +7,8 @@ use bevy::prelude::*;
 use common::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
-    ActiveBoard, Bankrupt, DataHandles, Detention, GameRules, GameSetup, LandId, Owner,
-    PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, START_TILE, TokenPosition,
+    ActiveBoard, Bankrupt, DataHandles, Detention, GameRules, GameSeed, GameSetup, LandId, Owner,
+    PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, TokenPosition, TurnPhase,
     Wallet,
 };
 
@@ -51,14 +51,23 @@ fn world_boots_from_real_assets() {
     let mut app = boot_default();
     assert!(run_until_world(&mut app), "棋盘资产没能在时限内装配成世界");
 
-    let start = START_TILE.0;
+    let rows = snapshot(&mut app);
     assert_eq!(
-        snapshot(&mut app),
+        rows.iter()
+            .map(|(id, name, cash, _)| (*id, name.clone(), *cash))
+            .collect::<Vec<_>>(),
         vec![
-            (0, "阿土伯".to_string(), 20_000, start),
-            (1, "孙小美".to_string(), 20_000, start),
+            (0, "姬百年".to_string(), 20_000),
+            (1, "范一文".to_string(), 20_000),
         ],
-        "玩家阵容/现金/起始格应与 Godot 端一致"
+        "玩家阵容与现金应与 `GameSetup::default()` 一致（阵容两位出自 CHARACTERS.md §五）"
+    );
+    // 落位是抽的（10-26 起这张棋盘没有起点），这里只问「抽到的那一格在不在环上」——
+    // 「同种子同落位」与「落位不触发结算」由下面的 `the_opening_deal_...` 那条钉
+    let ring = app.world().resource::<ActiveBoard>().def.loop_len();
+    assert!(
+        rows.iter().all(|(_, _, _, tile)| *tile < ring),
+        "开局落位必须落在主环上：{rows:?} / 环长 {ring}"
     );
 
     // 六块土地全部成实体，且开局无主（缺陷 #1 的前提：归属是组件，不是字符串 key 字典）
@@ -74,6 +83,67 @@ fn world_boots_from_real_assets() {
         "ActiveBoard 索引与实体数量不符"
     );
     assert_eq!(status_markers(&mut app), 0, "开局不该有拘留/破产标记");
+}
+
+/// 开局落位（10-26 实报：4 代没有起点格，玩家开局随机落位，而**落下不触发格子事件**，
+/// 只有第一次掷骰之后落到的那一格才算数）。
+///
+/// 三条各守一种翻法：
+/// - 同一种子两次装配给出同一份落位 —— 截图核对与回放的前提；
+/// - 换一种子就换一份 —— 有人把 `pick_start` 接回常量时，只有这一条会响；
+/// - 落位那一帧没有任何走步/落脚凭据，而同一份前置掷一次骰之后就有一条。
+///   最后这条是否定式，所以它必须带牙齿：先证明正面那一次真的发生过
+///   （§八 那条纪律，本项目已经在这一点上翻过五次）。
+#[test]
+fn the_opening_deal_is_seeded_and_settles_nothing() {
+    // 这条**不用** `boot_to_wait_roll`：那个夹具会把每人摆到 0 号格，而这里要读的正是
+    // 装配自己抽出来的那一份落位
+    fn deal(seed: u64) -> (App, Vec<u32>) {
+        let mut app = boot(GameSetup::default(), GameRules::instant(), GameSeed(seed));
+        assert!(run_until_world(&mut app), "棋盘资产没能在时限内装配成世界");
+        let tiles = roster(&mut app)
+            .into_iter()
+            .map(|(_, _, _, tile)| tile)
+            .collect();
+        (app, tiles)
+    }
+
+    let (mut app, first) = deal(GameSeed::default().0);
+    let (_, again) = deal(GameSeed::default().0);
+    assert_eq!(first, again, "同一种子必须给出同一份落位");
+    let (_, shifted) = deal(7_777);
+    assert_ne!(
+        first, shifted,
+        "换种子就该换落位。写死一格的话这条会红 —— 而它正是这次改动最可能犯的反向错误"
+    );
+
+    let ring = app.world().resource::<ActiveBoard>().def.loop_len();
+    assert!(
+        first.iter().all(|t| *t < ring),
+        "落位只能落在主环上：{first:?} / 环长 {ring}"
+    );
+
+    assert!(
+        run_until_phase(&mut app, TurnPhase::WaitRoll, 30),
+        "状态机没能进入 WaitRoll"
+    );
+    settle(&mut app, 2);
+    let before = events(&app);
+    assert!(
+        !before
+            .iter()
+            .any(|e| e.starts_with("Step(") || e.starts_with("Arrive(")),
+        "落位不该产生走步或落脚凭据（那会当场弹出买地报价、点券、命运抽卡）：{before:?}"
+    );
+
+    let p0 = current(&app);
+    roll(&mut app, p0);
+    settle(&mut app, 8);
+    let after = events(&app);
+    assert!(
+        after.iter().any(|e| e.starts_with("Arrive(")),
+        "掷骰之后落脚凭据确实会发出来 —— 上面那句否定式断言的存在理由：{after:?}"
+    );
 }
 
 #[test]
@@ -117,12 +187,18 @@ fn setup_and_rules_are_the_only_sources() {
     );
     assert!(run_until_world(&mut app));
 
+    // 阵容与起始现金都由 resource 驱动：换值不必动任何 system（缺陷 #12 的验收）。
+    // 落位那一列不进断言 —— 这条测的不是位置，而它在装配期抽的那一格本来也不该被钉成 0
+    //（位置那两条在 `the_opening_deal_is_seeded_and_settles_nothing`）
     assert_eq!(
-        snapshot(&mut app),
+        snapshot(&mut app)
+            .into_iter()
+            .map(|(id, name, cash, _)| (id, name, cash))
+            .collect::<Vec<_>>(),
         vec![
-            (0, "甲".to_string(), 8_888, 0),
-            (1, "乙".to_string(), 8_888, 0),
-            (2, "丙".to_string(), 8_888, 0),
+            (0, "甲".to_string(), 8_888),
+            (1, "乙".to_string(), 8_888),
+            (2, "丙".to_string(), 8_888),
         ]
     );
 

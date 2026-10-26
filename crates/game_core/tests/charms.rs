@@ -19,7 +19,7 @@ use common::*;
 use game_core::prelude::Gameplay;
 use game_core::prelude::{CardAim, God, Occupancy, OccupancyAt, OccupancyKind, TurnPhase};
 
-/// 装配到「P0 的回合、掷骰之前」。P0 站在 0 号格（起点），环长 13。
+/// 装配到「P0 的回合、掷骰之前」。P0 站在 0 号格（夹具钉住的座位，10-26 之前那一格叫起点），环长 13。
 fn two_players_before_the_roll() -> (App, Entity, Entity) {
     let mut app = boot_default();
     let p0 = boot_to_wait_roll(&mut app);
@@ -108,7 +108,7 @@ fn the_summon_buys_the_god_behind_him_not_the_one_he_was_about_to_step_on() {
         vec![2],
         "没被请的那位照站在原地"
     );
-    assert_eq!(tile_of(&app, p0), 0, "请神不走路：他还站在起点");
+    assert_eq!(tile_of(&app, p0), 0, "请神不走路：他还站在 0 号格");
     assert_eq!(phase(&app), TurnPhase::WaitRoll, "出牌不吃掉他的掷骰");
     assert!(
         !holds(&app, p0, "item_summon"),
