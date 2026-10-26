@@ -230,6 +230,11 @@ pub fn begin_game_system(
     // `requested` 里许下的一槌、`resume` 里那个「散场后回哪一阶段」—— 没有一样属于下一局。
     // 留着 `resume` 尤其贵：新局第一帧它会立刻把回合机推向上一局末尾那个阶段。
     commands.insert_resource(crate::auction::Auction::default());
+    // 魔法屋的草稿同理：「这场法事筛出了谁」不属于下一局。它平时靠
+    // `magic_spell_system` 那一句「窗口不在就把草稿收掉」自己归零，这一格是兜底 ——
+    // 上一局停在第二步窗口时按「回主菜单」，`PendingDecision` 被收走而那一帧没有窗口，
+    // 没有哪一处代码会再去碰这份资源（坑 22/25 同族）
+    commands.insert_resource(crate::magic::MagicRitual::default());
     next.set(TurnPhase::TurnStart);
 }
 

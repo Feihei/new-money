@@ -66,6 +66,12 @@ fn service_lines(app: &App) -> Vec<String> {
         .collect()
 }
 
+/// 格号一律现读（`common::land_tile` / `common::stand_to_land`），这条文件里不留写死的站位。
+///
+/// 为什么值得为它写一层：P13 在环上插了一格就把西单从 16 推到 18、王府井从 11 推到 12，
+/// 而写死的站位过期时症状是「服务费一笔都没收」或「现金凭空多了 5000」—— 看着像结算层的 bug，
+/// 查半天才发现是夹具里那个数字过期了（与 `tests/settle.rs` 那句 `tile < 19` 同一条教训）。
+///
 /// 摇出几走第几档。`roll` 出界（数据坏）直接 panic —— 用例里不该发生。
 fn tier_of(roll: u32) -> i64 {
     MALL_TIERS[(roll - 1) as usize]
@@ -223,8 +229,12 @@ fn smallrich_take(app: &App) -> i64 {
 /// 棋子停在旅馆那格（`Hotel` 没有死胡同分支），下回合开始时被跳过。
 #[test]
 fn the_hotel_bills_by_the_day_and_detains_the_guest() {
-    // P11 之后西单是 16 号：站上 15 号（航空公司）掷 1 点踩进去
-    let (mut app, p0) = ready_on(15, 1, DecisionPolicy::DeclineAll);
+    // 站上西单（land 5）前一格，那颗 1 点正好踩进去 —— 站位与格号都现读
+    let (mut app, p0) = ready_on(0, 1, DecisionPolicy::DeclineAll);
+    stand_to_land(&mut app, p0, 5, 1);
+    // 神请开：这两屏问的都是「按几天收钱、人被扣几天」，而换一次种子就可能有位神附在他身上
+    // 把服务费乘成 750、把住宿天数乘成两倍 —— 那两句断言会读不出它们在断什么
+    clear_gods(&mut app);
     let p1 = *roster(&mut app)
         .iter()
         .find(|(_, id, _, _)| *id == 1)
@@ -276,11 +286,15 @@ fn the_hotel_bills_by_the_day_and_detains_the_guest() {
     let detention = detain_of(&app, p0).expect("住店的人该被扣下");
     assert_eq!(detention.place, DetentionPlace::Hotel);
     assert_eq!(detention.term, Term::Turns(stay));
-    assert_eq!(tile_of(&app, p0), 16, "旅馆不在地图上，棋子停在那一格");
+    assert_eq!(
+        tile_of(&app, p0),
+        land_tile(&app, 5),
+        "旅馆不在地图上，棋子停在那一格"
+    );
     assert!(
         ledger(&app)
             .iter()
-            .any(|l| l.starts_with("Detain(P0@旅馆,格16)")),
+            .any(|l| l.starts_with(&format!("Detain(P0@旅馆,格{}", land_tile(&app, 5)))),
         "凭据也要说他在旅馆：{:?}",
         ledger(&app)
     );
@@ -314,8 +328,9 @@ fn the_hotel_bills_by_the_day_and_detains_the_guest() {
 /// `settle` 失败的那条路连 `Detention` 都不该挂。
 #[test]
 fn a_broke_guest_goes_bankrupt_instead_of_checking_in() {
-    // P11 之后西单是 16 号：站上 15 号掷 1 点踩进去
-    let (mut app, p0) = ready_on(15, 1, DecisionPolicy::DeclineAll);
+    // 站上西单（land 5）前一格，那颗 1 点正好踩进去 —— 格号从棋盘现读
+    let (mut app, p0) = ready_on(0, 1, DecisionPolicy::DeclineAll);
+    stand_to_land(&mut app, p0, 5, 1);
     retune(
         &mut app,
         5,
@@ -344,7 +359,9 @@ fn a_broke_guest_goes_bankrupt_instead_of_checking_in() {
 /// 步行踩加油站：**根本不产生账** —— 没车就没油耗，连 0 元收据都不该有。
 #[test]
 fn a_gas_station_lets_walkers_pass_for_free() {
-    let (mut app, p0) = ready_on(10, 1, DecisionPolicy::DeclineAll);
+    // 站上王府井（land 4，加油站）前一格，那颗 1 点踩上去 —— 格号从棋盘现读
+    let (mut app, p0) = ready_on(0, 1, DecisionPolicy::DeclineAll);
+    stand_to_land(&mut app, p0, 4, 1);
     retune(
         &mut app,
         4,
@@ -370,7 +387,12 @@ fn a_gas_station_lets_walkers_pass_for_free() {
 /// 「按骰数收费」读的是 `DiceRolled.steps`（P3d④b 起它永不乘方向、不夹步）。
 #[test]
 fn a_driver_pays_the_dice_face_not_the_steps_actually_taken() {
-    let (mut app, p0) = ready_on(10, 5, DecisionPolicy::DeclineAll);
+    // 骰面 5、被乌龟夹成 1 步：站王府井**前一格**，那一步正好踩上加油站
+    // （站位按「实走的那一步」算，不按骰面 —— 骰面只决定收多少钱）
+    let (mut app, p0) = ready_on(0, 5, DecisionPolicy::DeclineAll);
+    stand_to_land(&mut app, p0, 4, 1);
+    // 这一屏断的是「收 100 × 骰面」与「现金正好少那么多」，一位附身的神会把这两个数各改一半
+    clear_gods(&mut app);
     retune(
         &mut app,
         4,
@@ -400,7 +422,11 @@ fn a_driver_pays_the_dice_face_not_the_steps_actually_taken() {
         .expect("掷过骰才有落格")
         .1;
     assert!(face >= 3, "三颗骰的最小面是 3，实际 {face}");
-    assert_eq!(tile_of(&app, p0), 11, "乌龟把他按在只走一格的位置上");
+    assert_eq!(
+        tile_of(&app, p0),
+        land_tile(&app, 4),
+        "乌龟把他按在只走一格的位置上（那一格就是加油站）"
+    );
     assert_ne!(face, 1, "骰面与实走格数必须是两个数，这条用例才有牙");
     assert!(
         lines[0].contains(&format!("${},", 100 * face as i64)),
@@ -598,8 +624,12 @@ fn a_residential_lot_still_offers_an_upgrade_not_a_build() {
 /// 那条路要等多人局（P14）；这条钉的是它前面那一格：窗口压根不来。
 #[test]
 fn a_hotel_guest_cannot_be_bailed_out_of_the_jail_gate() {
-    // P11 之后西单是 16 号：站上 15 号掷 1 点踩进去
-    let (mut app, p0) = ready_on(15, 1, DecisionPolicy::DeclineAll);
+    // 站上西单（land 5）前一格，那颗 1 点正好踩进去 —— 站位与格号都现读
+    let (mut app, p0) = ready_on(0, 1, DecisionPolicy::DeclineAll);
+    stand_to_land(&mut app, p0, 5, 1);
+    // 神请开：这两屏问的都是「按几天收钱、人被扣几天」，而换一次种子就可能有位神附在他身上
+    // 把服务费乘成 750、把住宿天数乘成两倍 —— 那两句断言会读不出它们在断什么
+    clear_gods(&mut app);
     let p1 = *roster(&mut app)
         .iter()
         .find(|(_, id, _, _)| *id == 1)

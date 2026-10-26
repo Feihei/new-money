@@ -239,6 +239,13 @@ pub struct DumpView<'w, 's> {
     >,
     /// 名字（雇主那一半从这里读）。恶人也挂 `PlayerName`，见那个组件的注释
     names: Query<'w, 's, &'static PlayerName>,
+    /// 魔法屋这一场法事的草稿（P13）。查「女巫那道法术落到谁头上」「第二步窗口为什么是
+    /// 这三个人」时它是唯一一处答案 —— 它在资源里而不在任何组件上，窗口一关就没了
+    magic: Res<'w, game_core::prelude::MagicRitual>,
+    /// 性别（P13 那两条「所有女生／所有男生」的唯一读数）。**不并进 [`PlayerRow`]**：
+    /// 那张元组已顶到 Bevy `QueryData` 的 15 格上限 —— 与乐透票、保单同一条处理，
+    /// 另开一条查询按实体对回去。查「筛女生怎么把他筛进来了」要看的就是这一格
+    genders: Query<'w, 's, (Entity, Option<&'static game_core::prelude::Gender>)>,
 }
 
 fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
@@ -266,6 +273,7 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
             row(ui, "奖池", format_jackpot(&view));
             row(ui, "公司", format_companies(&view));
             row(ui, "拍卖", format_auction(&view));
+            row(ui, "法事", format_magic(&view));
             ui.separator();
             for line in format_corrections(&view) {
                 ui.monospace(line);
@@ -455,6 +463,26 @@ fn format_pending(view: &DumpView) -> String {
         Some((player, about @ Pending::Minigame(_))) => {
             format!("{about:?} ← {player:?} · 布局种子 {}", view.deal.seed)
         }
+        // 魔法屋第二步多带两句：条件的人话名字，和草稿里那份名单（P13）。
+        // `Debug` 给的是 `MagicSpell(AllGirls)` 那种英文，而「施到了谁头上」压根不在
+        // `Pending` 里（它在资源那份草稿上）—— 查「女巫筛出的怎么不是我以为的那几个」
+        // 只有这一行能同时看见两步的答案
+        Some((player, Pending::MagicSpell(filter))) => {
+            let draft = view.magic.draft.as_ref().map_or_else(
+                || "草稿不在（窗口与草稿分叉）".to_string(),
+                |(_, found)| {
+                    format!(
+                        "名单 {}",
+                        found
+                            .iter()
+                            .map(|e| who_are(view, *e))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                },
+            );
+            format!("MagicSpell({}) ← {player:?} · {}", filter.label(), draft)
+        }
         Some((player, about)) => format!("{about:?} ← {player:?}"),
         None => "没人挂着待决事项".to_string(),
     }
@@ -640,6 +668,27 @@ fn format_jackpot(view: &DumpView) -> String {
     )
 }
 
+/// 魔法屋这一场法事（P13）。
+///
+/// 没在办的时候也要写一句「没在办」：空栏既可能是「没在办」也可能是「面板没读到」，
+/// 那两种在排查时差一整趟（与 P11c② 那条「两家都开着」同一条理由）。
+/// 草稿里那份名单是**第二步窗口念的、与法术真正落到的同一批人** —— 查「女巫筛出的怎么
+/// 不是我以为的那几个」，这一栏是唯一一处能同时看见条件与名单的地方。
+fn format_magic(view: &DumpView) -> String {
+    let Some((filter, found)) = view.magic.draft.as_ref() else {
+        return match view.pending.active() {
+            Some((_, Pending::Magic)) => "第一步：等玩家挑一条条件（还没筛人）".to_string(),
+            _ => "没在办".to_string(),
+        };
+    };
+    let who = found
+        .iter()
+        .map(|e| who_are(view, *e))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("条件「{}」筛出 {} 人：{who}", filter.label(), found.len())
+}
+
 fn format_auction(view: &DumpView) -> String {
     let machine = &view.auction;
     let queued = machine.standby.len() + machine.liquidation.len();
@@ -710,6 +759,22 @@ fn who_are(view: &DumpView, player: Entity) -> String {
 fn format_players(view: &DumpView) -> Vec<String> {
     // 保单按实体对回去（见 DumpView.insured 的注释）：身上有单的人才写「投保剩N天」
     let insured: std::collections::HashMap<Entity, &Insured> = view.insured.iter().collect();
+    // 性别同样按实体对回去（见 DumpView.genders 的注释）。写出来是因为 P13 那两条
+    // 「所有女生／所有男生」的筛选条件读的就是它，而「女巫怎么把他筛进来了」这个问题
+    // 在别的栏里一个字都看不见
+    let genders: std::collections::HashMap<Entity, &'static str> = view
+        .genders
+        .iter()
+        .map(|(e, g)| {
+            (
+                e,
+                g.map_or("？", |g| match g {
+                    game_core::prelude::Gender::Male => "男",
+                    game_core::prelude::Gender::Female => "女",
+                }),
+            )
+        })
+        .collect();
     let mut rows: Vec<(u32, String)> = view
         .players
         .iter()
@@ -819,7 +884,7 @@ fn format_players(view: &DumpView) -> Vec<String> {
                 (
                     id.0,
                     format!(
-                        "P{:<2} {:<6} 现金 {:>7} 点券 {:>4} 存 {:>6} 贷 {:>6} {:<18} 牌 {:<12} 护 {:<4} 具 {:<12} 载 {:<4} {:?}",
+                        "P{:<2} {:<6} 现金 {:>7} 点券 {:>4} 存 {:>6} 贷 {:>6} {:<18} 牌 {:<12} 护 {:<4} 具 {:<12} 别 {:<2} 载 {:<4} {:?}",
                         id.0,
                         name.0,
                         wallet.cash,
@@ -830,6 +895,7 @@ fn format_players(view: &DumpView) -> Vec<String> {
                         cards,
                         guard,
                         items,
+                        genders.get(&entity).copied().unwrap_or("？"),
                         mount.label(),
                         entity
                     ),

@@ -27,6 +27,7 @@ fn trio() -> GameSetup {
             .map(|(i, name)| PlayerSetup {
                 name: (*name).to_string(),
                 color: PLAYER_COLORS[i],
+                gender: game_core::player::Gender::Male,
             })
             .collect(),
     }

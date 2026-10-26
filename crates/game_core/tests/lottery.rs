@@ -34,8 +34,8 @@ use game_core::prelude::{
 /// P11 的新闻中心插在 13 号、它跟着顺移到 19 号）。
 /// 两个数写在一起是因为前置要算「走 face 步正好落到 19 号」—— 环一变长这条就得重数，
 /// 而 `board.rs` 的环断言与 `tools/validate_board.py` 会一起响。
-const LOOP: u32 = 20;
-const COUNTER: u32 = 19;
+const LOOP: u32 = 21;
+const COUNTER: u32 = 20;
 
 /// 默认那套规则：36 个号、一注 1000、月息 5%。
 fn rules() -> GameRules {

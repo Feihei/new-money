@@ -17,10 +17,10 @@ use game_core::prelude::{
     BuildingKind, BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind,
     CompanyCharged, Decision, Detention, DetentionPlace, EffectOutcome, Facility, Gavel, Hand,
     Institution, Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets,
-    MortgageDeny, MortgageOp, Owner, Pending, PendingDecision, PlayerId, PlayerName, Rng,
-    ServiceCharged, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed,
-    bidders, buy_allowed, buyback, counter_plots, mortgage_op_allowed, read_facts, restock,
-    shop_op_allowed,
+    MagicFilter, MagicRitual, MagicSpell, MortgageDeny, MortgageOp, Owner, Pending,
+    PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf, ShopDeny, ShopStock,
+    TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders, buy_allowed, buyback,
+    counter_plots, filter_targets, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -199,6 +199,12 @@ pub(crate) struct ModalView<'w, 's> {
     hands: Query<'w, 's, &'static Hand, With<PlayerId>>,
     /// 彩票柜台要读的第三张账（P8）。它是资源而不是世界状态：同一时刻只有柜台前那位看得见
     jackpot: Res<'w, Jackpot>,
+    /// 魔法屋这一场法事的草稿（P13）：第二步那一屏念的是「女巫按这条条件筛出了谁」，
+    /// 而那份名单只在资源里 —— 面板不许自己再筛一遍，两处各筛迟早漂
+    ritual: Res<'w, MagicRitual>,
+    /// 回合机此刻在问谁。第一步那一屏的「走路的人」要按规则层同一个读数筛
+    /// （`magic_filter_system` 读的是同一句 `order.current()`）
+    order: Res<'w, TurnOrder>,
     /// 他手里有哪几个号。与 `hands` 同一形：只有彩票柜台用得上
     tickets: Query<'w, 's, &'static LotteryTickets, With<PlayerId>>,
     open: Query<'w, 's, (Entity, &'static ModalRoot)>,
@@ -213,10 +219,14 @@ pub(crate) struct ModalView<'w, 's> {
 pub(crate) fn sync_modal(
     mut commands: Commands,
     font: Res<DevFont>,
-    books: Books,
+    desk: game_core::magic::FilterDesk<'_, '_>,
     names: Query<&PlayerName>,
     view: ModalView<'_, '_>,
 ) {
+    // `Books` 从 `desk` 里拿，而不是再开一条参数：`FilterDesk` 本身就揣着一份（筛人要用账本），
+    // 同一 system 里两条对 `GameSession` 的可变借用会在参数建立期直接撞
+    // （§6.1 坑 33 的资源版，`magic.rs` 里那条 `CardSink` 的注写的是同一件事）
+    let books = &desk.books;
     let want = view.pending.active();
     // 柜台前那位手里有哪几张（卖回那一排的内容，也进签名）
     let held: Vec<CardId> = want
@@ -225,14 +235,14 @@ pub(crate) fn sync_modal(
         .unwrap_or_default();
     // 银行柜台那一节「你的地产」：只有柜台开着才算，别的模态不读地块表
     let plots: Vec<PlotRow> = match want {
-        Some((player, Pending::BankTeller)) => plot_rows(&books, player),
+        Some((player, Pending::BankTeller)) => plot_rows(books, player),
         _ => Vec::new(),
     };
     // 融资一排候选（P10d②）：只有银行保险的董事长在柜台前才算。
     // 名字在这里查好 —— 与 `bails`/`service` 同一条分工，收屏那一侧只管画
     let fins: Vec<(Entity, String, i64)> = match want {
         Some((player, Pending::BankTeller)) => {
-            if game_core::company::chairman_of(&books, game_core::company::FINANCE_STOCK)
+            if game_core::company::chairman_of(books, game_core::company::FINANCE_STOCK)
                 != Some(player)
             {
                 Vec::new()
@@ -259,20 +269,20 @@ pub(crate) fn sync_modal(
     };
     // 保释窗口的一排候选：只有保释窗口才算（P4③）
     let bails: Vec<BailRow> = match want {
-        Some((player, Pending::Bail(place))) => bail_rows(&books, &names, player, place),
+        Some((player, Pending::Bail(place))) => bail_rows(books, &names, player, place),
         _ => Vec::new(),
     };
     // 服务费收据的读数（P10c）：只有那张收据才算。名字与地块名在这里查好，
     // 收据那一屏拿到的就是一份可以直接上屏的东西 —— 与 `bails` 同一条分工
     let service: Option<ServiceRow> = match want {
         Some((_player, Pending::ServiceNotice(land))) => {
-            service_row(&books, &names, &view.bill, land)
+            service_row(books, &names, &view.bill, land)
         }
         _ => None,
     };
     // 公司收据的读数（P10d①）：只有那张收据才算。与 `service` 同一条分工
     let company: Option<CompanyRow> = match want {
-        Some((_player, Pending::CompanyNotice)) => company_row(&books, &names, &view.company_bill),
+        Some((_player, Pending::CompanyNotice)) => company_row(books, &names, &view.company_bill),
         _ => None,
     };
     // 彩票柜台的读数：只有它开着才算（P8）。判据要的现金、号码池、已有的号都在这里，
@@ -310,15 +320,50 @@ pub(crate) fn sync_modal(
             cash: books.balance(player),
             denied_by_god: books.acquire_denied(player),
             queued: books.auction.standby.len() + books.auction.liquidation.len(),
-            eligible: bidders(&books, lot.by()),
+            eligible: bidders(books, lot.by()),
             lot,
+        }),
+        _ => None,
+    };
+    // 魔法屋第一步（P13）：11 条条件各自筛出谁。名单与规则层算的是**同一个函数**
+    // （`magic::filter_targets`），所以「按钮亮着却筛不出人」与「面板说三个人、法术落到
+    // 两个人」这两种形状都写不出来。空名单那几条灰着，理由就写在行右。
+    // 「走路的人」按 `order.current()` 算 —— `magic_filter_system` 读的是同一句。
+    let magic_rows: Vec<MagicRow> = match want {
+        Some((player, Pending::Magic)) => {
+            let walker = view.order.current().unwrap_or(player);
+            MagicFilter::ALL
+                .iter()
+                .map(|f| MagicRow {
+                    filter: *f,
+                    who: filter_targets(*f, walker, &desk)
+                        .iter()
+                        .filter_map(|e| names.get(*e).ok().map(|n| n.0.clone()))
+                        .collect(),
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    // 第二步念的是这场法事的草稿（规则层筛完存进去的那一份），不是再筛一遍：
+    // 从「答完条件」到「点开法术」之间世界可能动了（有人破产、有人被新闻搬走），
+    // 再筛一次会给玩家一份与真正挨那一下的名单不同的名单
+    let magic_draft: Option<(MagicFilter, Vec<String>)> = match want {
+        Some((_, Pending::MagicSpell(_))) => view.ritual.draft.as_ref().map(|(f, found)| {
+            (
+                *f,
+                found
+                    .iter()
+                    .filter_map(|e| names.get(*e).ok().map(|n| n.0.clone()))
+                    .collect(),
+            )
         }),
         _ => None,
     };
     let stamp = want.map_or(String::new(), |(player, about)| {
         modal_stamp(
             about,
-            &books,
+            books,
             player,
             ModalExtra {
                 stock: &view.stock,
@@ -329,6 +374,8 @@ pub(crate) fn sync_modal(
                 bid: bid.as_ref(),
                 service: service.as_ref(),
                 company: company.as_ref(),
+                magic: &magic_rows,
+                draft: magic_draft.as_ref(),
             },
         )
     });
@@ -351,45 +398,45 @@ pub(crate) fn sync_modal(
         // 这里要的只是「建了哪一屏」这个副作用
         match about {
             Pending::Buy(land) => {
-                buy_modal(&mut commands, &font, &books, player, land, stamp);
+                buy_modal(&mut commands, &font, books, player, land, stamp);
             }
             Pending::Upgrade(land) => {
-                upgrade_modal(&mut commands, &font, &books, player, land, stamp);
+                upgrade_modal(&mut commands, &font, books, player, land, stamp);
             }
             Pending::RentNotice(land) => {
-                rent_modal(&mut commands, &font, &books, &names, player, land, stamp);
+                rent_modal(&mut commands, &font, books, &names, player, land, stamp);
             }
             Pending::Card => {
                 card_modal(&mut commands, &font, &view.memory, player, stamp);
             }
             Pending::BankTeller => {
-                bank_modal(&mut commands, &font, &books, player, stamp, &plots, &fins);
+                bank_modal(&mut commands, &font, books, player, stamp, &plots, &fins);
             }
             Pending::Shop => {
                 shop_modal(
                     &mut commands,
                     &font,
-                    &books,
-                    &shop_rows(&books, &view.shelf, &view.stock, player, &held),
+                    books,
+                    &shop_rows(books, &view.shelf, &view.stock, player, &held),
                     player,
                     stamp,
                 );
             }
             Pending::Bail(place) => {
-                bail_modal(&mut commands, &font, &books, player, place, &bails, stamp);
+                bail_modal(&mut commands, &font, books, player, place, &bails, stamp);
             }
             // 建设窗口（P10c）。候选与灰按钮的判据全在 `Books::build_probe` 里 ——
             // 面板不在自己这一侧另算一遍价（P9 那条「写的与扣的必须同一个表达式」）。
             // 建成之后窗口照开（`decision_system` 那一格的注）：这一屏会重建成
             // 「这里已经立着设施」的样子，玩家按「离开」才走
             Pending::Build(land) => {
-                build_modal(&mut commands, &font, &books, player, land, stamp);
+                build_modal(&mut commands, &font, books, player, land, stamp);
             }
             // 远程建设窗口（P10d②）。与 `build_modal` 同一条分工：候选与灰按钮的判据
             // 全在 `economy::can_upgrade`（就是 `Books::upgrade` 认的那张表）；
             // 升完窗口照开，按「先不建」才收摊
             Pending::RemoteBuild => {
-                remote_build_modal(&mut commands, &font, &books, player, stamp);
+                remote_build_modal(&mut commands, &font, books, player, stamp);
             }
             // 服务费收据（P10c）。与租金收据同一族：钱已经扣完（或被吃成 0），
             // 这一屏只负责把「摇了几点、住了几天」说出来。读数在 `sync_modal` 那边
@@ -429,7 +476,7 @@ pub(crate) fn sync_modal(
             // 事实：拿默认读数建一屏比整块不建更难查。
             Pending::Lottery => {
                 if let Some(desk) = lottery.as_ref() {
-                    lottery_modal(&mut commands, &font, &books, desk, player, stamp);
+                    lottery_modal(&mut commands, &font, books, desk, player, stamp);
                 }
             }
             // 拍卖台（P9）。它与彩票柜台同一条形状：一个窗口、两颗动作按钮。
@@ -439,6 +486,26 @@ pub(crate) fn sync_modal(
             Pending::Auction => {
                 if let Some(desk) = bid.as_ref() {
                     auction_modal(&mut commands, &font, &names, desk, player, stamp);
+                }
+            }
+            // 魔法屋的两步（P13）：两个窗口两个 builder，因为**候选来源不同** ——
+            // 第一步读 `MagicFilter::ALL` 加现筛的名单，第二步读的是规则层存进草稿的那一份。
+            // 合成一屏的话，「答完条件之后名单变了」这件事就没有地方说
+            Pending::Magic => {
+                magic_filter_modal(&mut commands, &font, player, &magic_rows, stamp);
+            }
+            Pending::MagicSpell(filter) => {
+                if let Some((f, who)) = magic_draft.as_ref() {
+                    magic_spell_modal(&mut commands, &font, player, *f, who, stamp);
+                } else {
+                    // 草稿与窗口分叉了（规则层那句 `warn!` 的画面对照）：宁可说一句「名单没了」，
+                    // 也不摆一排点下去落向未知名单的法术
+                    fallback_note(
+                        &mut commands,
+                        &font,
+                        (player, Pending::MagicSpell(filter)),
+                        "这场法事的名单不在了",
+                    );
                 }
             }
             // 游乐场（P7）**不在这里建面板**：模态的内容是「弹出那一刻烤死」的，
@@ -475,6 +542,20 @@ struct ModalExtra<'a> {
     /// 公司收据的读数（P10d①）。与 `service` 同一条理由：`RecentCompany` 是消息留下的，
     /// 内容本身就是判据
     company: Option<&'a CompanyRow>,
+    /// 魔法屋第一步的候选（P13）：每条条件筛出谁 —— 「哪几颗该灰、行右写谁」都由它决定，
+    /// 所以它是判据而不是文案。`Pending::Magic` 之外那一屏传空表
+    magic: &'a [MagicRow],
+    /// 魔法屋第二步的草稿（P13）：条件 + 已筛出的名单。名单变了这一屏就得重建 ——
+    /// 否则玩家对着一份「还写着三个人」的名单点出一道只落到两个人头上的法术
+    draft: Option<&'a (MagicFilter, Vec<String>)>,
+}
+
+/// 魔法屋第一步的一行（P13）：一条条件与它筛出的人名。
+///
+/// 名字在这里查好（与 `bails`/`service` 同一条分工）：收屏那一侧只管画，不回头开查询。
+pub(crate) struct MagicRow {
+    pub filter: MagicFilter,
+    pub who: Vec<String>,
 }
 
 fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<'_>) -> String {
@@ -598,6 +679,20 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
                 desk.queued,
                 desk.cash,
             )
+        }),
+        // 魔法屋第一步（P13）：签名是**每条条件筛出谁**。名单一动（有人破产、被新闻搬走、
+        // 换了载具）这一屏就得重建 —— 少这一位，玩家会对着一个「还亮着却已经筛不出人」的
+        // 按钮点下去，而规则层当场落空（`magic_filter_system` 那条空名单直接收摊的分支）
+        Pending::Magic => extra
+            .magic
+            .iter()
+            .map(|row| format!("{}:{}", row.filter.label(), row.who.join("+")))
+            .collect::<Vec<_>>()
+            .join(","),
+        // 第二步（P13）：条件 + 草稿名单。条件是窗口自己带的（换条件＝换一场法事），
+        // 名单是资源里的那一份 —— 两位都进签名，因为面板上那行字就是这两样
+        Pending::MagicSpell(_) => extra.draft.map_or(String::new(), |(f, who)| {
+            format!("{}|{}", f.label(), who.join("+"))
         }),
         // 游乐场那一屏不由 `sync_modal` 建（见下面那个空分支），所以这里没有要签名的东西：
         // 它的可见内容每帧都在动，由 `ui/minigame.rs` 自己就地改，不走「签名变了才重建」那条路
@@ -2468,6 +2563,224 @@ fn bail_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &BailRow) {
         if let Some(reason) = row.blocked {
             line.spawn(label(&font.0, reason, size::ROW, col::JAILED));
         }
+    });
+}
+
+// ===== 魔法屋（P13）=====
+
+/// 魔法屋**第一步**：女巫给的筛选条件（11 条）。
+///
+/// 「玩家不能指定具体人」是玩法不是限制（PLAN §三 那行）—— 指定人会把「害人」变成一次
+/// 查名操作，条件把它变成一次博弈。所以这一屏不摆一排名字，而摆 11 条条件、每条右边跟着
+/// **它此刻筛出谁**；筛不出人的那几条灰掉，理由就写在行右（这一屏 11 行的理由各不相同，
+/// 逐行写才是省的 —— 与彩票那种「36 颗共用一句总理由」正好相反）。
+fn magic_filter_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    player: Entity,
+    rows: &[MagicRow],
+    stamp: String,
+) -> Entity {
+    frame(
+        commands,
+        (player, Pending::Magic),
+        stamp,
+        layout::MAGIC_PANEL,
+        col::BORDER_MAGIC,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                "魔法屋",
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                "女巫只按条件指人 —— 挑一条，右边是她筛出的谁",
+                size::ROW,
+                col::MUTED,
+            ));
+            p.spawn(separator());
+            magic_list(p, |list| {
+                for row in rows {
+                    magic_filter_row(list, font, row);
+                }
+            });
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "离开",
+                        layout::MODAL_BUTTON,
+                        super::PRIMARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
+}
+
+/// 两步各自的那一截列表，收进一个自己的容器里排。
+///
+/// **不是美化**：面板的 `row_gap` 是 10，那是给「标题 / 分隔线 / 按钮行」这种异质块留的节奏。
+/// 第二步直接铺 12 行时总高 686，唯一的出口「离开」落到 y≈732 —— 720 高的客户区里点不到，
+/// 而这颗是「这一趟不作法」的唯一路径（十二颗法术各点下去都必定收窗口）。截图量过：
+/// 那一屏一个主色像素都没有。列表自己拿 2px 行距之后那颗量回来在 y=641..680（第一步的
+/// 在 y=569..609）—— 两个数都是从 PNG 上量的，不是按布局常量算的。
+fn magic_list(p: &mut ChildSpawnerCommands, rows: impl FnOnce(&mut ChildSpawnerCommands)) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: Val::Px(layout::MAGIC_LIST_GAP),
+        ..default()
+    })
+    .with_children(|list| rows(list));
+}
+
+/// 第一步的一行：「一颗条件按钮 + 这一条筛出谁」。
+///
+/// 名单在 `sync_modal` 那侧就算好（`MagicRow.who`），这里一个字不判断 —— 「灰不灰」读的
+/// 是同一条 `filter_targets` 的结果，面板与规则层因此不可能各说各话。
+fn magic_filter_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &MagicRow) {
+    let empty = row.who.is_empty();
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        row_gap: Val::Px(layout::MAGIC_ROW_GAP),
+        ..default()
+    })
+    .with_children(|line| {
+        button(
+            line,
+            &font.0,
+            ButtonSpec::new(
+                row.filter.label(),
+                layout::MAGIC_BUTTON,
+                super::SECONDARY,
+                UiAction::MagicFilter(row.filter),
+            )
+            .disabled(empty),
+        );
+        line.spawn((
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            label(
+                &font.0,
+                if empty {
+                    "没人命中 —— 这一条落空".to_string()
+                } else {
+                    row.who.join("、")
+                },
+                size::ROW,
+                if empty { col::KEY } else { col::BODY },
+            ),
+        ));
+    });
+}
+
+/// 魔法屋**第二步**：12 道法术，挑一道落到草稿那份名单上。
+///
+/// 名单是资源里的那一份（`MagicRitual.draft`），不是这里再筛一次 —— 从答完条件到点开法术
+/// 之间世界可能动了，再筛一次会给玩家一份与真正挨那一下不同的名单。
+///
+/// 十二颗按钮**全亮着**：这一屏不灰任何一道。落空是这一格的合法结果（脚下没有可加盖的地、
+/// 手里本来没卡、道具栏是空的），那一句「什么都没发生」由顶栏念出来（`MagicCast.targets`
+/// 是空的）。反过来把「会不会落空」的十二判据各写一遍进面板，就是让灰按钮与规则层分叉 ——
+/// 与保释/柜台那种「一张拒绝表两处读」不同，这里没有拒绝表，只有一条「落不落得空」的返回值。
+fn magic_spell_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    player: Entity,
+    filter: MagicFilter,
+    who: &[String],
+    stamp: String,
+) -> Entity {
+    frame(
+        commands,
+        (player, Pending::MagicSpell(filter)),
+        stamp,
+        layout::MAGIC_PANEL,
+        col::BORDER_MAGIC,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                format!("女巫按「{}」筛出 {}", filter.label(), who.join("、")),
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                format!("挑一道 —— 落到这 {} 个人头上", who.len()),
+                size::ROW,
+                col::MUTED,
+            ));
+            p.spawn(separator());
+            magic_list(p, |list| {
+                for spell in MagicSpell::ALL {
+                    magic_spell_row(list, font, filter, spell);
+                }
+            });
+            p.spawn(separator());
+            p.spawn(label(
+                &font.0,
+                "只有坐牢与住院两道挡得住（免罪卡）—— 其余十道不受任何卡影响",
+                size::SMALL,
+                col::KEY,
+            ));
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "离开",
+                        layout::MODAL_BUTTON,
+                        super::PRIMARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
+}
+
+/// 第二步的一行：「一颗法术按钮 + 它落到人头上是什么」。
+///
+/// 说明取自 core 的 `MagicSpell::desc` —— 文案在规则层，面板只念（与卡面 `desc` 同一条分工）。
+fn magic_spell_row(
+    p: &mut ChildSpawnerCommands,
+    font: &DevFont,
+    filter: MagicFilter,
+    spell: MagicSpell,
+) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        row_gap: Val::Px(layout::MAGIC_ROW_GAP),
+        ..default()
+    })
+    .with_children(|line| {
+        button(
+            line,
+            &font.0,
+            ButtonSpec::new(
+                spell.label(),
+                layout::MAGIC_BUTTON,
+                super::SECONDARY,
+                UiAction::MagicSpell(filter, spell),
+            ),
+        );
+        line.spawn((
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            label(&font.0, spell.desc(), size::SMALL, col::BODY),
+        ));
     });
 }
 

@@ -13,8 +13,9 @@ use bevy::prelude::NextState;
 use common::*;
 use game_core::prelude::{ActiveBoard, GameSession, TileKind, TurnPhase};
 
-/// prototype 上的点券箱（`assets/data/boards/prototype.json` 的 14 号格）。
-const BOX: u32 = 14;
+/// prototype 上的点券箱（`assets/data/boards/prototype.json` 的 15 号格 —— P13 在 8 与老 9
+/// 之间插了魔法屋，环上 9 号往后全部顺移一格）。
+const BOX: u32 = 15;
 
 fn land(app: &mut App) {
     play_turns(app, turn_count(app) + 1);

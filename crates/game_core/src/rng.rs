@@ -89,6 +89,13 @@ const NEWS_TAG: u64 = 0xBE5F_0000_0000_0010;
 /// 已有的流，「这一回合擦过谁的肩」都会挪动别人的随机数。而抢走哪张卡是玩家会回头对的事
 /// （「我那张停在我手里好好的卡怎么没了」），同一颗种子必须两次抢走同一张。
 const VILLAIN_TAG: u64 = 0x7A1A_0000_0000_0011;
+/// P13：魔法屋女巫的抽签（「得一张卡」发下的是哪一张）。
+///
+/// 单独一条的理由与百货、神明那两条同形：**施法发生在别人回合的落格帧上**，
+/// 并进任何一条已有的流，「这一趟踩没踩魔法屋」都会挪动别人的随机数。
+/// 而发下哪张卡是玩家会回头对的事（「上次同种子也该是这张」），同一颗种子必须
+/// 两次发下同一张。
+const MAGIC_TAG: u64 = 0x9A61_C000_0000_0012;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +130,7 @@ pub struct Rng {
     freebie: ChaCha8Rng,
     news: ChaCha8Rng,
     villain: ChaCha8Rng,
+    magic: ChaCha8Rng,
 }
 
 impl Rng {
@@ -147,6 +155,7 @@ impl Rng {
             freebie: ChaCha8Rng::seed_from_u64(seed ^ FREEBIE_TAG),
             news: ChaCha8Rng::seed_from_u64(seed ^ NEWS_TAG),
             villain: ChaCha8Rng::seed_from_u64(seed ^ VILLAIN_TAG),
+            magic: ChaCha8Rng::seed_from_u64(seed ^ MAGIC_TAG),
         }
     }
 
@@ -158,6 +167,11 @@ impl Rng {
     /// 恶人那一条流（P12）：强盗擦肩抢走受害者手牌里的第几张。
     pub fn pick_villain(&mut self, span: RangeInclusive<u32>) -> u32 {
         self.villain.random_range(span)
+    }
+
+    /// 魔法屋那一条流（P13）：「得一张卡」那道法术发下货架上的第几张。
+    pub fn pick_magic(&mut self, span: RangeInclusive<u32>) -> u32 {
+        self.magic.random_range(span)
     }
 
     /// 服务收费那一条流（P10）：购物中心掷几点、旅馆住几天、航空转盘停几段。

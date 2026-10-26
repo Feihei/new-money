@@ -679,8 +679,8 @@ mod tests {
         assert!(within_chebyshev(&b, TileIndex(6), TileIndex(7), 1));
         assert!(within_chebyshev(&b, TileIndex(6), TileIndex(6), 1));
         assert!(!within_chebyshev(&b, TileIndex(6), TileIndex(2), 1));
-        // 环上的距离与此无关：16 号 (0,1) 与 0 号 (1,1) 相邻，13 号 (1,3) 不相邻
-        assert!(within_chebyshev(&b, TileIndex(16), TileIndex(0), 1));
-        assert!(!within_chebyshev(&b, TileIndex(16), TileIndex(13), 1));
+        // 环上的距离与此无关：18 号 (0,1) 与 0 号 (1,1) 相邻，13 号 (1,4) 不相邻
+        assert!(within_chebyshev(&b, TileIndex(18), TileIndex(0), 1));
+        assert!(!within_chebyshev(&b, TileIndex(18), TileIndex(13), 1));
     }
 }

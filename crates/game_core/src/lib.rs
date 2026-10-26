@@ -32,6 +32,7 @@ pub mod land;
 pub mod landing;
 pub mod loader;
 pub mod lottery;
+pub mod magic;
 pub mod market;
 pub mod minigame;
 pub mod mortgage;
@@ -117,6 +118,10 @@ pub mod prelude {
         Jackpot, LotteryDeny, LotteryTickets, accrue_jackpot_interest_system, buy_allowed,
         draw_lottery_system, lottery_op_system, settle_lottery_landing,
     };
+    pub use crate::magic::{
+        MagicFilter, MagicRitual, MagicSpell, filter_targets, magic_filter_system,
+        magic_spell_system, settle_magic_landing,
+    };
     pub use crate::market::{
         Halt, Market, MarketClock, market_halt, market_tick_on_turn_end_system,
         settle_market_landing, trade_request_system,
@@ -138,7 +143,8 @@ pub mod prelude {
         FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GiftGiven, GiftsGiven,
         GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, IndemnityPaid, ItemPlaced,
         ItemThieved, JackpotChanged, JackpotWhy, LandBought, LandTaken, LandUpgraded,
-        LotteryBought, LotteryDrawn, LotteryWon, MinigameResult, MinigameScore, MortgageDone,
+        LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicFilterPicked,
+        MagicOffered, MagicSpellPicked, MagicTargets, MinigameResult, MinigameScore, MortgageDone,
         MortgageOp, MortgageRequested, MountChanged, MoveCapped, NewsAudience, NewsFired, NewsHit,
         NewsNotice, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
         PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, PointsStolen,
@@ -159,9 +165,9 @@ pub mod prelude {
         settle_landing_occupancy_system, spawn_starting_chests, trigger_of, within_chebyshev,
     };
     pub use crate::player::{
-        BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Heading, Insured, Mount,
-        MoveCap, PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, Points, START_TILE,
-        StaySentence, Term, TokenPosition, WalkQueue, Walker, Wallet,
+        BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Gender, Heading, Insured,
+        Mount, MoveCap, PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, Points,
+        START_TILE, StaySentence, Term, TokenPosition, WalkQueue, Walker, Wallet,
     };
     pub use crate::plot::{PlotArea, area_of, is_in_area};
     pub use crate::property::{
@@ -200,7 +206,8 @@ use prelude::{
     FacilityBuilt, FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GameRules,
     GameSeed, GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet,
     IndemnityPaid, ItemPlaced, ItemThieved, JackpotChanged, JsonAssetLoader, LandBought, LandTaken,
-    LandUpgraded, Landing, LotteryBought, LotteryDrawn, LotteryWon, MarketClock, MinigameResult,
+    LandUpgraded, Landing, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast,
+    MagicFilterPicked, MagicOffered, MagicSpellPicked, MagicTargets, MarketClock, MinigameResult,
     MinigameScore, MortgageDone, MortgageRequested, MountChanged, MoveCapped, NewsFired, Paused,
     PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
     PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, PointsStolen, PolicyBought,
@@ -214,9 +221,9 @@ use prelude::{
     build_op_system, decision_system, deliver_calendar_events_system, draw_lottery_system,
     expire_land_status_system, financing_system, finish_halt_system, grant_atm_access_system,
     hoodlum_toll_system, insurance_claim_system, land_deity_succession_system, lottery_op_system,
-    market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system, on_hired_system,
-    place_item_system, play_card_system, remote_build_system, resolve_halt_system,
-    robber_snatch_system, settle_arcade_landing, settle_god_landing_system,
+    magic_filter_system, magic_spell_system, market_tick_on_turn_end_system, minigame_score_system,
+    mortgage_op_system, on_hired_system, place_item_system, play_card_system, remote_build_system,
+    resolve_halt_system, robber_snatch_system, settle_arcade_landing, settle_god_landing_system,
     settle_landing_occupancy_system, shop_op_system, thief_deliver_system, tick_insurance_system,
     top_up_gods_system, trade_request_system, villain_rotation_system, villain_turn_system,
     walk_effect_system, walk_step_system, wander_gods_system,
@@ -263,6 +270,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<EpochOverride>()
             .init_resource::<HolidaySet>()
             .init_resource::<Paused>()
+            .init_resource::<crate::magic::MagicRitual>()
             .init_resource::<WalkClock>()
             .init_resource::<MarketClock>()
             .init_resource::<Landing>()
@@ -387,6 +395,13 @@ impl Plugin for CoreGamePlugin {
             .add_message::<CardSnatched>()
             .add_message::<TollExtorted>()
             .add_message::<RentRerouted>()
+            // ===== 魔法屋（P13）=====
+            .add_message::<MagicOffered>()
+            .add_message::<MagicFilterPicked>()
+            .add_message::<MagicTargets>()
+            .add_message::<MagicSpellPicked>()
+            .add_message::<MagicCast>()
+            .add_message::<MagicBlocked>()
             // ===== 抵押与赎回（P3d③）=====
             .add_message::<MortgageRequested>()
             .add_message::<MortgageDone>()
@@ -601,6 +616,15 @@ impl Plugin for CoreGamePlugin {
                     remote_build_system
                         .run_if(resource_exists::<ActiveBoard>)
                         .run_if(not_paused),
+                    // 魔法屋的两步回答（P13）：条件与法术各一条意图消息，规则层判窗口
+                    // 与主语。两条都带 CardSink（里面是 Books），所以接在同一条 chain 的尾部
+                    // —— 与保释/柜台那族同一条纪律：谁先办都不改结果，只是不能并行借同一份账本。
+                    magic_filter_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
+                    magic_spell_system
+                        .run_if(resource_exists::<ActiveBoard>)
+                        .run_if(not_paused),
                 )
                     .chain(),
             )
@@ -665,10 +689,18 @@ impl Plugin for CoreGamePlugin {
             // 是因为新闻动的正是上面那些域管着的东西（钱、归属、身上的计时）——
             // 它必须读到「这一趟已经结完」的世界，否则同一帧里地产租金与新闻课税会各按
             // 一半的账本走。14 元组已顶满上限，与上面两条同一手法用 `.after`/`.before` 接链
+            // 魔法屋（P13）：开两步窗口的第一步，同样排在全部域结算之后 ——
+            // 它要读的是「这一趟已经结完」的世界（脚下地、名下账）
+            .add_systems(
+                OnEnter(TurnPhase::Landed),
+                magic::settle_magic_landing
+                    .after(bail::settle_bail_landing_system)
+                    .before(landing::close_landing_system),
+            )
             .add_systems(
                 OnEnter(TurnPhase::Landed),
                 news::settle_news_landing_system
-                    .after(bail::settle_bail_landing_system)
+                    .after(magic::settle_magic_landing)
                     .before(landing::close_landing_system),
             )
             // 董事长白拿一件（P10d②）：接在 `settle_shop_landing` 之后 —— 货架刚

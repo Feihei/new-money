@@ -23,7 +23,7 @@ use game_core::prelude::{
 
 /// prototype 的两条分支接入点。
 const JAIL_JUNCTION: u32 = 2;
-const HOSPITAL_JUNCTION: u32 = 9;
+const HOSPITAL_JUNCTION: u32 = 10;
 
 fn other(app: &mut App, player: Entity) -> Entity {
     roster(app)
@@ -166,6 +166,7 @@ fn the_jail_gate_cannot_release_a_patient_from_the_hospital() {
     setup.players.push(PlayerSetup {
         name: "王小二".into(),
         color: PLAYER_COLORS[2],
+        gender: game_core::player::Gender::Male,
     });
     let mut app = boot(setup, GameRules::instant(), seed_rolling_first(1));
     app.insert_resource(DecisionPolicy::Hold);

@@ -407,11 +407,22 @@ pub struct Bankrupt;
 /// （`game_state.gd:42`），棋盘校验保证主环非空。
 pub const START_TILE: TileIndex = TileIndex(0);
 
+/// 玩家性别（P13 魔法屋「所有女生／所有男生」两条筛选条件的唯一来源）。
+///
+/// 为什么要一个字段而不是从名字猜：那是第二份真相 —— 名字是文案，文案改了
+/// 筛选结果就跟着变。CHARACTERS.md 的角色档案本来就有这一栏，它是开局配置的一部分。
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gender {
+    Male,
+    Female,
+}
+
 /// 开局时一个玩家的配置项。 spawned 之后就不再读。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerSetup {
     pub name: String,
     pub color: PlayerColor,
+    pub gender: Gender,
 }
 
 /// 对局配置：玩家名单。表现层/测试在开局前插入即可覆盖默认阵容。
@@ -428,10 +439,12 @@ impl Default for GameSetup {
                 PlayerSetup {
                     name: "阿土伯".into(),
                     color: PLAYER_COLORS[0],
+                    gender: Gender::Male,
                 },
                 PlayerSetup {
                     name: "孙小美".into(),
                     color: PLAYER_COLORS[1],
+                    gender: Gender::Female,
                 },
             ],
         }
@@ -456,6 +469,8 @@ pub fn spawn_players(commands: &mut Commands, setup: &GameSetup, rules: &GameRul
                         Walker,
                         PlayerName(p.name.clone()),
                         p.color,
+                        // 性别（P13 魔法屋那两条筛选条件的读数）：与名字同属「他是谁」那一组
+                        p.gender,
                     ),
                     (
                         Wallet {

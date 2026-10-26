@@ -28,9 +28,9 @@ use game_core::prelude::{
     StaySentence, StockSet, Term, TileKind, TradeSide, TurnPhase, date_of,
 };
 
-/// 演示盘上的新闻中心（`prototype.json` 的 13 号格，`(0,4)`）。
+/// 演示盘上的新闻中心（`prototype.json` 的 14 号格，`(0,4)`；P13 插了魔法屋之后从 13 顺移）。
 /// `board.rs::diagonal_segments_count_is_three` 与 `tools/validate_board.py` 钉着同一个数。
-const NEWS: u32 = 13;
+const NEWS: u32 = 14;
 /// 起始现金（`GameRules::default`），现金审计的基准。
 const START: i64 = 20_000;
 

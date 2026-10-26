@@ -1351,3 +1351,63 @@ pub struct RentRerouted {
     pub land: LandId,
     pub amount: i64,
 }
+
+// ===== 魔法屋（P13）=====
+
+/// 一位玩家踩到魔法屋，女巫的两步法事开台（P13）。
+///
+/// 它只是**报到**：条件的候选名单、施法的出口都在窗口里，规则层不预设任何一步。
+/// 与 [`BankVisited`] 同一条形状 —— 面板与 autopilot 读它弹 UI。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MagicOffered {
+    pub player: Entity,
+}
+
+/// 玩家选定了一条**筛选条件**（第一步的回答，P13）。
+///
+/// 这是意图不是结果：条件合不合法、筛出几个人，由 [`crate::magic::magic_filter_system`]
+/// 对着窗口判。与 [`RequestRoll`] 同一条纪律 —— 人、AI、旋钮发同一条。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MagicFilterPicked {
+    pub player: Entity,
+    pub filter: crate::magic::MagicFilter,
+}
+
+/// 女巫按条件筛出了**这些人**（第二步窗口的名单，P13）。
+///
+/// 名单带在消息上而不是让 UI 自己再筛一遍：筛选的口径（并列怎么取、破产者算不算）
+/// 只该有一份答案，而「第二步窗口显示的人」与「法术真正落到的头」必须是同一批。
+/// **空名单也发这一条** —— 那正是「落空」的凭据：窗口当场收掉，第二步不会开。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct MagicTargets {
+    pub player: Entity,
+    pub filter: crate::magic::MagicFilter,
+    pub targets: Vec<Entity>,
+}
+
+/// 玩家选定了**一道法术**（第二步的回答，P13）。与 [`MagicFilterPicked`] 同一条纪律。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MagicSpellPicked {
+    pub player: Entity,
+    pub spell: crate::magic::MagicSpell,
+}
+
+/// 一道法术施放完毕（P13）。`targets` 是**实际生效**的承受者 ——
+/// 被免罪挡掉的那一位不在这里（他有自己的凭据 [`MagicBlocked`]），
+/// 「落空」（脚下没有可加盖的地、手牌本来是空的）也不进名单。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct MagicCast {
+    pub player: Entity,
+    pub spell: crate::magic::MagicSpell,
+    pub targets: Vec<Entity>,
+}
+
+/// 免罪挡下了一道法术（P13）。十二种法术里只有坐牢与住院走得进这一条：
+/// 那两条构造 [`crate::afflict::Affliction`] 过护身，其余十条根本不进那条路 ——
+/// 「不受任何卡与神影响」是构造方式的差别，不是一次查询能答的。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MagicBlocked {
+    pub player: Entity,
+    pub spell: crate::magic::MagicSpell,
+    pub victim: Entity,
+}

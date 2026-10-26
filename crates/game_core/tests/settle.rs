@@ -184,7 +184,10 @@ fn mortgaged_land_charges_nothing_and_opens_no_dialog() {
 /// 所以下面断的是 `(None, 2)` 而不是旧版的 `(None, 0)`。
 #[test]
 fn cant_pay_rent_bankrupts_the_payer_and_frees_their_lands() {
-    let (mut app, p0) = ready_on(5, 6, DecisionPolicy::DeclineAll); // 5 → 11 王府井
+    // 站到「掷 6 点正好踩到王府井（land 4，yellow 整组在地主手里）」那一格 —— 格号现读，
+    // 写死过一次的话插一格之后症状是「没破产，只抽了一张机会牌」
+    let (mut app, p0) = ready_on(0, 6, DecisionPolicy::DeclineAll);
+    stand_to_land(&mut app, p0, 4, 6);
     own(&mut app, 3, Some(0), 2, false); // P0 自己有块徐家汇
     own(&mut app, 4, Some(1), 0, false); // yellow 组
     own(&mut app, 5, Some(1), 0, false); // 整组在手 → 空地租 160×2 = 320
@@ -633,7 +636,9 @@ fn card_tile_draws_exactly_one_card_and_ends_the_turn() {
 /// 缺陷 #3 的直接回归：扣不起的罚款必须真的把人判破产。
 #[test]
 fn a_fine_you_cannot_pay_bankrupts_you_for_real() {
-    let (mut app, p0) = ready_on(5, 5, DecisionPolicy::DeclineAll); // 5 → 10 机会
+    let (mut app, p0) = ready_on(0, 5, DecisionPolicy::DeclineAll);
+    let chance = kind_tile(&app, game_core::prelude::TileKind::Chance);
+    stand_to(&mut app, p0, chance, 5); // 掷 5 点正好踩到机会格（格号现读 —— 写死过一次时这一屏根本抽不到牌，用例照样绿）
     set_cash(&mut app, p0, 1_000);
     stack_card(&mut app, CardKind::Chance, 2); // chance_003 交通罚款 2000
     land(&mut app);
@@ -718,7 +723,9 @@ fn move_to_card_sends_the_token_without_settling_the_new_tile() {
 
 #[test]
 fn a_card_naming_a_missing_tile_says_so_instead_of_guessing() {
-    let (mut app, p0) = ready_on(5, 5, DecisionPolicy::DeclineAll); // 5 → 10 机会
+    let (mut app, p0) = ready_on(0, 5, DecisionPolicy::DeclineAll);
+    let chance = kind_tile(&app, game_core::prelude::TileKind::Chance);
+    stand_to(&mut app, p0, chance, 5); // 掷 5 点正好踩到机会格（格号现读 —— 写死过一次时这一屏根本抽不到牌，用例照样绿）
     // 把一张卡的效果改成「去一个棋盘上不存在的格」：牌堆按 `CardSet` 下标发牌，
     // 卡面在资产里，所以这里就地改资产内容
     {
@@ -735,7 +742,7 @@ fn a_card_naming_a_missing_tile_says_so_instead_of_guessing() {
 
     assert_eq!(
         tile_of(&app, p0),
-        10,
+        chance,
         "格名找不到时不该猜一个位置（Godot 曾把「找不到」回退成 0=起点）"
     );
     assert_eq!(cash_of(&mut app, p0), 20_000, "效果失效就不该有别的副作用");

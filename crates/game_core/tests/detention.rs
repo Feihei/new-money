@@ -22,10 +22,11 @@ use game_core::prelude::{
     TurnPhase,
 };
 
-/// prototype 上的三个格号：5 号是命运格（抽到就是这张卡），2 号挂监狱分支，9 号挂医院分支。
+/// prototype 上的三个格号：5 号是命运格（抽到就是这张卡），2 号挂监狱分支，10 号挂医院分支
+/// （医院挂在徐家汇那一格上，P13 插了魔法屋之后它从 9 顺移到 10）。
 const FATE: u32 = 5;
 const JAIL_JUNCTION: u32 = 2;
-const HOSPITAL_JUNCTION: u32 = 9;
+const HOSPITAL_JUNCTION: u32 = 10;
 
 /// 命运池里某个 id 的下标（与 `item_index` 同一条理由：按名字拿卡，不靠数组位置）。
 fn fate_index(app: &App, id: &str) -> u32 {
@@ -95,7 +96,7 @@ fn a_trip_to_the_ditch_parks_him_at_the_hospital_junction() {
         "掉水沟是住院，不是坐牢"
     );
     assert!(
-        ledger(&app).contains(&"Detain(P0@医院,格9)".to_string()),
+        ledger(&app).contains(&format!("Detain(P0@医院,格{HOSPITAL_JUNCTION})")),
         "流水要带得出他在哪儿：{:?}",
         ledger(&app)
     );
@@ -125,7 +126,8 @@ fn a_hospital_stay_skips_two_turns_and_says_which_door_he_came_back_through() {
         "剩余要逐格递减：{ev:?}"
     );
     assert!(
-        ev.iter().any(|e| e.starts_with("Lifted(P0@医院,格9")),
+        ev.iter()
+            .any(|e| e.starts_with(&format!("Lifted(P0@医院,格{HOSPITAL_JUNCTION}"))),
         "回来那一句要带得出他从哪一格继续走：{ev:?}"
     );
     assert_eq!(detention_of(&app, p0), None, "回来之后组件必须消失");

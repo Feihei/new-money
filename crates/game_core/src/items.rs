@@ -96,7 +96,10 @@ impl Inventory {
         self.counts.values().all(|n| *n == 0)
     }
 
-    /// 进 `n` 个，返回进完之后的持有量。`n == 0` 什么都不做（不是一条错误）。
+    /// 进 `n` 个，返回进完之后的持有量。`n == 0` 什么都不做（不是一条错误）——
+    /// 那句早退是必需的：`entry().or_insert(0)` 会为一次「进 0 个」在表里留下一个
+    /// 计数为 0 的槽，而面板的 `entries()` 就会吐出「路障 0」（与 [`Self::spend`]
+    /// 扣到 0 就删 key 同一条纪律）。
     pub fn gain(&mut self, kind: ItemKind, n: u32) -> u32 {
         if n == 0 {
             return self.count(kind);
@@ -104,6 +107,13 @@ impl Inventory {
         let slot = self.counts.entry(kind).or_insert(0);
         *slot = slot.saturating_add(n);
         *slot
+    }
+
+    /// 全部清空（P13「变卖所有道具」）。返回**变卖前**的那份清单 ——
+    /// 价钱在调用方算（它读的是世界此刻的标价表），这里只负责「一次性见底」；
+    /// 先取后清，两条写不完的中间态没有位置。
+    pub fn clear_all(&mut self) -> Vec<(ItemKind, u32)> {
+        std::mem::take(&mut self.counts).into_iter().collect()
     }
 
     /// 用掉 `n` 个。不够时**一个都不扣**并返回 `false`（与 `Books::spend_points` 同一条

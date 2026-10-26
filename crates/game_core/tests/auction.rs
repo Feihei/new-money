@@ -39,7 +39,7 @@ const LOT: u32 = 3;
 /// 而死者兜里只摆 50 元。
 const LANDLORD_PLOT: u32 = 4;
 /// 王府井踩到格（P10d② 顺移：9 → 11，机会格 8 → 10）。
-const LANDLORD_TILE: u32 = 11;
+const LANDLORD_TILE: u32 = 12;
 /// 死者那点现金：低于这一趟的租，又高到不至于让别的用例误读成「他本来就一分没有」
 const BROKE: i64 = 50;
 
@@ -66,6 +66,7 @@ fn table(n: usize) -> (App, Vec<Entity>) {
             setup.players.push(PlayerSetup {
                 name: name.into(),
                 color: PLAYER_COLORS[seat],
+                gender: game_core::player::Gender::Male,
             });
         }
     }

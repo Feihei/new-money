@@ -39,6 +39,8 @@ pub fn install_if_requested(app: &mut App) {
     let rbuild = ForceRbuild::from_env();
     let news = ForceNews::from_env();
     let villain = ForceVillain::from_env();
+    let magic = ForceMagic::from_env();
+    let spell = ForceSpell::from_env();
     if forced.0.is_none()
         && bail.0.is_none()
         && !items.0
@@ -52,6 +54,11 @@ pub fn install_if_requested(app: &mut App) {
         && !rbuild.0
         && news.0.is_none()
         && villain.0.is_none()
+        // 魔法屋那两步各一条：漏掉任何一条的症状都不是「旋钮不灵」，而是
+        // **整个 DevPlugin 没装** —— 于是 `NM_MAGIC=girls` 拍出来是「今天没人踩到魔法屋」，
+        // 与本模块上面那条「拼错的旋钮值不崩也不红」是同一族坑（P13 第一次冒烟就踩到了）
+        && magic.0.is_none()
+        && spell.0.is_none()
     {
         return;
     }
@@ -128,6 +135,21 @@ pub fn install_if_requested(app: &mut App) {
         info!(
             "开发注入已开启（NM_VILLAIN）：{} 将被当前玩家保释出场（点券补到够，出场行为随消息分派）",
             kind.label()
+        );
+    }
+    if let Some(wanted) = magic.0 {
+        info!(
+            "开发注入已开启（NM_MAGIC）：当前玩家面前摆出魔法屋{}",
+            match wanted {
+                MagicWanted::Menu => "第一步（十一道条件）".to_string(),
+                MagicWanted::Filter(filter) => format!("并替他答了条件「{}」", filter.label()),
+            }
+        );
+    }
+    if let Some(wanted) = spell.0 {
+        info!(
+            "开发注入已开启（NM_SPELL）：第二步窗口一挂上就替他求一道「{}」",
+            wanted.0.label()
         );
     }
     app.add_plugins(DevPlugin);
@@ -362,6 +384,8 @@ impl Plugin for DevPlugin {
             .insert_resource(ForceRbuild::from_env())
             .insert_resource(ForceNews::from_env())
             .insert_resource(ForceVillain::from_env())
+            .insert_resource(ForceMagic::from_env())
+            .insert_resource(ForceSpell::from_env())
             // 回菜单时清掉「已经注入过」：`NM_DETAIN` 配 `NM_MENULOOP` 要能在第二局再注入一次，
             // 而留在 true 就等于「新局什么都没有」，看着像注入失效（跨局残留那类坑的反面）
             .add_systems(OnEnter(crate::scene::Scene::Menu), clear_injected)
@@ -387,9 +411,23 @@ impl Plugin for DevPlugin {
                     // 抢在前面的那一版拍出来是一块本来就没楼的空地，看着像注入失效
                     force_news.after(force_house),
                     force_villain,
+                    // 魔法屋第一步与保释/彩票同一族门（`WaitRoll` 时才有「当前玩家」可摆）
+                    force_magic,
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
+            )
+            // 第二步那颗按钮点出去**之后**相位已经是 `WaitDecision`，上面那道门永远关着，
+            // 所以 `NM_SPELL` 只能挂在没有相位门禁的那一组里，由系统自己问「窗口是不是
+            // 魔法屋的第二步」。一局一次的位还是它自己的，不会每帧重复施法。
+            // ⚠️ 但**装配前那几帧仍然要挡**：它读 `TurnOrder`，而那是世界装配时才插进来的资源
+            // —— 只挡场景会在开局第一帧就把 SystemParam 校验撞成 panic（坑 22 的那一族，
+            // 第一次冒烟就是这么死的：症状不是「旋钮没生效」而是整局起不来）
+            .add_systems(
+                Update,
+                force_spell
+                    .run_if(in_state(crate::scene::Scene::Board))
+                    .run_if(resource_exists::<game_core::prelude::TurnOrder>),
             );
     }
 }
@@ -414,6 +452,10 @@ struct Injected {
     rbuild: bool,
     news: bool,
     villain: bool,
+    /// 魔法屋第一步（`NM_MAGIC`）与第二步（`NM_SPELL`）各一位：它们是两个旋钮、
+    /// 两次回答，共用一位的话后给的那个永远轮不到（上面那段「每个旋钮一位」的同一条理由）
+    magic: bool,
+    spell: bool,
 }
 
 fn clear_injected(mut done: ResMut<Injected>) {
@@ -834,6 +876,180 @@ fn force_lottery(
     }
 }
 
+// ===== P13：魔法屋那两步 =====
+
+/// `NM_MAGIC` 的那个值。`menu` = 只把第一步那一屏摆出来（11 条条件各自筛出谁），
+/// 其余是**一条条件**——于是第二步那一屏（12 道法术）开出来。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MagicWanted {
+    Menu,
+    Filter(game_core::prelude::MagicFilter),
+}
+
+impl MagicWanted {
+    /// 读法写成纯函数（与 [`LotteryWanted::parse`] 同一条理由：环境变量本身没法在测试里摆）。
+    /// 认不出来时由调用方 `warn!` 并列出可写的值 —— 猜一个条件是注入工具最坏的错误。
+    fn parse(raw: &str) -> Option<Self> {
+        use game_core::prelude::MagicFilter as F;
+        // 大小写先抹平再比：`NM_MAGIC=GIRLS` 与 `NM_MAGIC=girls` 该是同一个旋钮，
+        // 而认不出来时工具只会「注入没发生」，截图上看不出任何异常（`nm_god_*` 踩过的那格）
+        let raw = raw.trim().to_ascii_lowercase();
+        if raw == "menu" || raw.is_empty() {
+            return Some(Self::Menu);
+        }
+        Some(Self::Filter(match raw.as_str() {
+            "walker" | "走路" => F::Walker,
+            "deposit" | "存款" => F::TopDeposit,
+            "girls" | "女生" => F::AllGirls,
+            "boys" | "男生" => F::AllBoys,
+            "bike" | "机车" => F::OnBike,
+            "car" | "汽车" => F::OnCar,
+            "points" | "点券" => F::TopPoints,
+            "lands" | "土地" => F::TopLands,
+            "cash" | "现金" => F::TopCash,
+            "possessed" | "附身" => F::Possessed,
+            "wealth" | "财产" => F::TopWealth,
+            _ => return None,
+        }))
+    }
+}
+
+/// `NM_SPELL` 的那个值（第二步的那一道法术）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SpellWanted(game_core::prelude::MagicSpell);
+
+impl SpellWanted {
+    fn parse(raw: &str) -> Option<Self> {
+        use game_core::prelude::MagicSpell as S;
+        // 同 `MagicWanted::parse`：大小写先抹平，中文那半不受影响
+        let raw = raw.trim().to_ascii_lowercase();
+        Some(Self(match raw.as_str() {
+            "card" | "得卡" => S::GainCard,
+            "build" | "加盖" => S::BuildHere,
+            "bank" | "存钱" => S::BankCash,
+            "fate" | "命运" => S::DrawFate,
+            "sellcards" | "卖卡" => S::SellCards,
+            "sellitems" | "卖道具" => S::SellItems,
+            "jail" | "坐牢" => S::Jail,
+            "hospital" | "住院" => S::Hospital,
+            "stay" | "停留" => S::Stay,
+            "demolish" | "拆除" => S::Demolish,
+            "turn" | "掉头" => S::TurnBack,
+            "auction" | "拍卖" => S::AuctionHere,
+            _ => return None,
+        }))
+    }
+}
+
+/// `NM_MAGIC=<menu|条件>`：把当前玩家摆到女巫那里。`menu` 停在第一步，
+/// 给一条条件就替他答第一步（截图拍的是**第二步**那一屏：条件 + 名单 + 十二道法术）。
+///
+/// **别配 `NM_AUTOROLL`**（坑 37 的形状，实测两种结果）：注入与自动玩家在同一帧各写一次
+/// `NextState`（一个 `WaitDecision`、一个 `Moving`），谁赢由调度次序决定 —— 而次序会变
+/// （`NM_DUMP` 加不加就足以翻面）。输的那一版拍到的是「他滚完路、踩到别人家地、买地模态
+/// 把女巫的窗口顶掉了」，看着像旋钮失效。正经配方是 `NM_SCENE=board` 单独跑：回合机自己
+/// 会停在 `WaitRoll`，那一格没有人滚，窗口就一直挂着。
+#[derive(Resource)]
+struct ForceMagic(Option<MagicWanted>);
+
+impl ForceMagic {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_MAGIC") else {
+            return Self(None);
+        };
+        match MagicWanted::parse(&raw) {
+            Some(wanted) => Self(Some(wanted)),
+            None => {
+                warn!(
+                    "NM_MAGIC={raw} 不认识，应为 menu 或 \
+                     walker|deposit|girls|boys|bike|car|points|lands|cash|possessed|wealth"
+                );
+                Self(None)
+            }
+        }
+    }
+}
+
+/// `NM_SPELL=<法术>`：第二步窗口挂着时替他点那道法术。
+///
+/// 为什么是**第二条**旋钮而不是 `NM_MAGIC=girls:jail` 一条：两步之间隔着一次「筛人」，
+/// 名单由规则层算完才开得出第二步窗口，一条消息说不完那个中间状态（与真玩家的两次点击
+/// 同一形状）。它不认 `WaitRoll` 那道门——发出去的那一刻相位本来就是 `WaitDecision`。
+#[derive(Resource)]
+struct ForceSpell(Option<SpellWanted>);
+
+impl ForceSpell {
+    fn from_env() -> Self {
+        let Ok(raw) = std::env::var("NM_SPELL") else {
+            return Self(None);
+        };
+        match SpellWanted::parse(&raw) {
+            Some(wanted) => Self(Some(wanted)),
+            None => {
+                warn!(
+                    "NM_SPELL={raw} 不认识，应为 card|build|bank|fate|sellcards|sellitems|\
+                     jail|hospital|stay|demolish|turn|auction"
+                );
+                Self(None)
+            }
+        }
+    }
+}
+
+/// 两步各自要写的消息 + 要读的窗口。打包（§六 坑 8）。
+#[derive(SystemParam)]
+struct MagicInject<'w> {
+    order: Res<'w, TurnOrder>,
+    pending: ResMut<'w, PendingDecision>,
+    filters: MessageWriter<'w, game_core::prelude::MagicFilterPicked>,
+    spells: MessageWriter<'w, game_core::prelude::MagicSpellPicked>,
+    done: ResMut<'w, Injected>,
+}
+
+fn force_magic(
+    force: Res<ForceMagic>,
+    mut desk: MagicInject<'_>,
+    mut next: ResMut<NextState<TurnPhase>>,
+) {
+    let (Some(wanted), false) = (force.0, desk.done.magic) else {
+        return;
+    };
+    let Some(player) = desk.order.current() else {
+        return;
+    };
+    desk.done.magic = true;
+    desk.pending.offer(player, Pending::Magic);
+    next.set(TurnPhase::WaitDecision);
+    if let MagicWanted::Filter(filter) = wanted {
+        // 走真消息：筛谁、开不开得出第二步，全由 `magic_filter_system` 判（空名单那条
+        // 直接收摊 —— 注入替玩家答一条筛不出人的条件，拍到的就该是「女巫什么都没说」）
+        desk.filters
+            .write(game_core::prelude::MagicFilterPicked { player, filter });
+        info!(
+            "注入：{player:?} 站在魔法屋里，条件挑了「{}」",
+            filter.label()
+        );
+    } else {
+        info!("注入：{player:?} 站在魔法屋里，停在第一步");
+    }
+}
+
+fn force_spell(force: Res<ForceSpell>, mut desk: MagicInject<'_>) {
+    let (Some(wanted), false) = (force.0, desk.done.spell) else {
+        return;
+    };
+    // 主语与条件都取自窗口：第一步还没答完时这里什么都没有，等下一帧
+    let Some((player, Pending::MagicSpell(_))) = desk.pending.active() else {
+        return;
+    };
+    desk.done.spell = true;
+    desk.spells.write(game_core::prelude::MagicSpellPicked {
+        player,
+        spell: wanted.0,
+    });
+    info!("注入：{player:?} 求了一道「{}」", wanted.0.label());
+}
+
 /// `NM_AUCTION=<地块号>`：把那块地挂上拍卖台。`None` = 没开。
 ///
 /// 它写的不是窗口而是**那张愿望单**（`Auction::requested`）—— 与拍卖卡落下的那一槌同一格。
@@ -1177,5 +1393,80 @@ mod tests {
         assert_eq!(LotteryWanted::parse("99"), Some(LotteryWanted::Number(99)));
         assert_eq!(LotteryWanted::parse(""), None);
         assert_eq!(LotteryWanted::parse("256"), None, "u8 装不下就该说不认识");
+    }
+
+    /// `NM_MAGIC` 认的十一个条件必须真是 `MagicFilter::ALL` 那十一格，一格不漏。
+    ///
+    /// 这一条的价值在后半句：拼错的旋钮值不崩也不红，只会「注入没发生」，而那张截图
+    /// 看起来只是「今天没人踩到魔法屋」—— 与 `nm_god_...`／`nm_minigame_...` 同一种坑，
+    /// 而那两次各付过学费。用 `ALL` 的条数反证「表与穷尽表同源」，加第十二条条件时这条会红。
+    #[test]
+    fn nm_magic_takes_every_filter_and_menu() {
+        use super::MagicWanted;
+        use game_core::prelude::MagicFilter as F;
+        for (raw, want) in [
+            ("walker", F::Walker),
+            ("deposit", F::TopDeposit),
+            ("girls", F::AllGirls),
+            ("boys", F::AllBoys),
+            ("bike", F::OnBike),
+            ("car", F::OnCar),
+            ("points", F::TopPoints),
+            ("lands", F::TopLands),
+            ("cash", F::TopCash),
+            ("possessed", F::Possessed),
+            ("wealth", F::TopWealth),
+        ] {
+            assert_eq!(
+                MagicWanted::parse(raw),
+                Some(MagicWanted::Filter(want)),
+                "旋钮值 {raw}"
+            );
+        }
+        assert_eq!(
+            MagicWanted::parse("GIRLS"),
+            Some(MagicWanted::Filter(F::AllGirls)),
+            "大小写不分是环境变量的常态"
+        );
+        assert_eq!(MagicWanted::parse("menu"), Some(MagicWanted::Menu));
+        assert_eq!(
+            MagicWanted::parse(""),
+            Some(MagicWanted::Menu),
+            "只写 `NM_MAGIC=` 的意思是摆第一步"
+        );
+        assert_eq!(
+            MagicWanted::parse("rich"),
+            None,
+            "认不出来要说「不认识」，不许猜一条条件"
+        );
+    }
+
+    /// `NM_SPELL` 认的十二道法术必须真是 `MagicSpell::ALL` 那十二格。同上一条的理由。
+    #[test]
+    fn nm_spell_takes_every_spell() {
+        use super::SpellWanted;
+        use game_core::prelude::MagicSpell as S;
+        for (raw, want) in [
+            ("card", S::GainCard),
+            ("build", S::BuildHere),
+            ("bank", S::BankCash),
+            ("fate", S::DrawFate),
+            ("sellcards", S::SellCards),
+            ("sellitems", S::SellItems),
+            ("jail", S::Jail),
+            ("hospital", S::Hospital),
+            ("stay", S::Stay),
+            ("demolish", S::Demolish),
+            ("turn", S::TurnBack),
+            ("auction", S::AuctionHere),
+        ] {
+            assert_eq!(
+                SpellWanted::parse(raw).map(|w| w.0),
+                Some(want),
+                "旋钮值 {raw}"
+            );
+        }
+        assert_eq!(SpellWanted::parse("wish"), None);
+        assert_eq!(SpellWanted::parse(""), None, "空值不是「随便挑一道」");
     }
 }

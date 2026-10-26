@@ -24,6 +24,7 @@ fn four_players() -> GameSetup {
             .map(|i| PlayerSetup {
                 name: format!("P{i}"),
                 color: PLAYER_COLORS[i % PLAYER_COLORS.len()],
+                gender: game_core::player::Gender::Male,
             })
             .collect(),
     }
@@ -495,7 +496,8 @@ fn the_spy_reroutes_rent_only_for_roads_that_have_been_paid_before() {
 
     // ③ 王府井从没人交过费：间谍对它无功而返，租金照付地主
     set_price_index(&mut app, 1.0);
-    place(&mut app, p3, 10);
+    // 站到「掷 1 点正好踩到王府井（land 4）」那一格 —— 格号现读，别写死 10
+    stand_to_land(&mut app, p3, 4, 1);
     walk_exact(&mut app, p3, 1);
     let log = ledger(&app);
     assert!(

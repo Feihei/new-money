@@ -1,7 +1,8 @@
 //! 开发用自动玩家（`NM_AUTOROLL=1` 才装配）。
 //!
-//! 它是**输入侧**的替身，不是渲染层的一部分：只做两件 B5 的按钮同样会做的事 ——
-//! 在 `WaitRoll` 发 `RequestRoll`、在 `WaitDecision` 回答 `DecisionChosen`。
+//! 它是**输入侧**的替身，不是渲染层的一部分：只做三件 B5 的按钮同样会做的事 ——
+//! 在 `WaitRoll` 发 `RequestRoll`（被停留按住时发 `RequestStay`，见 [`auto_roll`]）、
+//! 在 `WaitDecision` 回答 `DecisionChosen`。
 //!
 //! B5 的按钮上线后它并没有退役，因为两者用途不同：按钮是给人的，这个是用来跑长对局的。
 //! 「打完一局」的验收要几百个回合，没有它就只能靠人手动点几百次；B6 的 AI 也会走同一条缝。
@@ -10,8 +11,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     Auction, AuctionMove, BidMove, BuyTicketRequested, Decision, DecisionChosen, GameKind,
-    GameRules, Jackpot, MinigameResult, Pending, PendingDecision, PlayerId, RequestRoll, TurnOrder,
-    TurnPhase, Wallet,
+    GameRules, Jackpot, MinigameResult, Pending, PendingDecision, PlayerId, RequestRoll,
+    RequestStay, StaySentence, TurnOrder, TurnPhase, Wallet,
 };
 
 pub struct AutopilotPlugin;
@@ -56,11 +57,21 @@ impl Plugin for AutopilotPlugin {
     }
 }
 
+/// 自动玩家在 `WaitRoll` 里的那一下。顶栏那颗按钮怎么答，它就这么答（`ui::send_roll`）：
+/// 身上挂着 `StaySentence` 的人**发「停留」而不是掷骰**。
+///
+/// 少这一支是**死锁**而不是「少走一步」：`roll_dice_system` 对被按住的人直接 `return`
+/// （那条判据在规则层，不认 UI），于是 `RequestRoll` 每帧被写、每帧被吞，回合机停在
+/// `WaitRoll` 不动也不报错。`RequestStay` 的文档注释从 P4④ 起就写着「AI 与恶人也要发
+/// 这一条」，恶人那一份 P12 接了，而这份自动玩家漏了 —— 实报的形状是 `NM_AUTOROLL` 长跑
+/// 跑到新闻「豪雨袭城」（走路的那几位原地停留 1 回合）命中当前玩家那一回合，之后 86 秒不推进一个回合。
 fn auto_roll(
     time: Res<Time>,
     order: Res<TurnOrder>,
     gap: Res<AutoGap>,
+    stays: Query<&StaySentence>,
     mut requests: MessageWriter<RequestRoll>,
+    mut stay_requests: MessageWriter<RequestStay>,
     mut due: Local<f32>,
 ) {
     let Some(player) = order.current() else {
@@ -70,6 +81,10 @@ fn auto_roll(
         return;
     }
     *due = time.elapsed_secs() + gap.0;
+    if stays.get(player).is_ok() {
+        stay_requests.write(RequestStay { player });
+        return;
+    }
     requests.write(RequestRoll { player, dice: 0 });
 }
 
@@ -134,6 +149,11 @@ fn answer_for(about: Pending, rules: &GameRules) -> AutoAnswer {
         Pending::RemoteBuild => AutoAnswer::Decide(Decision::Acknowledge),
         // 服务费收据（P10c）：钱已经扣完，与租金收据同一个回答
         Pending::ServiceNotice(_) => AutoAnswer::Decide(Decision::Acknowledge),
+        // 魔法屋的两步（P13）：自动玩家**不施法**，与 core 那套夹具同一条回答
+        // （`tests/common` 的 `auto_answer_system`，理由写在那里：法术的后果是坐牢、拍卖、
+        // 变卖，会把长跑里几十条断言一起搅浑）。代价只有一句：`NM_AUTOROLL` 的长跑里
+        // 女巫从不说话，那条路径由 `tests/magic.rs` 与 `NM_MAGIC` 的截图各自钉住
+        Pending::Magic | Pending::MagicSpell(_) => AutoAnswer::Decide(Decision::Acknowledge),
     }
 }
 

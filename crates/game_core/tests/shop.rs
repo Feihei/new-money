@@ -22,10 +22,11 @@ use game_core::prelude::{
 
 /// prototype 上那一格百货。`board.rs::prototype_carries_a_shop_the_player_can_step_on`
 /// 钉着这个编号，两处一起改才不会悄悄错位。（P10d① 两家公司插进环中段后它从 12 号顺移到
-/// 14 号，P10d② 重排演示盘后落到 16 号，P11 的新闻中心插在 13 号、它再顺移到 17 号。）
-const SHOP: u32 = 17;
+/// 14 号，P10d② 重排演示盘后落到 16 号，P11 的新闻中心插在 13 号、它再顺移到 17 号，
+/// P13 的魔法屋插在 9 号、它跟着顺移到 18 号。）
+const SHOP: u32 = 18;
 
-/// 走到「柜台开着」的那一帧：p0 从 15 号（西单）掷 1 点停在 16 号。
+/// 走到「柜台开着」的那一帧：p0 站在百货前一格（`SHOP - 1`）掷 1 点踩进去。
 /// 用 `Hold` 策略 —— 自动应答会把窗口直接关掉，就什么都观察不到了（同 `finance.rs` 的柜台）。
 fn open_counter() -> (App, Entity) {
     let (mut app, p0) = ready_on(SHOP - 1, 1, DecisionPolicy::Hold);

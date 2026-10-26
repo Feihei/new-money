@@ -12,7 +12,7 @@
     "id": "item_insulate",
     "type": "item",
     "title": "免罪卡",
-    "desc": "抵消接下来落到自己头上的一次厄运",
+    "desc": "只挡得住下一次「把人关起来」的事（坐牢／住院／出国）—— 停留、转向、乌龟与女巫的法术不吃它",
     "cost_points": 20,
     "effects": [{ "action": "insulate", "charges": 1 }]
   },

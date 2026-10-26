@@ -632,8 +632,9 @@ pub fn apply_effects(
                 let _ = sink.books.session.suspensions.suspend(*what, *days);
             }
             CardEffect::Reverse => {
-                // 与入狱同一条形状：它先过护身。被抵消的那次不该留下半个掉头 ——
-                // 「方向没变」与「方向变了又变回来」在流水上是两件事
+                // 还是先问一句 [`resist`]，但今天**只有神明那一半答"是"**：免罪卡不吃转向
+                // （P13 定稿，`AfflictDomain::forgivable`）—— 被大福神豁免的那一次不该留下
+                // 半个掉头流水，「方向没变」与「方向变了又变回来」在流水上是两件事
                 let affliction = Affliction::new(AfflictDomain::Reversal, victim);
                 if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
@@ -654,8 +655,9 @@ pub fn apply_effects(
                 outcomes.push(EffectOutcome::Reversed { heading: *heading });
             }
             CardEffect::Stay { turns } => {
-                // 还是那条形状：先过护身（PLAN §三「免罪抵消坐牢/住院/停留/转向」）。
-                // 停留是**事**不是钱，所以它不挂 `Corrections`（P3a 的划分）
+                // 停留是**事**不是钱，所以它不挂 `Corrections`（P3a 的划分）；而免罪卡今天
+                // 挡不掉它（P13 定稿：护身只吃「被关起来」那一族）—— 这一句还是先问一句
+                // `resist`，因为神明的厄运豁免照旧管到这一族
                 let affliction = Affliction::new(AfflictDomain::Stay, victim);
                 if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
@@ -684,7 +686,8 @@ pub fn apply_effects(
                 outcomes.push(EffectOutcome::Stayed { turns: left });
             }
             CardEffect::MoveCap { turns } => {
-                // 与停留同一条反制形状：免罪挡的是**事**，不是钱
+                // 与停留同一条形状：走不远是处境变了，不是一件灾落下来 —— 免罪卡不吃这一族
+                // （P13 定稿），这里留着 `resist` 那一句问的是神明的豁免
                 let affliction = Affliction::new(AfflictDomain::MoveCap, victim);
                 if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
@@ -795,7 +798,8 @@ pub fn apply_effects(
 }
 
 /// 这件厄运有没有被挡下来。**两个来源、一个出口**：
-/// 神给的免疫先问（它不消耗任何东西），否则用掉一层卡给的护身。
+/// 神给的免疫先问（它不消耗任何东西、也不看这一族可不可抵消），否则用掉一层卡给的护身
+/// —— 而护身只对 [`AfflictDomain::forgivable`] 答"是"的那一族开口。
 ///
 /// 顺序是有内容的：反过来写，大福神在场时每一件事都会白白吃掉一层免罪卡，
 /// 玩家手里那两张会在他还「免疫」的时候悄悄清零 —— 而那件事只有在他不再免疫的

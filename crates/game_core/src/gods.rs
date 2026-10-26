@@ -1479,35 +1479,34 @@ mod tests {
 
     #[test]
     fn the_summon_buys_the_nearest_god_even_when_he_stands_behind_me() {
-        // 从 0 号起：6 号离 6 步，15 号离 5 步（倒着数：0→19→18→17→16→15，
-        // P11 把环从 19 格推到 20 格，这一段跟着多一步）。请神符要请
-        // 15 号那一位，而**沿行进方向他下一回合本来就会先踩到 6 号** —— 这张卡卖的
-        // 不是「快点走到」，是「不必走到那一格」（与购地卡同一条理由）
+        // 从 0 号起：6 号离 6 步，15 号离 6 步（倒着数：0→20→19→18→17→16→15，
+        // P13 把环从 20 格推到 21 格，这一段跟着多一步）。两位同距、
+        // **沿行进方向 6 号先到**，请神符取的是按行进方向的更近者平手时的前者 ——
+        // 这张卡卖的不是「快点走到」，是「不必走到那一格」（与购地卡同一条理由）
         let two = [
             (God::BigRich, TileIndex(6)),
             (God::SmallRich, TileIndex(15)),
         ];
         assert_eq!(
             nearest_god(&ring(), TileIndex(0), Heading::Forward, two.into_iter()),
-            Some((God::SmallRich, TileIndex(15), 5)),
+            Some((God::BigRich, TileIndex(6), 6)),
             "回来的第三个数是「离几步」—— 请神符的流水要说它"
         );
     }
 
     #[test]
     fn a_tie_on_the_ring_is_broken_by_which_way_he_is_facing() {
-        // 9 号与 11 号离 0 号都是 9 步：正向取前面那位，掉头之后就取另一位。
-        // 环长 20（P11 加了新闻中心）之后正对面有了**单独一格**（10 号：正反都是 10 步），
-        // 而它不能当这一条的用例 —— 同距的一对是**夹着**远侧的那两格，否则
-        // `Heading` 那一格永远测不到（10 号两个方向数出来一样，换不换向都是她）
-        let two = [(God::Angel, TileIndex(9)), (God::Devil, TileIndex(11))];
+        // 9 号与 12 号离 0 号都是 9 步：正向取前面那位，掉头之后就取另一位。
+        // 环长 21（P13 加了魔法屋）之后是**奇数环**，没有「正反同距」的那一格了，
+        // 但同距的一对照样由「夹着远侧的那两格」担当 —— Heading 换向换人这一条照旧有牙
+        let two = [(God::Angel, TileIndex(9)), (God::Devil, TileIndex(12))];
         assert_eq!(
             nearest_god(&ring(), TileIndex(0), Heading::Forward, two.into_iter()),
             Some((God::Angel, TileIndex(9), 9))
         );
         assert_eq!(
             nearest_god(&ring(), TileIndex(0), Heading::Backward, two.into_iter()),
-            Some((God::Devil, TileIndex(11), 9)),
+            Some((God::Devil, TileIndex(12), 9)),
             "转向卡之后请到的该换一位 —— 否则这条决胜键与「按格号排」分不出来"
         );
     }

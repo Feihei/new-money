@@ -205,6 +205,28 @@ impl<'w, 's> Books<'w, 's> {
         self.villains.get(target).ok()
     }
 
+    /// 某人手上的持股清单（P13 财富读数的股票那一半）。现价不在这条读数里 ——
+    /// 价格的写侧在 [`crate::market::Market`]，读侧也归它（`Market::price`），
+    /// 两个参数包合起来才是一次完整的「他值多少钱」。
+    pub fn stock_holdings_of(&self, player: Entity) -> Vec<(crate::stock::StockId, u32)> {
+        self.holdings
+            .get(player)
+            .map(|h| h.0.iter().map(|(id, n)| (id.clone(), *n)).collect())
+            .unwrap_or_default()
+    }
+
+    /// 名下地块的编号清单（P13 财富读数的分子）。[`Self::land_count_of`] 的多值版。
+    pub fn owned_lands(&self, player: Entity) -> Vec<LandId> {
+        let Some(pid) = self.id_of(player) else {
+            return Vec::new();
+        };
+        self.plots
+            .iter()
+            .filter(|(_, _, owner, _, _)| owner.0 == Some(pid))
+            .map(|(_, id, _, _, _)| *id)
+            .collect()
+    }
+
     /// 保释这一位要花几点券 —— **一张表两行**（10-20 拍板：30 与 300 只是同一张表里
     /// 的两个价目，一处实现两处装配）。
     ///
@@ -1247,6 +1269,51 @@ impl<'w, 's> Books<'w, 's> {
         self.debit(player, cost)
             .map_err(|_| crate::property::BuildDeny::ShortOfCash)?;
         Ok(cost)
+    }
+
+    /// 现金**全部**转入存款（P13「存现金」法术）。返回存进去多少 ——
+    /// 0 也是合法答案（他本来就身无分文），调用方拿它答「生效了没有」。
+    ///
+    /// 与银行存取同一条口径（`bank_op_system` 的注）：自己左口袋换右口袋，
+    /// 不是一笔债，**不过修正管线** —— 女巫的存钱被「手续费」吃掉一笔才是怪事。
+    /// 现金那半照发 `CashChanged`（它真的动了），存款那半没有独立的流水
+    /// （`BankBalance` 的变动从来只有 `BankOpDone` 一条凭据，而这不是银行操作）。
+    pub fn bank_all_cash(&mut self, player: Entity) -> i64 {
+        let all = self.balance(player);
+        if all <= 0 {
+            return 0;
+        }
+        if self.debit(player, all).is_err() {
+            return 0;
+        }
+        if let Ok(mut bank) = self.banks.get_mut(player) {
+            bank.deposit += all;
+        }
+        all
+    }
+
+    /// 女巫的「就地加盖」：他脚下那块地**免费**升一级（P13）。
+    ///
+    /// 与 [`Self::upgrade_inner`] 相邻但不共用，理由写在判据上：那条问「他是不是业主、
+    /// 垄断凑齐没有、现钱够不够」，这一条全都不问 —— 女巫不收费，也不管那块地是谁的
+    /// （被施法的人脚下站着谁的地，升的就是谁家的楼）。两条共用的只剩「未满级、
+    /// 未抵押」两个物理前提，而它们各自只有两行，抽公共函数反而把两条判据搅在一起。
+    ///
+    /// 大福神的 `extra_levels` **不叠加**（与 `upgrade_chairman` 同一句）：法术写的是
+    /// 「升一级」，不是「一级再乘神」。
+    pub fn upgrade_witch(&mut self, land: LandId) -> Option<u8> {
+        let view = self.view(land)?;
+        if view.mortgaged {
+            return None;
+        }
+        let max = self.rules.max_building_level;
+        let entity = self.land_entity(land)?;
+        let (_, _, _, mut level, _) = self.plots.get_mut(entity).ok()?;
+        if level.0 >= max {
+            return None;
+        }
+        level.0 += 1;
+        Some(level.0)
     }
 
     /// 「这块地上建这一类的具体价钱」与「建不建得成」的同一个问法 —— 与 [`Self::build`]

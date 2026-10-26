@@ -164,7 +164,11 @@ fn a_player_the_ditch_sent_to_the_hospital_collects_no_rent() {
         }),
         "掉水沟是住院"
     );
-    assert_eq!(tile_of(&app, p0), 9, "他人已经在医院那条分支的接入点上");
+    assert_eq!(
+        tile_of(&app, p0),
+        junction_tile(&app, game_core::board::BranchKind::Hospital),
+        "他人已经在医院那条分支的接入点上"
+    );
 
     // 让 P1 从 1 号格走一步踩到 2 号格（地块 1，住院那位名下的地）
     rewind_dice(&mut app);

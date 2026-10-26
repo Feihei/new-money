@@ -60,27 +60,27 @@ fn walking_wraps_past_the_start_tile() {
         seed_with_first_roll(2),
     );
     let p0 = boot_to_wait_roll(&mut app);
-    // 站在环尾那一格（19 彩票中心；P10d② 重排后是 18 号，P11 插了新闻中心再顺移）：
-    // 走 2 步才会经过起点回绕。
+    // 站在环尾那一格（现读环长，P13 之后是 20 号彩票中心）：走 2 步才会经过起点回绕。
     // 站上去而不开出彩票柜台窗口，正是「落脚触发」与「经过触发」的区别（ADR-002 §6）——
     // 这一格是被 `place` 摆上去的，不是走到的
-    place(&mut app, p0, 19);
+    let tail = ring_len(&app) - 1;
+    place(&mut app, p0, tail);
 
     play_turns(&mut app, 1);
 
     let ev = events(&app);
     assert!(
-        ev.contains(&"Roll(P0,2,19->1)".to_string())
-            && ev.contains(&"Walk(P0,2,19->1)".to_string()),
+        ev.contains(&format!("Roll(P0,2,{tail}->1)"))
+            && ev.contains(&format!("Walk(P0,2,{tail}->1)")),
         "掷骰与行走意图都该带上回绕后的终点：{ev:?}"
     );
     assert_eq!(
         steps_of(&ev, "P0"),
         vec![0, 1],
-        "从 19 号走 2 步：先踏过 0 号起点，再落到 1 号 —— 「绕回起点经过」：{ev:?}"
+        "从环尾走 2 步：先踏过 0 号起点，再落到 1 号 —— 「绕回起点经过」：{ev:?}"
     );
     assert!(
-        ev.contains(&"Arrive(P0,19->1)".to_string()),
+        ev.contains(&format!("Arrive(P0,{tail}->1)")),
         "到站消息要带完整行程：{ev:?}"
     );
     assert_eq!(tile_of(&app, p0), 1);

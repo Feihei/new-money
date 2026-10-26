@@ -30,18 +30,20 @@ use game_core::prelude::{
     GodLeft, GodPossessed, Hand, IndemnityPaid, Insulation, Insured, Inventory, ItemKind,
     ItemPlaced, ItemThieved, Jackpot, JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId,
     LandStatus, LandTaken, LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought,
-    LotteryDrawn, LotteryTickets, LotteryWon, Market, MarketClock, MinigameResult, MinigameScore,
-    MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap,
-    MoveCapped, NewsSink, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending, PendingDecision,
-    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
-    PlayerDetained, PlayerId, PlayerName, PlayerTeleported, PlotArea, Points, PointsChanged,
-    PointsStolen, PolicyBought, Possession, Presence, RedEnvelope, RemoteBuildOffered,
-    RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RentRerouted, RequestRemoteDice, RequestRoll,
-    RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source,
-    StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested,
-    StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TollExtorted,
-    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, VillainHired,
-    WalkHalted, WalkStarted, Wallet, deal_to, find_id, fire_news, grant_effects,
+    LotteryDrawn, LotteryTickets, LotteryWon, MagicBlocked, MagicCast, MagicFilter,
+    MagicFilterPicked, MagicSpell, MagicSpellPicked, Market, MarketClock, MinigameResult,
+    MinigameScore, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged,
+    MoveCap, MoveCapped, NewsSink, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending,
+    PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
+    PlayerBankrupt, PlayerDetained, PlayerId, PlayerName, PlayerTeleported, PlotArea, Points,
+    PointsChanged, PointsStolen, PolicyBought, Possession, Presence, RedEnvelope,
+    RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RentRerouted,
+    RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone,
+    ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId,
+    StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
+    Timed, TokenPosition, TollExtorted, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted,
+    UpgradeOffered, VillainHired, WalkHalted, WalkStarted, Wallet, deal_to, find_id, fire_news,
+    grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -110,6 +112,15 @@ pub struct Scores(pub Vec<MinigameResult>);
 /// 四道门都被真走到，而不是被测试绕过。
 #[derive(Resource, Default)]
 pub struct TicketRequests(pub Vec<BuyTicketRequested>);
+
+/// 测试侧的「按魔法屋第一步那一颗条件按钮」（P13）。走队列 → 真消息，于是
+/// 「挂着这一步窗口的人才答得成」「空名单当场收摊」两道门被真走到。
+#[derive(Resource, Default)]
+pub struct MagicFilterRequests(pub Vec<MagicFilterPicked>);
+
+/// 测试侧的「按魔法屋第二步那一颗法术按钮」（P13）。同上一条。
+#[derive(Resource, Default)]
+pub struct MagicSpellRequests(pub Vec<MagicSpellPicked>);
 
 /// 测试侧的「按下拍卖面板上那两颗按钮之一」（P9）。同样走队列 → 真消息，于是
 /// 「不是他的回合要拒」「加不起这一档要拒」「放弃永远办得成」三道门都被真走到，
@@ -183,6 +194,9 @@ fn auto_answer_system(
         // 远程建设窗口（P10d②）同一条：自动玩家**不升**任何地 —— 日产格一踩到就开窗，
         // 长跑不自动关掉会整片挂在 `WaitDecision`，而升级那条路由 `tests/remote_build.rs` 自己走
         (Pending::RemoteBuild, _) => Decision::Acknowledge,
+        // 魔法屋（P13）两步都按「离开」：自动玩家不施法 —— 法术的后果（坐牢/拍卖）
+        // 会把几十条长跑断言一起搅浑，而施法那条路由 tests/magic.rs 自己走
+        (Pending::Magic | Pending::MagicSpell(_), _) => Decision::Acknowledge,
         // 柜台只认「办完」。这里必须显式答一句，否则每一个踩到银行格的回合都会
         // 停在 `WaitDecision`，把所有长跑用例整片挂死 —— 编译器逼这一条写出来。
         // 百货柜台同一条（P3d②）：13 格环上真有一格百货，长跑用例一定会踩到它。
@@ -272,6 +286,10 @@ struct FlowReaders<'w, 's> {
     walk_halted: MessageReader<'w, 's, WalkHalted>,
     turn_ended: MessageReader<'w, 's, TurnEnded>,
     game_over: MessageReader<'w, 's, GameOver>,
+    /// 魔法屋施法凭据（P13）。`targets` 是**实际生效**的那批 —— 落空与全被挡下在这一条上
+    /// 都是空名单，而它们是两个不同的世界，所以挡下的那一条单独记一行
+    magic_cast: MessageReader<'w, 's, MagicCast>,
+    magic_blocked: MessageReader<'w, 's, MagicBlocked>,
 }
 
 /// 经济/卡牌域的 reader 们。
@@ -520,6 +538,28 @@ fn collect_flow(
             None => "none".into(),
         };
         log.0.push(format!("GameOver({winner})"));
+    }
+    for m in r.magic_cast.read() {
+        // 「落到谁头上」用名单而不是人数：`AllGirls` 那道法术打到两个人时，
+        // 断言要能读出**是哪两个**（P13 免疫矩阵里「同一道法术、多个承受者」那一格）
+        log.0.push(format!(
+            "Magic({}:{}→{})",
+            who(&players, &names, m.player),
+            m.spell.label(),
+            m.targets
+                .iter()
+                .map(|e| who(&players, &names, *e))
+                .collect::<Vec<_>>()
+                .join("+")
+        ));
+    }
+    for m in r.magic_blocked.read() {
+        log.0.push(format!(
+            "MagicBlock({}挡{}的{})",
+            who(&players, &names, m.victim),
+            who(&players, &names, m.player),
+            m.spell.label()
+        ));
     }
 }
 
@@ -1157,6 +1197,8 @@ struct Pump<'w> {
     builds: ResMut<'w, BuildRequests>,
     remote_builds: ResMut<'w, RemoteBuildRequests>,
     financings: ResMut<'w, FinancingRequests>,
+    magic_filters: ResMut<'w, MagicFilterRequests>,
+    magic_spells: ResMut<'w, MagicSpellRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
     stay_writes: MessageWriter<'w, RequestStay>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
@@ -1173,6 +1215,8 @@ struct Pump<'w> {
     build_writes: MessageWriter<'w, BuildRequested>,
     remote_build_writes: MessageWriter<'w, RemoteUpgradeRequested>,
     financing_writes: MessageWriter<'w, FinancingDrawRequested>,
+    magic_filter_writes: MessageWriter<'w, MagicFilterPicked>,
+    magic_spell_writes: MessageWriter<'w, MagicSpellPicked>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
@@ -1224,6 +1268,12 @@ fn pump_inputs(mut pump: Pump<'_>) {
     for f in pump.financings.0.drain(..) {
         pump.financing_writes.write(f);
     }
+    for f in pump.magic_filters.0.drain(..) {
+        pump.magic_filter_writes.write(f);
+    }
+    for s in pump.magic_spells.0.drain(..) {
+        pump.magic_spell_writes.write(s);
+    }
 }
 
 pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
@@ -1255,6 +1305,8 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<BuildRequests>()
         .init_resource::<RemoteBuildRequests>()
         .init_resource::<FinancingRequests>()
+        .init_resource::<MagicFilterRequests>()
+        .init_resource::<MagicSpellRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
         .init_resource::<Ledger>()
@@ -1890,6 +1942,83 @@ pub fn place(app: &mut App, player: Entity, tile: u32) {
         .tile = TileIndex(tile);
 }
 
+// ===== 格号现读（P13 之后夹具的标准前置）=====
+//
+// 为什么要有这四条：环上插一格会把 9 号往后**全部**顺移。P13 那一次改完，写死格号的用例
+// 集体红在「服务费一笔没收」「董事长付了 2800」「破产没判成」上 —— 症状都指向结算层，
+// 真相只是夹具里那个数字不再指向它嘴上说的那一格（`tests/settle.rs` 的 `tile < 19`
+// 是同一件事的第三次登记）。断言目的而不是坐标，插格的成本就只剩棋盘那一份。
+
+/// 主环上关于那块地的那一格（`land_id` 反查）。一块地占两格（外滩 `size:2`）时取第一格。
+pub fn land_tile(app: &App, land: u32) -> u32 {
+    let board = app.world().resource::<ActiveBoard>();
+    let found: Vec<u32> = board
+        .def
+        .tiles
+        .iter()
+        .filter(|t| t.land_id == Some(land))
+        .map(|t| t.id)
+        .collect();
+    assert!(
+        !found.is_empty(),
+        "{land} 号地在这张盘上没有主环格（found={found:?}）"
+    );
+    found[0]
+}
+
+/// 主环上绑着那只股的公司门面格。
+pub fn stock_tile(app: &App, stock: &str) -> u32 {
+    let board = app.world().resource::<ActiveBoard>();
+    board
+        .def
+        .tiles
+        .iter()
+        .find(|t| t.data.stock.as_deref() == Some(stock))
+        .map(|t| t.id)
+        .unwrap_or_else(|| panic!("这张盘上没有绑定 {stock} 的门面格"))
+}
+
+/// 主环上第一格该类型的格（机会/命运那种「不关于一块地」的格按类型找，不按编号）。
+pub fn kind_tile(app: &App, kind: game_core::prelude::TileKind) -> u32 {
+    let board = app.world().resource::<ActiveBoard>();
+    board
+        .def
+        .tiles
+        .iter()
+        .find(|t| t.kind == kind)
+        .map(|t| t.id)
+        .unwrap_or_else(|| panic!("这张盘上没有 {kind:?} 格"))
+}
+
+/// 那条拘留分支在主环上的接入点（医院那条从 P13 起是 10 号，而它说什么也不该写死）。
+pub fn junction_tile(app: &App, kind: game_core::board::BranchKind) -> u32 {
+    let board = app.world().resource::<ActiveBoard>();
+    board
+        .def
+        .branch_junction(kind)
+        .map(|t| t.id)
+        .unwrap_or_else(|| panic!("这张盘上没有 {kind:?} 分支"))
+}
+
+/// 环长（现读）。
+pub fn ring_len(app: &App) -> u32 {
+    app.world().resource::<ActiveBoard>().def.loop_len()
+}
+
+/// 把这位挪到「掷 `steps` 点正好踩到 `at`」的那一格（回绕按环长，负方向不用管）。
+///
+/// 与 `ready_on(tile, steps, _)` 配合：那颗骰子仍由种子定死，只是站位从棋盘算出来。
+pub fn stand_to(app: &mut App, player: Entity, at: u32, steps: u32) {
+    let len = ring_len(app).max(1);
+    place(app, player, (at + len - steps % len) % len);
+}
+
+/// 挪到「掷 `steps` 点正好踩到那块地」的位置。
+pub fn stand_to_land(app: &mut App, player: Entity, land: u32, steps: u32) {
+    let at = land_tile(&*app, land);
+    stand_to(app, player, at, steps);
+}
+
 // ===== 道路放置物与道具（P5）=====
 
 /// 清空场上所有放置物。开局会随机撒宝箱，而 P5 的用例要精确控制「哪一格有什么」。
@@ -2310,6 +2439,61 @@ pub fn lottery_ask(app: &mut App, player: Entity, number: u8) {
         .resource_mut::<TicketRequests>()
         .0
         .push(BuyTicketRequested { player, number });
+}
+
+/// 替 `player` 按魔法屋**第一步**那颗条件按钮（P13）。与 [`lottery_ask`] 同一条：
+/// 走队列 → 真消息，于是「挂着这一步窗口的人才答得成」「筛出没人就当场收摊、第二步不开」
+/// 两道门被真走到，而不是被测试绕过。
+///
+/// 后面要跟一次 `settle`：筛人、写 [`MagicTargets`]、把窗口翻成第二步都发生在
+/// `magic_filter_system` 里。
+pub fn magic_filter_ask(app: &mut App, player: Entity, filter: MagicFilter) {
+    app.world_mut()
+        .resource_mut::<MagicFilterRequests>()
+        .0
+        .push(MagicFilterPicked { player, filter });
+}
+
+/// 替 `player` 按魔法屋**第二步**那颗法术按钮（P13）。同上一条，后面也要跟 `settle`。
+pub fn magic_spell_ask(app: &mut App, player: Entity, spell: MagicSpell) {
+    app.world_mut()
+        .resource_mut::<MagicSpellRequests>()
+        .0
+        .push(MagicSpellPicked { player, spell });
+}
+
+/// 一次「这一条条件筛出谁」的请求（[`hits`] 的载体）。
+#[derive(Resource)]
+struct HitsReq(Option<(MagicFilter, Entity)>);
+
+#[derive(Resource, Default)]
+struct HitsOut(Vec<Entity>);
+
+/// 筛人要 `FilterDesk`（里面是 `Books`），[`run_op`] 那条闭包签名给不出这一摞 ——
+/// 与 [`run_damage`] 同一条理由，单开一次性的 system，走的仍是同一个公开函数。
+fn hits_system(
+    mut req: ResMut<HitsReq>,
+    mut out: ResMut<HitsOut>,
+    desk: game_core::magic::FilterDesk<'_, '_>,
+) {
+    let Some((filter, current)) = req.0.take() else {
+        return;
+    };
+    out.0 = game_core::magic::filter_targets(filter, current, &desk);
+}
+
+/// 现读「这一条条件在此刻筛出谁」。**用的是规则层那同一个 `filter_targets`**
+/// （第二步面板显示的名单与法术落到的人共用的就是它），所以测试里没有第二份判据。
+///
+/// 为什么测试需要它而不只走真窗口：一条判据换一份世界状态就要重启一局，而真窗口一次
+/// 只答得出一个条件（草稿与它同生同灭）。窗口那条路本身由 `magic_filter_ask` 那几条覆盖，
+/// 这里补的是「并排看好几条判据」这一类断言。
+pub fn hits(app: &mut App, filter: MagicFilter, current: Entity) -> Vec<Entity> {
+    app.insert_resource(HitsReq(Some((filter, current))));
+    app.insert_resource(HitsOut::default());
+    app.add_systems(Update, hits_system);
+    app.update();
+    app.world().resource::<HitsOut>().0.clone()
 }
 
 /// 按下拍卖面板上的一颗按钮（P9）。`what` 是「加价」还是「放弃」。

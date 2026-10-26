@@ -17,12 +17,12 @@ use game_core::prelude::{
     ChargeWaived, ChestOpened, CompanyCharged, DepositsRobbed, DetentionLifted, DetentionSkipped,
     FacilityBuilt, FinancingDrawn, FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed,
     GodExit, GodLeft, GodPossessed, IndemnityPaid, Institution, ItemPlaced, ItemThieved, LandId,
-    LandTaken, LotteryBought, LotteryDrawn, LotteryWon, MarketClock, MinigameScore, MortgageDone,
-    MortgageOp, MountChanged, MoveCapped, NewsAudience, NewsFired, NewsScope, Paused,
-    PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged, PointsStolen,
-    PolicyBought, RemoteDiceUsed, RentRerouted, ServiceCharged, ShopOpDone, StayLifted,
-    StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TollExtorted, TradeSide,
-    TurnOrder, TurnPhase, VillainHired, WalkHalted,
+    LandTaken, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicSpell,
+    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience,
+    NewsFired, NewsScope, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName,
+    PointsChanged, PointsStolen, PolicyBought, RemoteDiceUsed, RentRerouted, ServiceCharged,
+    ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex,
+    TollExtorted, TradeSide, TurnOrder, TurnPhase, VillainHired, WalkHalted,
 };
 
 use super::dialog::describe;
@@ -544,6 +544,12 @@ pub(crate) struct Notices<'w, 's> {
     /// 而它动的正是前面那些域管着的东西 —— 同一帧里「谁付了租」与「号外说全场缴税」都写了
     /// 的时候，留下号外那一句才对（它是这一趟最后发生的事）
     news: MessageReader<'w, 's, NewsFired>,
+    // ===== 魔法屋（P13）=====
+    /// 一道法术施完了。`targets` 是**实际生效**的承受者 —— 被免罪挡掉的那一位不在里面，
+    /// 他有自己的凭据 [`MagicBlocked`]，两条各一份才有那四种说法
+    magic_cast: MessageReader<'w, 's, MagicCast>,
+    /// 免罪卡挡下一道法术（十二道里挡得住的那两道才会发这一条）
+    magic_blocked: MessageReader<'w, 's, MagicBlocked>,
     over: MessageReader<'w, 's, GameOver>,
 }
 
@@ -1176,6 +1182,30 @@ pub(crate) fn hint_from_events(
             }
         });
     }
+    // 魔法屋那一道法术（P13）。两条凭据先各收一份再决定这句怎么说：「落空」与「被挡下」
+    // 在顶栏那一行上是两种不同的世界，而 `MagicCast.targets` 里没有挡住的那位 ——
+    // 只读 cast 会把「有人用掉了一张免罪卡」这件事整条吞掉。
+    // 排在新闻之后：同帧里两者都写的机会很小（新闻在落格链、法术在回答链），
+    // 真要选一个的话，玩家刚点下去的那一步更该被回答
+    let blocked: Vec<(Entity, MagicSpell, Entity)> = notices
+        .magic_blocked
+        .read()
+        .map(|m| (m.player, m.spell, m.victim))
+        .collect();
+    for m in notices.magic_cast.read() {
+        let hit: Vec<String> = m.targets.iter().map(|e| name(&names, *e)).collect();
+        let held: Vec<String> = blocked
+            .iter()
+            .filter(|(caster, spell, _)| *caster == m.player && *spell == m.spell)
+            .map(|(_, _, victim)| name(&names, *victim))
+            .collect();
+        line = Some(magic_headline(
+            &name(&names, m.player),
+            m.spell,
+            &hit,
+            &held,
+        ));
+    }
     for m in notices.over.read() {
         line = Some(match m.winner.and_then(|w| names.get(w).ok()) {
             Some(winner) => format!("胜者：{}！", winner.0),
@@ -1384,6 +1414,28 @@ fn name(names: &Query<&PlayerName>, player: Entity) -> String {
         .get(player)
         .map(|n| n.0.clone())
         .unwrap_or_else(|_| "玩家".to_string())
+}
+
+// ===== P13：魔法屋那一句 =====
+
+/// 一道法术施完之后，顶栏那一行怎么说（P13）。
+///
+/// 抽成纯函数与 P6e／P11 那几条同一个理由：顶栏只有一行，而这一句有**四种**形状
+/// （落到人头上／顺带有人挡下／全被挡下／一样都没落到），只有纯函数能把四种各钉一条。
+/// 「落空」与「被挡下」不许共用一句话：前者是「这一道今天没东西可打」，后者是
+/// 「有人花掉了一张免罪卡」—— 玩家听完这两句会做不同的下一手。
+fn magic_headline(caster: &str, spell: MagicSpell, hit: &[String], blocked: &[String]) -> String {
+    let asked = format!("{} 求的「{}」", caster, spell.label());
+    match (hit.is_empty(), blocked.is_empty()) {
+        (false, true) => format!("{asked} 落到 {} 头上", hit.join("、")),
+        (false, false) => format!(
+            "{asked} 落到 {} 头上；{} 用免罪卡挡下了那一下",
+            hit.join("、"),
+            blocked.join("、")
+        ),
+        (true, false) => format!("{asked} 被 {} 用免罪卡整笔挡下", blocked.join("、")),
+        (true, true) => format!("{asked} 落空 —— 一样都没落到人头上"),
+    }
 }
 
 /// 「5 南京路」—— 顶栏那几行要说得出格名，否则「放在 5 号格」还得玩家自己数。
@@ -1656,6 +1708,10 @@ mod tests {
             .add_message::<CardSnatched>()
             .add_message::<TollExtorted>()
             .add_message::<RentRerouted>()
+            // P13：魔法屋的两条凭据（施法与「被免罪挡下」各一条）。同一条坑：漏了
+            // `Notices` 参数包建不出来，顶栏整行不再更新 —— 症状不是「那一句没播」
+            .add_message::<MagicCast>()
+            .add_message::<MagicBlocked>()
             .add_message::<GameOver>()
             .add_systems(Update, hint_from_events);
         let me = app.world_mut().spawn(PlayerName("阿土伯".into())).id();
@@ -2591,6 +2647,106 @@ mod tests {
         assert!(
             hint_of(&mut app, hint).starts_with("号外"),
             "同一帧两条，留下的该是最后发生的那一件"
+        );
+    }
+
+    /// 一句话的四种形状（纯函数）。顶栏只有一行，混着发就分不清是哪条 reader 读到的，
+    /// 而这一句的四格恰好是 P13 验收里最难念对的那四格。
+    ///
+    /// 「落空」与「被挡下」不许共用一句话：前者是「这一道今天没东西可打」，后者是
+    /// 「有人花掉了一张免罪卡」—— 玩家听完这两句会做不同的下一手。
+    #[test]
+    fn a_spell_headline_has_four_shapes() {
+        let row = |hit: &[&str], blocked: &[&str]| {
+            let hit: Vec<String> = hit.iter().map(|s| s.to_string()).collect();
+            let blocked: Vec<String> = blocked.iter().map(|s| s.to_string()).collect();
+            magic_headline("阿土伯", MagicSpell::Jail, &hit, &blocked)
+        };
+
+        assert_eq!(
+            row(&["孙小美"], &[]),
+            "阿土伯 求的「坐牢 3 天」 落到 孙小美 头上"
+        );
+        assert_eq!(
+            row(&["孙小美", "阿土伯"], &[]),
+            "阿土伯 求的「坐牢 3 天」 落到 孙小美、阿土伯 头上",
+            "一批两个人要都念出来，人数不能代替名字"
+        );
+        assert_eq!(
+            row(&[], &["孙小美"]),
+            "阿土伯 求的「坐牢 3 天」 被 孙小美 用免罪卡整笔挡下"
+        );
+        assert_eq!(
+            row(&["阿土伯"], &["孙小美"]),
+            "阿土伯 求的「坐牢 3 天」 落到 阿土伯 头上；孙小美 用免罪卡挡下了那一下",
+            "挡下与挨中并存时两句都要说 —— 只说一边就是少记账"
+        );
+        assert_eq!(
+            row(&[], &[]),
+            "阿土伯 求的「坐牢 3 天」 落空 —— 一样都没落到人头上"
+        );
+    }
+
+    /// 两条凭据都要接到那一行：只接 `MagicCast` 的话，「有人用掉了一张免罪卡」这件事
+    /// 整条被吞掉，而那是这一局里唯一一张会被用掉的卡。
+    #[test]
+    fn the_witch_s_two_receipts_reach_the_bar() {
+        let (mut app, me, foe, hint) = notices_app();
+        send(
+            &mut app,
+            MagicCast {
+                player: me,
+                spell: MagicSpell::Hospital,
+                targets: vec![foe],
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).contains("落到 孙小美 头上"),
+            "施法那一条没接到顶栏"
+        );
+
+        send(
+            &mut app,
+            MagicBlocked {
+                player: me,
+                spell: MagicSpell::Jail,
+                victim: foe,
+            },
+        );
+        send(
+            &mut app,
+            MagicCast {
+                player: me,
+                spell: MagicSpell::Jail,
+                targets: vec![],
+            },
+        );
+        assert!(
+            hint_of(&mut app, hint).contains("被 孙小美 用免罪卡整笔挡下"),
+            "全被挡下那一格没接到顶栏"
+        );
+
+        // 一批两个人：一个挨了、一个挡了 —— 同一句里两边都要说得出
+        send(
+            &mut app,
+            MagicBlocked {
+                player: me,
+                spell: MagicSpell::TurnBack,
+                victim: foe,
+            },
+        );
+        send(
+            &mut app,
+            MagicCast {
+                player: me,
+                spell: MagicSpell::TurnBack,
+                targets: vec![me],
+            },
+        );
+        let line = hint_of(&mut app, hint);
+        assert!(
+            line.contains("落到 阿土伯 头上") && line.contains("孙小美 用免罪卡挡下了那一下"),
+            "两种落点并存时少念了一半：{line}"
         );
     }
 }

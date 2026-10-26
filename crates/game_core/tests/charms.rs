@@ -85,11 +85,11 @@ fn holds(app: &App, player: Entity, id: &str) -> bool {
 
 #[test]
 fn the_summon_buys_the_god_behind_him_not_the_one_he_was_about_to_step_on() {
-    // 从 0 号格看：2 号那位离 2 步、在他**前面**；环尾 19 号那位离 1 步、在他**后面**
-    // （P11 加新闻中心之后环尾从 18 推到 19）。
+    // 从 0 号格看：2 号那位离 2 步、在他**前面**；环尾 20 号那位离 1 步、在他**后面**
+    // （P13 加魔法屋之后环尾从 19 推到 20）。
     // 请的是后面那位 —— 前面那位他下一回合本来就会踩到，那不必花一张卡
     let (mut app, p0, _p1) = two_players_before_the_roll();
-    board_gods(&mut app, &[(God::Angel, 2), (God::Devil, 19)]);
+    board_gods(&mut app, &[(God::Angel, 2), (God::Devil, 20)]);
 
     summon(&mut app, p0);
 

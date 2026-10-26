@@ -15,13 +15,24 @@
 //! [`crate::settle::Books::quoted`] 只是给 UI 看个数，它不该花掉玩家手里的一张卡。
 //! 护身挂在玩家身上，只有真正生效的那次结算才会去 `absorb` 一层。
 //!
-//! `cancellable` 这一位是给 P13 的免疫规则留的：魔法屋 12 条法术里只有坐牢与住院两条
-//! 可被免罪抵消或嫁祸移出，其余 10 条「不受任何卡与神影响」。那是一条**按类别**的豁免，
-//! 所以位挂在事上而不是挂在抵消方上 —— 与 P2 那条「这笔账免不免是账的性质」同一条理由。
+//! 两个形状各有一个**域**表：[`crate::charge::transferable`] 答「这一族钱允不允许转嫁」，
+//! 下面的 [`AfflictDomain::forgivable`] 答「这一族事允不允许被一张免罪卡挡掉」。
+//!
+//! 免疫口径由 P13 定稿（10-25 拍板）：**免罪卡只挡「被关起来」那一族**（陷害、命运牌的
+//! 坐牢/住院/出国、女巫的坐牢/住院），乌龟／停留／转向／损害**不吃护身**。理由不是嫌卡太强，
+//! 是那句卡面文案：「抵消落到自己头上的一次**厄运**」——被人按住一回合、走不远、掉了个头，
+//! 是他这一趟的处境变了，不是有一件灾落在他头上。挡掉这些会让免罪卡变成一张万能解，
+//! 而它玩家手里那一层该留给真正把人拎走的那一下。
+//!
+//! ⚠️ 这一位只管**卡**。神明那一半（[`crate::gods::resists`]，大福神与天使的厄运豁免）
+//! 仍然 blanket 挡所有五族，而且**先问神再问卡**（[`crate::deck::resist`] 的注写了顺序为什么
+//! 有内容）。所以「魔法屋的十二条不受任何卡与神影响」那半条不是这张表答的，
+//! 是 `magic.rs` 根本不走 `resist` —— 见那里的模块头。
 
 use bevy::prelude::*;
 
-/// 一类厄运。P13 的免疫矩阵按这一位逐格填「可抵消／不可抵消」。
+/// 一类厄运。免疫矩阵按这一位逐格填「免罪卡挡不挡」，答案在
+/// [`AfflictDomain::forgivable`] 那一张穷尽表上。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AfflictDomain {
     /// 进拘留类状态：坐牢、住院、被绑架（P4 的 `Detention` 是它的落地）
@@ -42,17 +53,36 @@ pub enum AfflictDomain {
 pub struct Affliction {
     pub domain: AfflictDomain,
     pub victim: Entity,
-    /// 允不允许被整笔抵消。今天四类**都**允许，将来 P13 的免疫规则把某几类关掉 ——
-    /// 与 [`crate::charge::Charge::cancellable`] 同一个道理：默认开着，关掉它的是免疫方。
+    /// 允不允许被一张免罪卡整笔抵消。它**不是**「这位玩家免疫吗」——那是 [`Self::domain`]
+    /// 过 [`AfflictDomain::forgivable`] 之后、再由 [`Insulation`] 自己回答的第二问。
     pub cancellable: bool,
 }
 
+impl AfflictDomain {
+    /// 这一族事允不允许被**免罪卡**挡掉（P13 定稿的免疫口径，10-25 拍板）。
+    ///
+    /// 穷尽表：新增一族必须当场回答它，漏答不会静默变成「挡得住」或「挡不住」。
+    /// 只有 [`Self::Detention`] 一行是 `true` —— 免罪卡卡面写的是「抵消一次**厄运**」，
+    /// 而被人按住一回合、走不远、掉了个头是处境变了，不是有一件灾落在头上。
+    ///
+    /// 这一位**不管神明**：大福神与天使的厄运豁免挡所有族（[`crate::gods::resists`]）。
+    /// 也不管魔法屋：女巫那十二条根本不走这条路（`magic.rs` 模块头）。
+    pub const fn forgivable(self) -> bool {
+        match self {
+            Self::Detention => true,
+            Self::Stay | Self::MoveCap | Self::Reversal | Self::Damage => false,
+        }
+    }
+}
+
 impl Affliction {
+    /// 造一件落到 `victim` 头上的事。**不可抵消的那几族在这里就已经带上答案**：
+    /// 让调用方各填一位，就会出现「某条新法术忘了填 false，于是白吃玩家一张免罪卡」。
     pub fn new(domain: AfflictDomain, victim: Entity) -> Self {
         Self {
             domain,
             victim,
-            cancellable: true,
+            cancellable: domain.forgivable(),
         }
     }
 }
@@ -120,27 +150,33 @@ mod tests {
     #[test]
     fn an_immune_affliction_does_not_eat_the_shield() {
         let mut shield = Insulation { charges: 1 };
-        let mut immune = Affliction::new(AfflictDomain::Reversal, victim());
-        immune.cancellable = false;
-        assert!(!shield.absorb(&immune));
-        assert_eq!(shield.charges, 1, "不可抵消的那类不该把免罪卡白白耗掉");
-        // 同一层护身接下来照样吃得掉可抵消的那类
-        assert!(shield.absorb(&Affliction::new(AfflictDomain::Stay, victim())));
+        // 转向今天就是那一条活例子：不可抵消，于是护身一层都不该动
+        let reversal = Affliction::new(AfflictDomain::Reversal, victim());
+        assert!(!shield.absorb(&reversal));
+        assert_eq!(shield.charges, 1, "挡不掉的那件事也不该白吃一张免罪卡");
+        // 同一层护身照样吃得掉可抵消的那一族
+        assert!(shield.absorb(&Affliction::new(AfflictDomain::Detention, victim())));
     }
 
+    /// P13 定稿的免疫口径（10-25 拍板）：**只有「被关起来」那一族吃免罪卡**。
+    ///
+    /// 这一条是穷尽表，所以它的价值在「新增一族必须当场表态」——把它删掉，
+    /// `forgivable` 的 match 就少了一条被钉住的分支。
     #[test]
-    fn everything_is_cancellable_until_something_says_otherwise() {
-        // 与 `Charge::new` 同一条默认：关掉位的是免疫方（P13），不是按类别预先写死
+    fn only_a_trip_away_is_forgivable() {
+        assert!(
+            AfflictDomain::Detention.forgivable(),
+            "免罪卡卡面那句「抵消一次厄运」吃的就是这一族：坐牢／住院／出国"
+        );
         for domain in [
-            AfflictDomain::Detention,
             AfflictDomain::Stay,
             AfflictDomain::MoveCap,
             AfflictDomain::Reversal,
             AfflictDomain::Damage,
         ] {
             assert!(
-                Affliction::new(domain, victim()).cancellable,
-                "{domain:?} 默认不可抵消 —— 那 P13 的矩阵就没得关了"
+                !Affliction::new(domain, victim()).cancellable,
+                "{domain:?} 不该被免罪卡挡掉 —— 它是处境变了，不是一件灾落下来"
             );
         }
     }

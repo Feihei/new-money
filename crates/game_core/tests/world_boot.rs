@@ -102,6 +102,7 @@ fn setup_and_rules_are_the_only_sources() {
             .map(|i| PlayerSetup {
                 name: ["甲", "乙", "丙"][i].to_string(),
                 color: PLAYER_COLORS[i],
+                gender: game_core::player::Gender::Male,
             })
             .collect(),
     };

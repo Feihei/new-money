@@ -281,9 +281,10 @@ fn a_shorter_stay_does_not_cut_a_longer_one_short() {
 }
 
 #[test]
-fn an_insulated_victim_is_not_stayed_and_both_sides_still_keep_a_trail() {
-    // 与入狱、转向同一条反制形状：免罪挡的是**事**（`AfflictDomain::Stay`），
-    // 挡掉了就没有这回事 —— 不留半个计数，但两边各看得见一次
+fn a_shield_does_not_eat_a_stay_card() {
+    // P13 定稿的免疫口径（10-25 拍板）：免罪卡只挡「被关起来」那一族，停留不在里面 ——
+    // 被人按住一回合是处境变了，不是一件灾落下来。牙齿在第二句断言：挡不掉的事
+    // 如果把那层护身也吃了，玩家手里就少了一张他根本没用上的卡
     let (mut app, p0, p1) = two_of_them(4, 3);
     let insulate = item_index(&app, "item_insulate");
     make_current(&mut app, p1);
@@ -294,17 +295,19 @@ fn an_insulated_victim_is_not_stayed_and_both_sides_still_keep_a_trail() {
 
     hold_there(&mut app, p0, p1);
 
-    assert_eq!(stay_of(&app, p1), None, "抵消了就没有停留这回事");
-    assert_eq!(shield_of(&app, p1), None, "用掉的那一层要跟着收走");
+    assert_eq!(stay_of(&app, p1), Some(1), "停留照样落地：护身不吃这一族");
+    assert_eq!(shield_of(&app, p1), Some(1), "挡不掉的事不该白吃一张免罪卡");
     assert!(
-        ledger(&app).contains(&"Play(P0->P1:item_stay挡1)".to_string()),
-        "被挡掉也要留痕：{:?}",
+        ledger(&app).contains(&"Play(P0->P1:item_stay)".to_string()),
+        "流水里不该带「挡」：{:?}",
         ledger(&app)
     );
 
-    // 而下一张照样生效：挡掉的是那一件**事**，不是这个人以后的所有事
+    // 那层护身留给真正挡得住的那一族：同一张停留卡再打一次还是照样生效，
+    // 而陷害卡（拘留族）来了才吃它 —— 两边各归 [`game_core::afflict::AfflictDomain::forgivable`]
     hold_there(&mut app, p0, p1);
-    assert_eq!(stay_of(&app, p1), Some(1), "护身只吃了一层");
+    assert_eq!(stay_of(&app, p1), Some(1), "第二次也没被挡");
+    assert_eq!(shield_of(&app, p1), Some(1), "两张停留卡都没吃到护身");
 }
 
 #[test]

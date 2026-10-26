@@ -106,7 +106,13 @@ fn walking_backwards_wraps_past_the_start_to_the_other_end_of_the_ring() {
     clear_gods(&mut app);
     play_turns(&mut app, 1);
 
-    assert_eq!(tile_of(&app, p0), 16, "倒着越过起点该绕到环尾，不是停在 0");
+    // 从 1 号倒着走 5 步：0 → 环尾 → …（环长现读，别写死那个 16）
+    let len = ring_len(&app);
+    assert_eq!(
+        tile_of(&app, p0),
+        (1 + len - 5) % len,
+        "倒着越过起点该绕到环尾，不是停在 0"
+    );
     assert_eq!(cash_of(&mut app, p0), 20_000, "擦过起点一分钱都不发");
 }
 
@@ -143,9 +149,10 @@ fn a_reversal_aimed_at_an_opponent_turns_him_and_not_the_caster() {
 }
 
 #[test]
-fn an_insulated_victim_keeps_his_heading_and_both_sides_still_keep_a_trail() {
-    // 与陷害卡同一条反制形状：挡掉了就没有这回事（不留半个掉头流水），
-    // 但两边各看得见一次 —— 打的人要知道这张卡没了，被挡的人要知道自己省了一张
+fn a_shield_does_not_eat_a_turn_card() {
+    // P13 定稿的免疫口径（10-25 拍板）：掉头是走法变了，不是一件灾落下来 —— 免罪卡不吃这一族。
+    // 三条用例（转向／停留／乌龟）各钉一格，因为「挡不掉」与「挡掉了但白吃一张卡」
+    // 这两种错法在玩家眼里是同一件事：他的护身不见了，而那件事本来就没被挡
     let (mut app, p0, p1) = standing_at(5, 3);
     let insulate = item_index(&app, "item_insulate");
     make_current(&mut app, p1);
@@ -158,13 +165,13 @@ fn an_insulated_victim_keeps_his_heading_and_both_sides_still_keep_a_trail() {
 
     assert_eq!(
         heading_of(&app, p1),
-        Heading::Forward,
-        "抵消了就没有掉头这回事"
+        Heading::Backward,
+        "掉头照样发生：护身不吃这一族"
     );
-    assert_eq!(shield_of(&app, p1), None, "用掉的那一层要跟着收走");
+    assert_eq!(shield_of(&app, p1), Some(1), "挡不掉的事不该白吃一张免罪卡");
     assert!(
-        ledger(&app).contains(&"Play(P0->P1:item_turn挡1)".to_string()),
-        "被挡掉也要留痕：{:?}",
+        ledger(&app).contains(&"Play(P0->P1:item_turn)".to_string()),
+        "流水里不该带「挡」：{:?}",
         ledger(&app)
     );
 }

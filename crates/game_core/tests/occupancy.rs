@@ -205,7 +205,11 @@ fn a_mine_sends_its_own_placer_to_the_hospital_for_three_days() {
         (DetentionPlace::Hospital, Term::Turns(3)),
         "地雷 3 天"
     );
-    assert_eq!(tile_of(&app, p0), 9, "逻辑位置回到医院的接入点");
+    assert_eq!(
+        tile_of(&app, p0),
+        junction_tile(&app, game_core::board::BranchKind::Hospital),
+        "逻辑位置回到医院的接入点"
+    );
     assert!(
         tiles_holding(&mut app, OccupancyKind::Mine).is_empty(),
         "地雷被踩掉，场上不该还留着"
@@ -449,7 +453,7 @@ fn the_turtle_counter_lasts_three_rolls_and_then_disappears() {
 }
 
 #[test]
-fn the_turtle_card_stacks_by_max_and_is_absorbed_like_other_misfortunes() {
+fn the_turtle_card_stacks_by_max_and_is_not_shortened_by_a_second_one() {
     let (mut app, p0) = ready_on(4, 3, DecisionPolicy::DeclineAll);
     let p1 = other_of(&mut app, p0);
     clear_occupancies(&mut app);
@@ -474,7 +478,11 @@ fn the_turtle_card_stacks_by_max_and_is_absorbed_like_other_misfortunes() {
 }
 
 #[test]
-fn a_shielded_player_is_not_slowed() {
+fn a_shield_does_not_eat_a_turtle_card() {
+    // P13 定稿的免疫口径（10-25 拍板）：免罪卡只挡「被关起来」那一族。走不远是这一趟
+    // 的处境变了，不是一件灾落在他头上 —— 所以乌龟照挂，而玩家那层护身**一层都不该少**。
+    // 后半句才是这条用例的牙齿：挡不掉的事如果还白吃一张卡，玩家就永远不知道自己那张
+    // 免罪卡其实挡不住这个（`Insulation::absorb` 的注写的是同一条纪律）
     let (mut app, p0) = ready_on(4, 3, DecisionPolicy::DeclineAll);
     let p1 = other_of(&mut app, p0);
     clear_occupancies(&mut app);
@@ -491,13 +499,20 @@ fn a_shielded_player_is_not_slowed() {
     play_card(&mut app, p0, turtle.0, Some(CardAim::Player(p1)));
     settle(&mut app, 2);
 
-    assert_eq!(move_cap_of(&app, p1), None, "免罪抵的是事，事没发生");
-    assert_eq!(shield_of(&app, p1), None, "用掉的那一层要收走");
+    assert_eq!(
+        move_cap_of(&app, p1),
+        Some(3),
+        "乌龟照样生效：护身不吃这一族"
+    );
+    assert_eq!(shield_of(&app, p1), Some(1), "挡不掉的事不该白吃一张免罪卡");
     assert!(
+        ledger(&app).contains(&"Play(P0->P1:item_turtle)".to_string()),
+        "流水里不该带「挡」：{:?}",
         ledger(&app)
-            .iter()
-            .any(|l| l == "Play(P0->P1:item_turtle挡1)"),
-        "{:?}",
+    );
+    assert!(
+        !ledger(&app).iter().any(|l| l.contains("挡")),
+        "没挡住却写了挡，等于凭空造一次免疫：{:?}",
         ledger(&app)
     );
 }
