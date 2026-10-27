@@ -41,20 +41,25 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::collections::VecDeque;
 
-use crate::afflict::Affliction;
+use crate::afflict::{Afflict, Affliction};
 use crate::auction::Gavel;
+use crate::board::BuildingKind;
 use crate::card::{CardEffect, PassiveCard};
-use crate::charge::ChargeKind;
+use crate::charge::{Charge, ChargeKind};
+use crate::company::{CompanyLedgers, LedgerEntry};
 use crate::deck::{CardId, CardSink, Deck};
 use crate::hand::CardAim;
+use crate::land::LandId;
 use crate::landing::{Pending, PendingDecision};
 use crate::magic::{MagicRitual, MagicSpell};
+use crate::market::MarketClock;
 use crate::msg::{
-    BlameShifted, Blocker, CardDrawn, CardNotice, CardPlayed, EffectOutcome, NewsHit,
-    PassiveAnswer, PassiveMove, PassiveUsed,
+    BlameShifted, Blocker, CardDrawn, CardNotice, CardPlayed, CompanyCharged, EffectOutcome,
+    NewsHit, PassiveAnswer, PassiveMove, PassiveUsed, PolicyBought, RentDue, RentRerouted,
+    ServiceCharged,
 };
 use crate::news::NewsDef;
-use crate::player::DetentionPlace;
+use crate::player::{DetentionPlace, Insured};
 use crate::turn::TurnPhase;
 
 /// 表上的一行 = 一个**具体事件**。
@@ -235,22 +240,119 @@ pub const fn trip_of(place: DetentionPlace) -> PassiveEvent {
     }
 }
 
-// ===== 门（P13b②：事那侧）=====
+// ===== 门（P13b② 事那侧 ＋ ③ 钱那侧）=====
 
 /// 门里的一步「接下来要办的事」。
 ///
 /// 为什么不直接是 [`CardEffect`]：四条来路的动词库不同一张 —— 卡面与新闻共用 `CardEffect`，
-/// 女巫用的是 [`MagicSpell`]（那十二条里六条压根不在动词库里），而公司到访与旅馆住店
-/// 连动词都没有（它们是一段结算的尾巴）。门要的是「下一步做什么」这一层，
+/// 女巫用的是 [`MagicSpell`]（那十二条里六条压根不在动词库里），而**账**与踩到公司／旅馆
+/// 那两格连动词都没有（它们是一段结算的尾巴）。门要的是「下一步做什么」这一层，
 /// 不是「哪张表里的哪一行」。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
-    /// 卡面／新闻的一个动词
+    /// 卡面／新闻的一个动词（是**事**还是**账**由 [`affair_of`] 当场分派 ——
+    /// 同一句 `deduct_cash` 在卡面上是一条动词，在门上是一笔账）
     Effect(CardEffect),
     /// 女巫的一道法术
     Spell(MagicSpell),
     /// 从命运牌堆再抽一张并当场办它（女巫「抽命运 3 张」的每一张）
     FateDraw,
+    /// 一笔**账**（③）：过路费、设施服务费、公司到访、保费。触发点把它交进来而不是自己结掉，
+    /// 于是「问不问、问谁、问几遍」这一套判据在世界上只有一个位置
+    Bill(Charge),
+    /// 踩到某一格把人送去某一处（③ 给表上那两行没有载体的格补的路：
+    /// 联合航空的**出国**与别人的**旅馆**）。带 `row` 而不是从 `place` 数：
+    /// 那两行的答案是「不可免也不可转」，而从去处数会数出可以免的那一行 ——
+    /// [`trip_of`] 那条注点的就是这一格
+    Trip {
+        row: PassiveEvent,
+        place: DetentionPlace,
+        turns: u32,
+    },
+}
+
+impl Step {
+    /// 踩到联合航空：出国 `turns` 天。表上点名 [`PassiveEvent::AirlineTrip`] 那一行
+    /// （10-27 的例外之一：可以免的那一行是命运牌发给你的出国，不是这一格）。
+    pub const fn airline(turns: u32) -> Self {
+        Self::Trip {
+            row: PassiveEvent::AirlineTrip,
+            place: DetentionPlace::Away,
+            turns,
+        }
+    }
+
+    /// 踩到别人的旅馆：强制住宿 `turns` 天（[`PassiveEvent::Lodging`]，同为 10-27 的例外）。
+    pub const fn lodging(turns: u32) -> Self {
+        Self::Trip {
+            row: PassiveEvent::Lodging,
+            place: DetentionPlace::Hotel,
+            turns,
+        }
+    }
+}
+
+/// 门上正挂着的那一件东西：**一件事**或**一笔账**。
+///
+/// ② 只有事，③ 把账并进来而不是另建一道门，理由在 PLAN §五 第 1 条：两侧各自的咽喉早就存在
+/// （事那侧是 `afflict::land`，账那侧是 `Books::settle`），缺的是**同一个位置**回答
+/// 「免不免、转给谁、问几遍」—— 而这两问的答案按 10-27 那张表是**逐行**给的，
+/// 一行既可能是一件事也可能是一笔账，两处各问一次就会在下一行加进来那天分叉。
+///
+/// 两格的差别全部收在这一个 `match` 里（[Self::row]、[Self::bearer]、[Self::shiftable]），
+/// 门的其余部分读的是这三个读数而不是「它是事还是账」。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Affair {
+    /// 一件会落到某人头上的事
+    Event(Affliction),
+    /// 一笔要从谁钱包里走掉的账
+    Bill(Charge),
+}
+
+impl Affair {
+    /// 表上哪一行。事带的是**构造它那一处点名的行**，账带的是**归行的那一句**
+    /// （[`PassiveEvent::of_charge`]）—— 两处都在表上，所以门问的每一格都是同一张表的答案。
+    pub fn row(&self) -> PassiveEvent {
+        match self {
+            Self::Event(aff) => aff.event,
+            Self::Bill(charge) => PassiveEvent::of_charge(charge.kind),
+        }
+    }
+
+    /// 此刻该挨它／付它的那位。嫁祸改的就是这一格（事改 `victim`、账改 `payer`），
+    /// 而**不是** [`Job::victim`]：一次调用的后半段仍然打在原来那位头上。
+    ///
+    /// `None` = 这一笔没有主语（纯进账：`payer` 与 `payee` 都空）。那种账问不出「谁来免」，
+    /// 所以 [`next_question`] 对它为假，落地的路照走。
+    pub fn bearer(&self) -> Option<Entity> {
+        match self {
+            Self::Event(aff) => Some(aff.victim),
+            Self::Bill(charge) => charge.bearer(),
+        }
+    }
+
+    /// 这一格允不允许换人挨／换人付。事的读数在行上，账的读数在**账上那一位**
+    /// （[`Charge::transferable`]，由 [`Charge::new`] 从同一行派生）—— 与事那侧
+    /// 「[`Affliction`] 自己带着行」同一条形状：要活过那几十帧的东西得自己说得出答案。
+    pub fn shiftable(&self) -> bool {
+        match self {
+            Self::Event(aff) => aff.event.shiftable(),
+            Self::Bill(charge) => charge.transferable,
+        }
+    }
+
+    /// 面板上那一行「是什么事／什么账」的人话（表上那一行）。
+    pub fn label(&self) -> &'static str {
+        self.row().label()
+    }
+
+    /// 是账吗（尾巴与 [`Job::paid`] 那一格读它）。
+    pub fn bill(&self) -> Option<Charge> {
+        match *self {
+            Self::Bill(charge) => Some(charge),
+            Self::Event(_) => None,
+        }
+    }
 }
 
 /// 这道门挂着的一份**办事调用**。
@@ -261,14 +363,21 @@ pub enum Step {
 /// 重跑就是付两遍钱（与 P3d③「同一帧押两遍钱」同一条坑）。
 #[derive(Debug, Clone)]
 pub struct Job {
-    /// 这一次调用原本挨它的那个人（卡面／法术点名的那位）。
+    /// 这一次调用原本挨它的那个人（卡面／法术点名的那位；账那侧就是踩到那一格的人）。
     ///
-    /// 嫁祸改的**不是**这一格，而是 [`Job::front`] 里那条 [`Affliction::victim`]：
+    /// 嫁祸改的**不是**这一格，而是 [`Job::front`] 里那一位（事的 `victim`、账的 `payer`）：
     /// 一张卡的两件事不该因为第一件被转走就整个换人 —— 后面那些仍然打在原来那位头上。
     pub victim: Entity,
     /// 还没执行的条目。第一条就是此刻被门截住的那一条（它的读数在 [`Job::front`]）。
     pub todo: VecDeque<Step>,
-    pub front: Option<Affliction>,
+    pub front: Option<Affair>,
+    /// 这笔账**真的结完**之后那笔账（③；`Affair::Event` 那一路永远是 `None`）。
+    ///
+    /// 为什么不在落地那一刻就把收据写完：收据上的两个数（实付额、实际付款人）只有过完
+    /// 管线才知道，而三条收据（`RentDue`／`ServiceCharged`／`CompanyCharged`）各自还有
+    /// 自己的地块、设施与公司那一半 —— 那些在 [`Tail`] 里。所以这里只交**钱那一半**，
+    /// 尾巴负责拼成人话。`None` 有两种：没落地（免掉了／被挡掉了），或者这一步根本不是账。
+    pub paid: Option<Charge>,
     /// 已经办成的那几条凭据。收尾时交给原路。
     pub done: Vec<EffectOutcome>,
     /// 「哪条数据要办这件事」（卡 id／新闻 id），只进日志与凭据，不进判据
@@ -314,6 +423,7 @@ impl Job {
             victim,
             todo: VecDeque::from(todo),
             front: None,
+            paid: None,
             done: Vec::new(),
             source,
             aim,
@@ -332,16 +442,25 @@ impl Job {
     pub fn landed(&self) -> Entity {
         self.landed_on.unwrap_or(self.victim)
     }
+
+    /// 门上正挂着那一件（面板与 dump 读它，别自己去数队列）。
+    pub fn affair(&self) -> Option<Affair> {
+        self.front
+    }
 }
 
-/// 门上的那一问。**有界的两问**（PLAN §五 第 7 条：免罪？→ 嫁祸给谁？；
-/// 账那侧的「免费？」是 ③ 加在第一问那一格里，不是第三问）。
+/// 门上的那一问。**有界的两问**（PLAN §五 第 7 条：抵消？→ 嫁祸给谁？）。
 ///
 /// 顺序有内容：先免掉就没有可转的东西，反过来会白烧一张嫁祸 —— 与 P6b① 那条
 /// 「先问神、后花卡」同族。所以这一格是**状态**而不是两处各写一遍的 `if`。
+///
+/// ⚠️ 第一问的名字是 `Offset`（抵消）而不是 `Forgive`：③ 之后它吃两张卡 ——
+/// 事那侧是免罪卡、账那侧是免费卡，而**表上那一行点名是哪一张**
+/// （[`PassiveEvent::offset_card`]）。同一格、两张卡、一句问话，这是「有界的三问」
+/// 在代码里的实际形状：问的是「要不要用掉那张挡这一行的卡」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ask {
-    /// 免罪？（抵消类。账那侧的免费卡在 ③ 复用这一格，因为它是同一个「先抵消」的位置）
+    /// 用那张**抵消类**卡吗（免罪卡挡事、免费卡挡账，由表上那一行点名）
     Offset,
     /// 嫁祸给谁？（要过那位「已转过一次」）
     Shift,
@@ -349,21 +468,38 @@ pub enum Ask {
 
 impl Ask {
     /// 窗口上那一句问话。面板念的是这一句，所以它住在规则层。
-    pub const fn label(self) -> &'static str {
+    ///
+    /// 抵消那一问**按卡分支**而不是按问分支：`Ask::Offset` 一格挂着免罪与免费两张，
+    /// 而玩家在屏幕上要读到的是他手里那张的名字。名字从 [`PassiveCard::label`] 来，
+    /// 面板不许自己再写一句 —— 两处各写一遍就会出现「门问『要用免罪卡吗』而按钮写着『挡掉这次』」。
+    pub const fn label(self, card: Option<PassiveCard>) -> &'static str {
         match self {
-            Self::Offset => "要用免罪卡吗？",
             Self::Shift => "要嫁祸给谁？",
+            Self::Offset => match card {
+                Some(PassiveCard::Forgive) => "要用免罪卡吗？",
+                Some(PassiveCard::FreePass) => "要用免费卡吗？",
+                // 表上答「可免」的那一行必定点名一张抵消卡（`each_forgivable_row_names_which_card_answers_it`
+                // 钉着），而那一张不会是嫁祸卡（同一张用例的第二格）—— 所以这两格今天走不到，
+                // 走到了也只念一句不出错的话，而不是替规则层编一张卡
+                Some(PassiveCard::Shift) | None => "要挡下这一件吗？",
+            },
         }
     }
 }
 
-/// 答完之后，这一次调用的凭据交给谁。五格＝五条来路，**穷尽表**：
+/// 答完之后，这一次调用的凭据交给谁。**八格＝八条来路，穷尽表**：
 /// 新增一条来路必须在这里回答「你的收据找谁」。
 ///
 /// `Witch` 与 `News` 各带一份「还有一串人要落」的续作：一场法事筛出的是**一批人**、
 /// 一条人档新闻点到的也是**一批人**，而门截住其中一个时，另外那几个还没落。
 /// 续作存在信封里而不是存在来源的循环里，是因为来源那条 system 在门挂着的那几十帧里
 /// 根本不会跑（窗口已经不是它的了）—— 这条与 P9 拍卖的 `standby` 是同一个形状。
+///
+/// ③ 添的下面三格是**钱那侧的三条收据**（过路费／设施服务费／公司到访）。
+/// 它们为什么不合成一格 `Bill { .. }`：三格的**收款方**是三种东西（地主的口袋、
+/// 地主的口袋、公司的当月损益账），而收据之后各挂自己的窗口、B 型与航空各要再交一份
+/// 「人去哪儿」的信封。合成一格就得在格上摆一个「我是哪一种钱」的位 —— 那是把这三句
+/// 话抄成第二份真相（与 [`Pending`] 那八格不分叉同一条纪律）。
 #[derive(Debug, Clone)]
 pub enum Tail {
     /// 抽到的那张牌。收尾＝发 [`CardDrawn`]；`receipt` 那一格说的是「要不要把那张卡面
@@ -397,6 +533,54 @@ pub enum Tail {
         hits: Vec<NewsHit>,
         waiting: Vec<(Entity, Vec<Step>)>,
     },
+    /// 踩到**别人**的地付过路费（③）。`payee` 是收款的那一位 —— 地主，或者替他收钱的
+    /// 间谍雇主（P12d 那条转付在**交账之前**就定好了，而门不会重算它：间谍判据问的是
+    /// 「谁踩过这块地」，不是「谁付的钱」，把两句话合成一处就会在嫁祸那天分叉）。
+    ///
+    /// 收尾＝发 [`RentDue`]（上面的实付额与**实际付款人**都读 [`Job::paid`]）＋
+    /// 那张收据窗口。收据弹给**踩到那一格的人**（`job.victim`）而不是弹给出钱的那位 ——
+    /// 这一趟的回合机挂在他身上，而「谁替我付了钱」那句由顶栏念（`RentDue.payer`）。
+    Rent {
+        land: LandId,
+        payee: Entity,
+        /// 间谍转付那两个数（雇主与那位间谍）。`None` = 没有转付，钱照地主收
+        spy: Option<(Entity, Entity)>,
+    },
+    /// 踩到**别人**带设施的地（P10c 那一族：购物中心摇档、加油站油费、旅馆住宿）。
+    /// `stay_days > 0` 的那一格在钱结清之后**再交一份信封**（[`Step::lodging`]）——
+    /// 顺序是原来的那条：钱先扣（付不起当场破产，人都没了就不必再住店），再动棋子。
+    Service {
+        land: LandId,
+        owner: Entity,
+        kind: BuildingKind,
+        roll: u32,
+        stay_days: u32,
+    },
+    /// 踩到公司门面（P10d①）：维修费／保费／出国。钱不进任何人的口袋而进那家公司的
+    /// **当月损益账**（分红按它分），所以这一格的收尾比 [`Tail::Service`] 多两件事：
+    /// 记一笔真账（`amount != 0` 才记 —— 公司没收着钱就不欠任何保障，保费那一支的
+    /// 保单同一条口径），以及 B 型那份「送他去国外」的信封（[`Step::airline`]）。
+    Company {
+        stock: String,
+        /// 此刻的董事长（只进收据，让面板说得出「你是董事长，这一趟免费」）
+        chairman: Option<Entity>,
+        /// 摇出的那个数。B/C 型是档位，保险那一支是**投保天数** —— 收据上那一句
+        /// 「摇到几点」与「保几天」读的是同一个位置，因为一条公司格只会是其中一种
+        roll: u32,
+        stay_days: u32,
+        /// 流水上那一句为什么（「服务费」／「保费」）—— 同一本账、两种钱，
+        /// 而分红日念的是这一句
+        why: &'static str,
+        /// 保险那一支的**每日赔付额**；`None` = 不是保险格（不发 [`Insured`]、不发 [`PolicyBought`]）
+        insurance: Option<i64>,
+    },
+    /// 没有收据的那一步（③：住店与出国那两份**由钱结清之后**交进来的信封）。
+    ///
+    /// 它不是一格「以后再说」：那两行的后果全部落在世界状态里（棋子被挪去那一格、`Detention`
+    /// 挂上、`PlayerDetained` 由 [`crate::afflict::land`] 一处写），收尾**不该**再发第二条
+    /// 凭据 —— 而「不该」这句话也得在穷尽表上占一格，否则加一条来路的人会顺手把 `Rent`
+    /// 那一格改成「什么都能塞」。
+    Quiet,
 }
 
 /// 这道门本身。**槽仍然只有一个**（[`PendingDecision`]），这里挂的是「谁在等着答、答到哪一问」。
@@ -427,13 +611,22 @@ impl Gate {
     ///
     /// 判据是 [`Job::parked`] 而不是「最前面那份手上有没有事」—— 后者在「不用问、下一轮就落」
     /// 那一条路上也为真，那样一来 dump 会说「有人在答」而其实在场没人被问。
+    ///
+    /// 「那一位」读的是 [`Affair::bearer`]（事＝此刻该挨他的那位，账＝此刻该付的那位）——
+    /// 嫁祸之后两者都已经换成接住的人，而**不是** [`Job::victim`]。
     pub fn asking(&self) -> Option<(Entity, Ask, PassiveEvent)> {
         let job = self.queue.front()?;
         if !job.parked {
             return None;
         }
         let aff = job.front?;
-        Some((aff.victim, job.ask, aff.event))
+        Some((aff.bearer()?, job.ask, aff.row()))
+    }
+
+    /// 此刻挂着那一件（③：账那侧的面板要念得出实付额，而那个数只有门拿得到 ——
+    /// 面板不许自己再乘一遍物价）。
+    pub fn affair(&self) -> Option<Affair> {
+        self.queue.front()?.affair()
     }
 
     /// 此刻排在最前面那份信封（dump 面板读它，别自己再数一遍队列）。
@@ -443,12 +636,19 @@ impl Gate {
 }
 
 /// 一道门要动的全部东西。`CardSink` 是「把一件事落到某人头上」那把工具包（P3a 起），
-/// 这里在它上面加五样：那个槽、那个资源、那一格回合状态与它的前一格、法事草稿、
-/// 命运牌堆，以及五条来路各自的凭据写手。
+/// 这里在它上面加那个槽、那个资源、那一格回合状态与它的前一格、法事草稿、命运牌堆，
+/// 以及**八条来路各自的凭据写手**。
 ///
 /// ⚠️ 四条来路的写手**只在这里有一份**：抽卡那条 system 原来自己写 `CardDrawn`，
 /// 现在交给 [`crate::deck::finish_drawn`] 收尾 —— 两处各写一次的下一步就是「同一个数存两处」
 /// （而收据的 `outcomes` 恰恰是门答完才凑齐的）。
+///
+/// ⚠️ ③ 之后**钱那侧的三条收据也在这一张包里**（`rents`／`services`／`company`）。
+/// 这不是把门变成一个杂物间，而是那条「收据的实付额只有落地那一刻知道」的直接后果：
+/// 触发点把账交进来之时那个数还不存在，能写它的只有门。连带后果与 `CardSink` 同一条房规 ——
+/// 想用地的那三条 system（[`settle_property_landing`](crate::property::settle_property_landing)、
+/// [`settle_company_landing`](crate::company::settle_company_landing)）**不再自己拿**
+/// `Books`／`Commands`／`PendingDecision`／那几条 writer，一律借 `desk` 这一份。
 ///
 /// ⚠️ 它**内含** `CardSink` 而不是并列（§6.1 坑 33）：`Books` 与 `Commands` 出现两次会在
 /// 参数建立期直接撞。连带后果：任何想用门的 system 都不许再自己拿 `decks`／`hands`／
@@ -481,6 +681,20 @@ pub struct GateDesk<'w, 's> {
     pub newsfired: MessageWriter<'w, crate::msg::NewsFired>,
     pub used: MessageWriter<'w, PassiveUsed>,
     pub blame: MessageWriter<'w, BlameShifted>,
+    // ===== 钱那侧的三条收据（③）=====
+    pub rents: MessageWriter<'w, RentDue>,
+    /// 间谍转付。与 `rents` 分开是原来那两句各说一件事（「有人交了租」／「这笔租交错了人」），
+    /// 门没有理由把它们并成一条 —— 并了就得在收据上多摆一个「其实没付给 owner」的位
+    pub rerouted: MessageWriter<'w, RentRerouted>,
+    pub services: MessageWriter<'w, ServiceCharged>,
+    pub company: MessageWriter<'w, CompanyCharged>,
+    pub policies: MessageWriter<'w, PolicyBought>,
+    /// 公司的当月损益账（分红的分子）。公司那一笔钱**过完管线才记账**，而管线走完之后
+    /// 那个数才存在 —— 记在门上而不是记在触发点，是同一条理由。
+    pub ledgers: ResMut<'w, CompanyLedgers>,
+    /// 入账日期那一句需要的 tick（[`crate::calendar::date_of`] 的另一半是 `books.session.epoch`，
+    /// 那里读得到）。
+    pub clock: Res<'w, MarketClock>,
 }
 
 impl<'w, 's> GateDesk<'w, 's> {
@@ -643,18 +857,21 @@ pub fn affair_of_card(effect: &CardEffect, victim: Entity) -> Option<Affliction>
         CardEffect::Stay { turns } => Some(Affliction::stay(victim, *turns)),
         CardEffect::MoveCap { turns } => Some(Affliction::slow(victim, *turns)),
         CardEffect::Reverse => Some(Affliction::reversal(victim)),
-        // 下面这些不落「事」：钱、地、地块状态、瞬移、请送神、停摆 ——
-        // 它们各自那一格说得出为什么不是「一件灾」。`Damage`（地雷／飞弹／天灾）在表上有
-        // 一行（[`PassiveEvent::Hazard`]）而路上不走这里：它改的是楼不是人，
+        // ⚠️ 这三条**钱**在这里答 `None`，但不是「什么都不做」：[`affair_of`] 先问过
+        // [`crate::deck::bill_of`]，它们在那里成了 [`Affair::Bill`] 而根本走不到这一臂。
+        // 这一句要写住，因为「钱不是一种事」与「钱不归门管」是两句话，而这一张表的形状
+        // 只答得出前者 —— 后者正是 ③ 之前那些「就地算完就地扣」的触发点说的话。
+        CardEffect::AddCash { .. } | CardEffect::DeductCash { .. } | CardEffect::Levy { .. } => {
+            None
+        }
+        // 下面这些不落「事」：地、地块状态、瞬移、请送神、停摆 —— 它们各自那一格说得出
+        // 为什么不是「一件灾」。`Damage`（地雷／飞弹／天灾）在表上有一行
+        // （[`PassiveEvent::Hazard`]）而路上不走这里：它改的是楼不是人，
         // 由 [`Books::damage`](crate::settle::Books::damage) 结账
-        CardEffect::AddCash { .. }
-        | CardEffect::DeductCash { .. }
-        | CardEffect::Levy { .. }
-        | CardEffect::Release { .. }
+        CardEffect::Release { .. }
         | CardEffect::MoveTo { .. }
         | CardEffect::LandStatus { .. }
         | CardEffect::Damage { .. }
-        | CardEffect::FreePass { .. }
         | CardEffect::BuyLand
         | CardEffect::Auction { .. }
         | CardEffect::Suspend { .. }
@@ -663,18 +880,31 @@ pub fn affair_of_card(effect: &CardEffect, victim: Entity) -> Option<Affliction>
     }
 }
 
-/// 哪一步是「一件要问人的事」。`Some` 的那几条就是 P13b② 收进来的**全部**五处
-/// 「就地构造 → 就地挡 → 就地写状态」（`deck.rs` 四处 + `magic.rs` 一处），
-/// 外加两处点名行（公司到访／旅馆住店）。
+/// 这一步是**一笔账**吗（③）。`pub` 的理由与 [`affair_of_card`] 同一条：
+/// 那条不经过门的路（新闻的地档与机构档）要能与这里说同一句话 ——
+/// 两处各认各的「哪几条是钱」，就是「同一句扣款在两个文件里各修一半」的另一种写法。
+///
+/// 本体住在 [`crate::deck::bill_of`]：动词→账那张映射跟着动词库走（它是卡面的事），
+/// 而基数要从世界里现读的那一句也是（`levy` 读的是他此刻的现金）。
+pub fn affair_of_bill(sink: &CardSink, effect: &CardEffect, victim: Entity) -> Option<Affair> {
+    crate::deck::bill_of(sink, effect, victim).map(Affair::Bill)
+}
+
+/// 哪一步是「一件要问人的东西」—— ② 收事那五处（`deck.rs` 四处 + `magic.rs` 一处），
+/// ③ 收账那几处（卡面／新闻的三条钱动词 + 三个落格触发点 + 两处点名的送人）。
 ///
 /// 法事那四条在构造完顺手标成 [`Affliction::ritual`]：神明量的是「落到某人头上的厄运」，
 /// 而女巫那 3 天写在 [`MAGIC_DAYS`](crate::magic::MAGIC_DAYS) 这张表上 —— 免疫与天数加倍
 /// 两句话都由那一格答，所以这里只认「这一步是不是法术」，不再回去问来路。
-fn affair_of(step: &Step, victim: Entity) -> Option<Affliction> {
+///
+/// ⚠️ `sink` 只为**账**那一支存在（`levy` 的基数要读他此刻的现金与地块现值）。
+/// 它是只读的：算账归算账，动钱必须等到落地那一句（[`land_now`]）。
+fn affair_of(step: &Step, victim: Entity, sink: &CardSink) -> Option<Affair> {
     match step {
-        Step::Effect(effect) => affair_of_card(effect, victim),
-        Step::Spell(spell) => Some(
-            match spell {
+        Step::Effect(effect) => affair_of_bill(sink, effect, victim)
+            .or_else(|| affair_of_card(effect, victim).map(Affair::Event)),
+        Step::Spell(spell) => {
+            let aff = match spell {
                 // 女巫判 3 天写在 [`crate::magic::MAGIC_DAYS`] 那一格（卡面的天数在卡上、这里的在这里）
                 MagicSpell::Jail => {
                     Affliction::detain(victim, DetentionPlace::Jail, crate::magic::MAGIC_DAYS)
@@ -696,16 +926,30 @@ fn affair_of(step: &Step, victim: Entity) -> Option<Affliction> {
                 | MagicSpell::SellItems
                 | MagicSpell::Demolish
                 | MagicSpell::AuctionHere => return None,
-            }
-            .ritual(),
-        ),
+            };
+            Some(Affair::Event(aff.ritual()))
+        }
         Step::FateDraw => None,
+        // ③ 的两个落格触发点：账在触发点算好交进来（那里的判据是地块与设施，不是门的事），
+        // 送人是钱结清之后的第二步（顺序原样保留：钱先扣，付不起当场破产，人都没必要再住店）
+        Step::Bill(charge) => Some(Affair::Bill(*charge)),
+        Step::Trip { row, place, turns } => Some(Affair::Event(
+            Affliction::named(
+                *row,
+                victim,
+                Afflict::Detain {
+                    place: *place,
+                    turns: *turns,
+                },
+            )
+            .ritual(),
+        )),
     }
 }
 
 /// 办一步。四格返回见 [`Out`]。
 fn one(desk: &mut GateDesk, job: &mut Job) -> Out {
-    // 1. 门答完了的那件事：落
+    // 1. 门答完了的那件事／那笔账：落
     if job.front.is_some() {
         land_now(desk, job);
         return Out::Running;
@@ -714,7 +958,7 @@ fn one(desk: &mut GateDesk, job: &mut Job) -> Out {
     let Some(step) = job.todo.front().cloned() else {
         return Out::Finished;
     };
-    if let Some(aff) = affair_of(&step, job.victim) {
+    if let Some(affair) = affair_of(&step, job.victim, &desk.sink) {
         job.todo.pop_front();
         // **先问神再问卡**（P6b① 那条顺序纪律）：神那一半不消耗任何东西，也不看这一行
         // 可不可免。反过来写，大福神在场时每一件事都会白白花掉玩家一张免罪卡，
@@ -722,7 +966,12 @@ fn one(desk: &mut GateDesk, job: &mut Job) -> Out {
         //
         // 「法事不吃神明的豁免」这一格现在挂在**事**上（[`Affliction::is_ritual`]）而不是
         // 来路上：同一条判据还要管衰神的天数加倍（`afflict::days_of`），而落地那一句拿不到来路。
-        if !aff.is_ritual
+        //
+        // 账那一侧**不需要另写一句**：神明给的钱的豁免是登记在管线里的修正，
+        // 而 [`next_question`] 读的是**过完那条链之后的数** —— 已经被勾成 0 的账没有可免的东西，
+        // 那一句「先问神」在这里是算出来的而不是排出来的（P6b① 那句话在钱这侧的自动版本）。
+        if let Affair::Event(aff) = affair
+            && !aff.is_ritual
             && let Some(god) = god_resists(desk, aff.victim)
         {
             job.done.push(EffectOutcome::Blocked {
@@ -731,7 +980,7 @@ fn one(desk: &mut GateDesk, job: &mut Job) -> Out {
             });
             return Out::Running;
         }
-        job.front = Some(aff);
+        job.front = Some(affair);
         job.ask = Ask::Offset;
         // 「不可免也不可转」的那些行在这里就答 `false` —— 于是 `Hold` 那一族
         // （停留／乌龟／掉头）与联合航空、住店两行**从来挂不出窗口**，
@@ -746,9 +995,9 @@ fn one(desk: &mut GateDesk, job: &mut Job) -> Out {
     };
     match step {
         Step::Effect(effect) => {
-            // `None` = 这一笔钱扣不起、人已经离场：剩下的条目不办（旧 `apply_effects`
-            // 那句 `break` 的归宿）。凭据（`CouldNotPay` + `PlayerBankrupt`）在
-            // `apply_one` 里已经发掉了
+            // `None` = 这一笔扣不起、人已经离场：剩下的条目不办（旧 `apply_effects`
+            // 那句 `break` 的归宿）。钱不在这一支里动了 —— 三条钱动词在上面那一格
+            // 就被 `affair_of` 截成 [`Affair::Bill`]，走到这里的是地块、瞬移、停摆那些
             if let Some(outs) = crate::deck::apply_one(
                 &mut desk.sink,
                 &effect,
@@ -778,24 +1027,60 @@ fn one(desk: &mut GateDesk, job: &mut Job) -> Out {
             // 牌堆空了（一副都没有）：这一条什么也不办，与旧 `DrawFate` 那句 `break` 同义
             None => Out::Running,
         },
+        // 账与送人**只会从上面那一格进来**（`affair_of` 对这两步都答 `Some`）。
+        // 走到这里意味着一步已经办完而 `front` 是空的 —— 那不可能，所以这两臂是
+        // 那条穷尽表不许有 `_` 的代价，写成一声 `debug!` 而不是静默
+        Step::Bill(_) | Step::Trip { .. } => {
+            debug!("这一步该由门拿着而它没有：{step:?}");
+            Out::Running
+        }
     }
 }
 
-/// 落地那一条（没人可答、或答完了要落的那一条）。
+/// 落地那一条（没人可答、或答完了要落的那一条）。**事与账在这一句里各有一条出口，
+/// 而「落」这个动作只有这一处**（PLAN §五 第 1 条的那个咽喉）。
 fn land_now(desk: &mut GateDesk, job: &mut Job) {
-    let Some(aff) = job.front else {
+    let Some(affair) = job.front else {
         return;
     };
-    let source = job.source.clone();
-    let outs = crate::afflict::land(&mut desk.sink, &aff, &source);
-    job.landed_on = Some(aff.victim);
-    // 「办了」按**世界上真变了什么**判，不按「落下来了」判：棋盘没有那条分支时
-    // `land` 交回一张空清单（旧 `cast_one` 那一句 `let Some(..) = detain(..) else { false }`
-    // 的归宿），而顶栏不该对一块什么都没发生的人念出「他被关起来了」
-    job.effected |= !outs.is_empty();
-    job.done.extend(outs);
     job.front = None;
     job.ask = Ask::Offset;
+    match affair {
+        Affair::Event(aff) => {
+            let source = job.source.clone();
+            let outs = crate::afflict::land(&mut desk.sink, &aff, &source);
+            job.landed_on = Some(aff.victim);
+            // 「办了」按**世界上真变了什么**判，不按「落下来了」判：棋盘没有那条分支时
+            // `land` 交回一张空清单（旧 `cast_one` 那一句 `let Some(..) = detain(..) else { false }`
+            // 的归宿），而顶栏不该对一块什么都没发生的人念出「他被关起来了」
+            job.effected |= !outs.is_empty();
+            job.done.extend(outs);
+        }
+        Affair::Bill(charge) => {
+            // 免掉的那一笔在这里是一笔 `base = 0` 的账（[`answer_moves`] 答「用」时归零的），
+            // 它**照样过管线、照样发收据**，上面写着 0 —— 「玩家得看得见为什么没付钱」
+            // 这句 P10c 的话在门里仍然是同一条出口（与旧管线把 `Cancel` 落成 0 元同形：
+            // `debit`/`credit` 对 0 都不动钱包，也不给那块地留案底）
+            let income = charge.payer.is_none();
+            let Some(done) = desk.sink.books.settle(&mut desk.sink.commands, charge).ok() else {
+                // 付不起：破产已由 `settle` 宣告，人都离场了，剩下的条目不必再办
+                // （旧 `apply_effects` 那句 `break` 的归宿，而收据与窗口都不发 —— 与 ③ 之前
+                // `settle_service`／保费那两处 `let Ok(done) = .. else { return }` 同一条口径）
+                job.todo.clear();
+                return;
+            };
+            job.paid = Some(done);
+            // `bearer` 而不是 `payer`：纯进账（横财）没有付款人，「这一笔落到谁头上」
+            // 说的就是收钱的那位
+            job.landed_on = done.bearer();
+            job.effected = true;
+            job.done.push(if income {
+                EffectOutcome::Gained(done.amount)
+            } else {
+                EffectOutcome::Lost(done.amount)
+            });
+        }
+    }
 }
 
 /// 那位神是否豁免这一族厄运。返回他是谁，凭据要说得出**是哪一位**挡的
@@ -805,21 +1090,53 @@ fn god_resists(desk: &GateDesk, victim: Entity) -> Option<crate::gods::God> {
     crate::gods::resists(held.god).then_some(held.god)
 }
 
+/// 「大额」那把尺**按今天的物价折过之后**是多少。
+///
+/// 门槛必须跟着物价走，否则通胀会把这张卡稀释成永久免费券：钉死 2000 的话，物价 5 倍时
+/// 它连一格空地都免得掉（P3c② 立的这一条，③ 把它从管线里的 `Correction::floor`
+/// 搬到了门上，而**乘物价那一句一起搬**）。取整走 [`charge::scale`] ——
+/// 与账本身过管线时同一句四舍五入，两处取整不同就说不清「差一块钱免不免」。
+fn big_money_line(desk: &GateDesk) -> i64 {
+    let books = &desk.sink.books;
+    crate::charge::scale(
+        books.rules.big_money_floor,
+        f64::from(books.session.price_index),
+    )
+}
+
 /// 门此刻该不该问、问哪一句。会把 [`Job::ask`] 推到下一格；推到底答 `false` = 可以落了。
 ///
 /// **同类多张只答一次**（PLAN §五 第 7 条）就在这一句的形状里：它问的是「这个人手里
 /// 有没有这一张」，不是「有几张」，也没有按张数循环的那条路。
+///
+/// ⚠️ 这一句是**整个玩法里唯一决定「弹不弹窗口」的地方**（验收⑥ 那句话的代码形状）：
+/// 八个触发点把东西交进来就走，问不问、问谁、问几遍全在这里答。
 fn next_question(desk: &GateDesk, job: &mut Job) -> bool {
-    let Some(aff) = job.front else {
+    let Some(affair) = job.front else {
         return false;
     };
+    let Some(bearer) = affair.bearer() else {
+        return false;
+    };
+    // 账那侧先答两件事，两件事都**不消耗任何东西**：
+    // 1. 神明与规则给的修正已经把这笔勾掉了没有？勾掉了就没有可免的东西，
+    //    也不值得为它烧一张嫁祸 —— 这一句就是 P6b① 那句「先问神再问卡」在钱这侧的自动版本
+    //    （事那侧靠 [`god_resists`]，钱那侧靠过完链的实付额，两侧各自算，不共用一句 `if`）
+    // 2. 它够不够「大额」那把尺？10-27 拍的是**一把尺两处消费**：免费卡与嫁祸卡都只在
+    //    超过它时才问 —— 「买不起免罪卡也不要紧，花张嫁祸照样甩掉」那条旁路在钱这侧同样堵死
+    if affair.bill().is_some_and(|charge| {
+        let quoted = desk.sink.books.staged(charge).amount;
+        quoted <= 0 || quoted <= big_money_line(desk)
+    }) {
+        return false;
+    }
     loop {
         match job.ask {
             Ask::Offset => {
-                let card = aff.event.offset_card();
-                if aff.event.forgivable()
+                let card = affair.row().offset_card();
+                if affair.row().forgivable()
                     && card.is_some()
-                    && desk.holds(aff.victim, expect_card(card)).is_some()
+                    && desk.holds(bearer, expect_card(card)).is_some()
                 {
                     return true;
                 }
@@ -828,10 +1145,10 @@ fn next_question(desk: &GateDesk, job: &mut Job) -> bool {
             Ask::Shift => {
                 // 「不可免者不可转」这条蕴含在这里**不需要再判一次**：`shiftable()` 为真的
                 // 行由表保证都可免，所以走到这一格时上面那一问已经查过他手里有没有卡
-                let asked = aff.event.shiftable()
+                let asked = affair.shiftable()
                     && !job.shifted
-                    && desk.holds(aff.victim, PassiveCard::Shift).is_some()
-                    && !desk.shift_candidates(aff.victim).is_empty();
+                    && desk.holds(bearer, PassiveCard::Shift).is_some()
+                    && !desk.shift_candidates(bearer).is_empty();
                 return asked;
             }
         }
@@ -854,10 +1171,10 @@ fn expect_card(card: Option<PassiveCard>) -> PassiveCard {
 /// 归还地址取「此刻那一格」而不是写死 `TurnEnd`：`WaitRoll` 里出牌被门截住、答完就该
 /// 回到 `WaitRoll`（玩家还没掷骰），而 `Landed` 与 `WaitDecision` 里的事答完都是往下走。
 fn offer(desk: &mut GateDesk, job: &Job) {
-    let Some(aff) = job.front else {
+    let Some(bearer) = job.front.and_then(|affair| affair.bearer()) else {
         return;
     };
-    desk.pending.offer(aff.victim, Pending::Passive);
+    desk.pending.offer(bearer, Pending::Passive);
     if desk.gate.resume.is_none() {
         let here = *desk.phase.get();
         desk.gate.resume = Some(if here == TurnPhase::WaitRoll {
@@ -871,10 +1188,28 @@ fn offer(desk: &mut GateDesk, job: &Job) {
     }
 }
 
-/// 信封跑完了：把凭据交给原路（五格穷尽）。
+/// 钱结清了才交回来的那一份「送人」信封（③ 的两个落格触发点共用这一句）。
+///
+/// 为什么不并进那一笔账的 `todo`：账与人是**两行**（过路费 vs 住店），一行一个答案，
+/// 而住店那一行今天的答案是「不可免也不可转」—— 并进同一条调用里就等于让两行共用一份
+/// `shifted` 那一位（一条链最多两跳数的是**一件事**，不是一笔账加一次送人）。
+/// 交进来的时机倒是必须跟着钱：钱付不起人就离场了，不必再住店（P10c 原来那一句）。
+fn submit_trip(desk: &mut GateDesk, who: Entity, step: Step, source: String) {
+    submit(
+        desk,
+        Job::new(who, vec![step], source, None, Gavel::Public, Tail::Quiet),
+    );
+}
+
+/// 信封跑完了：把凭据交给原路（**九格穷尽**）。
 ///
 /// `Witch`／`News` 那两格先问「还有人要落吗」—— 有就起一条新的信封继续跑（**同一帧里**，
-/// 所以名单上五个人不会拖五帧），没有才真的收尾。
+/// 所以名单上五个人不会拖五帧），没有才真的收尾。③ 那三格（`Rent`／`Service`／`Company`）
+/// 各带一份「钱结清了才交回来的送人信封」，与那两格是同一个形状：**尾巴负责把后果接着交进来**，
+/// 而不是回头去催那条已经不跑的触发点 system。
+///
+/// ⚠️ 三条收据上的 `payer` 读的是 [`Job::paid`] 里那一位而不是 [`Job::victim`] ——
+/// 验收② 那句话（「收据说的是**实际付钱的人**」）的代码位置就在这一句注释下面。
 fn finish(desk: &mut GateDesk, job: Job) {
     let landed = job.landed();
     let Job {
@@ -884,6 +1219,7 @@ fn finish(desk: &mut GateDesk, job: Job) {
         effected,
         aim,
         gavel,
+        paid,
         ..
     } = job;
     match tail {
@@ -973,6 +1309,120 @@ fn finish(desk: &mut GateDesk, job: Job) {
                 );
             }
         }
+        // ===== 钱那侧的三条收据（③）=====
+        Tail::Rent { land, payee, spy } => {
+            // `paid` 为 `None` 只有一种情况：**付不起，人已离场**（免掉的那一笔是
+            // 一笔 0 元的账，照样 `Some`）。今天 `settle_rent` 的 `if let Ok(done)` 之外
+            // 那一句 `pending.offer(RentNotice)` 是**无条件**的 —— 破产那一支也弹收据，
+            // 所以这里同样把窗口与收据分开写，而不是把两句并成一个 `if`
+            if let Some(done) = paid {
+                desk.rents.write(RentDue {
+                    payer: done.payer.unwrap_or(victim),
+                    owner: payee,
+                    land,
+                    amount: done.amount,
+                });
+                if let Some((spy_entity, employer)) = spy {
+                    desk.rerouted.write(RentRerouted {
+                        spy: spy_entity,
+                        employer,
+                        land,
+                        amount: done.amount,
+                    });
+                }
+            }
+            desk.pending.offer(victim, Pending::RentNotice(land));
+        }
+        Tail::Service {
+            land,
+            owner,
+            kind,
+            roll,
+            stay_days,
+        } => {
+            let Some(done) = paid else {
+                // 付不起 → 破产已宣告。③ 之前这一支是 `let Ok(done) = .. else { return }`：
+                // 不发收据、不送人住店、也不弹那张窗口（人都没了，住宿无从谈起）
+                return;
+            };
+            if stay_days > 0 {
+                // B 型（旅馆）：钱先结清，再交一份「住店」的信封。表的上那一行是
+                // [`PassiveEvent::Lodging`] —— 10-27 的例外之一，门读到它就当场落，不问人
+                let source = format!("踩到 L{} 的{}", land.0, kind.label());
+                submit_trip(desk, victim, Step::lodging(stay_days), source);
+            }
+            desk.services.write(ServiceCharged {
+                payer: done.payer.unwrap_or(victim),
+                owner,
+                land,
+                kind,
+                amount: done.amount,
+                roll,
+                stay_days,
+            });
+            // 钱已扣、人已送走 —— 收据仍然要弹：B 型那张上写着「住了几天」，
+            // A 型那张上写着「摇出几点走了哪一档」。免单（金额 0）也一样弹。
+            desk.pending.offer(victim, Pending::ServiceNotice(land));
+        }
+        Tail::Company {
+            stock,
+            chairman,
+            roll,
+            stay_days,
+            why,
+            insurance,
+        } => {
+            let Some(done) = paid else {
+                return; // 与 `Service` 那一支同一句理由
+            };
+            // 收据上的「谁付的」先定下来：下面那笔真账、那张保单都跟着**实际掏钱的那位**走
+            let payer = done.payer.unwrap_or(victim);
+            // 记一笔真账：过完管线的实付额。免单（门答「用免费卡」落成的那笔 0 元）不记 ——
+            // 公司没收着钱，记 0 只会让分红日多算一笔空账
+            if done.amount != 0 {
+                let date = crate::calendar::date_of(desk.clock.tick, desk.sink.books.session.epoch);
+                desk.ledgers
+                    .current_mut(&stock, date)
+                    .entries
+                    .push(LedgerEntry {
+                        date,
+                        amount: done.amount,
+                        why,
+                    });
+            }
+            if stay_days > 0 {
+                let source = format!("踩到 {} 的门面", stock);
+                submit_trip(desk, victim, Step::airline(stay_days), source);
+            }
+            // 保险那张保单发给**实际掏保费的那位**：「免单不发保单」那句判据（保费一分没掏
+            // 就是凭空印一张）说的就是掏钱这个人，而嫁祸之后掏钱的换了位 —— 保单跟着钱走
+            // 才不让「A 踩格、B 掏钱、A 得保障」这种第三种答案悄悄成立
+            if let Some(indemnity_per_day) = insurance
+                && done.amount > 0
+            {
+                desk.sink.commands.entity(payer).insert(Insured {
+                    days_left: roll,
+                    insurer: stock.clone(),
+                    indemnity_per_day,
+                });
+                desk.policies.write(PolicyBought {
+                    player: payer,
+                    stock: stock.clone(),
+                    days: roll,
+                    premium: done.amount,
+                });
+            }
+            desk.company.write(CompanyCharged {
+                payer,
+                stock,
+                chairman,
+                amount: done.amount,
+                roll,
+                stay_days,
+            });
+            desk.pending.offer(victim, Pending::CompanyNotice);
+        }
+        Tail::Quiet => {}
     }
 }
 
@@ -1033,14 +1483,20 @@ pub fn gate_system(mut desk: GateDesk, mut answers: MessageReader<PassiveAnswer>
 ///
 /// **放弃 = 事件照原样落**（与拍卖的 `Withdraw` 同形），而放弃**不消耗卡**
 /// （P3d④a ⑤ 那条纪律：卡没了事没成＝缺陷）。
+///
+/// 事与账在这一句里各有两答，而形状是**同一句**：抵消＝把这件事变得不发生（事的 `front` 清空、
+/// 账的 `base` 归零），转嫁＝换主语（事的 `victim`、账的 `payer`）。两种「改变」都只改
+/// [`Job::front`] 里那一格，而不动 [`Job::victim`] —— 一次调用的后半段仍然归原来那位。
 fn answer_moves(desk: &mut GateDesk, job: &mut Job, moved: PassiveMove, asked: Entity) -> bool {
-    let Some(aff) = job.front else {
+    let Some(affair) = job.front else {
         return true;
     };
-    let event = aff.event;
-    let from = aff.victim;
+    let event = affair.row();
+    let Some(from) = affair.bearer() else {
+        return true;
+    };
     match (job.ask, moved) {
-        // 免罪：花掉那张，这件事不落下来
+        // 抵消：花掉那张，这一件不落下来 / 这一笔变成 0 元
         (Ask::Offset, PassiveMove::Use) => {
             let Some(card) = desk.holds(from, expect_card(event.offset_card())) else {
                 warn!("{asked:?} 被问了一句他答不了的话：手里那张抵消卡不见了");
@@ -1051,20 +1507,39 @@ fn answer_moves(desk: &mut GateDesk, job: &mut Job, moved: PassiveMove, asked: E
                 job.front = None;
                 return true;
             };
+            // `saved` 是**过完物价与神明之后**那个数（免掉的到底值多少），事那侧没有钱、是 0
+            let saved = affair
+                .bill()
+                .map_or(0, |charge| desk.sink.books.staged(charge).amount);
             desk.used.write(PassiveUsed {
                 player: from,
                 card: notice,
                 event,
                 moved_to: None,
+                saved,
             });
-            job.done.push(EffectOutcome::Blocked {
-                event,
-                by: Blocker::Card,
-            });
-            job.front = None;
+            match affair {
+                Affair::Event(_) => {
+                    job.done.push(EffectOutcome::Blocked {
+                        event,
+                        by: Blocker::Card,
+                    });
+                    job.front = None;
+                }
+                // 账**照样落地**，只是落成一笔 0 元的账：收据要弹、上面写着 0，
+                // 而那块地不会因为这一笔而记上「踩过交费」（`Books::stamp_rent` 只数收过钱的）
+                // —— 两句都是 ③ 之前那条 `Cancel` 的行为，逐字保留
+                Affair::Bill(charge) => {
+                    job.front = Some(Affair::Bill(Charge {
+                        base: 0,
+                        amount: 0,
+                        ..charge
+                    }));
+                }
+            }
             true
         }
-        // 嫁祸：换承受者，然后**回到第一问**（接住的那位照样可以被问免罪 ——
+        // 嫁祸：换主语，然后**回到第一问**（接住的那位照样可以被问抵消那一问 ——
         // PLAN §五 第 3 条那句「这不是要拍的例外，而是门的自然行为」）
         (Ask::Shift, PassiveMove::Shift { to }) => {
             if !desk.shift_candidates(from).contains(&to) {
@@ -1080,22 +1555,35 @@ fn answer_moves(desk: &mut GateDesk, job: &mut Job, moved: PassiveMove, asked: E
                 job.front = None;
                 return true;
             };
+            // 嫁祸那一格的 `saved` 是**整笔**转出去的数（他自己少付了这么多，
+            // 与 ③ 之前 `stage_and_spend` 对 `TransferTo` 那一句同一条口径）
+            let saved = affair
+                .bill()
+                .map_or(0, |charge| desk.sink.books.staged(charge).amount);
             desk.used.write(PassiveUsed {
                 player: from,
                 card: notice,
                 event,
                 moved_to: Some(to),
+                saved,
             });
             desk.blame.write(BlameShifted { from, to, event });
             // 改的是 `front` 里那一位，不是 `job.victim`：一张卡的两件事不该因为
             // 第一件被转走就整个换人（后面那些仍然打在原来那位头上）
-            job.front = Some(Affliction {
-                event,
-                victim: to,
-                ..aff
+            job.front = Some(match affair {
+                Affair::Event(aff) => Affair::Event(Affliction {
+                    event,
+                    victim: to,
+                    ..aff
+                }),
+                // 收款方**不换**：把账推给别人是「他替我付」，不是「钱给他」
+                Affair::Bill(charge) => Affair::Bill(Charge {
+                    payer: Some(to),
+                    ..charge
+                }),
             });
             job.shifted = true;
-            // 新承受者先问抵消那一问；他自己「往下转」的那一问被他身上那一位
+            // 新主语先问抵消那一问；他自己「往下转」的那一问被他身上那一位
             // 「已转过一次」挡掉 —— 这就是「链最长两跳」的全部内容，不是一条特例
             job.ask = Ask::Offset;
             !next_question(desk, job)
@@ -1357,7 +1845,11 @@ mod tests {
                 player: victim,
             },
         );
-        job.front = Some(Affliction::detain(victim, DetentionPlace::Jail, 3));
+        job.front = Some(Affair::Event(Affliction::detain(
+            victim,
+            DetentionPlace::Jail,
+            3,
+        )));
         let mut gate = Gate {
             queue: std::collections::VecDeque::from(vec![job]),
             resume: None,

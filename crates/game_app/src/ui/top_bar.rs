@@ -14,15 +14,15 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionFailed, AuctionStarted, AuctionWon, BankOpDone, BankVisited,
     BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, CardSnatched, ChairmanTook,
-    ChargeWaived, ChestOpened, CompanyCharged, DepositsRobbed, DetentionLifted, DetentionSkipped,
-    FacilityBuilt, FinancingDrawn, FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed,
-    GodExit, GodLeft, GodPossessed, IndemnityPaid, Institution, ItemPlaced, ItemThieved, LandId,
-    LandTaken, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicSpell,
-    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience,
-    NewsFired, NewsScope, PassiveUsed, Paused, PendingDecision, PlayerBailed, PlayerBankrupt,
-    PlayerName, PointsChanged, PointsStolen, PolicyBought, RemoteDiceUsed, RentRerouted,
-    ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited,
-    TileIndex, TollExtorted, TradeSide, TurnOrder, TurnPhase, VillainHired, WalkHalted,
+    ChestOpened, CompanyCharged, DepositsRobbed, DetentionLifted, DetentionSkipped, FacilityBuilt,
+    FinancingDrawn, FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed, GodExit,
+    GodLeft, GodPossessed, IndemnityPaid, Institution, ItemPlaced, ItemThieved, LandId, LandTaken,
+    LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicSpell, MarketClock,
+    MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience, NewsFired,
+    NewsScope, PassiveUsed, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName,
+    PointsChanged, PointsStolen, PolicyBought, RemoteDiceUsed, RentRerouted, ServiceCharged,
+    ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex,
+    TollExtorted, TradeSide, TurnOrder, TurnPhase, VillainHired, WalkHalted,
 };
 
 use super::dialog::describe;
@@ -499,9 +499,6 @@ pub(crate) struct Notices<'w, 's> {
     card_lost: MessageReader<'w, 's, CardLost>,
     /// 土地公把一块地直接拿走。它与「有人付钱买地」是两条凭据，那条带付款、这条不带
     land_taken: MessageReader<'w, 's, LandTaken>,
-    /// 一次性修正生效那一笔（免费卡花掉了）。**没有对应的 `CashChanged`**：钱一分没动而
-    /// 卡没了，玩家能看见的只有这一行
-    waived: MessageReader<'w, 's, ChargeWaived>,
     // ===== 道路放置物与道具（P5）=====
     /// 放下了什么、放在哪一格。面板随道具数重建，一次性结果只有这一行能说
     placed: MessageReader<'w, 's, ItemPlaced>,
@@ -893,18 +890,9 @@ pub(crate) fn hint_from_events(
             ),
         });
     }
-    // 免付要说「免掉了多少」而不是「付了 0」：前者是一次事件的凭据，后者读起来像租金表坏了
-    for m in notices.waived.read() {
-        line = Some(format!(
-            "{} 免付了一笔 ${}（{}）",
-            name(&names, m.player),
-            comma(m.saved),
-            source_word(m.via)
-        ));
-    }
     // ===== P6e①：神明 =====
     // 六句话各抽成一个纯函数：顶栏只有一行，而「这句话怎么说」与名字怎么解析无关
-    // （与 `op_verb`／`source_word` 同一条分工）。抽出来还有一层用处 —— 那六条分支里
+    // （与 `op_verb`／`passive_clause` 同一条分工）。抽出来还有一层用处 —— 那六条分支里
     // 有五条是「带不带某个尾巴」的形状，不抽出来就只能靠截图去撞它们
     for m in notices.god_appeared.read() {
         line = Some(god_appeared_word(m.god.label(), &tile_word(&board, m.tile)));
@@ -1053,7 +1041,8 @@ pub(crate) fn hint_from_events(
         ));
     }
     for m in notices.service.read() {
-        // 免单（大财神/免费卡）那笔是 0：说「免费」而不是「付了 0」，与 `waived` 同一条
+        // 免单那笔是 0（大财神赖账，或门用免费卡免掉 —— 后者那条流水自带金额）：
+        // 说「分文不取」而不是「付了 0」，后者读起来像租金表坏了
         let amount = if m.amount == 0 {
             "分文不取".to_string()
         } else {
@@ -1230,6 +1219,7 @@ pub(crate) fn hint_from_events(
                 &m.card.title,
                 m.event.label(),
                 m.moved_to.map(|to| name(&names, to)).as_deref(),
+                m.saved,
             ),
         ));
     }
@@ -1425,17 +1415,6 @@ fn side_verb(side: game_core::prelude::TradeSide) -> &'static str {
     }
 }
 
-/// 免付是谁给的。今天只有卡，但这一栏不能省：将来神明（大财神赖账）与规则（P10 的
-/// 董事长免费）都走同一条凭据，而玩家有权知道自己这次是靠什么少付的。
-fn source_word(via: game_core::prelude::Source) -> &'static str {
-    use game_core::prelude::Source;
-    match via {
-        Source::Card => "卡片",
-        Source::God => "神明",
-        Source::Rule => "规则",
-    }
-}
-
 fn name(names: &Query<&PlayerName>, player: Entity) -> String {
     names
         .get(player)
@@ -1473,16 +1452,31 @@ fn append_clause(prev: Option<String>, clause: &str) -> String {
     }
 }
 
-/// 门那一句怎么说（P13b②）。两个形状对应门上两个动作：
+/// 门那一句怎么说（P13b②，③ 补上钱那一半）。两个形状对应门上两个动作：
 /// **抵消**（「挡下了」—— 这一次不落下来）与**嫁祸**（「转给」—— 这一次落到别人头上）。
 /// 两句话的差别是下一手：挡下的那位自己脱身，转走的那位要知道**是谁**接住了这一下。
 /// 放弃不发这一条（什么都不花，所以没有新事实要说 —— 事件照原样落那一句由各个来路
 /// 自己的凭据讲）。抽成纯函数与 P13/P11 那几条同一个理由：一行话有两种形状，
 /// 截图撞不出那两格。
-fn passive_clause(who: &str, card: &str, event: &str, moved_to: Option<&str>) -> String {
+///
+/// 第三种形状是**价签**：`saved > 0` 只在账那一侧成立（坐牢没有价签），所以「这是事还是钱」
+/// 不用再带一个位 —— 「他花了一张卡」这句话在两种东西上要说的是「挡下了那一次」还是
+/// 「免掉了那笔多少」，而后者那句里的数是玩家判断下一张该不该留着的唯一依据。
+fn passive_clause(
+    who: &str,
+    card: &str,
+    event: &str,
+    moved_to: Option<&str>,
+    saved: i64,
+) -> String {
+    let (verb, what) = if saved > 0 {
+        ("免掉", format!("那笔 {}", comma(saved)))
+    } else {
+        ("挡下", format!("那一次「{event}」"))
+    };
     match moved_to {
-        None => format!("{who} 花一张「{card}」挡下了那一次「{event}」"),
-        Some(to) => format!("{who} 花一张「{card}」把那一次「{event}」转给了 {to}"),
+        None => format!("{who} 花一张「{card}」{verb}了{what}"),
+        Some(to) => format!("{who} 花一张「{card}」把{what}转给了 {to}"),
     }
 }
 
@@ -1506,8 +1500,8 @@ mod tests {
     use game_core::prelude::BuildingKind;
     use game_core::prelude::{
         CardKind, CardNotice, DetentionPlace, EffectOutcome, FieldFilter, GameKind, GameRules, God,
-        LandId, NewsFired, NewsHit, NewsNotice, NewsScope, PlayerId, PlayerPick, StockId,
-        TradeSide, TurnOrder,
+        LandId, NewsFired, NewsHit, NewsNotice, NewsScope, PassiveEvent, PlayerId, PlayerPick,
+        StockId, TradeSide, TurnOrder,
     };
 
     /// 顶栏刷新只许动顶栏名下的按钮（§6.1 坑 31）。
@@ -1726,7 +1720,6 @@ mod tests {
             .add_message::<GodDeed>()
             .add_message::<CardLost>()
             .add_message::<LandTaken>()
-            .add_message::<ChargeWaived>()
             .add_message::<ItemPlaced>()
             .add_message::<WalkHalted>()
             .add_message::<BombTransferred>()
@@ -2795,6 +2788,81 @@ mod tests {
         assert!(
             line.contains("落到 阿土伯 头上") && line.contains("孙小美 用免罪卡挡下了那一下"),
             "两种落点并存时少念了一半：{line}"
+        );
+    }
+
+    /// 门那一句有四种形状（事／钱 × 抵消／嫁祸），而这一行是「我刚才花了一张卡」
+    /// 唯一上屏的地方。钱那两种**必须带数**：不带数就分不清「免了一次坐牢」与
+    /// 「免了一笔 2,400」，而后者正是玩家判断下一张该不该留着的唯一依据。
+    #[test]
+    fn the_gate_clause_reads_differently_for_money_and_for_events() {
+        let (mut app, me, foe, hint) = notices_app();
+        send(
+            &mut app,
+            PassiveUsed {
+                player: me,
+                card: notice("免费卡"),
+                event: PassiveEvent::Rent,
+                moved_to: None,
+                saved: 2_400,
+            },
+        );
+        let line = hint_of(&mut app, hint);
+        assert!(
+            line.contains("免掉了那笔 2,400"),
+            "钱那一侧要说得出省了多少：{line}"
+        );
+        assert!(
+            !line.contains("挡下"),
+            "钱不是一件灾，别念事件的动词：{line}"
+        );
+
+        send(
+            &mut app,
+            PassiveUsed {
+                player: me,
+                card: notice("嫁祸卡"),
+                event: PassiveEvent::Bill,
+                moved_to: Some(foe),
+                saved: 5_000,
+            },
+        );
+        let line = hint_of(&mut app, hint);
+        assert!(
+            line.contains("那笔 5,000") && line.contains("转给了 孙小美"),
+            "转嫁要说的是**那笔钱**去了谁那儿：{line}"
+        );
+
+        send(
+            &mut app,
+            PassiveUsed {
+                player: me,
+                card: notice("免罪卡"),
+                event: PassiveEvent::JailTrip,
+                moved_to: None,
+                saved: 0,
+            },
+        );
+        let line = hint_of(&mut app, hint);
+        assert!(
+            line.contains("挡下了那一次") && !line.contains('$'),
+            "事那侧没有价签，`saved` 恒为 0：{line}"
+        );
+
+        send(
+            &mut app,
+            PassiveUsed {
+                player: me,
+                card: notice("嫁祸卡"),
+                event: PassiveEvent::HospitalTrip,
+                moved_to: Some(foe),
+                saved: 0,
+            },
+        );
+        let line = hint_of(&mut app, hint);
+        assert!(
+            line.contains("那一次「") && line.contains("转给了 孙小美"),
+            "四种形状里最后这一种：{line}"
         );
     }
 }

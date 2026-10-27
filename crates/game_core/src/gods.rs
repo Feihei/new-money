@@ -1309,6 +1309,11 @@ mod tests {
 
     /// [`Corrections::release`] 键的是 `(bearer, Source::God)`。这两位在表上必须一致，
     /// 否则「神走了」永远撤不掉他给的那几条 —— 症状不是崩，是第八天租金还是双倍。
+    ///
+    /// ③ 之前这里还钉着两条「神的链是常开的、没有门槛」。它们现在**在这张类型上问不出来**：
+    /// `one_shot` 与 `floor` 那两格随免费卡一起搬进了那道门（[`crate::passive`]），
+    /// 而「一次性的那种是卡，不是神」从此是**结构**而不是断言 —— 神的构造只登记常开那一条，
+    /// 而 `Correction` 里已经没有「一次」这个位可填。
     #[test]
     fn every_row_a_god_leaves_is_reachable_by_the_exit_that_clears_it() {
         for god in God::ALL {
@@ -1320,12 +1325,6 @@ mod tests {
                     "{} 的链主语是被附身的那位",
                     god.label()
                 );
-                assert!(
-                    !row.one_shot,
-                    "{} 的链是常开的：一次性的那种是卡，不是神",
-                    god.label()
-                );
-                assert_eq!(row.floor, 0, "神的链没有门槛，门槛是免费卡那一条的形状");
             }
         }
     }

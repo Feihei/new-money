@@ -461,3 +461,153 @@ fn a_fate_card_sending_him_abroad_can_be_shifted_to_somebody_else() {
         "谁替谁出国要留一条流水：{log:?}"
     );
 }
+
+// ===== ③：钱那一侧的门 =====
+//
+// 上面那几条钉的是「事」，下面这三条钉的是「账」。它们同住这一份文件而不是搬去
+// `tests/free_pass.rs`，因为这里问的是**门的性质**（链长、问序、谁答完就停），而那份文件
+// 问的是那张卡自己的玩法（门槛、烧几张）。夹具也不同：那一份踩的是 P1 的地 —— 两人盘上
+// 能接盘的不是业主本人没别人，「付钱的、收钱的、被点名的」是三个不同的人这一格读不出来。
+
+/// 装配到「P0 的回合，下一步就踩到**丙**的 L0（名义租金 5000）」，并按座位发好手里的被动卡。
+///
+/// 走 P5 的遥控骰子而不是 `ready_on` 那颗种子骰：这份盘用的是默认种子，
+/// 「下一颗正好是 1」押不住（`tests/news.rs` 的 `step_news_on` 同一条理由）。
+fn rent_table(holds: &[(usize, &[&str])]) -> (App, [Entity; 3]) {
+    let mut app = boot(trio(), GameRules::instant(), GameSeed::default());
+    app.insert_resource(DecisionPolicy::Hold);
+    let p0 = boot_to_wait_roll(&mut app);
+    let rows = roster(&mut app);
+    let seats: [Entity; 3] = [p0, rows[1].0, rows[2].0];
+    own(&mut app, 0, Some(2), 1, false);
+    flat_rent(&mut app, 0, 5_000);
+    let tile = land_tile(&app, 0);
+    place(&mut app, p0, tile - 1);
+    for (seat, ids) in holds {
+        for id in ids.iter() {
+            let card = item_index(&app, id);
+            deal(&mut app, seats[*seat], card.0);
+        }
+    }
+    make_current(&mut app, p0);
+    (app, seats)
+}
+
+/// 让 P0 真走那一步，走到门把那笔过路费问出去为止。
+fn step_onto_rent(app: &mut App, p0: Entity) {
+    let want = app.world().resource::<GameSession>().turn_count + 1;
+    grant_item(app, p0, ItemKind::RemoteDice, 1);
+    use_remote_dice(app, p0, 1);
+    settle(app, 2);
+    play_turns(app, want);
+}
+
+/// 验收③（链最长两跳）在**钱**这一侧的形状：第二跳被 `shifted` 那一格挡掉，
+/// 而不是被「他手里没有那张卡」挡掉 —— 所以接盘的那一位**也**得有一张嫁祸卡，
+/// 否则这一条什么都没说（拿「没卡」冒充「链长到头」是这批用例最容易犯的错）。
+#[test]
+fn a_shifted_bill_lands_on_the_one_he_names_and_stops_there() {
+    let (mut app, [p0, p1, p2]) = rent_table(&[(0, &["item_shift"]), (1, &["item_shift"])]);
+    step_onto_rent(&mut app, p0);
+
+    assert_eq!(
+        gate_asking(&app),
+        Some((p0, Ask::Shift, PassiveEvent::Rent)),
+        "他手里没有免费卡，第一问落空 → 门自己跳到第二问"
+    );
+
+    answer_gate(&mut app, p0, PassiveMove::Shift { to: p1 });
+    settle(&mut app, 2);
+
+    assert_eq!(
+        gate_asking(&app),
+        None,
+        "接住的那位不该再被问一遍 —— 挡他的是『已经转过一次』，不是『他没有卡』"
+    );
+    assert_eq!(cash_of(&mut app, p0), 20_000, "转出去的人一分不付");
+    assert_eq!(cash_of(&mut app, p1), 15_000, "掏钱的是接盘的那位");
+    assert_eq!(
+        cash_of(&mut app, p2),
+        25_000,
+        "收款方不换：丙照样收到这笔租"
+    );
+    assert_eq!(
+        shift_left(&app, p1),
+        1,
+        "他那张嫁祸卡原样留着，一句都没问过他"
+    );
+    let log = ledger(&app);
+    assert!(
+        log.contains(&"Rent(P1->P2@L0$5000)".to_string()),
+        "收据说的是**实际付钱的人**付给谁：{log:?}"
+    );
+    assert!(
+        log.iter().any(|l| l.starts_with("Blame(P0→P1")),
+        "「谁把账推给谁」单独一条，与收据各说一件事：{log:?}"
+    );
+    assert_cash_audit(&mut app, 20_000);
+}
+
+/// 验收④（先抵消后转嫁）在钱这一侧的形状：免掉之后第二问根本问不到，
+/// 而那张嫁祸卡原样留在手里 —— 与上面事件那一侧的同名用例**同一句判据、两处形状**。
+#[test]
+fn a_waived_bill_never_reaches_the_shift_question() {
+    let (mut app, [p0, _p1, p2]) = rent_table(&[(0, &["item_free", "item_shift"])]);
+    step_onto_rent(&mut app, p0);
+
+    assert_eq!(
+        gate_asking(&app),
+        Some((p0, Ask::Offset, PassiveEvent::Rent)),
+        "两张卡都在手里时，第一问必须是抵消那一问"
+    );
+
+    answer_gate(&mut app, p0, PassiveMove::Use);
+    settle(&mut app, 2);
+
+    assert_eq!(gate_asking(&app), None, "免掉了就没有第二问");
+    assert_eq!(cash_of(&mut app, p0), 20_000, "免掉：付款人不动");
+    assert_eq!(cash_of(&mut app, p2), 20_000, "免掉：业主不收");
+    assert_eq!(free_in_hand(&app, p0), 0, "免费那一张花掉了");
+    assert_eq!(
+        shift_left(&app, p0),
+        1,
+        "第二问没被问到，那张嫁祸就该原样留着"
+    );
+    let log = ledger(&app);
+    assert!(
+        !log.iter().any(|l| l.starts_with("Blame(")),
+        "没有转嫁就不该有一条换人的流水：{log:?}"
+    );
+    assert!(
+        log.contains(&"Rent(P0->P2@L0$0)".to_string()),
+        "免单留一张 0 元的收据，而不是没有收据：{log:?}"
+    );
+    assert_cash_audit(&mut app, 20_000);
+}
+
+/// 两问都答「不用」：什么都不消耗，账原样落下。
+///
+/// 这一条是上一条的反面，也是 PLAN §五 第 6 条那句「不可免者不可转」的反证形状 ——
+/// 门问得出两句而两张卡都不花，说明「问到」与「花掉」是两件事；
+/// 而它挡住的错误是「问一句就登记一次待用」。
+#[test]
+fn two_declines_cost_nothing_and_the_bill_lands_as_written() {
+    let (mut app, [p0, _p1, p2]) = rent_table(&[(0, &["item_free", "item_shift"])]);
+    step_onto_rent(&mut app, p0);
+
+    let asked = ask_the_gate(&mut app, PassiveMove::Decline);
+    assert_eq!(
+        asked,
+        vec![
+            (p0, Ask::Offset, PassiveEvent::Rent),
+            (p0, Ask::Shift, PassiveEvent::Rent)
+        ],
+        "两句都要问得出，而且顺序是先抵消后转嫁：{asked:?}"
+    );
+    assert_eq!(cash_of(&mut app, p0), 15_000, "原样落下：5000 照付");
+    assert_eq!(cash_of(&mut app, p2), 25_000, "业主照收");
+    assert_eq!(free_in_hand(&app, p0), 1, "两句都答不用，两张卡都该在");
+    assert_eq!(shift_left(&app, p0), 1);
+    assert_eq!(gate_spends(&app), 0, "门一张卡都没花");
+    assert_cash_audit(&mut app, 20_000);
+}

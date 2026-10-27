@@ -788,12 +788,12 @@ fn a_fresh_match_has_no_previous_news_to_avoid() {
 /// 新闻的罚款登记在 `Penalty` 那一族，所以**免罪那一族吃得到它**。
 ///
 /// 这里单独钉的不是「审计对得上」（每条用例最后都问一遍），而是新闻没有各写一套结算：
-/// `deck.rs` 里 `FREE_PASS_DOMAINS` 那条注释早就替 P11 写好了「税也归这里」，而
-/// 「归这里」的可执行版本就是挂一条修正之后这一笔真的变了。
+/// 罚款与税都归 [`ChargeDomain::Penalty`]（`charge.rs` 那张归域表里 `Levy` 与 `Penalty`
+/// 同域那一句），而「归这里」的可执行版本就是挂一条修正之后这一笔真的变了。
 ///
 /// 前置与 [`a_news_that_names_somebody_else_never_touches_the_broadcaster`] **逐字相同**
 /// （同一种子、同样六轮、指数同样钉在 1.0），只多挂那一条修正：于是那一串
-/// `Lost(3000)`／`Lost(2000)` 在这里全部翻成 `Lost(0)` —— 同一份世界上「有卡」与「没卡」
+/// `Lost(3000)`／`Lost(2000)` 在这里全部翻成 `Lost(0)` —— 同一份世界上「有链」与「没链」
 /// 的两个读数，不是两份不可比的前置。
 ///
 /// 两条断言是一对，少一条都松：**挨刀分文不动**说「新闻走的是管线」，
@@ -810,7 +810,7 @@ fn a_named_fine_is_a_penalty_so_a_cancel_waives_it() {
             p1,
             Scope::Domain(ChargeDomain::Penalty),
             Adjustment::Cancel,
-            Source::Card,
+            Source::God,
         ),
     );
     let before = cash_of(&mut app, p1);
@@ -838,103 +838,127 @@ fn a_named_fine_is_a_penalty_so_a_cancel_waives_it() {
         subsidy * field as i64,
         "乙：罚款分文不动、补贴照领：{lines:?}"
     );
-    // **常开**的那一条不消耗：它没有 `Waive` 流水（那条说的是一张卡花掉了），
-    // 寿命由它的来源管。这一点下一那条用例用对照钉
+    // **常开**的那一条不消耗：③ 之后这条链上根本没有「一次」这个位（`Used` 那条流水说的
+    // 是一张**卡**没了，而卡住在门里，不住在这里）。寿命由它的来源管 —— 神离场才撤。
     assert_eq!(corrections_len(&app), 1, "常开的那条修正不该被新闻花掉");
     assert_cash_audit(&mut app, START);
 }
 
-/// 一次性那一族（真正的**免罪卡**）只挡一刀，第二刀照砍。
+/// 验收②（P13b③）：一笔**账**在**别人的回合**落到我头上 —— 窗口挂到我这儿、回合停住，
+/// 而我答「用」之后它才免掉，而那张卡只够挡这一笔。
 ///
-/// 上面那条挂的是常开的修正，而玩家手里那张是**一张卡**：它要能挡下新闻的罚款
-/// （不然「免罪卡只对命运牌有效」这条隐含承诺就是假的），又只能挡一次。
-/// 于是这一条问三件事：第一刀 `Lost(0)` 且有一条 `Waive`，登记处当场空掉，
-/// 后面的刀分文不免。`Waive` 只可能来自 `stage_and_spend` 的「真的花掉了哪几条」回报 ——
-/// 上一那条没有它，正是「常开／一次性」两种寿命在流水里的不同形状。
+/// 夹具是 `news_008`（全场现金税 10%）：税按每个人自己的钱包抽，所以「谁欠多少」在这一播里
+/// 是**分开算**的 —— 这是全工程唯一一条「钱的承受者不是当前回合玩家」的来路（租金、服务费、
+/// 公司到访的付款人都是踩格的那位，也就是他自己）。10-27 拍的那句「决策主体要能在回合内
+/// 跳动」在钱这一侧只有这里问得出来。
+///
+/// 钱摆成 P0 十万 / P1 三万，而免费卡只在 P1 手里 —— 于是整条池子里**只有一问**问得出来：
+/// - `news_002`（最富那位罚 3000）点到的是 P0，他身上没卡，门连问都不问就落；
+/// - `news_008` 对 P0 是 10000（同样没卡），对 P1 是 3000（过了 2000 那道门槛且有卡）→ 问；
+/// - `news_003`（2000 定额）卡在「**超过**门槛」那一句上，谁都不问。
+///
+/// 这样摆不是洁癖：`DecisionPolicy::Hold` 底下每一问都会把回合机押住，多一种问就多一次空转；
+/// 而「只有这一问」本身就是那条门槛判据的一个读数。
 #[test]
-fn a_one_shot_free_pass_waives_exactly_one_news_fine() {
-    let (mut app, p0) = step_onto_once();
+fn a_news_tax_asks_its_bearer_while_the_broadcaster_holds_the_turn() {
+    let (mut app, p0) = ready_on(NEWS - 1, 1, DecisionPolicy::Hold);
     let p1 = roster(&mut app)[1].0;
-    set_cash(&mut app, p1, 90_000);
-    register(
-        &mut app,
-        Correction::one_shot(
-            p1,
-            Scope::Domain(ChargeDomain::Penalty),
-            Adjustment::Cancel,
-            Source::Card,
-            0,
-        ),
-    );
+    set_cash(&mut app, p0, 100_000);
+    set_cash(&mut app, p1, 30_000);
+    // 卡**留在手里**就是资格（③ 之后没有「打出去挂着」那一步：`Insulation` 组件删了）
+    let free = item_index(&app, "item_free");
+    deal(&mut app, p1, free.0);
     let before = cash_of(&mut app, p1);
 
-    let lines = step_onto_money_news(&mut app, p0, 12, 1.0);
-    let fines: Vec<String> = lines
-        .iter()
-        .filter(|l| !l.contains("news_001"))
-        .cloned()
-        .collect();
-    assert!(
-        fines.len() >= 2,
-        "至少要挨两刀才问得出「只挡一次」，十二条里不够：{lines:?}"
+    walk_until_the_gate_asks(&mut app, p0, 40);
+
+    assert_eq!(
+        gate_asking(&app),
+        Some((p1, Ask::Offset, PassiveEvent::Bill)),
+        "账落在谁头上，那一问就挂到谁身上"
     );
-    assert!(
-        fines[0].contains("Lost(0)"),
-        "第一刀该被那张卡挡下：{}",
-        fines[0]
+    assert_eq!(
+        gate_source(&app).as_deref(),
+        Some("news_008"),
+        "问出来的那一封是从现金税来的"
     );
-    let mut cut = 0;
-    for line in &fines[1..] {
-        let hits = parts(line).2;
-        match fixed_cash_of(&app, &parts(line).0) {
-            Some(each) => {
-                cut += 1;
-                assert_eq!(
-                    net_for(&hits, "P1"),
-                    -each,
-                    "卡烧掉之后的每一刀都要真的砍下去：{line}"
-                );
-            }
-            // 一条税：数不在卡面上，但「不免」这件事照样问得出 —— P1 那一份必须真的扣了钱。
-            // （`ChargeKind::Levy` 归 `Penalty` 域，所以那张卡本来**挡得住**它 —— 挡不住
-            // 才是分叉：同一域里的两族钱不该有两种寿命）
-            None => {
-                let p0 = net_for(&hits, "P0");
-                let p1 = net_for(&hits, "P1");
-                if p0 == 0 {
-                    // 这一播的基数对全场都是 0（没人有地，地价税抽不出钱）。它既不能证明
-                    // 挡住了也不能证明砍下去 —— 问它等于空跑，跳过，但下面那句 `cut > 0`
-                    // 保证这一串里真的有过刀
-                    assert_eq!(p1, 0, "P0 那一档没挨税而 P1 挨了：{line}");
-                    continue;
-                }
-                assert!(p1 < 0, "卡烧掉之后税也该真的砍下去：{line}");
-            }
+    assert_eq!(current(&app), p0, "回合还是播报者的");
+    assert_eq!(
+        phase(&app),
+        TurnPhase::WaitDecision,
+        "而回合停在他答完为止 —— 不是「P1 答完，P0 才能继续」"
+    );
+
+    answer_gate(&mut app, p1, PassiveMove::Use);
+    settle(&mut app, 2);
+
+    assert_eq!(cash_of(&mut app, p1), before, "免掉了就一分不动");
+    assert_eq!(free_in_hand(&app, p1), 0, "那张卡花掉了");
+    let log = ledger(&app);
+    assert!(
+        log.iter()
+            .any(|l| l.starts_with("Used(P1") && l.contains("$3000")),
+        "「花掉一张卡」与「这张卡值多少」要同一条流水说得出来：{log:?}"
+    );
+    assert_eq!(gate_asking(&app), None, "答完就没有人在等了");
+    assert_cash_audit(&mut app, START);
+}
+
+/// 把 P0 一次次送上新闻中心，直到门问出一句为止（最多 `tries` 播）。
+///
+/// 为什么不复用 [`walk_until_rearmed`]（那句「一直踩到某一条播出来为止」）：它按名字挑的
+/// 是**流水**，而这里要停在**问出去的那一刻** —— 回合被门押住之后 `play_turns` 只剩空转到
+/// 帧数上限，那条走法在这里会在正确的那一播上走过头。
+fn walk_until_the_gate_asks(app: &mut App, p0: Entity, tries: usize) {
+    for _ in 0..tries {
+        // 每一播都把现金摆回「只有 P1 会被问」那一份前置：上一播的税与补贴已经动过钱包
+        set_cash(app, p0, 100_000);
+        let p1 = roster(app)[1].0;
+        set_cash(app, p1, 30_000);
+        step_news_on(app, p0, NEWS, Some(1.0));
+        if gate_asking(app).is_some() {
+            return;
         }
     }
-    assert!(
-        cut > 0,
-        "第二刀之后一条定额罚金都没撞到，那「后面的刀分文不免」是空跑的：{lines:?}"
-    );
-    assert!(
-        ledger(&app)
-            .iter()
-            .any(|l| l.starts_with("Waive(P1$") && l.ends_with("·Card)")),
-        "挡下的那一笔要说得出替谁挡了多少：{:?}",
-        ledger(&app)
-    );
-    assert_eq!(corrections_len(&app), 0, "一张卡就是只烧一张");
-    // 钱包那一句读的是**整串流水的净额**而不是「卡面数之和」：P11b② 之后 fines 里
-    // 混着税，它的数是从世界里现读的，加不出一个卡面上的总数 —— 而这一句要问的从来
-    // 不是「等于哪个总数」，是「凭据里的数真的进了钱包」
+    panic!("{tries} 播里门一次都没问出来（现金税没撞上？「全池随机」那条是假的）");
+}
+
+/// 他说「不用」：账照原样落下，而那张卡**分文不动地留在手里** —— ⑤ 那句「放弃不消耗」。
+///
+/// 这一条走 `DeclineAll`：自动应答替 P1 答「不用」，回合机因此一路跑到底（上一条要停在
+/// 那一问上，这一条要跑到落下来之后，两种走法不能互相冒充）。上面那条证明了「问了」，
+/// 这一条证明的是「问而不用」与「不问」在原样落下这件事上是同一个出口。
+#[test]
+fn a_declined_tax_is_paid_in_full_while_the_card_and_the_windfalls_stay_untouched() {
+    let (mut app, p0) = step_onto_once();
+    let p1 = roster(&mut app)[1].0;
+    set_cash(&mut app, p0, 100_000);
+    set_cash(&mut app, p1, 30_000);
+    let free = item_index(&app, "item_free");
+    deal(&mut app, p1, free.0);
+    let tax = 3_000;
+
+    let line = walk_until_rearmed(&mut app, p0, NEWS, "news_008", 40, |app| {
+        set_cash(app, p0, 100_000);
+        set_cash(app, p1, 30_000);
+    });
     assert_eq!(
-        cash_of(&mut app, p1) - before,
-        net_over(&lines, "P1"),
-        "补贴照领、第二刀照挨：{lines:?}"
+        net_for(&parts(&line).2, "P1"),
+        -tax,
+        "答「不用」的那一笔要真的砍下去：{line}"
     );
+    assert_eq!(free_in_hand(&app, p1), 1, "放弃不该消耗那张卡");
+    assert_eq!(
+        gate_spends(&app),
+        0,
+        "整串流水里门一张卡都没花：{:?}",
+        ledger(&app)
+    );
+    // 「凭据写了钱、钱包没动」是审计抓不住的（两边都一动没动照样对得平），所以要正面问一句
+    let lines = news_lines(&app);
     assert!(
         paid_over(&lines, "P1") > 0,
-        "P1 这一趟一分都没掏过，上面那句相等就成了两边都一动没动：{lines:?}"
+        "P1 这一趟一分都没掏过，上面那句「砍下去」就成了空跑的：{lines:?}"
     );
     assert_cash_audit(&mut app, START);
 }

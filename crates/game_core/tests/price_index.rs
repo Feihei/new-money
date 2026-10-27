@@ -1,18 +1,20 @@
 //! P2 的验收：同一条 5000 的租金在四种状态下各收多少，以及物价指数本身的口径。
 //!
-//! 四条状态里「免费卡」与「大穷神」都还没出生（P3 的卡、P6 的神明），这里用
+//! 四条状态里「整笔抵消」与「加倍」当时都还没出生（P3 的卡、P6 的神明），这里用
 //! **测试侧往登记处塞一条修正** 的方式表达它们 —— 这正是 P2 这条链的验收点：
-//! 加一种修正不必碰 `charge.rs`，也不必给管线开洞。等 P3/P6 真做出来，
-//! 它们写的就是同样的几行，只不过发起方换成卡牌效果与附身组件。
+//! 加一种修正不必碰 `charge.rs`，也不必给管线开洞。
+//!
+//! ⚠️ ③ 之后**免费卡不再是一条修正**（它成了被动卡那道门的两个问句，见 `tests/free_pass.rs`），
+//! 而神明那一族仍然是 —— 所以这一张表今天测的是「链上的修正」那一半，
+//! 而「卡」那一半在下面那条 `a_shifted_bill_names_the_real_payer` 里走的是门。
+//! 两种形状各在一个地方，不许互相冒充。
 
 mod common;
 
 use bevy::app::App;
 use bevy::ecs::entity::Entity;
 use common::*;
-use game_core::prelude::{
-    Adjustment, ChargeKind, Correction, GameSession, LandId, Scope, Source, TurnPhase,
-};
+use game_core::prelude::{ChargeKind, GameSession, LandId, TurnPhase};
 
 fn me(app: &mut App) -> Entity {
     roster(app)[0].0
@@ -47,7 +49,7 @@ fn five_thousand(tweak: impl FnOnce(&mut App, Entity)) -> (i64, i64) {
     (cash_of(&mut app, payer), cash_of(&mut app, owner))
 }
 
-/// PLAN §四 P2 的那句验收：无修正／有免费卡／有大穷神加倍／物价 2.5。
+/// PLAN §四 P2 的那句验收：无修正／一条 `Cancel`／有大穷神加倍／物价 2.5。
 /// 四个数一次说完，因为它们必须来自**同一条链的同一处**，分开写就看不出串了没有。
 #[test]
 fn the_same_five_thousand_rent_in_four_states() {
@@ -62,7 +64,8 @@ fn the_same_five_thousand_rent_in_four_states() {
     assert_eq!(
         (payer, owner),
         (20_000, 20_000),
-        "免费卡：整笔抵消，两边都不动 —— 抵消不是「付了 0 元再退回来」"
+        "整笔抵消：两边都不动 —— 抵消不是「付了 0 元再退回来」\
+         （③ 之后这一格是神明那一族，免费卡走门，两条路各有一张表）"
     );
 
     let (payer, owner) =
@@ -81,38 +84,46 @@ fn the_same_five_thousand_rent_in_four_states() {
     );
 }
 
-/// 转嫁改的是**付款人**，收据要说实际付钱的那个人。
+/// 转嫁改的是**付款人**，收据要说实际付钱的那个人 —— 而③ 之后这件事不是「一条挂在人身上的
+/// 修正」，是**门在钱动之前问的一句**（`Adjustment::TransferTo` 那一位删了）。
 /// 走真落格路径（不是 `charge::stage` 的单测），所以它同时钉住接线。
 ///
 /// 两人局里能接盘的不是业主本人没别人，于是这笔账变成「P1 付给 P1」—— 看着像脱裤子放屁，
 /// 但它证的正是「付款人这个字段真的被换掉了」，而四人局里接盘的是第三方，同一条代码。
 #[test]
 fn a_shifted_bill_names_the_real_payer() {
-    let (mut app, payer) = ready_on(0, 1, DecisionPolicy::DeclineAll);
+    let (mut app, payer) = ready_on(0, 1, DecisionPolicy::Hold);
     let owner = other(&mut app);
     own(&mut app, 0, Some(1), 1, false);
     flat_rent(&mut app, 0, 5_000);
-    register(
-        &mut app,
-        Correction::always(
-            payer,
-            Scope::Any,
-            Adjustment::TransferTo { to: owner },
-            Source::Card,
-        ),
-    );
+    // 手里只有嫁祸卡，没有免费卡：第一问「免不免」问不出来，门自己跳到第二问
+    let shift = item_index(&app, "item_shift");
+    deal(&mut app, payer, shift.0);
     land(&mut app);
+
+    assert_eq!(
+        gate_asking(&app),
+        Some((payer, Ask::Shift, PassiveEvent::Rent)),
+        "钱这一侧的嫁祸是**第二问**，而那一问确实挂到了踩格的人身上：{:?}",
+        gate_asking(&app)
+    );
+    answer_gate(&mut app, payer, PassiveMove::Shift { to: owner });
+    settle(&mut app, 2);
 
     assert_eq!(cash_of(&mut app, payer), 20_000, "被转嫁的人一分不付");
     assert_eq!(
         cash_of(&mut app, owner),
         20_000,
-        "接盘的业主付了 5000 又收 of 5000，净零"
+        "接盘的业主付了 5000 又收了 5000，净零"
+    );
+    let log = ledger(&app);
+    assert!(
+        log.contains(&"Rent(P1->P1@L0$5000)".to_string()),
+        "流水要说实际付款人：{log:?}"
     );
     assert!(
-        ledger(&app).contains(&"Rent(P1->P1@L0$5000)".to_string()),
-        "流水要说实际付款人：{:?}",
-        ledger(&app)
+        log.iter().any(|l| l.starts_with("Blame(P0→P1")),
+        "「谁把账推给谁」是另一句话，它得单独有一条：{log:?}"
     );
     assert_cash_audit(&mut app, 20_000);
 }

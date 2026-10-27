@@ -24,29 +24,28 @@ pub use game_core::prelude::{
     BankVisited, BidMove, BidPlaced, BidWithdrawn, BlameShifted, Blocker, BombTransferred, Books,
     BuildOffered, BuildRequested, BuildingLevel, BuyOffered, BuyTicketRequested, CardAim,
     CardDrawn, CardGained, CardId, CardKind, CardLost, CardPlayed, CardSet, CardSnatched,
-    CashChanged, ChairmanTook, ChargeKind, ChargeWaived, ChestOpened, CompanyCharged,
-    CompanyLedgers, CompanyPayout, Correction, Corrections, CouponBoxes, DamageTally, DataHandles,
-    Date, Decision, DecisionChosen, Deck, DepositsRobbed, Detention, DetentionLifted,
-    DetentionSkipped, DiceRolled, EffectOutcome, EpochOverride, FacilityBuilt,
-    FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameKind, GameOver, GameRules,
-    GameSeed, GameSession, GameSetup, Gameplay, Gate, GiftsGiven, God, GodAppeared, GodDeed,
-    GodLeft, GodPossessed, Hand, IndemnityPaid, Insured, Inventory, ItemKind, ItemPlaced,
-    ItemThieved, Jackpot, JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId, LandStatus,
-    LandTaken, LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought, LotteryDrawn,
-    LotteryTickets, LotteryWon, MagicBlocked, MagicCast, MagicFilter, MagicFilterPicked,
-    MagicSpell, MagicSpellPicked, Market, MarketClock, MinigameResult, MinigameScore, MortgageDone,
-    MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, NewsSink,
-    Occupancy, OccupancyAt, OccupancyKind, Owner, PassiveAnswer, PassiveCard, PassiveEvent,
-    PassiveMove, PassiveUsed, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
-    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerName,
-    PlayerTeleported, PlotArea, Points, PointsChanged, PointsStolen, PolicyBought, Possession,
-    Presence, RedEnvelope, RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue,
-    RentRerouted, RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, ServiceCharged, Shelf,
-    ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId,
-    StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
-    Timed, TokenPosition, TollExtorted, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted,
-    UpgradeOffered, VillainHired, WalkHalted, WalkStarted, Wallet, deal_to, find_id, fire_news,
-    grant_effects,
+    CashChanged, ChairmanTook, ChargeKind, ChestOpened, CompanyCharged, CompanyLedgers,
+    CompanyPayout, Correction, Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision,
+    DecisionChosen, Deck, DepositsRobbed, Detention, DetentionLifted, DetentionSkipped, DiceRolled,
+    EffectOutcome, EpochOverride, FacilityBuilt, FinancingDrawRequested, FinancingDrawn,
+    FinancingRecalled, GameKind, GameOver, GameRules, GameSeed, GameSession, GameSetup, Gameplay,
+    Gate, GiftsGiven, God, GodAppeared, GodDeed, GodLeft, GodPossessed, Hand, IndemnityPaid,
+    Insured, Inventory, ItemKind, ItemPlaced, ItemThieved, Jackpot, JackpotChanged, JackpotWhy,
+    LandBought, LandDamage, LandId, LandStatus, LandTaken, LandUpgraded, LandView, LiquidationPlan,
+    Lot, LotteryBought, LotteryDrawn, LotteryTickets, LotteryWon, MagicBlocked, MagicCast,
+    MagicFilter, MagicFilterPicked, MagicSpell, MagicSpellPicked, Market, MarketClock,
+    MinigameResult, MinigameScore, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount,
+    MountChanged, MoveCap, MoveCapped, NewsSink, Occupancy, OccupancyAt, OccupancyKind, Owner,
+    PassiveAnswer, PassiveCard, PassiveEvent, PassiveMove, PassiveUsed, Pending, PendingDecision,
+    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
+    PlayerDetained, PlayerId, PlayerName, PlayerTeleported, PlotArea, Points, PointsChanged,
+    PointsStolen, PolicyBought, Possession, Presence, RedEnvelope, RemoteBuildOffered,
+    RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RentRerouted, RequestRemoteDice, RequestRoll,
+    RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone, ShopOpRequested, ShopStock, Source,
+    StayLifted, StaySentence, StaySkipped, StockId, StockPriceChanged, StockTradeRequested,
+    StockTraded, StockVisited, TileIndex, TileStepped, Timed, TokenPosition, TollExtorted,
+    TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted, UpgradeOffered, VillainHired,
+    WalkHalted, WalkStarted, Wallet, deal_to, find_id, fire_news, grant_effects,
 };
 
 pub fn asset_root() -> PathBuf {
@@ -325,9 +324,6 @@ struct BookReaders<'w, 's> {
     lands_taken: MessageReader<'w, 's, LandTaken>,
     upgraded: MessageReader<'w, 's, LandUpgraded>,
     rents: MessageReader<'w, 's, RentDue>,
-    /// 一次性修正生效那一笔（免费卡花掉了）。它**没有**对应的 `CashChanged`，
-    /// 所以「钱一分没动而卡没了」这件事只有这一条流水能证明。
-    waived: MessageReader<'w, 's, ChargeWaived>,
     bankrupts: MessageReader<'w, 's, PlayerBankrupt>,
     detained: MessageReader<'w, 's, PlayerDetained>,
     teleported: MessageReader<'w, 's, PlayerTeleported>,
@@ -648,14 +644,6 @@ fn collect_books(
             m.amount
         ));
     }
-    for m in r.waived.read() {
-        log.0.push(format!(
-            "Waive({}${}·{:?})",
-            who(&players, &names, m.player),
-            m.saved,
-            m.via
-        ));
-    }
     for m in r.bankrupts.read() {
         log.0.push(format!(
             "Bankrupt({}欠{})",
@@ -734,15 +722,21 @@ fn collect_books(
             }
         ));
     }
-    // 被动卡那道门的两条凭据（P13b②）。它们与上面那条 `Play` 同域（都是「一张卡没了」），
-    // 所以同住这一张表。分开记是主语的分别：`Used` 说的是**卡**没了，`Blame` 说的是**事**
-    // 换人挨了 —— 合成一条就成了「用了嫁祸卡」与「嫁祸给了谁」在同一行里互相冒充
+    // 被动卡那道门的两条凭据（P13b②，③ 补上钱那半）。它们与上面那条 `Play` 同域
+    // （都是「一张卡没了」），所以同住这一张表。分开记是主语的分别：`Used` 说的是**卡**没了，
+    // `Blame` 说的是**事**换人挨了 —— 合成一条就成了「用了嫁祸卡」与「嫁祸给了谁」
+    // 在同一行里互相冒充。
+    //
+    // 免付那一笔**没有**对应的 `CashChanged`（钱一分没动），所以「他花了一张免费卡」
+    // 这件事只有这里那句 `$省下的数` 能证明 —— P3c② 的 `ChargeWaived` 就是这个位置，
+    // ③ 把它并成一条：「花掉一张卡」与「这张卡值多少」本来就是同一句话。
     for u in r.passive_used.read() {
         log.0.push(format!(
-            "Used({}花{}挡{})",
+            "Used({}花{}挡{}${})",
             who(&players, &names, u.player),
             u.card.id,
-            u.event.label()
+            u.event.label(),
+            u.saved
         ));
     }
     for s in r.blame_shifted.read() {
@@ -2766,6 +2760,24 @@ pub fn gate_asking(app: &App) -> Option<(Entity, Ask, PassiveEvent)> {
 /// 那两条：它们说的是**问了几遍**，而问的遍数只能从队列上数。
 pub fn gate_depth(app: &App) -> usize {
     app.world().resource::<Gate>().queue.len()
+}
+
+/// 门里那份正在被问的信封是从哪儿来的（`Job.source`：卡 id、新闻 id、`L3 的过路费`…）。
+///
+/// 它是「谁问的」唯一的读数，而跨来路的用例（新闻的账 vs 租金的账）要在**问出去的那一刻**
+/// 分辨这两者 —— 事件那一行分不出来：两条都是 `Bill`。
+pub fn gate_source(app: &App) -> Option<String> {
+    app.world()
+        .resource::<Gate>()
+        .queue
+        .front()
+        .filter(|job| job.parked)
+        .map(|job| job.source.clone())
+}
+
+/// 某人手里还有几张**免费卡**（`PassiveCard::FreePass` 那一格）。
+pub fn free_in_hand(app: &App, player: Entity) -> u32 {
+    passive_in_hand(app, player, PassiveCard::FreePass)
 }
 
 /// 把门问的每一句都按同一个动作答掉，返回**被问过的那些**（谁、哪一问、表上哪一行）。

@@ -84,7 +84,7 @@ pub mod prelude {
     };
     pub use crate::charge::{
         Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, Scope, Source,
-        charge_domain_of, scales_with_price, stage, stage_and_spend, transferable,
+        charge_domain_of, scales_with_price, stage, transferable,
     };
     pub use crate::company::{
         CompanyLedgers, LedgerEntry, MonthLedger, chairman_of, insurance_claim_system,
@@ -144,11 +144,11 @@ pub mod prelude {
         BankOpRequested, BankVisited, BidMove, BidPlaced, BidWithdrawn, BlameShifted, Blocker,
         BombTransferred, BuildOffered, BuildRequested, BuyOffered, BuyTicketRequested, CardDrawn,
         CardGained, CardLost, CardNotice, CardPlayed, CardSnatched, CashChanged, ChairmanTook,
-        ChargeWaived, ChestOpened, CompanyCharged, CompanyPayout, Decision, DecisionChosen,
-        DepositsRobbed, DetentionLifted, DetentionSkipped, DiceRolled, EffectOutcome,
-        FacilityBuilt, FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver,
-        GiftGiven, GiftsGiven, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, IndemnityPaid,
-        ItemPlaced, ItemThieved, JackpotChanged, JackpotWhy, LandBought, LandTaken, LandUpgraded,
+        ChestOpened, CompanyCharged, CompanyPayout, Decision, DecisionChosen, DepositsRobbed,
+        DetentionLifted, DetentionSkipped, DiceRolled, EffectOutcome, FacilityBuilt,
+        FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GiftGiven, GiftsGiven,
+        GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, IndemnityPaid, ItemPlaced,
+        ItemThieved, JackpotChanged, JackpotWhy, LandBought, LandTaken, LandUpgraded,
         LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicFilterPicked,
         MagicOffered, MagicSpellPicked, MagicTargets, MinigameResult, MinigameScore, MortgageDone,
         MortgageOp, MortgageRequested, MountChanged, MoveCapped, NewsAudience, NewsFired, NewsHit,
@@ -171,8 +171,8 @@ pub mod prelude {
         settle_landing_occupancy_system, spawn_starting_chests, trigger_of, within_chebyshev,
     };
     pub use crate::passive::{
-        Ask, Gate, GateDesk, Job, PassiveEvent, Step, Tail, affair_of_card, blame_candidates,
-        gate_system, submit, trip_of,
+        Affair, Ask, Gate, GateDesk, Job, PassiveEvent, Step, Tail, affair_of_card,
+        blame_candidates, gate_system, submit, trip_of,
     };
     pub use crate::player::{
         BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Gender, Heading, Insured,
@@ -211,30 +211,30 @@ use prelude::{
     BailRequested, BankOpDone, BankOpRequested, BankVisited, BidPlaced, BidWithdrawn, BlameShifted,
     BoardDef, BombTransferred, BuildOffered, BuildRequested, BuyOffered, BuyTicketRequested,
     CardDrawn, CardGained, CardLost, CardPlayed, CardSet, CardSnatched, CashChanged, ChairmanTook,
-    ChargeWaived, ChestOpened, CompanyCharged, CompanyPayout, Corrections, CouponBoxes,
-    DecisionChosen, DepositsRobbed, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride,
-    FacilityBuilt, FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GameRules,
-    GameSeed, GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet,
-    IndemnityPaid, ItemPlaced, ItemThieved, JackpotChanged, JsonAssetLoader, LandBought, LandTaken,
-    LandUpgraded, Landing, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast,
-    MagicFilterPicked, MagicOffered, MagicSpellPicked, MagicTargets, MarketClock, MinigameResult,
-    MinigameScore, MortgageDone, MortgageRequested, MountChanged, MoveCapped, NewsFired,
-    PassiveAnswer, PassiveUsed, Paused, PendingDecision, PlaceItemRequested, PlayCardRequested,
-    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged,
-    PointsStolen, PolicyBought, RedEnvelope, RemoteBuildOffered, RemoteDiceUsed,
-    RemoteUpgradeRequested, RentDue, RentRerouted, RequestRemoteDice, RequestRoll, RequestStay,
-    ServiceCharged, ShopOpDone, ShopOpRequested, ShopStock, StayLifted, StaySkipped,
-    StockPriceChanged, StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped,
-    TollExtorted, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered, VillainHired, WalkClock,
-    WalkHalt, WalkHalted, WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system,
-    age_suspensions_system, auction_hold_system, auction_move_system, bail_op_system,
-    bank_op_system, begin_game_system, build_op_system, decision_system,
-    deliver_calendar_events_system, draw_lottery_system, expire_land_status_system,
-    financing_system, finish_halt_system, gate_system, grant_atm_access_system,
-    hoodlum_toll_system, insurance_claim_system, land_deity_succession_system, lottery_op_system,
-    magic_filter_system, magic_spell_system, market_tick_on_turn_end_system, minigame_score_system,
-    mortgage_op_system, on_hired_system, place_item_system, play_card_system, remote_build_system,
-    resolve_halt_system, robber_snatch_system, settle_arcade_landing, settle_god_landing_system,
+    ChestOpened, CompanyCharged, CompanyPayout, Corrections, CouponBoxes, DecisionChosen,
+    DepositsRobbed, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, FacilityBuilt,
+    FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GameRules, GameSeed,
+    GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, IndemnityPaid,
+    ItemPlaced, ItemThieved, JackpotChanged, JsonAssetLoader, LandBought, LandTaken, LandUpgraded,
+    Landing, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicFilterPicked,
+    MagicOffered, MagicSpellPicked, MagicTargets, MarketClock, MinigameResult, MinigameScore,
+    MortgageDone, MortgageRequested, MountChanged, MoveCapped, NewsFired, PassiveAnswer,
+    PassiveUsed, Paused, PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived,
+    PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, PointsStolen,
+    PolicyBought, RedEnvelope, RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue,
+    RentRerouted, RequestRemoteDice, RequestRoll, RequestStay, ServiceCharged, ShopOpDone,
+    ShopOpRequested, ShopStock, StayLifted, StaySkipped, StockPriceChanged, StockSet,
+    StockTradeRequested, StockTraded, StockVisited, TileStepped, TollExtorted, TurnEnded,
+    TurnPhase, TurnStarted, UpgradeOffered, VillainHired, WalkClock, WalkHalt, WalkHalted,
+    WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system, age_suspensions_system,
+    auction_hold_system, auction_move_system, bail_op_system, bank_op_system, begin_game_system,
+    build_op_system, decision_system, deliver_calendar_events_system, draw_lottery_system,
+    expire_land_status_system, financing_system, finish_halt_system, gate_system,
+    grant_atm_access_system, hoodlum_toll_system, insurance_claim_system,
+    land_deity_succession_system, lottery_op_system, magic_filter_system, magic_spell_system,
+    market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system, on_hired_system,
+    place_item_system, play_card_system, remote_build_system, resolve_halt_system,
+    robber_snatch_system, settle_arcade_landing, settle_god_landing_system,
     settle_landing_occupancy_system, shop_op_system, thief_deliver_system, tick_insurance_system,
     top_up_gods_system, trade_request_system, villain_rotation_system, villain_turn_system,
     walk_effect_system, walk_step_system, wander_gods_system,
@@ -347,9 +347,6 @@ impl Plugin for CoreGamePlugin {
             .add_message::<FinancingRecalled>()
             .add_message::<FinancingDrawRequested>()
             .add_message::<RentDue>()
-            // 一次性修正生效那一笔（免费卡花掉了）。不注册的话 `Books` 的 writer
-            // 参数校验直接失败 —— 而 `Books` 被每个 system 用着，症状是整局不跑
-            .add_message::<ChargeWaived>()
             .add_message::<BankVisited>()
             .add_message::<BankOpRequested>()
             .add_message::<BankOpDone>()

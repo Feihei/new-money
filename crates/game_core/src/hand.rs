@@ -258,7 +258,6 @@ fn unmet_precondition(
             | CardEffect::Levy { .. }
             | CardEffect::Detain { .. }
             | CardEffect::MoveTo { .. }
-            | CardEffect::FreePass { .. }
             | CardEffect::Reverse
             | CardEffect::Stay { .. }
             | CardEffect::MoveCap { .. }

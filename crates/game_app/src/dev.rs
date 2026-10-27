@@ -61,7 +61,7 @@ pub fn install_if_requested(app: &mut App) {
         // 与本模块上面那条「拼错的旋钮值不崩也不红」是同一族坑（P13 第一次冒烟就踩到了）
         && magic.0.is_none()
         && spell.0.is_none()
-        && !gate.0
+        && gate.0 == GateWanted::Off
     {
         return;
     }
@@ -155,11 +155,14 @@ pub fn install_if_requested(app: &mut App) {
             wanted.0.label()
         );
     }
-    if gate.0 {
-        info!(
-            "开发注入已开启（NM_GATE）：当前玩家手里一张陷害卡，另一位玩家手里免罪卡与嫁祸卡各一张，\
-             并替他打出那张陷害卡 —— 门于是问到**不是当前回合玩家**的那一位面前（这一问由鼠标按）"
-        );
+    match gate.0 {
+        GateWanted::Blame => info!(
+            "开发注入已开启（NM_GATE=blame）：当前玩家手里一张陷害卡，另一位玩家手里免罪卡与嫁祸卡各一张，             并替他打出那张陷害卡 —— 门于是问到**不是当前回合玩家**的那一位面前（这一问由鼠标按）"
+        ),
+        GateWanted::Bill => info!(
+            "开发注入已开启（NM_GATE=bill）：每人手里免费卡与嫁祸卡各一张，把**不是当前玩家**             的那一位补成最有钱的人，再当场播一条「点名最富那位罚款」的新闻 —— 门问到那位身上"
+        ),
+        GateWanted::Off => {}
     }
     app.add_plugins(DevPlugin);
 }
@@ -227,22 +230,50 @@ impl ForceItems {
     }
 }
 
-/// `NM_GATE=1`：让门向**不是当前回合玩家**的那一位开口。
+/// `NM_GATE=blame|bill`：让门开口问一句，而**问的是哪一幕**由值点名。
 ///
 /// 为什么非要有这个旋钮：门只在「有人即将挨那一下」的那一刻开口，而那一下要同时凑齐三件事 ——
-/// 有人手里有陷害卡、轮到他出牌、被打的那一位手里正好有一张被动卡。运气押不住截图时刻
-/// （同 `NM_DETAIN`／`NM_AUCTION` 那两条理由），而 P13b 的验收原话是「窗口挂到**我**这儿、
-/// 回合停住、答完再落」，这个「我」按设计**不是**当前回合玩家：「决策主体能在回合内跳动」
-/// 正是这一阶段的整条理由，拍不到就等于没做。
+/// 有人手里有那张卡、轮到他出牌（或一条新闻正好播到那一档）、挨的那一位手里正好有一张被动卡。
+/// 运气押不住截图时刻（同 `NM_DETAIN`／`NM_AUCTION` 那两条理由），而 P13b 的验收原话是
+/// 「窗口挂到**我**这儿、回合停住、答完再落」，这个「我」按设计**不是**当前回合玩家：
+/// 「决策主体能在回合内跳动」正是这一阶段的整条理由，拍不到就等于没做。
 ///
-/// 它只发牌、只替当前玩家打出那张陷害卡，**不替他回答门** —— 那颗「用免罪卡」按下去省掉一次
-/// 坐牢，而那颗「不用」按下去才问出第二句（嫁祸），于是两问在同一局里都拍得到，且两问的答案
-/// 都来自鼠标或自动玩家，不是来自这个旋钮。
+/// 两幕而不是一个布尔：② 那一幕挨的是**事**（陷害卡把人关三天），③ 那一幕挨的是**一笔账**。
+/// 两块屏写的量词不一样（「那一次」与「这一笔多少」），而它们是同一条队列、同两句问话 ——
+/// 一个旋钮只拍得出一种，另一种就永远只是注释。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Resource)]
+enum GateWanted {
+    /// 没开
+    Off,
+    /// ②：当前玩家替他人打出一张陷害卡，门问到被打的那一位面前
+    Blame,
+    /// ③：当场播一条「点名最富那位罚款」的新闻，门问到**那位最有钱的人**面前
+    Bill,
+}
+
+impl GateWanted {
+    /// 裸 `NM_GATE`（空值）与 `=1` 都算 `blame`：② 那次冒烟拍的就是那一幕，
+    /// 别让记在 README 与脚本里的旧命令突然变成空转。
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "" | "1" | "blame" => Some(Self::Blame),
+            "bill" | "money" => Some(Self::Bill),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Resource)]
-struct ForceGate(bool);
+struct ForceGate(GateWanted);
 impl ForceGate {
     fn from_env() -> Self {
-        Self(std::env::var_os("NM_GATE").is_some())
+        let Ok(raw) = std::env::var("NM_GATE") else {
+            return Self(GateWanted::Off);
+        };
+        Self(GateWanted::parse(&raw).unwrap_or_else(|| {
+            warn!("NM_GATE={raw} 不认识，应为 blame 或 bill");
+            GateWanted::Off
+        }))
     }
 }
 
@@ -445,6 +476,7 @@ impl Plugin for DevPlugin {
                     // 门那一问也要 `WaitRoll`：出牌入口在规则层只认这一格相位（`PlayWindow`），
                     // 在别的相位写 `PlayCardRequested` 等于什么都没发生，而症状是「面板是空的」
                     force_gate,
+                    force_money_gate,
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
@@ -1114,7 +1146,7 @@ fn item_of(shelf: &Shelf<'_>, wanted: &str) -> Option<CardId> {
 /// 两个人手里都放一张免罪卡：被问的那一位要能挡下那一下，而接住嫁祸的那一位也要能挡 ——
 /// 「同一件事最多转一次，但接住的人自己的免罪照样吃」这句卡面话，只有在他被问第二次时才拍得到。
 fn force_gate(force: Res<ForceGate>, mut desk: GateScene<'_, '_>) {
-    if !force.0 || desk.done.gate {
+    if force.0 != GateWanted::Blame || desk.done.gate {
         return;
     }
     let Some(current) = desk.order.current() else {
@@ -1161,6 +1193,83 @@ fn force_gate(force: Res<ForceGate>, mut desk: GateScene<'_, '_>) {
         "注入：当前玩家对 {victim:?} 打出「陷害卡」—— 门现在问到的是**不是当前回合玩家**的那一位，\
          他手里有免罪卡与嫁祸卡各一张（答完这一问才落那一判）"
     );
+}
+
+/// `NM_GATE=bill` 的那一幕（③）：给每人发一张免费卡与一张嫁祸卡，然后当场播一条
+/// 「点名最富那位罚款」的新闻 —— 门于是问到**那位最有钱的人**面前，而那一屏上写的
+/// 是「这一笔 3,000」而不是「那一次什么」。
+///
+/// 为什么这一幕要用新闻而不是用一笔租金：租金、服务费、公司到访的付款人**永远是踩格的那位**，
+/// 也就是回合主人 —— 那一幕拍得出「问的是我」，拍不出「答完才轮到他的回合继续」（同
+/// `force_gate` 那一幕为同一句话存在的理由）。而 ③ 要验收的正是「钱那侧也过这道门」。
+///
+/// 它只发牌、只挑「播哪一条」，**不替任何人回答门**：播新闻走 [`fire_news`] ——
+/// 与 `NM_NEWS` 同一个真入口，于是「谁挨这一刀」「免不免」「转给谁」三句全归门与鼠标。
+///
+/// 挑 `news_002`（定额 3000）而不是别的：门槛那句是「**超过** 2000×物价」，池子里 2000
+/// 那一档正好卡在线上问不出来，而 1500 那档是发钱。名字写死在这里而不按「找一条够大的」
+/// 去筛 —— 筛出来的那条随数据变，症状会是「今天门没问，可旋钮说它注入了」。
+const BILL_NEWS: &str = "news_002";
+
+fn force_money_gate(
+    force: Res<ForceGate>,
+    order: Res<TurnOrder>,
+    mut news: NewsSink,
+    mut done: ResMut<Injected>,
+) {
+    if force.0 != GateWanted::Bill || done.gate {
+        return;
+    }
+    done.gate = true;
+    let Some(actor) = order.current() else {
+        return;
+    };
+    let (Some(free), Some(shift)) = (
+        item_of(&news.desk.sink.kit.shelf, "item_free"),
+        item_of(&news.desk.sink.kit.shelf, "item_shift"),
+    ) else {
+        warn!("NM_GATE=bill：道具池里找不到免费卡／嫁祸卡，什么都没注入");
+        return;
+    };
+    let limit = news.desk.sink.books.rules.hand_limit;
+    // 每人一张：谁最富由账本说，而这一幕要拍的是「门找到的是他」而不是「旋钮猜中了他」
+    for who in order.order.iter().copied() {
+        for card in [free, shift] {
+            let Ok(mut hand) = news.desk.sink.kit.hands.get_mut(who) else {
+                warn!("NM_GATE=bill：{who:?} 手上没有牌栏，注入停在这里");
+                return;
+            };
+            deal_to(
+                &mut hand,
+                limit,
+                card,
+                who,
+                &news.desk.sink.kit.shelf,
+                &mut news.desk.sink.kit.gained,
+            );
+        }
+    }
+    // 把**不是当前玩家**的那一位补成最有钱的人：`news_002` 点的是「最富那位」，而并列时
+    // 按座位序取靠前那一位 —— 不补这一把，那一问就永远挂在回合主人自己身上，
+    // 这一幕与「租金那一问」就没有区别了（而 ③ 要拍的正是「钱那侧的主语也会跳动」）。
+    // 这是注入世界事实而不是替谁答话，与 `NM_PLOTS` 把地划给玩家同一条待遇。
+    for other in order.order.iter().copied() {
+        if other == actor {
+            continue;
+        }
+        news.desk.sink.books.credit(other, 20_000);
+        break;
+    }
+    let Some(set) = news.pool() else {
+        warn!("NM_GATE=bill 没能播：新闻池还没就位");
+        return;
+    };
+    let Some(id) = find_id(set, BILL_NEWS) else {
+        warn!("NM_GATE=bill：新闻池里找不到 {BILL_NEWS}，什么都没播");
+        return;
+    };
+    fire_news(&mut news, actor, id);
+    info!("注入：{BILL_NEWS} 已播出 —— 门现在问到那位最有钱的人面前（那一问由鼠标答）");
 }
 
 /// `NM_AUCTION=<地块号>`：把那块地挂上拍卖台。`None` = 没开。
@@ -1506,6 +1615,24 @@ mod tests {
         assert_eq!(LotteryWanted::parse("99"), Some(LotteryWanted::Number(99)));
         assert_eq!(LotteryWanted::parse(""), None);
         assert_eq!(LotteryWanted::parse("256"), None, "u8 装不下就该说不认识");
+    }
+
+    /// 门的两幕都得认，而**拼错的那一种要说得出为什么不算数**：`NM_GATE=money` 认，
+    /// 而 `NM_GATE=mony` 不认 —— 症状是「截图里门没问，可旋钮说它注入了」，
+    /// 与 `nm_lottery`／`nm_minigame` 那几条同一种坑（第三次登记）。
+    #[test]
+    fn nm_gate_takes_both_scenes() {
+        use super::GateWanted;
+        assert_eq!(GateWanted::parse("blame"), Some(GateWanted::Blame));
+        assert_eq!(GateWanted::parse("bill"), Some(GateWanted::Bill));
+        assert_eq!(
+            GateWanted::parse(""),
+            Some(GateWanted::Blame),
+            "裸 `NM_GATE` 与 `=1` 都是 ② 那一幕"
+        );
+        assert_eq!(GateWanted::parse(" 1 "), Some(GateWanted::Blame));
+        assert_eq!(GateWanted::parse("money"), Some(GateWanted::Bill));
+        assert_eq!(GateWanted::parse("blim"), None, "拼错了就该说不认识");
     }
 
     /// `NM_MAGIC` 认的十一个条件必须真是 `MagicFilter::ALL` 那十一格，一格不漏。

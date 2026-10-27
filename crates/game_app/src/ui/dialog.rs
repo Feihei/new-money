@@ -433,11 +433,21 @@ pub(crate) fn sync_modal(
                         .count() as u32
                 })
                 .unwrap_or(0);
+            // 那一问值多少钱：读**正在被问的那一份**信封里的账（`asking()` 与 `queue.front()`
+            // 是同一个 `parked` 位派出来的，所以这里与面板上面那句问话不会数到两件事）
+            let price = view
+                .gate
+                .queue
+                .front()
+                .and_then(|job| job.front)
+                .and_then(|affair| affair.bill())
+                .map(|charge| books.staged(charge).amount);
             Some(GateAsk {
                 ask,
                 event,
                 card,
                 held,
+                price,
                 blame: match ask {
                     // 候选与门里「这一问要不要挂出来」用的是同一句（[`blame_candidates`]）：
                     // 两处各筛一遍的形状是「按钮亮着而门说不能转」。
@@ -2486,6 +2496,12 @@ pub(crate) struct GateAsk {
     pub card: Option<PassiveCard>,
     /// 他手里有几张这一种。门问的就是这一位，所以这一格与「有资格」是同一句话
     pub held: u32,
+    /// 那一问**值多少钱**（③）。`None` = 那一问不是一笔账 —— 坐牢没有价签。
+    ///
+    /// 这个数只能从 [`Books::staged`] 来，与门里那句「过不过那道门槛」读同一个表达式：
+    /// 面板自己乘一遍物价就会出现「屏幕上写着 2,400 而门说没到线」，
+    /// 而那正是 P3d③ 立的「写的与扣的必须同一个数」在这块屏上的形状。
+    pub price: Option<i64>,
     /// 可以点名给谁（转嫁那一问的候选，已排除自己，名字在这里查好）
     pub blame: Vec<(Entity, String)>,
     /// 这一问之后还排着几份信封。主语会跳动，而这一格是「答完这一句为什么还没回到回合机」
@@ -2526,13 +2542,23 @@ fn passive_modal(
             ));
             // 问话原文在规则层（`Ask::label`）：面板只念，不改写 —— 两处各写一遍就会出现
             // 「门问『要用免罪卡吗』而按钮写着『挡掉这次』」
-            p.spawn(center_label(&font.0, desk.ask.label(), size::ROW, col::KEY));
             p.spawn(center_label(
                 &font.0,
-                format!("{seat_of} 正挨一次「{}」", desk.event.label()),
+                desk.ask.label(desk.card),
                 size::ROW,
-                col::MUTED,
+                col::KEY,
             ));
+            // 「一次」与「一笔」是两个量词，而它们之间只由 `price` 那一格分岔：
+            // 问的是钱的时候，那个数就是玩家按不按的唯一依据，藏在下一行等于不给看
+            let bearing = match desk.price {
+                Some(n) => format!(
+                    "{seat_of} 正挨一笔 {} 的「{}」",
+                    comma(n),
+                    desk.event.label()
+                ),
+                None => format!("{seat_of} 正挨一次「{}」", desk.event.label()),
+            };
+            p.spawn(center_label(&font.0, bearing, size::ROW, col::MUTED));
             if desk.owner != seat_of {
                 p.spawn(center_label(
                     &font.0,
@@ -2547,6 +2573,28 @@ fn passive_modal(
                 ));
             }
             p.spawn(separator());
+            // 两问各自的提示按「是钱还是事」各写一句：量词（次／笔）、动词（抵消／免）与
+            // 数字两侧的空格三样都跟着变。合成一句共享的短语就会漏掉那个空格 ——
+            // 「这一笔 3,000推给」是屏幕上看得出来的糙，而它正是共享写法省不掉的那一笔
+            let (offset_hint, shift_hint) = match desk.price {
+                Some(n) => (
+                    format!("用一张就把这一笔 {} 免掉；剩下的留着挨下一笔", comma(n)),
+                    format!(
+                        "把这一笔 {} 推给点名的那一位；他自己手里有卡，还能接着挡",
+                        comma(n)
+                    ),
+                ),
+                None => (
+                    format!(
+                        "用一张就把这一次「{}」抵消掉；剩下的留着挨下一次",
+                        desk.event.label()
+                    ),
+                    format!(
+                        "把这一次「{}」推给点名的那一位；他自己手里有卡，还能接着挡",
+                        desk.event.label()
+                    ),
+                ),
+            };
             match desk.ask {
                 Ask::Offset => {
                     // 卡名与张数都来自门里那一句判据读的同一格（`PassiveEvent::offset_card`
@@ -2562,10 +2610,7 @@ fn passive_modal(
                         &font.0,
                         // 「同类多张只问一次」（PLAN §五 第 7 条）：这句话要说得出按一次
                         // 只花一张、剩下的那张还在
-                        format!(
-                            "用一张就把这一次「{}」抵消掉；剩下的留着挨下一次",
-                            desk.event.label()
-                        ),
+                        offset_hint,
                         size::SMALL,
                         col::MUTED,
                     ));
@@ -2593,15 +2638,7 @@ fn passive_modal(
                     });
                 }
                 Ask::Shift => {
-                    p.spawn(label(
-                        &font.0,
-                        format!(
-                            "把这一次「{}」推给点名的那一位；他自己手里有卡，还能接着挡",
-                            desk.event.label()
-                        ),
-                        size::ROW,
-                        col::KEY,
-                    ));
+                    p.spawn(label(&font.0, shift_hint, size::ROW, col::KEY));
                     p.spawn(label(
                         &font.0,
                         // 「链最长两跳」在屏幕上的那一格：接住的那位不能再往下转
@@ -3947,9 +3984,15 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
         // 摆一张「族 → 词」的映射 —— 那是 P13b① 删掉的第一份冗余：五行词与表上十五行
         // 各有一份答案，而加一行时只有表会被编译器逼着表态。
         // 「被谁挡的」由 P13b② 的门带上来（[`Blocker`]）：**卡挡的要花一张卡、神挡的分文不花**，
-        // 两句混成一条「被抵消」就等于替玩家宣布少了一张卡（或少了一层永不消耗的免疫）
+        // 两句混成一条「被抵消」就等于替玩家宣布少了一张卡（或少了一层永不消耗的免疫）。
+        // 而 ③ 之后「那一张卡」不再是免罪卡一种：挡事的是免罪卡、挡账的是免费卡，
+        // 名字由**表上那一行**点名（`offset_card`），写死「免罪卡」就会念出
+        // 「一次过路费被免罪卡抵消」这种看着顺眼的假话。
         EffectOutcome::Blocked { event, by } => match by {
-            Blocker::Card => format!("一次{}被免罪卡抵消", event.label()),
+            Blocker::Card => match event.offset_card() {
+                Some(card) => format!("一次{}被{}抵消", event.label(), card.label()),
+                None => format!("一次{}被一张卡抵消", event.label()),
+            },
             Blocker::God(god) => format!("一次{}被{}豁免", event.label(), god.label()),
         },
         // 块数要说：「整街」在缺路段键的盘上可能只盖到一块，玩家有权知道自己办成了多大一片
@@ -3969,12 +4012,6 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
                 String::new()
             }
         ),
-        // 打出去那一刻**什么都不发生**，所以这一句必须说清「从今天起可以免一次」——
-        // 否则玩家以为自己按错了。门槛要连着物价一起写，因为「现在值不值得用」正是这张卡
-        // 唯一需要判断的地方
-        EffectOutcome::FreePassArmed { floor } => {
-            format!("存下一次免付（超过 {floor}×物价 的账才免）")
-        }
         // 地块名字不在凭据里（`LandId` 只是个下标），而这一句是打在「刚按下去的那颗按钮」
         // 对应的卡面上 —— 玩家刚选的就是这块地，这里要说的是「付了多少」，那是唯一会变数的数
         EffectOutcome::Purchased { price, .. } => format!("买下这块地，付 ${price}"),

@@ -15,67 +15,43 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use crate::auction::Gavel;
 use crate::board::{BuildingKind, LandType};
 use crate::charge::{Charge, ChargeKind};
 use crate::economy;
 use crate::land::{Facility, LandId};
-use crate::msg::{
-    BuildOffered, BuildRequested, BuyOffered, FacilityBuilt, PlayerDetained, RentDue,
-    ServiceCharged, UpgradeOffered,
-};
-use crate::player::{DetentionPlace, Mount, PlayerId, TokenPosition};
-use crate::rng::Rng;
+use crate::msg::{BuildOffered, BuildRequested, BuyOffered, FacilityBuilt, UpgradeOffered};
+use crate::passive::{GateDesk, Job, Step, Tail, submit};
+use crate::player::Mount;
 use crate::service;
 use crate::settle::Books;
 use crate::turn::LastRoll;
 
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
 
-/// 服务结算那张台子（P10c）：[`crate::service`] 原型库接上世界的那几样。
-/// 打包成参数包是房规（§六 坑 8）—— 摇数、步数、载具、棋子与两条凭据是同一件事的
-/// 六个侧面，散装就是一条十五个参数的 system。
-#[derive(SystemParam)]
-pub struct ServiceDesk<'w, 's> {
-    /// 第十四条子流：商业设施摇的数。
-    pub rng: ResMut<'w, Rng>,
-    /// 本回合掷出的骰面（C 型按它计费）。写入在 `turn::apply_plan` 一处。
-    pub last_roll: Res<'w, LastRoll>,
-    /// C 型的载体判据：油费只对载具收。
-    pub mounts: Query<'w, 's, &'static Mount, With<PlayerId>>,
-    /// 这块地上立着什么。`None` ＝ 空地（商业空地或住宅）。
-    pub facilities: Query<'w, 's, Option<&'static Facility>>,
-    /// B 型住宿要把人挪走 —— 拘留的写就在 [`crate::landing::detain`]，这里只递工具。
-    /// 按 `Walker` 收是那条签名的要求（P12）；今天走到这一格的必然是玩家（服务费只有
-    /// 付得起的人挨得到，而恶人没有钱包）。
-    pub positions: Query<'w, 's, &'static mut TokenPosition, With<crate::player::Walker>>,
-    pub services: MessageWriter<'w, ServiceCharged>,
-    /// 住宿那一下的凭据。与扣款凭据分开写：一笔记的是钱、一笔记的是人。
-    pub detained_note: MessageWriter<'w, PlayerDetained>,
-}
-
-/// 落格结算要发出去的四种报价/凭据：买地、升级、建设、租金。合成一个参数包是房规
-/// （§六 坑 8）—— 它们说的是同一件事的四个分支，散装就把
-/// [`settle_property_landing`] 顶到 clippy 的参数上限，而那条警告在这里正是要吃掉
-/// 「一条 system 要发四种消息」这个信号。
+/// 落格结算要发出去的三种报价：买地、升级、建设。合成一个参数包是房规（§六 坑 8）——
+/// 它们说的是同一件事的三个分支，散装就把 [`settle_property_landing`] 顶到 clippy 的
+/// 参数上限，而那条警告在这里正是要吃掉「一条 system 要发四种消息」这个信号。
+///
+/// ⚠️ ③ 之前这里还有第四、第五格（`rents`／`rerouted`）。**收据的实付额只有落地那一刻
+/// 才知道**，而落地发生在被动卡那道门里（问完才扣），所以那两条 writer 搬进了
+/// [`GateDesk`](crate::passive::GateDesk) —— 留在这里就等于两处各写一次同一条收据。
 #[derive(SystemParam)]
 pub struct PropertySink<'w> {
     pub offers: MessageWriter<'w, BuyOffered>,
     pub upgrades: MessageWriter<'w, UpgradeOffered>,
     pub builds: MessageWriter<'w, BuildOffered>,
-    pub rents: MessageWriter<'w, RentDue>,
-    /// 间谍转付（P12d）。与 `rents` 分开：两条说的是两件事 ——
-    /// 「有人交了租」与「这笔租交错了人」。合一条就得在 `RentDue` 上加一个
-    /// 「其实没付给 owner」的标记位，而 UI 的两句播报读的是不同的消息。
-    pub rerouted: MessageWriter<'w, crate::msg::RentRerouted>,
 }
 
 /// 踩到地产格：三种归属三种走法（无主 / 自己 / 别人），与 Godot 完全一致。
+///
+/// ⚠️ 这张包里没有 `Books`／`Commands`／`PendingDecision`，也没有那条骰面 ——
+/// ③ 之后它们都从 [`GateDesk`] 里借（同一 system 里两份 `Books` 会在参数建立期直接撞，
+/// §6.1 坑 33）。`last_roll` 是唯一的例外：它是只读的世界读数，与门不相交。
 pub fn settle_property_landing(
-    mut commands: Commands,
-    mut books: Books,
+    mut gate: GateDesk<'_, '_>,
     landing: Res<Landing>,
-    mut pending: ResMut<PendingDecision>,
-    mut desk: ServiceDesk<'_, '_>,
+    last_roll: Res<'_, LastRoll>,
     mut sink: PropertySink<'_>,
 ) {
     // 只有地产格带土地；其余格（含 `land_id` 为 `None` 的坏数据）直接跳过
@@ -88,14 +64,12 @@ pub fn settle_property_landing(
     else {
         return;
     };
-    let Some(view) = books.view(land) else {
+    let Some(view) = gate.sink.books.view(land) else {
         return;
     };
-    let Some(self_id) = books.id_of(player) else {
+    let Some(self_id) = gate.sink.books.id_of(player) else {
         return;
     };
-    let def = &books.active.def;
-
     match view.owner {
         // 无主 → 挂牌待决。Godot 也是「不管买不买得起都弹一张」（`confirm_buy` 里
         // 才做二次判定），差别在于这里买不起就是 `None`，不会静默扣成负数。
@@ -103,8 +77,8 @@ pub fn settle_property_landing(
         // 但**必败**那一格不给弹（P6b② 大衰神）：报价与成交读的是同一句
         // [`Books::buy_price`]，弹一张按下去必然失败的模态，比不弹更糟 ——
         // 玩家会以为是自己按错了，而不是身上那位神不让买。
-        None if books.acquire_denied(player) => {
-            let god = books.god_of(player).map(|held| held.god);
+        None if gate.sink.books.acquire_denied(player) => {
+            let god = gate.sink.books.god_of(player).map(|held| held.god);
             debug!(
                 "{} 想踩下这块无主地，但{}在场 —— 买地建屋必败",
                 self_id.0,
@@ -115,10 +89,10 @@ pub fn settle_property_landing(
             // 土地公踩到无主地**不问价**（判据在 `Books::takes_landing`，过户由排在后面的
             // `settle_land_deity_landing_system` 做）。这一句必须问在弹窗口之前：先弹一张
             // 「是否购买此地」、答完才发现地已经归他，那是一个答完就失效的窗口
-            if books.takes_landing(player) {
+            if gate.sink.books.takes_landing(player) {
                 debug!("无主地 L{} 不问价：他身上是土地公", land.0);
             } else {
-                pending.offer(player, Pending::Buy(land));
+                gate.pending.offer(player, Pending::Buy(land));
                 sink.offers.write(BuyOffered { player, land });
             }
         }
@@ -126,13 +100,13 @@ pub fn settle_property_landing(
         // 两条判据互相独立 —— 升级看「楼还有几层可盖」，建设看「这块地上还什么都没有」
         // —— 所以各占一格，而不是一条 if 链。
         Some(owner) if owner == self_id => {
-            let Some(def_land) = def.land(land.0) else {
+            let Some(def_land) = gate.sink.books.active.def.land(land.0) else {
                 return;
             };
             if def_land.land_type == LandType::Commercial {
                 // 已有设施的商业地踩回自己家：无事。设施不可升级，4 代也没有
                 // 「逛自己的店」这一出 —— 这一条刻意是空支，不是漏了升级报价。
-                let occupied = books.facility_of(land).is_some();
+                let occupied = gate.sink.books.facility_of(land).is_some();
                 if occupied {
                     return;
                 }
@@ -141,59 +115,57 @@ pub fn settle_property_landing(
                 // 与买地报价同一条口径，按钮灰着、理由写在按钮上
                 if !view.mortgaged
                     && view.status != Some(crate::status::LandStatus::Sealed)
-                    && !books.acquire_denied(player)
+                    && !gate.sink.books.acquire_denied(player)
                 {
-                    let base = economy::upgrade_cost(def, &view).unwrap_or(0);
-                    let cost = books.quoted(ChargeKind::Build { land }, player, base);
-                    pending.offer(player, Pending::Build(land));
+                    let base =
+                        economy::upgrade_cost(&gate.sink.books.active.def, &view).unwrap_or(0);
+                    let cost = gate
+                        .sink
+                        .books
+                        .quoted(ChargeKind::Build { land }, player, base);
+                    gate.pending.offer(player, Pending::Build(land));
                     sink.builds.write(BuildOffered { player, land, cost });
                 }
                 return;
             }
-            let base = economy::upgrade_cost(def, &view).unwrap_or(0);
-            let cost = books.quoted(ChargeKind::Upgrade { land }, player, base);
-            let views = books.views();
-            if !books.acquire_denied(player)
+            let base = economy::upgrade_cost(&gate.sink.books.active.def, &view).unwrap_or(0);
+            let cost = gate
+                .sink
+                .books
+                .quoted(ChargeKind::Upgrade { land }, player, base);
+            let views = gate.sink.books.views();
+            if !gate.sink.books.acquire_denied(player)
                 && economy::can_upgrade(
                     &view,
                     owner,
                     &views,
                     cost,
-                    books.balance(player),
-                    &books.rules,
+                    gate.sink.books.balance(player),
+                    &gate.sink.books.rules,
                 )
             {
-                pending.offer(player, Pending::Upgrade(land));
+                gate.pending.offer(player, Pending::Upgrade(land));
                 sink.upgrades.write(UpgradeOffered { player, land, cost });
             }
         }
         // 别人的地：带设施 → 服务费（原型库当场结）；空商业地 → 一文不收
         // （设施还没立起来，不产生任何账 —— 连收据都不该有）；住宅 → 照旧收租。
         Some(owner) => {
-            let Some(owner_entity) = books.holder(owner) else {
+            let Some(owner_entity) = gate.sink.books.holder(owner) else {
                 return;
             };
-            let facility = books.facility_of(land);
+            let facility = gate.sink.books.facility_of(land);
             if let Some(kind) = facility {
-                settle_service(
-                    &mut commands,
-                    &mut books,
-                    &mut pending,
-                    &mut desk,
-                    player,
-                    land,
-                    owner_entity,
-                    kind,
-                );
+                settle_service(&mut gate, &last_roll, player, land, owner_entity, kind);
                 return;
             }
-            let Some(def_land) = def.land(land.0) else {
+            let Some(def_land) = gate.sink.books.active.def.land(land.0) else {
                 return;
             };
             if def_land.land_type == LandType::Commercial {
                 return;
             }
-            let rent = books.rent_of(land);
+            let rent = gate.sink.books.rent_of(land);
             if rent <= 0 {
                 return;
             }
@@ -201,48 +173,53 @@ pub fn settle_property_landing(
             // 收款人从地主换成雇主 —— 钱从结算那一刻就走对口袋，不做两段账。
             // 「无功而返」在这里没有形状：判据不过时 `None`，租金照付地主，
             // 世界看起来与没有间谍时一模一样 —— 那正是这句话的本意。
-            let spy = books.on_duty_spy();
-            let rerouted_to = books.rent_rerouted_to(player, land, owner_entity);
+            //
+            // ⚠️ 这一句读的是**踩格的那一位**（`player`），交进门之后不改：间谍探的是
+            // 「谁在这块地上踩过交费」，与「此刻谁替谁付」是两件事（③ 落地时想过要不要
+            // 按新付款人重算，答案是不要 —— 那等于让一张嫁祸卡改变第三个人（雇主）的账）
+            let spy = gate.sink.books.on_duty_spy();
+            let rerouted_to = gate.sink.books.rent_rerouted_to(player, land, owner_entity);
             let payee = rerouted_to.unwrap_or(owner_entity);
+            let rerouted = match (spy, rerouted_to) {
+                (Some((spy_entity, employer)), Some(_)) => Some((spy_entity, employer)),
+                _ => None,
+            };
             let charge = Charge::new(ChargeKind::Rent { land }, Some(player), Some(payee), rent);
-            // `payer` 取成交后那个：被嫁祸卡转手时，收据要说的是**实际付钱的人**
-            if let Ok(done) = books.settle(&mut commands, charge) {
-                sink.rents.write(RentDue {
-                    payer: done.payer.unwrap_or(player),
-                    owner: payee,
-                    land,
-                    amount: done.amount,
-                });
-                if let (Some((spy_entity, employer)), Some(_)) = (spy, rerouted_to) {
-                    sink.rerouted.write(crate::msg::RentRerouted {
-                        spy: spy_entity,
-                        employer,
+            // ③：这一笔**交给门**而不是自己结掉。就地结掉与挂成窗口由门定 ——
+            // 手里没有免费卡与嫁祸卡、或这笔不够「大额」那把尺时，门在同一帧里就地落，
+            // 世界看起来与这一句还是 `books.settle` 时一模一样
+            submit(
+                &mut gate,
+                Job::new(
+                    player,
+                    vec![Step::Bill(charge)],
+                    format!("L{} 的过路费", land.0),
+                    None,
+                    Gavel::Public,
+                    Tail::Rent {
                         land,
-                        amount: done.amount,
-                    });
-                }
-            }
-            pending.offer(player, Pending::RentNotice(land));
+                        payee,
+                        spy: rerouted,
+                    },
+                ),
+            );
         }
     }
 }
 
-/// 踩到**别人**的设施：按原型算一笔账并当场结掉（P10c）。
+/// 踩到**别人**的设施：按原型算一笔账，把账交给门（P10c，③ 换成门的形状）。
 ///
 /// 「不产生账」与「免单」在这里分家（见 [`service::assess`] 的注）：步行踩加油站、
 /// D 型（研究所/公园）连流水都没有；大财神赖账 / 免费卡吃掉的那笔**过管线**，
 /// 收据照样弹、上面的金额是 0 —— 玩家得看得见「为什么没付钱」。
 ///
-/// B 型（旅馆）在钱结清之后把人送去住宿：钱先扣（付不起当场破产，人都没了就不
-/// 必再住店），再动棋子。`detain` 是四条去处的唯一入口 —— 棋子停在旅馆所在的
-/// 那一格（`Hotel` 没有死胡同分支，`DetentionPlace::branch()` 是 `None`），回来那天
-/// 从这格继续走。
-#[allow(clippy::too_many_arguments)]
+/// B 型（旅馆）那一句「钱结清了再送人去住」现在写在 [`Tail::Service`] 的收尾里，
+/// 而「住店」本身是表上 [`PassiveEvent::Lodging`] 那一行（10-27 的例外：不可免也不可转，
+/// 所以门读到它当场落，一次窗口都不弹）。顺序还是那一条：钱先扣
+/// （付不起当场破产，人都没了就不必再住店），再动棋子。
 fn settle_service(
-    commands: &mut Commands,
-    books: &mut Books,
-    pending: &mut PendingDecision,
-    desk: &mut ServiceDesk<'_, '_>,
+    gate: &mut GateDesk<'_, '_>,
+    last_roll: &Res<'_, LastRoll>,
     player: Entity,
     land: LandId,
     owner_entity: Entity,
@@ -250,7 +227,9 @@ fn settle_service(
 ) {
     // 设施类别在组件上，参数按「预建用自己的、现建用棋盘默认」那条规则查 ——
     // 数据校验（P10b）保证两者与类别配对；缺参数（这条盘没配这类）等于没建成，不收费
-    let Some(proto) = books
+    let Some(proto) = gate
+        .sink
+        .books
         .active
         .def
         .facility_fee(land.0, kind)
@@ -260,18 +239,17 @@ fn settle_service(
     };
     // A/B 型摇一个数；C/D 型不摇（`sides()` 为 0），传什么都行
     let roll = if proto.sides() > 0 {
-        desk.rng.pick_service(1..=proto.sides())
+        gate.sink.kit.rng.pick_service(1..=proto.sides())
     } else {
         0
     };
     // C 型的步数 = 本回合骰面。`LastRoll` 缺席（理论不可达：落格必跟在一次掷骰后）
     // 就按 0 步算 —— 账会算出 0，而不是 panic 一局对局
-    let steps = desk
-        .last_roll
+    let steps = last_roll
         .0
         .filter(|(who, _)| *who == player)
         .map_or(0, |(_, steps)| steps);
-    let mount = desk.mounts.get(player).copied().unwrap_or(Mount::Foot);
+    let mount = gate.sink.mounts.get(player).copied().unwrap_or(Mount::Foot);
     let Some(bill) = service::assess(&proto, roll, steps, mount) else {
         return;
     };
@@ -281,40 +259,23 @@ fn settle_service(
         Some(owner_entity),
         bill.base,
     );
-    let Ok(done) = books.settle(commands, charge) else {
-        return; // 付不起 → 破产已由 `settle` 宣告；人都没了，住宿无从谈起
-    };
-    if bill.stay_days > 0 {
-        // B 型：离场 N 天。`detain` 更久的那张赢 —— 他本就关着时不换地方、只续到更久
-        if let Some((sentence, junction, end)) = crate::landing::detain(
-            commands,
-            &mut desk.positions,
-            &mut books.detained,
-            &books.active.def,
+    submit(
+        gate,
+        Job::new(
             player,
-            DetentionPlace::Hotel,
-            crate::player::Term::Turns(bill.stay_days),
-        ) {
-            desk.detained_note.write(PlayerDetained {
-                player,
-                place: sentence.place,
-                junction,
-                end,
-            });
-        }
-    }
-    desk.services.write(ServiceCharged {
-        payer: done.payer.unwrap_or(player),
-        owner: owner_entity,
-        land,
-        kind,
-        amount: done.amount,
-        roll,
-        stay_days: bill.stay_days,
-    });
-    // 钱已扣、人已送走 —— 收据仍然要弹：B 型那张上写着「住了几天」，
-    // A 型那张上写着「摇出几点走了哪一档」。免单（金额 0）也一样弹。
-    pending.offer(player, Pending::ServiceNotice(land));
+            vec![Step::Bill(charge)],
+            format!("L{} 的{}", land.0, kind.label()),
+            None,
+            Gavel::Public,
+            Tail::Service {
+                land,
+                owner: owner_entity,
+                kind,
+                roll,
+                stay_days: bill.stay_days,
+            },
+        ),
+    );
 }
 
 /// 建造请求被拒的理由。与 [`crate::shop::ShopDeny`] 同一族：面板的灰按钮与规则层

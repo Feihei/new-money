@@ -16,13 +16,13 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
 use game_core::prelude::{
-    ActiveBoard, ArcadeDeal, AtmAccess, Auction, BankBalance, Bankrupt, BuildingLevel, CardKind,
-    CompanyLedgers, Corrections, CouponBoxes, Deck, DeckOrder, Detention, Facility, GameRules,
-    GameSeed, GameSession, Gate, Gavel, Hand, Heading, Hired, HolidaySet, Institution, Insured,
-    Inventory, Jackpot, LandId, LandStatus, Landing, LotteryTickets, MarketClock, Mortgaged, Mount,
-    MoveCap, Occupancy, OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName,
-    Points, Possession, Shelf, ShopStock, StaySentence, StockHoldings, Timed, TokenPosition,
-    TurnOrder, TurnPhase, Villain, Wallet, resists,
+    ActiveBoard, ArcadeDeal, Ask, AtmAccess, Auction, BankBalance, Bankrupt, BuildingLevel,
+    CardKind, CompanyLedgers, Corrections, CouponBoxes, Deck, DeckOrder, Detention, Facility,
+    GameRules, GameSeed, GameSession, Gate, Gavel, Hand, Heading, Hired, HolidaySet, Institution,
+    Insured, Inventory, Jackpot, LandId, LandStatus, Landing, LotteryTickets, MarketClock,
+    Mortgaged, Mount, MoveCap, Occupancy, OccupancyAt, Owner, PassiveCard, Paused, Pending,
+    PendingDecision, PlayerId, PlayerName, Points, Possession, Shelf, ShopStock, StaySentence,
+    StockHoldings, Timed, TokenPosition, TurnOrder, TurnPhase, Villain, Wallet, resists, stage,
 };
 
 use crate::asset_root;
@@ -507,8 +507,9 @@ fn format_access(view: &DumpView) -> String {
 /// 修正登记处整表打出来。P2 的管线只有两个输入 —— 物价指数（上一行的 `物价 ×`）
 /// 和这张表 —— 有了这两样，屏幕上任何一笔金额都能手算回去。
 ///
-/// 门槛与「一次性」必须跟着打出来：免费卡那种账「今天没免掉」的原因就是这两个位，
-/// 少了它们，这一栏只说得出「挂着一条 Cancel」，而玩家问的是「为什么这一笔还是 2400」。
+/// ⚠️ ③ 之前这里还打两栏「门槛」与「一次性」。那两个位随免费卡一起搬进了被动卡那道门
+/// （`Correction` 里已经没有「一次」这个位可填），所以这一栏今天只说得出**世界状态**那一半：
+/// 「为什么这一笔还是 2400」现在要找门问（下一栏 `门` 那句「问谁 · 哪一问」就是它的答案）。
 fn format_corrections(view: &DumpView) -> Vec<String> {
     if view.corrections.is_empty() {
         return vec!["修正登记处：空（没有人挂着可抵消/转嫁/加倍的账）".to_string()];
@@ -516,17 +517,8 @@ fn format_corrections(view: &DumpView) -> Vec<String> {
     let mut lines = vec![format!("修正登记处：{} 条", view.corrections.len())];
     lines.extend(view.corrections.iter().map(|(at, c)| {
         format!(
-            "  #{at} {:?} {:?} {:?} ←{:?}{}{}",
-            c.bearer,
-            c.scope,
-            c.adjustment,
-            c.source,
-            if c.floor > 0 {
-                format!(" 门槛{}", c.floor)
-            } else {
-                String::new()
-            },
-            if c.one_shot { " 一次性" } else { "" },
+            "  #{at} {:?} {:?} {:?} ←{:?}",
+            c.bearer, c.scope, c.adjustment, c.source,
         )
     }));
     lines
@@ -721,11 +713,30 @@ fn format_gate(view: &DumpView) -> String {
     // 「后面排着」数的是**除了正在被问的那一份之外**还有几份 —— 与面板那一句同一条读数
     // （`dialog.rs` 的 `queued`）。把正在被问的那一份也算进「后面」，这一行就在说
     // 「答完这一句还要再等一份」，而那是假话：答完就交还回合了
+    // 问句原文与面板同一句（`Ask::label`），而那张卡的名字由**表上那一行**点名 ——
+    // 在这一栏写死「免罪卡」就会在免费卡那一问上念出一句假话
+    let card = match ask {
+        Ask::Offset => event.offset_card(),
+        Ask::Shift => Some(PassiveCard::Shift),
+    };
+    // 那一问值多少钱。只有账有价签，而「门为什么问这一句」读的就是这个数与那道门槛
+    let price = gate
+        .front()
+        .and_then(|job| job.front)
+        .and_then(|affair| affair.bill())
+        .map(|charge| {
+            let index = view
+                .session
+                .as_ref()
+                .map_or(1.0, |session| session.price_index);
+            stage(charge, index, &view.corrections).amount
+        });
     format!(
-        "问 {} · {} · {}（行 {}）· 后面排着 {} 份 · 答完回 {:?}",
+        "问 {} · {} · {}{}（行 {}）· 后面排着 {} 份 · 答完回 {:?}",
         who_are(view, who),
-        ask.label(),
+        ask.label(card),
         event.label(),
+        price.map_or(String::new(), |n| format!(" ${}", comma(n))),
         head,
         depth.saturating_sub(1),
         gate.resume,

@@ -167,17 +167,6 @@ pub enum CardEffect {
     Release {
         place: crate::player::DetentionPlace,
     },
-    /// 挂上一条**待用**的免付（免费卡，P3c②）。`floor` 是门槛的名义额：过完物价的实付
-    /// 金额要**超过** `floor × 物价` 才免得掉，而且只免一次。
-    ///
-    /// 为什么不当场折现：这张卡的全部玩法在「留着等那笔大的」。打出去就结算的话，
-    /// 它只是一张按市价换现金的券，玩家永远不必判断。
-    ///
-    /// 它抵的是**钱**，所以走 `Corrections` 那条管线；免罪卡抵的是**事**，走
-    /// [`crate::afflict`]。两张表 P13 的免疫矩阵要各读一遍（PLAN §三「反制链」行）。
-    FreePass {
-        floor: i64,
-    },
     /// 当场买下一块无主地（购地卡，P3d④）。**卡面上不带地块编号**：选哪块地是玩家按下去
     /// 那一刻定的，来自出牌请求的 `aim`（与 [`Self::LandStatus`] 同一条理由）。
     ///
@@ -422,16 +411,6 @@ impl CardSet {
                         // 而那一问有真答案（放人的受益者是被关的那位，不是掏钱的另一位，
                         // 与保释同一条分叉），静默走 `self_only` 会做出「自己放自己」那张卡
                     }
-                    CardEffect::FreePass { floor } => {
-                        // 门槛写成 0（或负）的免费卡是「以后所有账一律免」，那不该是
-                        // 一张卖几十点券的东西 —— 它的玩法形状全在这个数上
-                        if *floor <= 0 {
-                            errs.push(format!(
-                                "卡牌 {} 的免付门槛是 {floor}，没有门槛的免付不是这张卡",
-                                c.id
-                            ));
-                        }
-                    }
                     CardEffect::BuyLand => {
                         // 与 `LandStatus` 同一条绑定：这块地来自出牌请求，不在卡面上。
                         // 目标写成 `land` 的话，购地卡会去问一块**有主**的地（那条判据要业主），
@@ -660,7 +639,26 @@ mod tests {
             "牌池里出现了 `move_to` —— 上面那条豁免该销掉了"
         );
         assert!(has(|e| matches!(e, CardEffect::LandStatus { .. }),));
-        assert!(has(|e| matches!(e, CardEffect::FreePass { .. })));
+        // 被动卡那三张**不在**上面这张表里（它们的 `effects` 是空的，理由见
+        // `a_passive_card_is_a_key_not_a_verb`），所以这一句要换个键问：门上那三问
+        // 各自要有一张买得到的卡。少一张的形状是「门问得起这一问，而货架／宝箱／命运
+        // 三条来源一条都发不到它」
+        let held: Vec<_> = CardSet::from_json(ITEMS)
+            .unwrap()
+            .0
+            .iter()
+            .filter_map(|c| c.passive)
+            .collect();
+        for want in [
+            PassiveCard::Forgive,
+            PassiveCard::FreePass,
+            PassiveCard::Shift,
+        ] {
+            assert!(
+                held.contains(&want),
+                "道具池里没有 `passive` 是 {want:?} 的那一张 —— 门上那一问没有来源"
+            );
+        }
         assert!(has(|e| matches!(e, CardEffect::BuyLand)));
         assert!(has(|e| matches!(e, CardEffect::Reverse)));
         assert!(has(|e| matches!(e, CardEffect::Stay { .. })));

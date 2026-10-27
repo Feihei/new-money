@@ -55,18 +55,20 @@ use std::collections::BTreeMap;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use crate::auction::Gavel;
 use crate::calendar::Date;
 use crate::charge::{Charge, ChargeKind};
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
 use crate::market::MarketClock;
 use crate::msg::{
-    CompanyCharged, CompanyPayout, IndemnityPaid, LandUpgraded, PlayerDetained, PolicyBought,
-    RemoteBuildOffered, RemoteUpgradeRequested,
+    CompanyCharged, CompanyPayout, IndemnityPaid, LandUpgraded, PlayerDetained, RemoteBuildOffered,
+    RemoteUpgradeRequested,
 };
-use crate::player::{DetentionPlace, Insured, Mount};
-use crate::property::ServiceDesk;
+use crate::passive::{GateDesk, Job, Step, Tail, submit};
+use crate::player::{Insured, Mount};
 use crate::service;
 use crate::settle::Books;
+use crate::turn::LastRoll;
 
 /// 一笔公司账。`amount` **带符号**：服务费是正的进账，P10d② 的保险赔付与
 /// 新闻罚款会写负数 —— 「亏损月是负数」从入账那一刻就是数据事实，不是分红时才补算。
@@ -167,35 +169,32 @@ pub fn chairman_of(books: &Books, stock: &str) -> Option<Entity> {
     best.map(|(_, e)| e)
 }
 
-/// 公司结算那张台子：日历钟、损益账与收据是同一件事的三个侧面。打包成参数包是
-/// 房规（§六 坑 8）—— 散装就把 [`settle_company_landing`] 顶到 clippy 的参数上限，
-/// 而那条警告在这里正是要吃掉「一条 system 要挂三样公司私产」这个信号。
+/// 公司结算那张台子：日历钟与当月损益账。
+///
+/// ⚠️ ③ 之前这里还有三条 writer（收据／保单／远程建设窗口）与一份 `Books`。前两条搬进了
+/// [`GateDesk`](crate::passive::GateDesk)：**实付额只有落地那一刻才知道**，而落地发生在
+/// 被动卡那道门里（问完才扣），留在触发点就是两处各写一次同一条收据。`offered` 留在
+/// [`settle_company_landing`]：D 型那一格根本不产生账，门无从路过。
 #[derive(SystemParam)]
 pub struct CompanyDesk<'w> {
     /// 入账日期的来源（损益账按自然月分页）。
     pub clock: Res<'w, MarketClock>,
     /// 全体公司的当月账。
     pub ledgers: ResMut<'w, CompanyLedgers>,
-    /// 踩格收据（含董事长免单那张 0 元的）。
-    pub charged: MessageWriter<'w, CompanyCharged>,
-    /// 投保凭据（P10d②）：保费付了、保单生效了。
-    pub policies: MessageWriter<'w, PolicyBought>,
-    /// 远程建设窗口报到（P10d②，日产建设）。
-    pub offered: MessageWriter<'w, RemoteBuildOffered>,
 }
 
 /// 踩到公司门面格：董事长免费（连账都不产生），其余人按原型收一笔进公司账。
 ///
-/// 与 `property.rs` 的 `settle_service` 同形（摇数 → assess → settle → 收据），差别有三：
-/// 收款方是 `None`（钱进账本不进口袋）、B 型送去 [`DetentionPlace::Away`]（出国旅游
-/// 那个地方不在棋盘上）、结算完**记一笔账**（分红按它分）。
+/// 与 `property.rs` 的 `settle_service` 同形（摇数 → assess → **交给门**），差别有三：
+/// 收款方是 `None`（钱进账本不进口袋）、B 型送去
+/// [`DetentionPlace::Away`](crate::player::DetentionPlace)（出国旅游
+/// 那个地方不在棋盘上）、结算完**记一笔账**（分红按它分）。后两样今天都写在
+/// [`Tail::Company`] 的收尾里：钱是门答完才落的，而「送人」与「记账」都跟着那笔实付额走。
 pub fn settle_company_landing(
-    mut commands: Commands,
-    mut books: Books,
+    mut gate: GateDesk<'_, '_>,
     landing: Res<Landing>,
-    mut pending: ResMut<PendingDecision>,
-    mut desk: ServiceDesk<'_, '_>,
-    mut company: CompanyDesk<'_>,
+    last_roll: Res<'_, LastRoll>,
+    mut offered: MessageWriter<'_, RemoteBuildOffered>,
 ) {
     let Some(Landed {
         player,
@@ -206,29 +205,35 @@ pub fn settle_company_landing(
     else {
         return;
     };
-    let Some(tile) = books.active.def.tile(tile.0 as i64) else {
+    // 这一格需要的两样**当场拷成自己的**（`CompanyFee` 是 `Copy`）：`&TileDef` 借的是门里
+    // 那份 `Books`，把它拖到 `submit(&mut gate, ...)` 之后就是同一处既借又改
+    let Some((stock, tile_fee)) = gate
+        .sink
+        .books
+        .active
+        .def
+        .tile(tile.0 as i64)
+        .and_then(|t| t.data.stock.clone().map(|s| (s, t.data.fee)))
+    else {
+        // `validate` 保证公司格必带 stock；这里用退路而不是 expect：坏数据
+        // 表现为一格白踩（与 Unimplemented 同一待遇），不该 panic 一局对局
         return;
     };
-    // `validate` 保证公司格必带 stock；这里用 `?` 式退路而不是 expect：坏数据
-    // 表现为一格白踩（与 Unimplemented 同一待遇），不该 panic 一局对局
-    let Some(stock) = tile.data.stock.clone() else {
-        return;
-    };
-    let date = crate::calendar::date_of(company.clock.tick, books.session.epoch);
     // D 型（日产建设，P10d②）：没有 fee —— 踩到不收费，只开远程升级窗口。
     // 窗口对谁都开（**包括董事长**：他的「免费升两层」就发生在这一格里，
     // 排在下面那条免单短路之后的话，特权在结构上就按不出来）；
     // 窗口里能升谁的地，判据全在 [`remote_build_system`]。
-    let Some(fee) = tile.data.fee.as_ref() else {
-        company.offered.write(RemoteBuildOffered { player });
-        pending.offer(player, Pending::RemoteBuild);
+    let Some(fee) = tile_fee else {
+        offered.write(RemoteBuildOffered { player });
+        gate.pending.offer(player, Pending::RemoteBuild);
         return;
     };
-    let chairman = chairman_of(&books, &stock);
+    let chairman = chairman_of(&gate.sink.books, &stock);
     if chairman == Some(player) {
         // 董事长踩自己公司：没这回事（见模块头）。收据照样弹 —— 面板得说得出
-        // 「你是董事长，这一趟免费」，与免单要看得见「为什么没付钱」同一条理由
-        company.charged.write(CompanyCharged {
+        // 「你是董事长，这一趟免费」，与免单要看得见「为什么没付钱」同一条理由。
+        // 这一条**不进门**：没有账可问，而门读到的空账只会让它原地落一次
+        gate.company.write(CompanyCharged {
             payer: player,
             stock,
             chairman,
@@ -236,7 +241,7 @@ pub fn settle_company_landing(
             roll: 0,
             stay_days: 0,
         });
-        pending.offer(player, Pending::CompanyNotice);
+        gate.pending.offer(player, Pending::CompanyNotice);
         return;
     }
     // 保险（P10d②）：转盘摇出的不是离场天数而是投保天数 —— 人原地不动，付保费
@@ -249,53 +254,31 @@ pub fn settle_company_landing(
         indemnity_per_day,
     } = fee
     {
-        let (sides, premium_per_day, indemnity_per_day) =
-            (*sides, *premium_per_day, *indemnity_per_day);
         let days = if sides > 0 {
-            desk.rng.pick_service(1..=sides)
+            gate.sink.kit.rng.pick_service(1..=sides)
         } else {
             0
         };
         let premium = premium_per_day * days as i64;
         let charge = Charge::new(ChargeKind::Service, Some(player), None, premium);
-        let Ok(done) = books.settle(&mut commands, charge) else {
-            return; // 保费付不起 → 破产已宣告；人都没了，保单无从谈起
-        };
-        if done.amount != 0 {
-            company
-                .ledgers
-                .current_mut(&stock, date)
-                .entries
-                .push(LedgerEntry {
-                    date,
-                    amount: done.amount,
-                    why: "保费",
-                });
-        }
-        // 免单（免费卡把保费吃成 0）不发保单：保费一分没掏，保单就是凭空印的。
-        // 与上面「免单不记账」同一口径 —— 公司没收着钱，就不欠任何保障
-        if done.amount > 0 {
-            commands.entity(player).insert(Insured {
-                days_left: days,
-                insurer: stock.clone(),
-                indemnity_per_day,
-            });
-            company.policies.write(PolicyBought {
+        submit(
+            &mut gate,
+            Job::new(
                 player,
-                stock: stock.clone(),
-                days,
-                premium: done.amount,
-            });
-        }
-        company.charged.write(CompanyCharged {
-            payer: done.payer.unwrap_or(player),
-            stock,
-            chairman,
-            amount: done.amount,
-            roll: days,
-            stay_days: 0,
-        });
-        pending.offer(player, Pending::CompanyNotice);
+                vec![Step::Bill(charge)],
+                format!("{} 的保费", stock),
+                None,
+                Gavel::Public,
+                Tail::Company {
+                    stock,
+                    chairman,
+                    roll: days,
+                    stay_days: 0,
+                    why: "保费",
+                    insurance: Some(indemnity_per_day),
+                },
+            ),
+        );
         return;
     }
     let proto = fee
@@ -304,65 +287,38 @@ pub fn settle_company_landing(
     // 摇数走服务子流（P10 立的那条）：SERVICE_TAG 的注释本来就点着「航空转盘停几段」，
     // 公司摇数与商业设施摇数是同一个域 —— 再开第十五条流反而是把一句话拆成两句
     let roll = if proto.sides() > 0 {
-        desk.rng.pick_service(1..=proto.sides())
+        gate.sink.kit.rng.pick_service(1..=proto.sides())
     } else {
         0
     };
-    let steps = desk
-        .last_roll
+    let steps = last_roll
         .0
         .filter(|(who, _)| *who == player)
         .map_or(0, |(_, steps)| steps);
-    let mount = desk.mounts.get(player).copied().unwrap_or(Mount::Foot);
+    let mount = gate.sink.mounts.get(player).copied().unwrap_or(Mount::Foot);
     let Some(bill) = service::assess(&proto, roll, steps, mount) else {
         return; // C 型 + 步行 + requires_mount：没这回事（与加油站同一格）
     };
     // payee = None：公司是外部对手方，钱离开钱包进了它的账
     let charge = Charge::new(ChargeKind::Service, Some(player), None, bill.base);
-    let Ok(done) = books.settle(&mut commands, charge) else {
-        return; // 付不起 → 破产已由 settle 宣告；人都没了，账与出国都无从谈起
-    };
-    // 记真账：过完管线的实付额。免单（免费卡吃成 0）不记 —— 公司没收着钱，
-    // 记 0 只会让分红日多算一笔空账
-    if done.amount != 0 {
-        company
-            .ledgers
-            .current_mut(&stock, date)
-            .entries
-            .push(LedgerEntry {
-                date,
-                amount: done.amount,
-                why: "服务费",
-            });
-    }
-    if bill.stay_days > 0 {
-        // 航空：出国旅游。`Away` 没有死胡同分支，接入点就是他此刻那一格（P4① 的试金石）
-        if let Some((sentence, junction, end)) = crate::landing::detain(
-            &mut commands,
-            &mut desk.positions,
-            &mut books.detained,
-            &books.active.def,
+    submit(
+        &mut gate,
+        Job::new(
             player,
-            DetentionPlace::Away,
-            crate::player::Term::Turns(bill.stay_days),
-        ) {
-            desk.detained_note.write(PlayerDetained {
-                player,
-                place: sentence.place,
-                junction,
-                end,
-            });
-        }
-    }
-    company.charged.write(CompanyCharged {
-        payer: done.payer.unwrap_or(player),
-        stock,
-        chairman,
-        amount: done.amount,
-        roll,
-        stay_days: bill.stay_days,
-    });
-    pending.offer(player, Pending::CompanyNotice);
+            vec![Step::Bill(charge)],
+            format!("{} 的服务费", stock),
+            None,
+            Gavel::Public,
+            Tail::Company {
+                stock,
+                chairman,
+                roll,
+                stay_days: bill.stay_days,
+                why: "服务费",
+                insurance: None,
+            },
+        ),
+    );
 }
 
 /// 保险赔付（P10d②）：投保人在保单效期内被拘留，保险公司按天赔现金。

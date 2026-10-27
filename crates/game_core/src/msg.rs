@@ -682,12 +682,6 @@ pub enum EffectOutcome {
         lands: u32,
         seized: u32,
     },
-    /// 挂上了一条待用的免付（免费卡）。`floor` 是门槛的名义额 —— 这条凭据说的是
-    /// 「从今天起，超过这个数的账可以免一次」，而**不是**「已经免了」。真免掉那笔是
-    /// 另一条消息 [`ChargeWaived`]，两件事之间可以隔几十个回合。
-    FreePassArmed {
-        floor: i64,
-    },
     /// 买下了这块地（购地卡，P3d④）。`price` 是**实付**额（过了物价与修正），与
     /// [`LandBought`] 上那个数同源 —— 那条说的是「归属变了」，这条说的是「这张卡办成的」。
     Purchased {
@@ -740,18 +734,6 @@ pub enum EffectOutcome {
         god: crate::gods::God,
         bomb: bool,
     },
-}
-
-/// 一条一次性修正**真的生效了**：`saved` 这笔账从这位身上免掉了，那张卡就此消失。
-///
-/// 与 [`CashChanged`] 分开，是因为这里**没有钱动** —— 「少付」不是一笔收入，把它记成
-/// `+2400` 会让现金审计对不上账（P1 那两套账同一条理由）。而没有这条消息，玩家看见的
-/// 就是「租金那一格显示 0」，读不出自己刚花掉一张卡。
-#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChargeWaived {
-    pub player: Entity,
-    pub saved: i64,
-    pub via: crate::charge::Source,
 }
 
 // ===== 决策 =====
@@ -816,11 +798,12 @@ pub enum PassiveMove {
     Shift { to: Entity },
 }
 
-/// 一张被动卡**真的花掉了**。
+/// 一条**账**被被动卡免掉时没有钱动，所以这里没有对应的 [`CashChanged`] ——
+/// 「少付」不是一笔收入，把它记成 `+2400` 会让现金审计对不上账（P1 那两套账同一条理由）。
+/// 那句「玩家刚花掉一张卡」由 [`PassiveUsed`] 一条话说完，它带的 `saved` 就是
+/// P3c② 那条 `ChargeWaived` 的归宿（③ 把免付从管线里搬进那道门，两条凭据就此合成一条）。
 ///
-/// 与管线那条 `ChargeWaived`（一笔钱没付）分开：这里说的是「一件事没落下来」。
-/// 两条都不与 `CashChanged` 混（这里可能一分钱都没动），
-/// 也都不与 [`EffectOutcome::Blocked`] 混 —— 那一条是「这一次调用里的那条效果」的凭据，
+/// 与 [`EffectOutcome::Blocked`] 的区别：那一条是「这一次调用里的那条效果」的凭据，
 /// 进的是卡面/法事/新闻那份清单；这一条说的是**卡**没了，顶栏与 dump 要单独念它。
 #[derive(Message, Debug, Clone, PartialEq)]
 pub struct PassiveUsed {
@@ -829,6 +812,12 @@ pub struct PassiveUsed {
     pub event: PassiveEvent,
     /// 嫁祸那一句带来的下一位（抵消那一句是 `None`）。顶栏那句「嫁祸给谁」读的就是它
     pub moved_to: Option<Entity>,
+    /// 这一次花卡**省（或转出去）多少钱**。事那侧永远是 0 —— 坐牢没有价签。
+    ///
+    /// 它与 [`CashChanged`] 无关：这里没有钱动（免付）或动的不是他的钱（嫁祸）。
+    /// 带上它是为了「玩家刚花掉一张卡」与「这张卡值多少」是同一句话，而不是两条消息
+    /// 各自的一半（`ChargeWaived` 当年那样）。
+    pub saved: i64,
 }
 
 /// 一件事被从甲转到乙（P13b② 嫁祸卡）。

@@ -155,7 +155,6 @@ const fn family_of(effect: &CardEffect) -> Family {
         | CardEffect::Detain { .. }
         | CardEffect::Release { .. }
         | CardEffect::MoveTo { .. }
-        | CardEffect::FreePass { .. }
         | CardEffect::Reverse
         | CardEffect::Stay { .. }
         | CardEffect::MoveCap { .. }
@@ -759,7 +758,6 @@ fn verb_area(effect: &CardEffect) -> Option<crate::plot::PlotArea> {
         | CardEffect::Detain { .. }
         | CardEffect::Release { .. }
         | CardEffect::MoveTo { .. }
-        | CardEffect::FreePass { .. }
         | CardEffect::BuyLand
         | CardEffect::Reverse
         | CardEffect::Stay { .. }
@@ -791,7 +789,6 @@ fn only_public(effect: &CardEffect) -> bool {
         | CardEffect::Detain { .. }
         | CardEffect::Release { .. }
         | CardEffect::MoveTo { .. }
-        | CardEffect::FreePass { .. }
         // 购地卡今天连范围都没有，而它**确实**只挑无主的地 —— 那条判据住在
         // `Books::buy_price`（无主 + 付得起），不在这里。这一格填 `false` 说的是
         // 「这张表管不到它」，不是「它不挑客」
@@ -1125,7 +1122,6 @@ mod tests {
                 depth: crate::damage::LandDamage::Clear { seize: true },
                 area: PlotArea::Box { side: 3 },
             },
-            CardEffect::FreePass { floor: 2_000 },
             CardEffect::BuyLand,
             CardEffect::Reverse,
             CardEffect::Stay { turns: 1 },

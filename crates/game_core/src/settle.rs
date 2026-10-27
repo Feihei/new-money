@@ -13,11 +13,11 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::charge::{self, Charge, ChargeKind, Correction, Corrections};
+use crate::charge::{self, Charge, ChargeKind, Corrections};
 use crate::damage::{self, DamageTally, LandDamage};
 use crate::economy::{self, LandView};
 use crate::land::{BuildingLevel, LandId, Mortgaged, Owner};
-use crate::msg::{CashChanged, ChargeWaived, PlayerBankrupt, PointsChanged};
+use crate::msg::{CashChanged, PlayerBankrupt, PointsChanged};
 use crate::player::{
     BankBalance, Bankrupt, Detention, DetentionPlace, PlayerId, Points, Walker, Wallet,
 };
@@ -44,11 +44,12 @@ pub struct Books<'w, 's> {
     /// 所以「棋盘在则它在」这条已经成立，不需要额外的门禁。回合末由
     /// `turn::update_price_index_system` 写一次。
     pub session: ResMut<'w, GameSession>,
-    /// 修正登记处。P2 只有物价指数这一个常驻修正；P3 的卡、P6 的神明各自往这里 push。
+    /// 修正登记处。今天往里 push 的只有神明（`gods::money_corrections`）—— 一条**常驻**的
+    /// 修正，寿命由给它的那一位管，离场时由 [`Corrections::release`] 一处清。
     ///
-    /// 要是**可变**的，为的不只是登记：一次性修正（免费卡）在真正扣款那一笔上被花掉，
-    /// 而花掉它的动作只能发生在这里 —— 报价侧走 [`Self::quoted`]，那条路拿不到下标，
-    /// 结构上就花不了卡（P3a 给免罪卡立的同一条纪律）。
+    /// ⚠️ P13b③ 之前这里还有第二种住户：免费卡登记的那条一次性 `Cancel`。被动卡那一族
+    /// 从此不进这张表（它们在事件那一刻被那道门问一次），所以这条字段仍然是可变的，
+    /// 但**没有「花掉某一条」这回事了** —— 报价与成交走同一个纯函数（[`Self::staged`]）。
     pub corrections: ResMut<'w, Corrections>,
     wallets: Query<'w, 's, &'static mut Wallet, With<PlayerId>>,
     points: Query<'w, 's, &'static mut Points, With<PlayerId>>,
@@ -120,9 +121,6 @@ pub struct Books<'w, 's> {
     /// 直接撞（§6.1 坑 33 的同族，只是碰的是资源而不是查询）。
     pub auction: ResMut<'w, crate::auction::Auction>,
     cash: MessageWriter<'w, CashChanged>,
-    /// 一次性修正生效那一笔的凭据（免费卡免掉了多少）。与 `cash` 分开写，
-    /// 因为这里没有钱动 —— 见 [`ChargeWaived`]。
-    waived: MessageWriter<'w, ChargeWaived>,
     points_changed: MessageWriter<'w, PointsChanged>,
     bankrupts: MessageWriter<'w, PlayerBankrupt>,
 }
@@ -431,16 +429,13 @@ impl<'w, 's> Books<'w, 's> {
             .collect()
     }
 
-    /// 登记一条修正。P3c 的免费卡、P6 的神明都从这里进，管线本身不必认识它们。
-    pub fn register(&mut self, correction: Correction) {
-        self.corrections.register(correction);
-    }
-
-    /// 把一笔账过一遍修正管线，**不动钱也不花卡**。
+    /// 把一笔账过一遍修正管线，**不动钱**。
     ///
     /// 报价走这一条：`amount` 只从 `base` 算（见 `charge::stage`），所以同一个入参调多少次
     /// 都是同一个数 —— 「模态上写的价」与「扣掉的价」不可能不一致，除非中间的登记变了
-    /// （卡被打掉、神明到期），那时候以成交这次为准。成交走 [`Books::settle`]。
+    /// （神明到期），那时候以成交这次为准。成交走 [`Books::settle`]，它过的是**同一条链**。
+    ///
+    /// ⚠️ 被动卡那道门问「要用免费卡吗」之前读的也是这一句（`&self`，结构上扣不了钱也花不了卡）。
     pub fn staged(&self, charge: Charge) -> Charge {
         charge::stage(charge, self.session.price_index, &self.corrections)
     }
@@ -453,11 +448,13 @@ impl<'w, 's> Books<'w, 's> {
 
     /// 走管线的一笔收付 —— 「询问 → 修正 → 扣」的第三步，也是**有名目的钱**的唯一入口。
     ///
-    /// 返回最终那笔账（`amount` 已定，`payer` 可能已被转嫁给别人）。付不起时与
+    /// 返回最终那笔账（`amount` 已定，`payer` 可能已被被动卡那道门换成别人）。付不起时与
     /// [`Books::charge`] 同语义：当场破产、收款方一分拿不到，返回 `Err`。
     ///
-    /// **只有这一条路会花掉一次性修正**：它走 [`charge::stage_and_spend`] 并注销回报的条目，
-    /// 而报价侧的 [`Self::quoted`] 走 [`Self::staged`]，连下标都拿不到。
+    /// ⚠️ P13b③ 之后这一条**不再花掉任何东西**：① 之前它还要注销「生效的那几条一次性修正」
+    /// 并发一条 `ChargeWaived`，那是免费卡的寿命机制。现在这条链与 [`Self::staged`] 走的是
+    /// **同一个纯函数**，两者只差「扣不扣钱」这一步 —— 于是「模态上写的价」与「扣掉的价」
+    /// 是同一个表达式，而卡什么时候算用掉只由那道门答（玩家答「用」那一刻）。
     ///
     /// `debit`/`credit` 仍然留在 `pub`：银行存取借还那条路是**自己左口袋换右口袋**，
     /// 不是一笔债，没有可修正的对象；硬套进管线只会让「存款被物价指数放大」这种
@@ -467,26 +464,7 @@ impl<'w, 's> Books<'w, 's> {
         commands: &mut Commands,
         charge: Charge,
     ) -> Result<Charge, InsufficientFunds> {
-        // bearer 在过链**之前**取：转嫁那一支会把 `payer` 换人，而花掉那张卡的是登记它的
-        // 那个人，不是最后付钱的那个人。
-        let bearer = charge.bearer();
-        let (charge, spent) =
-            charge::stage_and_spend(charge, self.session.price_index, &self.corrections);
-        if !spent.is_empty() {
-            let at: Vec<usize> = spent.iter().map(|s| s.at).collect();
-            for (idx, gone) in self.corrections.spend(&at) {
-                let Some(spend) = spent.iter().find(|s| s.at == idx) else {
-                    continue;
-                };
-                if let Some(player) = bearer {
-                    self.waived.write(ChargeWaived {
-                        player,
-                        saved: spend.saved,
-                        via: gone.source,
-                    });
-                }
-            }
-        }
+        let charge = charge::stage(charge, self.session.price_index, &self.corrections);
         let Some(payer) = charge.payer else {
             // 纯收入（奖金、股息）：系统出钱，没有「付不起」这一说
             if let Some(payee) = charge.payee {

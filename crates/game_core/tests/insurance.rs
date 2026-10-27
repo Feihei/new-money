@@ -99,28 +99,36 @@ fn stepping_on_the_insurer_buys_a_policy_by_the_spin() {
 
 /// 免费卡把保费吃成 0：公司没收着钱，就不欠任何保障 —— 保单不发。
 ///
-/// 演示盘的保费（300×1..=4 ≤ 1200）够不到免费卡的门槛（2000×物价），所以这一条
-/// 把承保格的保费临时改到 3000/天：门槛吃的是「实付超过 floor×物价才免」，改盘子
-/// 而不是改卡，与 `coupon_tile` 同一条手法 —— 棋盘是 resource 里的一份快照。
+/// 演示盘的保费（300×1..=4 ≤ 1200）够不到那道门槛（2000×物价），所以这一条把承保格的
+/// 保费临时改到 3000/天、并把转盘钉成一档（`sides: 1` → 那一笔恒等于 3000，流水里那个数
+/// 才写得死）：门槛吃的是「实付**超过** floor×物价才免」，改盘子而不是改卡，
+/// 与 `coupon_tile` 同一条手法 —— 棋盘是 resource 里的一份快照。
+///
+/// ③ 之后免费卡**不用打出去**：卡在手里就是资格，而那一问由门在钱动之前挂出来
+/// （`DecisionPolicy::Hold` 就是为了让它停在那一句上，被 `ask_the_gate` 数出来）。
 #[test]
 fn a_waived_premium_buys_no_policy() {
-    let (mut app, p0) = ready_on(INSURER - 1, 1, DecisionPolicy::DeclineAll);
+    let (mut app, p0) = ready_on(INSURER - 1, 1, DecisionPolicy::Hold);
     clear_gods(&mut app); // 同上：小财神的折半会把「免单」这场戏整个搅掉
     app.world_mut().resource_mut::<ActiveBoard>().def.tiles[INSURER as usize]
         .data
         .fee = Some(CompanyFee::Insure {
-        sides: 4,
+        sides: 1,
         premium_per_day: 3_000,
         indemnity_per_day: 800,
     });
-    // 免费卡在掷骰之前打出（出牌窗口与证券同一条：WaitRoll 且无待决）
     let card = item_index(&app, "item_free").0;
     deal(&mut app, p0, card);
-    play_card(&mut app, p0, card, None);
-    settle(&mut app, 2);
 
     roll(&mut app, p0);
     play_turns(&mut app, 1);
+
+    let asked = ask_the_gate(&mut app, PassiveMove::Use);
+    assert_eq!(
+        asked,
+        vec![(p0, Ask::Offset, PassiveEvent::Bill)],
+        "那一问要挂在踩格的人身上、且是抵消那一问（免掉之后嫁祸那一问不该被问到）"
+    );
 
     assert_eq!(cash_of(&mut app, p0), 20_000, "整笔免掉，钱包分文不动");
     assert!(
@@ -133,9 +141,11 @@ fn a_waived_premium_buys_no_policy() {
         "免单连投保凭据都不该有：{led:?}"
     );
     assert!(
-        led.iter().any(|l| l.starts_with("Waive(P0$")),
-        "免掉这件事本身要留凭据（否则「钱没动」读不出为什么）：{led:?}"
+        led.iter()
+            .any(|l| l.starts_with("Used(P0") && l.contains("$3000")),
+        "免掉这件事本身要留凭据（这里没有钱动，只有这条说得出口）：{led:?}"
     );
+    assert_eq!(free_in_hand(&app, p0), 0, "一张卡就是只烧一张");
     assert_eq!(
         page_net(&app, "stock_003"),
         None,

@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use crate::auction::Gavel;
 use crate::board::TileIndex;
 use crate::card::{CardDef, CardEffect, CardKind, CardSet, LevyBasis};
-use crate::charge::{Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Scope, Source};
+use crate::charge::{Charge, ChargeKind};
 use crate::data::DataHandles;
 use crate::landing::{Landed, Landing, LandingDomain, Pending, teleport};
 use crate::msg::{
@@ -250,13 +250,43 @@ pub struct CardSink<'w, 's> {
     pub kit: crate::gods::BestowKit<'w, 's>,
 }
 
-/// 免费卡免的是哪几族钱（PLAN §三「**免费**抵 >2000×物价 的租金/罚金/税」）。
+/// 一条动词是**一笔账**吗 —— 门上的「钱那侧」读这一句（[`crate::passive::affair_of`]）。
 ///
-/// ✅ P11b② 那三条里的「税」真的来了（`ChargeKind::Levy`），而它落在 `Penalty` 那一族 ——
-/// 这张卡不必改一行就覆盖到它，正是当初把域写成 `Penalty` 而不是 `Fine` 的理由。
-/// **不含 `Acquire`（买地、加盖）**：「买地免费」是大福神的特权（PLAN §三 神明行），
-/// 两张卡各自有价，合成一个域就分不开了。
-const FREE_PASS_DOMAINS: &[ChargeDomain] = &[ChargeDomain::Rent, ChargeDomain::Penalty];
+/// 三条钱都归门，而不在这里扣：③ 之后**没有任何一条路**能在玩家答话之前动钱。
+/// 归行与那一行的两列答案见 [`PassiveEvent::of_charge`](crate::passive::PassiveEvent::of_charge)
+/// —— `AddCash` 归 [`PassiveEvent::Windfall`](crate::passive::PassiveEvent::Windfall)
+/// 而那一行两列都答「否」，所以横财照样进门、照样当场落地，只是永远不会有人被问。
+///
+/// 基数在这里就**算完**（`Levy` 要读他此刻的现金与名下地块的现值）：门把这笔账在队列里
+/// 放几十帧等人回答，而「抽一成资产税」抽的是**被问的那一刻**的资产还是**事件那一刻**的
+/// 资产，必须是定死的 —— 取后者，因为前者会让一句回答改变另一笔账的基数。
+pub fn bill_of(sink: &CardSink, effect: &CardEffect, victim: Entity) -> Option<Charge> {
+    match effect {
+        CardEffect::AddCash { amount } => {
+            Some(Charge::new(ChargeKind::Bonus, None, Some(victim), *amount))
+        }
+        CardEffect::DeductCash { amount } => Some(Charge::new(
+            ChargeKind::Penalty,
+            Some(victim),
+            None,
+            *amount,
+        )),
+        CardEffect::Levy { basis, percent } => {
+            // 基数是**此刻**的数（他手上有多少钱、名下那些地今天值多少），不是条目上的
+            // 名义数 —— 所以这条在「缩不缩物价」那一格填「不缩」：基数已经含今天的价，
+            // 再乘一次指数就成了「物价 2 倍时 10% 的税悄悄变 20%」（见 `charge::scales_with_price`）
+            let base = match basis {
+                // 现金不会是负的（`debit` 挡在破产那一侧），`max(0)` 挡的是「负基数
+                // 乘出一个负税率、于是税变成一笔收入」这种形状
+                LevyBasis::Cash => sink.books.balance(victim).max(0),
+                LevyBasis::LandValue => sink.books.land_value_of(victim),
+            };
+            let amount = base.saturating_mul(*percent as i64) / 100;
+            Some(Charge::new(ChargeKind::Levy, Some(victim), None, amount))
+        }
+        _ => None,
+    }
+}
 
 /// 一组效果**当场**打在 `victim` 头上，返回每条效果的凭据。
 ///
@@ -298,8 +328,10 @@ pub fn apply_effects(
 /// 由 [`crate::passive::Job`] 带着走，不靠这里的循环。
 ///
 /// 三条刻意的规则（沿用 [`crate::passive::submit`] 之前那一份）：
-/// - **扣不到钱就真破产**（缺陷 #3）：`CouldNotPay` 与 `PlayerBankrupt` 同帧成对，且回报
-///   `None` 让调用方停手 —— 人已经离场。
+/// - **钱不在这里**。三条钱的动词由 [`bill_of`] 在**进门之前**就被截走，落地只在门里
+///   那一句（`passive::land_now` 的 `Bill` 那一臂）—— ③ 之后「扣不到钱就当场破产」
+///   （缺陷 #3 那条）这句话在世界上只有一个位置。
+///   走到这里的钱只能是一条**装配错误**（见下面那一臂），因为新闻那两档带不了钱。
 /// - **`move_to` 不连锁结算新格子**：Godot 端踩到「回到起点」也不会领过路费奖金，这里照做。
 ///   连锁会引入「卡牌把玩家送到卡牌格」这类环，属于设计而非移植。
 /// - **四条「事」不在这里挡也不在这里问**：免罪与嫁祸的回答归那道门（[`crate::passive`]），
@@ -315,53 +347,16 @@ pub fn apply_one(
 ) -> Option<Vec<EffectOutcome>> {
     let mut outcomes = Vec::new();
     match effect {
-        CardEffect::AddCash { amount } => {
-            // 走管线：物价 2.5 时这张「横财」卡真的多给钱，而衰神的「得钱作废」
-            // 是一条 Cancel 就能勾掉的账（所以 Bonus 的 `cancellable` 是开着的）
-            let charge = Charge::new(ChargeKind::Bonus, None, Some(victim), *amount);
-            let got = sink
-                .books
-                .settle(&mut sink.commands, charge)
-                .map(|done| done.amount)
-                .unwrap_or(0);
-            outcomes.push(EffectOutcome::Gained(got));
-        }
-        CardEffect::DeductCash { amount } => {
-            let charge = Charge::new(ChargeKind::Penalty, Some(victim), None, *amount);
-            match sink.books.settle(&mut sink.commands, charge) {
-                Ok(done) => outcomes.push(EffectOutcome::Lost(done.amount)),
-                Err(short) => {
-                    outcomes.push(EffectOutcome::CouldNotPay {
-                        needed: short.needed,
-                    });
-                    // 人已破产，卡上剩下的效果不必再执行
-                    return None;
-                }
-            }
-        }
-        CardEffect::Levy { basis, percent } => {
-            // 基数是**此刻**的数（他手上有多少钱、名下那些地今天值多少），不是条目上的
-            // 名义数 —— 所以这条在「缩不缩物价」那一格填「不缩」：基数已经含今天的价，
-            // 再乘一次指数就成了「物价 2 倍时 10% 的税悄悄变 20%」（见 `charge::scales_with_price`）
-            let base = match basis {
-                // 现金不会是负的（`debit` 挡在破产那一侧），`max(0)` 挡的是「负基数
-                // 乘出一个负税率、于是税变成一笔收入」这种形状
-                LevyBasis::Cash => sink.books.balance(victim).max(0),
-                LevyBasis::LandValue => sink.books.land_value_of(victim),
-            };
-            let amount = base.saturating_mul(*percent as i64) / 100;
-            let charge = Charge::new(ChargeKind::Levy, Some(victim), None, amount);
-            match sink.books.settle(&mut sink.commands, charge) {
-                // 0 元税照样留一条 `Lost(0)`：名下没地的人被抽地价税，「什么都没发生」与
-                // 「这条新闻是空的」在玩家眼里是两件事，流水要说得出是前者
-                Ok(done) => outcomes.push(EffectOutcome::Lost(done.amount)),
-                Err(short) => {
-                    outcomes.push(EffectOutcome::CouldNotPay {
-                        needed: short.needed,
-                    });
-                    return None;
-                }
-            }
+        // 三条**账**（[`bill_of`] 对它们答 `Some`）。走到这里只可能是那条不落地的来路：
+        // 新闻的地档与机构档，而 [`crate::news::family_of`] 把钱全部归在「人」那一族、
+        // `mismatch` 又不许人族的动词出现在那两档里 —— 所以这一臂今天没有生产者。
+        //
+        // 它不是一条「以后会有人用」的占位：**经过门的那条路在 `one()` 里先问 `bill_of`**，
+        // 钱根本进不到这里；而不经门的那两档压根带不了钱。留这一臂是为了让
+        // 「同一句话在两个文件里各有一半」这件事在类型上说不出来（穷尽表不许 `_`），
+        // 而真走到了就照 `BuyLand` 那条落空的形状办：一声 `debug!`、什么都不做。
+        CardEffect::AddCash { .. } | CardEffect::DeductCash { .. } | CardEffect::Levy { .. } => {
+            debug!("{source} 要把一笔账打在 {victim:?} 身上，而这条路不结账（钱只在门里那一句动）");
         }
         // 四条「事」（[`crate::passive::affair_of_card`] 对它们答 `Some`）。走到这里
         // 只可能是**不经过门**的那条来路 —— 新闻的地档与机构档，而
@@ -479,23 +474,6 @@ pub fn apply_one(
                 lands: n,
                 seized: tally.seized,
             });
-        }
-        CardEffect::FreePass { floor } => {
-            // 登记一条**带门槛的一次性 `Cancel`**。三样信息各有归属：门槛与「免哪几族钱」
-            // 是这张卡的玩法（所以写在这里，不写在管线里），而「什么时候算用掉」是世界的
-            // 行为（所以由 `Books::settle` 在生效那一笔注销，这里不承诺寿命）。
-            //
-            // 打出去那一刻**什么都不发生** —— 没有流水金额、没有组件、屏幕上没有变化。
-            // 这不是静默失效：`FreePassArmed` 那条凭据就是「从今天起可以免一次」，
-            // 而它值多少钱取决于下一笔多大的账先来。
-            sink.books.register(Correction::one_shot(
-                victim,
-                Scope::domains(FREE_PASS_DOMAINS),
-                Adjustment::Cancel,
-                Source::Card,
-                *floor,
-            ));
-            outcomes.push(EffectOutcome::FreePassArmed { floor: *floor });
         }
         CardEffect::BuyLand => {
             // 要买哪块地同样来自**请求**，不在卡面上（与 `LandStatus` 的锚点同一条理由）。
