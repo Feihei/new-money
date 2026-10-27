@@ -9,12 +9,12 @@
 
 use bevy::prelude::*;
 
-use crate::afflict::AfflictDomain;
 use crate::board::{GridPos, TileIndex};
 use crate::card::CardKind;
 use crate::deck::CardId;
 use crate::hand::CardAim;
 use crate::land::LandId;
+use crate::passive::PassiveEvent;
 use crate::player::DetentionPlace;
 use crate::stock::StockId;
 
@@ -649,10 +649,15 @@ pub enum EffectOutcome {
     UnknownTile {
         name: String,
     },
-    /// 一件厄运被护身吃掉了（免罪卡生效）。与 `Detained` 互斥 —— 抵消了就没有入狱这回事，
-    /// 而流水里必须留下「被抵消」这一条，否则玩家只看见「什么都没发生」。
+    /// 一件厄运被挡下来了（免罪卡生效，或身上那位神豁免）。与 `Detained` 互斥 ——
+    /// 抵消了就没有入狱这回事，而流水里必须留下「被抵消」这一条，否则玩家只看见
+    /// 「什么都没发生」。
+    ///
+    /// 带的是**表上的那一行**而不是旧那个「族」：`Hold`（停留／乌龟／掉头）与 `JailTrip`
+    /// 在屏幕上是两句话，而 P13b① 之后「能不能免」这件事只在行上有答案
+    /// （见 [`crate::passive`]）。谁挡的（卡还是神）今天说不出 —— 那半句归 ② 的门。
     Blocked {
-        domain: AfflictDomain,
+        event: PassiveEvent,
     },
     /// 挂上了护身。`charges` 是**叠完之后剩余**的层数（两张免罪卡 = 2）。
     Shielded {

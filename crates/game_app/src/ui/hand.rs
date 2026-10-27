@@ -13,9 +13,9 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, Bankrupt, Books, CardAim, CardDef, CardEffect, CardGained, CardId, CardKind,
     CardTarget, GameRules, God, Hand, Heading, Insulation, LandId, NO_GOD_ON_THE_ROAD,
-    NO_GOD_TO_BANISH, Occupancy, OccupancyKind, Paused, PendingDecision, PlayerId, PlayerName,
-    Possession, Shelf, TokenPosition, TurnOrder, TurnPhase, acquire_denied_word, banishable,
-    deal_to, god_refuses_banish, nearest_god, resists,
+    NO_GOD_TO_BANISH, Occupancy, OccupancyKind, PASSIVE_WORD, Paused, PendingDecision, PlayerId,
+    PlayerName, Possession, Shelf, TokenPosition, TurnOrder, TurnPhase, acquire_denied_word,
+    banishable, deal_to, god_refuses_banish, is_passive, nearest_god, resists,
 };
 
 use super::theme::{col, layout, size};
@@ -52,7 +52,7 @@ pub(crate) struct HandStamp(pub String);
 /// （涨价 / 查封）、给一块无主地（购地）、给一个人含自己（转向、停留），以及会落空的那两张符
 /// （请神、送神 —— 它们同属「给自己」那一格，但那颗「用」可以灰着自带一句话）。
 /// 少一种，那个形状的按钮排就永远拍不到 —— 而「拍不到」在验收里读起来和「没做」一样。
-const SAMPLE_CARDS: [&str; 10] = [
+const SAMPLE_CARDS: [&str; 11] = [
     "item_frame",
     "item_insulate",
     "item_hike",
@@ -66,6 +66,9 @@ const SAMPLE_CARDS: [&str; 10] = [
     // 读起来和「没做」一样
     "item_summon",
     "item_banish",
+    // P13b 第三形状：**没有那颗按钮的一格**。被动卡不打得出去，
+    // 而这一格不发进来就拍不到（它长的与「落空的那两张符」不是一句话）
+    "item_shift",
 ];
 
 /// 开发用：给当前回合玩家发 [`SAMPLE_CARDS`] —— 一张要选对手、一张给自己，两种形状都要拍到。
@@ -268,6 +271,12 @@ pub(crate) fn play_buttons(
     denied: Option<String>,
     charm: &Charm,
 ) -> Vec<PlayButton> {
+    // 被动卡那一族**没有出牌这个动作**（P13b：判据在 core 的 `hand::is_passive`，
+    // 出牌那条路与这里读同一句）。它不产按钮，也不产「灰掉的用」—— 灰掉的那颗
+    // 说的是「这动作存在，只是此刻不给做」，而真相是它永远不给做
+    if is_passive(def) {
+        return Vec::new();
+    }
     let blocked = |why: &str| Some(why.to_string());
     match def.target {
         // 「用」这颗按钮今天有两句话可说：办不成时那一句为什么（请神符在路上没有一位神时
@@ -365,6 +374,11 @@ pub(crate) fn play_buttons(
 
 /// 目标种类的人话。数据里写的是 `target: "player"`，屏幕上要读得出「这是对谁用的」。
 fn aim_text(def: &CardDef) -> &'static str {
+    // 这一位问的是「这是对谁用的」，而被动卡根本没有「用」这半步 —— 它那一格的答案
+    // 不在 `target` 上（嫁祸卡的 target 是缺省的 `SelfOnly`，照下表念成「对自己」是句假话）
+    if is_passive(def) {
+        return "被动";
+    }
     match def.target {
         CardTarget::SelfOnly => "对自己",
         CardTarget::Player => "对一名对手",
@@ -697,6 +711,12 @@ pub(crate) fn sync_hand_panel(
                         (layout::CARD_BUTTON, size::BODY)
                     };
                 actions.with_children(|line| {
+                    // 被动卡这一格只有一句话，没有按钮（`play_buttons` 对它交回空表）。
+                    // 空表而不写这一句的话，屏幕上就是「这张卡按不动也没人解释」
+                    if is_passive(def) {
+                        line.spawn(label(&font.0, PASSIVE_WORD, size::ROW, col::MUTED));
+                        return;
+                    }
                     for pb in &buttons {
                         button(
                             line,
@@ -761,6 +781,7 @@ mod tests {
             desc: "测试".into(),
             cost_points: Some(20),
             target,
+            passive: None,
             effects: vec![],
         }
     }

@@ -162,6 +162,17 @@ fn aim_is_legal(def: &CardDef, aim: Option<CardAim>, player: Entity, books: &Boo
     }
 }
 
+/// 这一族**没有「出牌」这个动作**（P13b，PLAN §五 第 6 条：10-27 拍「免罪／免费／嫁祸
+/// 都是事件那一刻才问要不要用」）。判据只有这一句，两处读它：出牌那条路认不认，
+/// 与手牌面板那颗按钮亮不亮 —— 分成两处写的下一步就是「面板说能按而规则层不认」。
+pub fn is_passive(def: &CardDef) -> bool {
+    def.passive.is_some()
+}
+
+/// 那颗灰按钮自己说出为什么（与 `ShopDeny::label`／`LotteryDeny` 同一条纪律：
+/// 「按不动」与「坏了」在玩家眼里是同一件事）。
+pub const PASSIVE_WORD: &str = "被动 · 事件落到头上那一刻才问你";
+
 /// 出牌的第四道门：**这张卡的效果此刻有没有对象**。
 ///
 /// 它与 [`aim_is_legal`] 分开，是因为问的不是「选的东西合不合法」而是「这件事有没有可做的
@@ -311,6 +322,13 @@ pub fn play_card_system(
             debug!("出牌被拒：货架上没有 {:?}", request.card);
             continue;
         };
+        // 被动卡打不出去：它没有「按下去会发生什么」这一层，只有「被问到时能答什么」。
+        // 这一格排在目标与落空两道门**之前**，因为它问的是这张卡的本性 ——
+        // 而本性不对时后面那两句会说出一句误导的话（「他没有可选的对手」）
+        if is_passive(def) {
+            debug!("出牌被拒：{} 是被动卡，{PASSIVE_WORD}", def.id);
+            continue;
+        }
         if !hand_holds(&sink.kit.hands, current, request.card) {
             debug!("出牌被拒：手里没有 {}", def.id);
             continue;
@@ -444,6 +462,40 @@ mod tests {
         assert!(!hand.spend(card(3)), "没有第三张，spend 要说假");
     }
 
+    /// 出牌那道门的判据只认 `passive` 那一位，**不去读 `effects`**。
+    ///
+    /// 为什么这条要单独钉：`effects` 为空在数据里有两种含义 —— 「这是一张钥匙」（被动卡）
+    /// 与「这条数据写坏了」。如果 `is_passive` 改成「效果为空就是被动」，一张漏写效果的
+    /// 普通卡会在面板上变成一句「被动 · 事件那一刻才问你」，而玩家等的那件事永远不会来问它。
+    /// （`CardSet::validate` 已经在加载期把「两边都空」拦成数据错误，这一条是判据自己的形状）
+    #[test]
+    fn passive_is_the_field_and_not_the_absence_of_a_verb() {
+        let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
+        let mut shift = CardDef {
+            id: "item_shift".into(),
+            kind: CardKind::Item,
+            title: "嫁祸卡".into(),
+            desc: String::new(),
+            cost_points: Some(45),
+            target: CardTarget::SelfOnly,
+            passive: Some(crate::card::PassiveCard::Shift),
+            effects: vec![],
+        };
+        assert!(is_passive(&shift), "带着那一位就是被动卡");
+        // 被动卡的 target 缺省成 `SelfOnly`（数据里没有「点谁」这一问），
+        // 所以判据绝不能反过来用 target 猜
+        assert_eq!(
+            victim_of(&shift, Some(CardAim::Player(me)), me, None),
+            Some(me),
+            "被动卡不进入出牌那条路，承受者表对它没有意见"
+        );
+        shift.passive = None;
+        assert!(
+            !is_passive(&shift),
+            "掏空那一位之后它就不是被动卡了（哪怕效果仍是空的）"
+        );
+    }
+
     #[test]
     fn a_self_only_card_aims_at_its_player_and_takes_no_aim() {
         let def = CardDef {
@@ -453,6 +505,7 @@ mod tests {
             desc: String::new(),
             cost_points: Some(20),
             target: CardTarget::SelfOnly,
+            passive: None,
             effects: vec![],
         };
         let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
@@ -474,6 +527,7 @@ mod tests {
             desc: String::new(),
             cost_points: Some(30),
             target: CardTarget::Player,
+            passive: None,
             effects: vec![],
         };
         let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
@@ -493,6 +547,7 @@ mod tests {
             desc: String::new(),
             cost_points: Some(40),
             target: CardTarget::Land,
+            passive: None,
             effects: vec![],
         }
     }
@@ -532,6 +587,7 @@ mod tests {
             desc: String::new(),
             cost_points: Some(25),
             target: CardTarget::Anybody,
+            passive: None,
             effects: vec![crate::card::CardEffect::Reverse],
         };
         let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");
@@ -561,6 +617,7 @@ mod tests {
             desc: String::new(),
             cost_points: Some(30),
             target: CardTarget::UnownedLand,
+            passive: None,
             effects: vec![crate::card::CardEffect::BuyLand],
         };
         let me = Entity::from_raw_u32(5).expect("索引不该撞上保留值");

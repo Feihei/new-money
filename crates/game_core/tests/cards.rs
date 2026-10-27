@@ -273,3 +273,28 @@ fn a_card_id_outside_the_shelf_is_refused() {
     assert_eq!(turns_left(&app, p1), None);
     assert_eq!(hand_of(&app, p0), vec![CardId(0)]);
 }
+
+/// P13b 第 6 条：**这一族从此没有「出牌」这个动作**。
+///
+/// 嫁祸卡躺在手里就是躺在手里 —— 规则层拒掉它，而且**卡不消耗**（P3d④a 那条纪律：
+/// 判据分叉的形状从来不是「钱少了」，是「卡没了事没成」）。它带不带目标都同样拒：
+/// 「被动卡不占 `CardTarget`」这件事在数据上是 `target` 缺省成 `SelfOnly`，
+/// 所以面板若哪天错发一颗带目标的按钮，规则层照样挡得住。
+#[test]
+fn a_passive_card_cannot_be_played_and_stays_in_hand() {
+    let (mut app, p0, p1) = two_players_before_the_roll();
+    let shift = item_index(&app, "item_shift");
+    deal(&mut app, p0, shift.0);
+    let cash = cash_of(&mut app, p0);
+
+    play_card(&mut app, p0, shift.0, Some(CardAim::Player(p1)));
+    play_card(&mut app, p0, shift.0, None);
+    settle(&mut app, 2);
+
+    assert_eq!(
+        hand_of(&app, p0),
+        vec![shift],
+        "被拒的被动卡一张都没该花掉 —— 事件还没落下来，它连被问都没被问"
+    );
+    assert_eq!(cash_of(&mut app, p0), cash, "这一趟没有任何事发生");
+}

@@ -13,14 +13,14 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, AfflictDomain, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Books,
-    BuildingKind, BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind,
-    CompanyCharged, Decision, Detention, DetentionPlace, EffectOutcome, Facility, Gavel, Hand,
-    Institution, Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets,
-    MagicFilter, MagicRitual, MagicSpell, MortgageDeny, MortgageOp, Owner, Pending,
-    PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf, ShopDeny, ShopStock,
-    TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders, buy_allowed, buyback,
-    counter_plots, filter_targets, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
+    ActiveBoard, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Books, BuildingKind,
+    BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind, CompanyCharged,
+    Decision, Detention, DetentionPlace, EffectOutcome, Facility, Gavel, Hand, Institution,
+    Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets, MagicFilter,
+    MagicRitual, MagicSpell, MortgageDeny, MortgageOp, Owner, Pending, PendingDecision, PlayerId,
+    PlayerName, Rng, ServiceCharged, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder,
+    bail_op_allowed, bid_allowed, bidders, buy_allowed, buyback, counter_plots, filter_targets,
+    mortgage_op_allowed, read_facts, restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -3658,16 +3658,12 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
         },
         // 数据写了个棋盘上不存在的格名：如实报出来，别退成一句漂亮话把数据错误藏起来
         EffectOutcome::UnknownTile { name } => format!("数据错误：找不到「{name}」"),
-        EffectOutcome::Blocked { domain } => {
-            let what = match domain {
-                AfflictDomain::Detention => "拘留",
-                AfflictDomain::Stay => "停留",
-                AfflictDomain::MoveCap => "少动",
-                AfflictDomain::Reversal => "转向",
-                AfflictDomain::Damage => "损害",
-            };
-            format!("一次{what}被免罪抵消")
-        }
+        // 表上那一行的人话（`PassiveEvent::label`）就是这句话的内容，所以 UI 不再自己
+        // 摆一张「族 → 词」的映射 —— 那是 P13b① 删掉的第一份冗余：五行词与表上十五行
+        // 各有一份答案，而加一行时只有表会被编译器逼着表态。
+        // ⚠️ 「被谁挡的」今天还说不出（卡挡的还是神豁免的，这条凭据没带那一格）：
+        // 那句话归 ② 的门（门才知道是哪一张卡答的「可免」）
+        EffectOutcome::Blocked { event } => format!("一次{}被抵消", event.label()),
         EffectOutcome::Shielded { charges } => format!("护身 {charges} 次"),
         // 块数要说：「整街」在缺路段键的盘上可能只盖到一块，玩家有权知道自己办成了多大一片
         EffectOutcome::Stamped {

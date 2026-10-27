@@ -18,6 +18,27 @@ pub enum CardKind {
     Item,
 }
 
+/// 这张卡**不是动词**：它被拿在手里就是答案，问它的那一刻由事件带来。
+///
+/// P13b 拍的那条「被动卡这一族从此没有『出牌』这个动作」（PLAN §五 第 6 条）在数据上的
+/// 落点就是这一位。为什么另开一位而不是复用 [`CardEffect`] 里的 `Insulate`／`FreePass`
+/// 两条：一条效果的含义是「打出去会发生什么」，而这三张卡打不出去 —— 把它们留在动词库里，
+/// 嫁祸卡就得挂一条**永远不会被执行**的效果才能进池（那正是 PLAN §五 第 1 条点名的
+/// 「表上有、路上没有」那种假答案）。
+///
+/// 所以这一位是「门该翻谁的手牌」的唯一读数：拿着 = 有资格被问，花掉 = 从手里移除。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PassiveCard {
+    /// 免罪卡：挡掉一次「把人关起来」的事（哪些事件吃它见
+    /// [`PassiveEvent::offset_card`](crate::passive::PassiveEvent::offset_card)）
+    Forgive,
+    /// 免费卡：把一笔大额账整笔免掉（门槛见 [`crate::rules`]，与嫁祸卡是同一个数）
+    FreePass,
+    /// 嫁祸卡：把这一件事／这一笔账转给**点名**的另一个人（10-27 拍板：点名，不是随机）
+    Shift,
+}
+
 /// 这张卡要落在谁/什么头上。写在数据里而不是代码里，是因为出牌浮层的按钮要把目标
 /// 编码进去（同 ATM 金额按钮的形状：一颗按钮 = 一个完整意图），而浮层不该去猜
 /// 「这张卡是给自己用还是给对手用」。
@@ -27,7 +48,12 @@ pub enum CardTarget {
     /// 打在自己身上（免罪、停留、转向）
     #[default]
     SelfOnly,
-    /// 选一名对手（陷害、嫁祸）
+    /// 选一名对手（陷害卡）。
+    ///
+    /// ⚠️ 这一格曾经写着「陷害、嫁祸」—— P13b 把嫁祸卡改成被动卡之后它**不在这里了**：
+    /// 嫁祸的那一次点名发生在事件落下来的那一刻（门里），不在出牌请求里，
+    /// 所以它没有 `aim`、也就不占这一格。10-27 之前那版「获得那一刻点名」的候选
+    /// 换掉的就是这一格（PLAN §七 那一行的 ②）。
     Player,
     /// 选一个人，**含自己**（转向、停留，P3d④b/④c）。
     ///
@@ -155,8 +181,10 @@ pub enum CardEffect {
     /// 所以这里既没有 `to` 也没有层数。
     ///
     /// 环还是那一条环，只是步进取 `+1` 还是 `-1`（ADR-001 行为规则 3 + `GLOSSARY-board.md`
-    /// 「仍沿同一环，只是反向」）。它抵消得了（[`crate::afflict::AfflictDomain::Reversal`]
-    /// 走免罪那条护身，因为这是一件**事**不是一笔钱），也因此与 `LandStatus`/`BuyLand` 不同：
+    /// 「仍沿同一环，只是反向」）。它**不吃免罪卡**（P13 定稿 10-25：掉了个头是他这一趟的
+    /// 处境变了，不是一件灾落在他头上 —— 读数在
+    /// [`PassiveEvent::Hold`](crate::passive::PassiveEvent::Hold)，而「不可免者不可转」
+    /// 那条蕴含顺手把它从嫁祸那一侧也划掉了）；也因此与 `LandStatus`/`BuyLand` 不同：
     /// 没有 aim 它照样成立（打给自己），所以 `validate` 不给它绑 target。
     Reverse,
     /// 让承受者原地停留 N 回合（停留卡）。**人还在场上**：棋子不动、不改方向、
@@ -269,6 +297,15 @@ pub struct CardDef {
     /// 打出去要选谁/选哪块地。缺省 `SelfOnly`。
     #[serde(default)]
     pub target: CardTarget,
+    /// 这张卡是**被动卡**吗（P13b）。`Some` = 它没有「出牌」这个动作：躺在手里就是资格，
+    /// 事件落到某人头上的那一刻由 [`crate::passive`] 那道门问他要不要用。
+    ///
+    /// 与 `effects` 的分别是**谁决定什么时候生效**：`effects` 是打出去那一刻执行完的动词，
+    /// 而这一位压根不进入 [`crate::deck::apply_effects`]。一条卡若两边都写，
+    /// 「按下去会发生什么」与「被问到时能答什么」就会各说一句话，所以
+    /// [`CardSet::validate`] 直接拒这种写法。
+    #[serde(default)]
+    pub passive: Option<PassiveCard>,
     #[serde(default)]
     pub effects: Vec<CardEffect>,
 }
@@ -309,8 +346,16 @@ impl CardSet {
             if c.desc.is_empty() {
                 errs.push(format!("卡牌 {} 缺 desc", c.id));
             }
-            if c.effects.is_empty() {
-                errs.push(format!("卡牌 {} 没有任何效果", c.id));
+            // 一条卡要么有动词（打出去执行完），要么是一张被动卡（被门问到才算数），
+            // 两边都写 = 「按下去会发生什么」与「被问到能答什么」各有一份答案，
+            // 而两边都空 = 货架上一件按下去什么都不做的事
+            let id = c.id.as_str();
+            match (c.passive, c.effects.is_empty()) {
+                (Some(card), false) => errs.push(format!(
+                    "卡牌 {id} 是被动卡（{card:?}）却带效果：被动卡没有『打出去』那一刻"
+                )),
+                (None, true) => errs.push(format!("卡牌 {id} 既没有任何效果，也不是被动卡")),
+                (Some(_), true) | (None, false) => {}
             }
             // 货架上的东西必须有价：没有价的 `Item` 卡要么白送要么永远买不到，
             // 两种都是把数据错误藏进「点数账对不上」里（P3d 的百货正靠这一列定价）
@@ -486,6 +531,59 @@ mod tests {
         assert!(
             free.validate(CardKind::Item).is_err(),
             "货架商品没有价应该报错"
+        );
+    }
+
+    /// P13b 那一族的形状：**被动卡是一张钥匙，不是一个动词**。
+    ///
+    /// 三件事一起钉：① 嫁祸卡在池里、45 点券、**不带效果**（PLAN §七 那一行的 ④ ——
+    /// 它与免费卡同档，那张免掉一笔很贵的账，这张把一次很贵的东西推给别人）；
+    /// ② `validate` 新加的那两格禁令真的会咬人 —— 给被动卡塞一条效果、
+    /// 或把一张普通卡的效果清空，都必须报错而不是安静地变成「按下去什么都不做」；
+    /// ③ 出牌那条路认不认（`crate::hand::is_passive`）读的就是这一位，
+    /// 所以「池里说它是被动的」与「规则层拒得掉它」不可能分叉。
+    #[test]
+    fn a_passive_card_is_a_key_not_a_verb() {
+        let items = CardSet::from_json(ITEMS).expect("道具牌应能解析");
+        let shift = items
+            .0
+            .iter()
+            .find(|c| c.id == "item_shift")
+            .expect("嫁祸卡该在第三副池里（10-27 拍板：进 item_cards）");
+        assert_eq!(shift.passive, Some(PassiveCard::Shift));
+        assert_eq!(shift.cost_points, Some(45), "卡面价是那张拍板里的数");
+        assert!(
+            shift.effects.is_empty(),
+            "被动卡不许带效果：它没有『打出去』那一刻"
+        );
+        // 池里凡是被动卡，出牌判据都认它 —— 这一句是「两处各判一次」的防线
+        for c in items.0.iter().filter(|c| c.passive.is_some()) {
+            assert!(
+                crate::hand::is_passive(c),
+                "{} 在数据里是被动卡而出牌判据认它打得出去",
+                c.id
+            );
+        }
+
+        // 禁令的两条各咬一次：把嫁祸卡装上一条效果（它「打出去会发生什么」就有了第二个答案）
+        let mut rigged = items.clone();
+        let victim = rigged
+            .0
+            .iter_mut()
+            .find(|c| c.id == "item_shift")
+            .expect("同上");
+        victim.effects = vec![CardEffect::DeductCash { amount: 100 }];
+        assert!(
+            rigged.validate(CardKind::Item).is_err(),
+            "被动卡带效果必须报错，否则门与出牌各处各有一份答案"
+        );
+        // 再把一张普通卡掏空（货架上一件按下去什么都不做的东西）
+        let mut hollow = items.clone();
+        let first = &mut hollow.0[0];
+        first.effects.clear();
+        assert!(
+            hollow.validate(CardKind::Item).is_err(),
+            "既无效果又非被动的那条卡必须报错"
         );
     }
 

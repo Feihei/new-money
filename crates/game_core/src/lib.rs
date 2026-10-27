@@ -39,6 +39,7 @@ pub mod mortgage;
 pub mod msg;
 pub mod news;
 pub mod occupancy;
+pub mod passive;
 pub mod player;
 pub mod plot;
 pub mod property;
@@ -55,7 +56,7 @@ pub mod walk;
 pub mod world;
 
 pub mod prelude {
-    pub use crate::afflict::{AfflictDomain, Affliction, Insulation};
+    pub use crate::afflict::{Affliction, Insulation};
     pub use crate::auction::{
         Auction, AuctionDesk, BidDeny, BidFacts, Gavel, LiquidationPlan, Listing, Lot, OpenDeny,
         auction_hold_system, auction_move_system, bid_allowed, bidders, can_open, close_if_done,
@@ -78,7 +79,9 @@ pub mod prelude {
         days_until_dividend, is_dividend_day, is_leap_year, is_month_end,
     };
     pub use crate::calendar_fx::deliver_calendar_events_system;
-    pub use crate::card::{CardDef, CardEffect, CardKind, CardSet, CardTarget, LevyBasis};
+    pub use crate::card::{
+        CardDef, CardEffect, CardKind, CardSet, CardTarget, LevyBasis, PassiveCard,
+    };
     pub use crate::charge::{
         Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, Scope, Source,
         charge_domain_of, scales_with_price, stage, stage_and_spend, transferable,
@@ -105,7 +108,9 @@ pub mod prelude {
         settle_god_landing_system, settle_land_deity_landing_system, spawn_starting_gods,
         takes_landing, top_up_gods_system, walk_effect, walk_effect_system, wander_gods_system,
     };
-    pub use crate::hand::{CardAim, Hand, PlayWindow, card_notice, deal_to, play_card_system};
+    pub use crate::hand::{
+        CardAim, Hand, PASSIVE_WORD, PlayWindow, card_notice, deal_to, is_passive, play_card_system,
+    };
     pub use crate::institution::{Institution, Suspensions, age_suspensions_system};
     pub use crate::items::{Inventory, ItemKind};
     pub use crate::land::{BuildingLevel, Facility, LandId, Mortgaged, Owner};
@@ -164,6 +169,7 @@ pub mod prelude {
         first_roadblock, place, place_denied, place_item_system, resolve_halt_system,
         settle_landing_occupancy_system, spawn_starting_chests, trigger_of, within_chebyshev,
     };
+    pub use crate::passive::{PassiveEvent, trip_of};
     pub use crate::player::{
         BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Gender, Heading, Insured,
         Mount, MoveCap, PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, Points,

@@ -12,7 +12,7 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::afflict::{AfflictDomain, Affliction, Insulation};
+use crate::afflict::{Affliction, Insulation};
 use crate::board::TileIndex;
 use crate::card::{CardDef, CardEffect, CardKind, CardSet, LevyBasis};
 use crate::charge::{Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Scope, Source};
@@ -370,10 +370,12 @@ pub fn apply_effects(
                 }
             }
             CardEffect::Detain { place, turns } => {
-                let affliction = Affliction::new(AfflictDomain::Detention, victim);
+                // 行按去处数（命运牌、陷害卡这一族是可以免的那几行）——
+                // 而踩到联合航空那一条**不**从这一句进，它自己点名 `AirlineTrip`
+                let affliction = Affliction::detain(victim, *place);
                 if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
-                        domain: affliction.domain,
+                        event: affliction.event,
                     });
                     continue;
                 }
@@ -633,12 +635,12 @@ pub fn apply_effects(
             }
             CardEffect::Reverse => {
                 // 还是先问一句 [`resist`]，但今天**只有神明那一半答"是"**：免罪卡不吃转向
-                // （P13 定稿，`AfflictDomain::forgivable`）—— 被大福神豁免的那一次不该留下
+                // （P13 定稿，表上 `Hold` 那一行答「不可免」）—— 被大福神豁免的那一次不该留下
                 // 半个掉头流水，「方向没变」与「方向变了又变回来」在流水上是两件事
-                let affliction = Affliction::new(AfflictDomain::Reversal, victim);
+                let affliction = Affliction::reversal(victim);
                 if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
-                        domain: affliction.domain,
+                        event: affliction.event,
                     });
                     continue;
                 }
@@ -658,10 +660,10 @@ pub fn apply_effects(
                 // 停留是**事**不是钱，所以它不挂 `Corrections`（P3a 的划分）；而免罪卡今天
                 // 挡不掉它（P13 定稿：护身只吃「被关起来」那一族）—— 这一句还是先问一句
                 // `resist`，因为神明的厄运豁免照旧管到这一族
-                let affliction = Affliction::new(AfflictDomain::Stay, victim);
+                let affliction = Affliction::stay(victim);
                 if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
-                        domain: affliction.domain,
+                        event: affliction.event,
                     });
                     continue;
                 }
@@ -688,10 +690,10 @@ pub fn apply_effects(
             CardEffect::MoveCap { turns } => {
                 // 与停留同一条形状：走不远是处境变了，不是一件灾落下来 —— 免罪卡不吃这一族
                 // （P13 定稿），这里留着 `resist` 那一句问的是神明的豁免
-                let affliction = Affliction::new(AfflictDomain::MoveCap, victim);
+                let affliction = Affliction::slow(victim);
                 if resist(sink, &affliction) {
                     outcomes.push(EffectOutcome::Blocked {
-                        domain: affliction.domain,
+                        event: affliction.event,
                     });
                     continue;
                 }
@@ -799,7 +801,7 @@ pub fn apply_effects(
 
 /// 这件厄运有没有被挡下来。**两个来源、一个出口**：
 /// 神给的免疫先问（它不消耗任何东西、也不看这一族可不可抵消），否则用掉一层卡给的护身
-/// —— 而护身只对 [`AfflictDomain::forgivable`] 答"是"的那一族开口。
+/// —— 而护身只对[`crate::passive`] 那张表上答「可免」的那些行开口。
 ///
 /// 顺序是有内容的：反过来写，大福神在场时每一件事都会白白吃掉一层免罪卡，
 /// 玩家手里那两张会在他还「免疫」的时候悄悄清零 —— 而那件事只有在他不再免疫的
@@ -918,6 +920,7 @@ mod tests {
                     desc: "测试".into(),
                     cost_points: None,
                     target: crate::card::CardTarget::SelfOnly,
+                    passive: None,
                     effects: vec![CardEffect::AddCash { amount: 100 }],
                 })
                 .collect(),

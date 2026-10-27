@@ -8,8 +8,8 @@
 //! 所以「受神明修正」不是魔法屋写的特例，是它根本没挡）。
 //!
 //! 免疫规则是这一格的全部难度（PLAN §三 那行），而它的答案是**构造方式**的差别：
-//! 十二条法术里只有坐牢与住院两条构造 [`crate::afflict::Affliction`] 过护身（那一族在
-//! [`crate::afflict::AfflictDomain::forgivable`] 的表上答"是"），其余十条根本不进那条路 ——
+//! 十二条法术里只有坐牢与住院两条构造 [`crate::afflict::Affliction`] 过护身（那两行在
+//! [`crate::passive`] 那张事件表上答"可免"），其余十条根本不进那条路 ——
 //! 于是「不受任何卡影响」不需要任何查询去逐条挡，漏挡与误挡在类型上都没有位置。坐牢与住院
 //! **刻意不接**神明那一半（`resist` 里的 `resists` 分支，连 [`crate::gods::doom_days`]
 //! 的天数加倍也不接）：大福神豁免的是厄运、大衰神加倍的也是厄运，而女巫的法术不是厄运 ——
@@ -22,7 +22,7 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::afflict::{AfflictDomain, Affliction};
+use crate::afflict::Affliction;
 use crate::board::TileIndex;
 use crate::deck::{CardId, CardSink, apply_card};
 use crate::land::LandId;
@@ -466,7 +466,7 @@ pub fn magic_spell_system(
 /// 把一道法术落到一个人头上。返回 `true` = 生效了（进 [`MagicCast::targets`]）。
 ///
 /// 免疫规则的**全部实现**就在前两条分支里：坐牢与住院构造 `Affliction`
-/// （`cancellable: true`）过护身 —— 但**只过卡那一半**（[`crate::afflict::Insulation`]
+/// （表上 `JailTrip`／`HospitalTrip` 两行答「可免」）过护身 —— 但**只过卡那一半**（[`crate::afflict::Insulation`]
 /// 的 `absorb`），不走 `deck::resist` 里的神明分支：大福神豁免的是厄运，女巫的
 /// 法术不是厄运。其余十条**根本不构造 Affliction**，直接落 —— 「不受任何卡与神
 /// 影响」于是没有一处需要逐条挡。
@@ -492,7 +492,7 @@ fn cast_one(
                 MagicSpell::Jail => crate::player::DetentionPlace::Jail,
                 _ => crate::player::DetentionPlace::Hospital,
             };
-            let affliction = Affliction::new(AfflictDomain::Detention, target);
+            let affliction = Affliction::detain(target, place);
             // **只过卡**：`Insulation::absorb` 而不是 `deck::resist` —— 两者的差别
             // 是神明那一半，而大福神的厄运豁免管不到女巫（见函数头那条注）
             let shielded = sink

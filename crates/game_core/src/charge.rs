@@ -111,19 +111,17 @@ pub const fn scales_with_price(kind: ChargeKind) -> bool {
 }
 
 /// 允不允许转嫁给别人（嫁祸卡读这一位）。
+///
+/// ✅ P13b① 把这张表**删掉了**，读数搬到 [`crate::passive`] 那一张事件表上：
+/// 「可免／可转嫁」原来是两条互不相干的链（钱看这里、事看 `afflict::forgivable`），
+/// 而 10-27 实报的那一格 —— 同一个 `DetentionPlace::Away`，命运牌的出国可转、
+/// 踩联合航空的不可转 —— 两张表都答不了，因为它们的键一个是「一笔账」、一个是「一族事」，
+/// 而这一格要的是「哪一个事件」。
+///
+/// 于是这里只留一句**派生**：一种钱归哪一行，那一行答什么。归行见
+/// [`PassiveEvent::of_charge`](crate::passive::PassiveEvent::of_charge)。
 pub const fn transferable(kind: ChargeKind) -> bool {
-    match kind {
-        // 只有「我欠的」能嫁祸出去：过路费、服务费、罚款与税。买地要的是地契，
-        // 转给别人付钱不等于给别人地
-        ChargeKind::Rent { .. } | ChargeKind::Service | ChargeKind::Penalty | ChargeKind::Levy => {
-            true
-        }
-        ChargeKind::BuyLand { .. }
-        | ChargeKind::Upgrade { .. }
-        | ChargeKind::Build { .. }
-        | ChargeKind::Bonus
-        | ChargeKind::God => false,
-    }
+    crate::passive::PassiveEvent::of_charge(kind).shiftable()
 }
 
 /// 一笔账。`base` 是名义金额（租金表上写的那个），`amount` 是过完链之后的实付金额。
