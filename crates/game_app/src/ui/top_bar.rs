@@ -19,10 +19,10 @@ use game_core::prelude::{
     GodExit, GodLeft, GodPossessed, IndemnityPaid, Institution, ItemPlaced, ItemThieved, LandId,
     LandTaken, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicSpell,
     MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience,
-    NewsFired, NewsScope, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName,
-    PointsChanged, PointsStolen, PolicyBought, RemoteDiceUsed, RentRerouted, ServiceCharged,
-    ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex,
-    TollExtorted, TradeSide, TurnOrder, TurnPhase, VillainHired, WalkHalted,
+    NewsFired, NewsScope, PassiveUsed, Paused, PendingDecision, PlayerBailed, PlayerBankrupt,
+    PlayerName, PointsChanged, PointsStolen, PolicyBought, RemoteDiceUsed, RentRerouted,
+    ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited,
+    TileIndex, TollExtorted, TradeSide, TurnOrder, TurnPhase, VillainHired, WalkHalted,
 };
 
 use super::dialog::describe;
@@ -550,6 +550,11 @@ pub(crate) struct Notices<'w, 's> {
     magic_cast: MessageReader<'w, 's, MagicCast>,
     /// 免罪卡挡下一道法术（十二道里挡得住的那两道才会发这一条）
     magic_blocked: MessageReader<'w, 's, MagicBlocked>,
+    // ===== 被动卡那道门（P13b②）=====
+    /// 一张被动卡**真的花掉了**。它与上面那条 `MagicBlocked` 的分别：那一条只讲「这道法术
+    /// 没落到他身上」，这一条讲的是**谁的钱包少了一张卡** —— 而门为五处来路都发这一条
+    /// （卡、命运牌、新闻、法事、③ 的账），只接前一条就只有魔法屋那一路说得出来
+    passive_used: MessageReader<'w, 's, PassiveUsed>,
     over: MessageReader<'w, 's, GameOver>,
 }
 
@@ -1214,6 +1219,20 @@ pub(crate) fn hint_from_events(
             &held,
         ));
     }
+    // 门那一句（P13b②）。它**追加**在上面那几条后面而不是把它们换掉：顶栏只有一行、
+    // 最后写的赢，而「事情落到谁头上」与「谁花了一张卡」是同一帧里的两半话 ——
+    // 换掉就等于替玩家宣布「刚才那一下没发生」。
+    for m in notices.passive_used.read() {
+        line = Some(append_clause(
+            line,
+            &passive_clause(
+                &name(&names, m.player),
+                &m.card.title,
+                m.event.label(),
+                m.moved_to.map(|to| name(&names, to)).as_deref(),
+            ),
+        ));
+    }
     for m in notices.over.read() {
         line = Some(match m.winner.and_then(|w| names.get(w).ok()) {
             Some(winner) => format!("胜者：{}！", winner.0),
@@ -1443,6 +1462,27 @@ fn magic_headline(caster: &str, spell: MagicSpell, hit: &[String], blocked: &[St
         ),
         (true, false) => format!("{asked} 被 {} 用免罪卡整笔挡下", blocked.join("、")),
         (true, true) => format!("{asked} 落空 —— 一样都没落到人头上"),
+    }
+}
+
+/// 一句话往已有那行后面追加。`None` 时它就是这一行（这一帧没有别的事件在说）。
+fn append_clause(prev: Option<String>, clause: &str) -> String {
+    match prev {
+        Some(line) => format!("{line}；{clause}"),
+        None => clause.to_string(),
+    }
+}
+
+/// 门那一句怎么说（P13b②）。两个形状对应门上两个动作：
+/// **抵消**（「挡下了」—— 这一次不落下来）与**嫁祸**（「转给」—— 这一次落到别人头上）。
+/// 两句话的差别是下一手：挡下的那位自己脱身，转走的那位要知道**是谁**接住了这一下。
+/// 放弃不发这一条（什么都不花，所以没有新事实要说 —— 事件照原样落那一句由各个来路
+/// 自己的凭据讲）。抽成纯函数与 P13/P11 那几条同一个理由：一行话有两种形状，
+/// 截图撞不出那两格。
+fn passive_clause(who: &str, card: &str, event: &str, moved_to: Option<&str>) -> String {
+    match moved_to {
+        None => format!("{who} 花一张「{card}」挡下了那一次「{event}」"),
+        Some(to) => format!("{who} 花一张「{card}」把那一次「{event}」转给了 {to}"),
     }
 }
 
@@ -1720,6 +1760,9 @@ mod tests {
             // `Notices` 参数包建不出来，顶栏整行不再更新 —— 症状不是「那一句没播」
             .add_message::<MagicCast>()
             .add_message::<MagicBlocked>()
+            // P13b②：门花掉一张被动卡那一条（「谁花了哪张、转给了谁」都在这一条上）。
+            // 同一条坑的第五遍：漏了它 = `Notices` 参数包建不出来 = 顶栏整行不更新
+            .add_message::<PassiveUsed>()
             .add_message::<GameOver>()
             .add_systems(Update, hint_from_events);
         let me = app.world_mut().spawn(PlayerName("阿土伯".into())).id();

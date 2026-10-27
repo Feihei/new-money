@@ -151,15 +151,15 @@ fn a_reversal_aimed_at_an_opponent_turns_him_and_not_the_caster() {
 }
 
 #[test]
-fn a_shield_does_not_eat_a_turn_card() {
+fn a_forgive_card_is_not_even_asked_about_a_turn() {
     // P13 定稿的免疫口径（10-25 拍板）：掉头是走法变了，不是一件灾落下来 —— 免罪卡不吃这一族。
     // 三条用例（转向／停留／乌龟）各钉一格，因为「挡不掉」与「挡掉了但白吃一张卡」
-    // 这两种错法在玩家眼里是同一件事：他的护身不见了，而那件事本来就没被挡
+    // 这两种错法在玩家眼里是同一件事：他的卡不见了，而那件事本来就没被挡。
+    // ② 之后每格都是两句证据：门没问 + 卡还在手里
     let (mut app, p0, p1) = standing_at(5, 3);
     let insulate = item_index(&app, "item_insulate");
     make_current(&mut app, p1);
     deal(&mut app, p1, insulate.0);
-    play_card(&mut app, p1, insulate.0, None);
     settle(&mut app, 2);
     make_current(&mut app, p0);
 
@@ -168,9 +168,18 @@ fn a_shield_does_not_eat_a_turn_card() {
     assert_eq!(
         heading_of(&app, p1),
         Heading::Backward,
-        "掉头照样发生：护身不吃这一族"
+        "掉头照样发生：免罪卡不吃这一族"
     );
-    assert_eq!(shield_of(&app, p1), Some(1), "挡不掉的事不该白吃一张免罪卡");
+    assert_eq!(
+        gate_asking(&app),
+        None,
+        "门不许对着一句「掉头」问人 —— 问了就是替玩家决定这张卡值不值"
+    );
+    assert_eq!(
+        forgive_in_hand(&app, p1),
+        1,
+        "没问的那一句不该白吃一张免罪卡"
+    );
     assert!(
         ledger(&app).contains(&"Play(P0->P1:item_turn)".to_string()),
         "流水里不该带「挡」：{:?}",

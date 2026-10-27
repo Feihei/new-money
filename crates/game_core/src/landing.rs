@@ -314,6 +314,17 @@ pub enum Pending {
     /// UI 与结算都要读它，而 `Pending` 的形状（`Copy`）装不下一个 `Vec`。
     /// 回答走 [`crate::msg::MagicSpellPicked`]。
     MagicSpell(crate::magic::MagicFilter),
+    /// 被动卡那道门正在问一句「免不免／转给谁」（P13b②）。
+    ///
+    /// 它是第八种窗口，与 [`Self::Auction`] 同一族：**主语会在一次事件里跳动**的那个。
+    /// 命运牌把甲关进监狱，门问甲；甲答「嫁祸给乙」，门接着问乙 —— 而槽仍然只有一个，
+    /// 所以这条也不带任何字段：问的是哪一行、问到第几问、还有哪些人要落，全在
+    /// [`Gate`](crate::passive::Gate) 那一份队列里。在这里再挂一份 `(Entity, PassiveEvent)`
+    /// 就是第二份真相，而两份会在「答完那一帧」分叉。
+    ///
+    /// 三种 `Decision` 对它一律不认（见 [`decision_system`] 里那一格）：它的三个动作
+    /// （用／不用／给谁）走 [`crate::msg::PassiveAnswer`]，而「用哪一张」由门自己认。
+    Passive,
 }
 
 /// 系统状态：现在正等谁的什么回答。
@@ -346,21 +357,26 @@ impl PendingDecision {
 
 /// 流水线最后一段：有人被挂着等回答就停在 `WaitDecision`，否则收摊。
 ///
-/// 那句「没人等回答」问的不只是 `pending`：拍卖机（P9）占回合的方式是**换人问**，而一处清算
-/// 在两场之间存在 `pending` 已经交还、下一场还没挂上的那一帧；更直接的一手是破产恰好发生在
-/// 落格结算里 —— 本机与拍卖机在同一帧里写的是同一个 `NextState`。所以这里问一句
-/// [`Auction::holds_turn`](crate::auction::Auction::holds_turn)，而不是让两处各写一次、
+/// 那句「没人等回答」问的不只是 `pending`：拍卖机（P9）与被动卡那道门（P13b②）占回合的方式
+/// 都是**换人问**，而一处清算在两场之间、一条新闻在名单中途，都存在 `pending` 已经交还、
+/// 下一问还没挂上的那一帧；更直接的一手是破产或落格恰好发生在结算里 —— 本机与那两台机器
+/// 在同一帧里写的是同一个 `NextState`。所以这里先问一句
+/// [`Auction::holds_turn`](crate::auction::Auction::holds_turn) 与
+/// [`Gate::holds_turn`](crate::passive::Gate::holds_turn)，而不是让三处各写一次、
 /// 再赌哪一条后写（那等于把回合机押在 `OnEnter(Landed)` 与 `Update` 的相对次序上）。
 pub fn close_landing_system(
     pending: Res<PendingDecision>,
     auction: Res<crate::auction::Auction>,
+    gate: Res<crate::passive::Gate>,
     mut next: ResMut<NextState<TurnPhase>>,
 ) {
-    next.set(if pending.active().is_some() || auction.holds_turn() {
-        TurnPhase::WaitDecision
-    } else {
-        TurnPhase::TurnEnd
-    });
+    next.set(
+        if pending.active().is_some() || auction.holds_turn() || gate.holds_turn() {
+            TurnPhase::WaitDecision
+        } else {
+            TurnPhase::TurnEnd
+        },
+    );
 }
 
 /// `decision_system` 除了账本之外要读的那一份「这一帧落在哪」。
@@ -468,6 +484,10 @@ pub fn decision_system(
         // 窗口就被清掉、回合被交还，而拍卖机还在等下一个人喊 —— 症状是拍卖停在
         // 一个没人被问的地方，且一句错话也不说。
         (Pending::Auction, _) => return,
+        // 被动卡那道门：与拍卖同一格处理，理由同一条。它的三个动作走 `PassiveAnswer`，
+        // 由 `passive::gate_system` 认；这里若认了任何一条 `Decision`，就把门还在等的
+        // 那一问连信封一起清掉了 —— 而症状不是报错，是「那件事默默地落下来了」。
+        (Pending::Passive, _) => return,
         // 收据与卡面没有「可拒绝」的选项：钱已经扣了、效果已经结算了。
         // 任何回答都算「我看完了」—— 严格拒绝只会把 UI 的一次疏忽变成挂死。
         (

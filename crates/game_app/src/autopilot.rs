@@ -11,8 +11,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     Auction, AuctionMove, BidMove, BuyTicketRequested, Decision, DecisionChosen, GameKind,
-    GameRules, Jackpot, MinigameResult, Pending, PendingDecision, PlayerId, RequestRoll,
-    RequestStay, StaySentence, TurnOrder, TurnPhase, Wallet,
+    GameRules, Jackpot, MinigameResult, PassiveAnswer, PassiveMove, Pending, PendingDecision,
+    PlayerId, RequestRoll, RequestStay, StaySentence, TurnOrder, TurnPhase, Wallet,
 };
 
 pub struct AutopilotPlugin;
@@ -107,6 +107,14 @@ enum AutoAnswer {
     /// 这一格存在的最低代价是「让长跑转得动」：答成 `Acknowledge` 的话窗口不会被清掉
     /// （`decision_system` 对拍卖三种回答一律不认），于是**第一个破产就把整局停住**。
     Bid,
+    /// 被动卡那道门（P13b②）的三个动作之一。同 `Bid` 一条理由：那三种 `Decision` 门一条都不认
+    /// （认了就是把还在等的那一问连信封一起清掉，而症状是「那件事默默地落下来了」），
+    /// 而**必须**答这一句 —— 不答就等于把门永久挂在 `WaitDecision`，所有长跑整片停死。
+    ///
+    /// 自动玩家一律答「不用」。那条口径与拍卖的 `Withdraw`、彩票的「不买券」是同一条：
+    /// 长跑要钉的是既有的那几笔账，而「手里那张免罪卡花掉一次」会把一整片
+    /// 「他进了监狱」的断言改成「他没进」。真用那张卡那条路由 `tests/passive.rs` 自己走。
+    Gate(PassiveMove),
 }
 
 /// 报价类答「接受」，收据/卡面/三种柜台答「已阅」。这一分工不是讲究：柜台只认
@@ -156,6 +164,10 @@ fn answer_for(about: Pending, rules: &GameRules) -> AutoAnswer {
         // 变卖，会把长跑里几十条断言一起搅浑）。代价只有一句：`NM_AUTOROLL` 的长跑里
         // 女巫从不说话，那条路径由 `tests/magic.rs` 与 `NM_MAGIC` 的截图各自钉住
         Pending::Magic | Pending::MagicSpell(_) => AutoAnswer::Decide(Decision::Acknowledge),
+        // 被动卡那道门（P13b②）：自动玩家答「不用」，与上面那两条「不施法」、拍卖那一条
+        // 「不喊价」同一条理由 —— 手里那张卡花掉一次就会把一整片「他进了监狱」的断言
+        // 改成「他没进」。真花那张卡那条路由 `tests/passive.rs` 与真人鼠标各自钉住
+        Pending::Passive => AutoAnswer::Gate(PassiveMove::Decline),
     }
 }
 
@@ -179,6 +191,9 @@ struct AutoHand<'w, 's> {
     scores: MessageWriter<'w, MinigameResult>,
     tickets: MessageWriter<'w, BuyTicketRequested>,
     bids: MessageWriter<'w, AuctionMove>,
+    /// 被动卡那道门的那一句回答（P13b②）。它与 `bids` 同类：**不是一条 `Decision`**，
+    /// 发错类型就等于什么都没答（`decision_system` 对这一格一律不认，而门只读这一条消息）
+    passives: MessageWriter<'w, PassiveAnswer>,
 }
 
 fn auto_answer(
@@ -225,6 +240,15 @@ fn auto_answer(
                 action: Decision::Acknowledge,
             });
         }
+        AutoAnswer::Gate(moved) => {
+            // 主语取窗口而不是门里的队列：`gate_system` 认的就是「这一问挂在他身上吗」，
+            // 而这两处在同一帧里可能不一致（窗口刚被下一个承受者覆盖）。发错人那句会被
+            // 读掉（「答了一句没有人在问的话」），不发就整片挂死 —— 取窗口是更稳的那一侧
+            hand.passives.write(PassiveAnswer {
+                player,
+                what: moved,
+            });
+        }
         AutoAnswer::Bid => {
             // **主语取机器而不是取窗口**：轮转指针与窗口在绝大多数帧上是同一个人，但它们由两条
             // system 写（`auction_move_system` 改机器、`auction_hold_system` 挂窗口），
@@ -259,7 +283,7 @@ fn auto_answer(
 #[cfg(test)]
 mod tests {
     use super::{AutoAnswer, answer_for};
-    use game_core::prelude::{Decision, GameKind, GameRules, LandId, Pending};
+    use game_core::prelude::{Decision, GameKind, GameRules, LandId, PassiveMove, Pending};
 
     /// 每一种窗口都要有自动玩家的答案，而游乐场那一份必须是**带分的**：
     /// 答成 `Acknowledge` 的话长跑会在第一个游乐场格永久停住，且不报错、只是不动了。
@@ -283,6 +307,7 @@ mod tests {
                 }
                 AutoAnswer::Ticket => panic!("游乐场不该被当成买券"),
                 AutoAnswer::Bid => panic!("游乐场不该被当成出价"),
+                AutoAnswer::Gate(_) => panic!("游乐场不该被当成被动卡"),
             }
         }
         assert!(matches!(
@@ -305,6 +330,15 @@ mod tests {
         assert!(matches!(
             answer_for(Pending::Auction, &rules),
             AutoAnswer::Bid
+        ));
+        // 门（P13b②）同样**不是**一句 `Decision`：那三种回答门一条都不认（认了就是把还在等的
+        // 那一问连信封一起清掉，而症状是「那件事默默地落下来了」）。答成任何一条 `Decision`
+        // 都等于不答 —— 长跑里第一个踩到命运格的人把整局钉死在 `WaitDecision`。
+        // 自动玩家答「不用」而不是「用」：手里那张卡花掉一次会把一整片「他进了监狱」的
+        // 既有断言翻成「他没进」，而 `NM_AUTOROLL` 的职责是跑完一局、不是替玩家做决定。
+        assert!(matches!(
+            answer_for(Pending::Passive, &rules),
+            AutoAnswer::Gate(PassiveMove::Decline)
         ));
     }
 }

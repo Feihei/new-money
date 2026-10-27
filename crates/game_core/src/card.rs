@@ -21,10 +21,10 @@ pub enum CardKind {
 /// 这张卡**不是动词**：它被拿在手里就是答案，问它的那一刻由事件带来。
 ///
 /// P13b 拍的那条「被动卡这一族从此没有『出牌』这个动作」（PLAN §五 第 6 条）在数据上的
-/// 落点就是这一位。为什么另开一位而不是复用 [`CardEffect`] 里的 `Insulate`／`FreePass`
-/// 两条：一条效果的含义是「打出去会发生什么」，而这三张卡打不出去 —— 把它们留在动词库里，
-/// 嫁祸卡就得挂一条**永远不会被执行**的效果才能进池（那正是 PLAN §五 第 1 条点名的
-/// 「表上有、路上没有」那种假答案）。
+/// 落点就是这一位。为什么另开一位而不是让它挂在 [`CardEffect`] 里（① 之前免罪卡写的正是
+/// 一条 `insulate` 效果）：一条效果的含义是「打出去会发生什么」，而这三张卡打不出去 ——
+/// 把它们留在动词库里，嫁祸卡就得挂一条**永远不会被执行**的效果才能进池
+/// （那正是 PLAN §五 第 1 条点名的「表上有、路上没有」那种假答案）。
 ///
 /// 所以这一位是「门该翻谁的手牌」的唯一读数：拿着 = 有资格被问，花掉 = 从手里移除。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -37,6 +37,18 @@ pub enum PassiveCard {
     FreePass,
     /// 嫁祸卡：把这一件事／这一笔账转给**点名**的另一个人（10-27 拍板：点名，不是随机）
     Shift,
+}
+
+impl PassiveCard {
+    /// 人话：这一张在屏幕上叫什么。门问那一句、面板那颗按钮、顶栏那条流水说的是同一张卡，
+    /// 所以映射只写一次 —— 三处各念一遍就会出现「按钮写『免罪卡』而顶栏写『护身卡』」。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Forgive => "免罪卡",
+            Self::FreePass => "免费卡",
+            Self::Shift => "嫁祸卡",
+        }
+    }
 }
 
 /// 这张卡要落在谁/什么头上。写在数据里而不是代码里，是因为出牌浮层的按钮要把目标
@@ -90,7 +102,8 @@ pub enum CardEffect {
     /// 把承受者送进某一处「不在牌桌上」的地方 N 天（P4）。**承受者是这张卡的目标**
     /// （[`CardTarget`]），不是抽卡的人 —— 所以命运牌的「直接入狱」（target 缺省 = 自己）
     /// 与陷害卡的「送对手入狱」是同一条效果，不必为陷害单开一个变体。
-    /// 可被 [`crate::afflict::Insulation`] 抵消。
+    /// 落在表上哪一行、能不能被手里那张免罪卡挡掉，由 [`crate::passive`] 那张表答
+    /// （行按去处数，见 [`crate::afflict::Affliction::detain`]）。
     ///
     /// `place` 是**必填**的：坐牢、住院、出国在三条数据上就是三个数，而「不给 place 默认成
     /// 监狱」会让「掉水沟」这类卡静默变成坐牢 —— 那正是最难查的一类错（文案说住院、
@@ -104,10 +117,6 @@ pub enum CardEffect {
     /// 真正「存不存在」要等 B3 拿到 BoardDef 才能校验。
     MoveTo {
         tile_name: String,
-    },
-    /// 挂上「抵消 N 次厄运」的护身（免罪卡）。见 [`crate::afflict`]。
-    Insulate {
-        charges: u32,
     },
     /// 给一片地块盖上限时状态（涨价卡 / 查封卡，P3c）。
     ///
@@ -379,11 +388,6 @@ impl CardSet {
                             errs.push(format!("卡牌 {} 的 move_to 缺 tile_name", c.id));
                         }
                     }
-                    CardEffect::Insulate { charges } => {
-                        if *charges == 0 {
-                            errs.push(format!("卡牌 {} 的抵消次数是 0（打它做什么）", c.id));
-                        }
-                    }
                     CardEffect::LandStatus { days, .. } => {
                         // 0 天的状态会在面板上挂满一整天再消失（「剩 0 天」），而它的本意是
                         // 「什么也没发生」。数据里写 0 就是写错了，加载期拦下
@@ -589,6 +593,10 @@ mod tests {
 
     /// 陷害卡与命运入狱共用同一条效果，区别只在 `target`。这条钉住那个形状：
     /// 将来谁给「陷害」单开一个 `CardEffect` 变体，两边就会开始各修一半。
+    ///
+    /// （① 之前这一条还顺手检查了免罪卡那条 `insulate` 效果；P13b② 把它换成
+    /// `passive: "forgive"` 之后那一半归 `a_passive_card_is_a_key_not_a_verb`，
+    /// 这里不再重复。）
     #[test]
     fn framing_is_the_jail_effect_aimed_at_somebody_else() {
         let items = CardSet::from_json(ITEMS).unwrap();
@@ -605,15 +613,6 @@ mod tests {
             "{} 的效果不是关人",
             frame.id
         );
-        let insulate = items
-            .0
-            .iter()
-            .find(|c| c.target == CardTarget::SelfOnly)
-            .expect("免罪卡是打给自己的");
-        assert!(matches!(
-            insulate.effects[0],
-            CardEffect::Insulate { charges: 1 }
-        ));
     }
 
     #[test]
@@ -660,7 +659,6 @@ mod tests {
             !has(|e| matches!(e, CardEffect::MoveTo { .. })),
             "牌池里出现了 `move_to` —— 上面那条豁免该销掉了"
         );
-        assert!(has(|e| matches!(e, CardEffect::Insulate { .. })));
         assert!(has(|e| matches!(e, CardEffect::LandStatus { .. }),));
         assert!(has(|e| matches!(e, CardEffect::FreePass { .. })));
         assert!(has(|e| matches!(e, CardEffect::BuyLand)));

@@ -12,10 +12,10 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, Bankrupt, Books, CardAim, CardDef, CardEffect, CardGained, CardId, CardKind,
-    CardTarget, GameRules, God, Hand, Heading, Insulation, LandId, NO_GOD_ON_THE_ROAD,
-    NO_GOD_TO_BANISH, Occupancy, OccupancyKind, PASSIVE_WORD, Paused, PendingDecision, PlayerId,
-    PlayerName, Possession, Shelf, TokenPosition, TurnOrder, TurnPhase, acquire_denied_word,
-    banishable, deal_to, god_refuses_banish, is_passive, nearest_god, resists,
+    CardTarget, GameRules, God, Hand, Heading, LandId, NO_GOD_ON_THE_ROAD, NO_GOD_TO_BANISH,
+    Occupancy, OccupancyKind, PASSIVE_WORD, Paused, PendingDecision, PlayerId, PlayerName,
+    Possession, Shelf, TokenPosition, TurnOrder, TurnPhase, acquire_denied_word, banishable,
+    deal_to, god_refuses_banish, is_passive, nearest_god, resists,
 };
 
 use super::theme::{col, layout, size};
@@ -131,9 +131,8 @@ pub(crate) struct HandView<'w, 's> {
     /// 这块面板那时也不该在（`UiSet::Live` 的门挡着），拿不到时按「没有地」画
     board: Option<Res<'w, ActiveBoard>>,
     hands: Query<'w, 's, &'static Hand, With<PlayerId>>,
-    shields: Query<'w, 's, &'static Insulation>,
     /// 身上挂着哪位神（P6b②）。护身那一行有**两个来源**，少读一个就会在玩家其实免疫的时候
-    /// 只念出卡上的层数（§6.1 坑 30 同一条：可见位要有它的全部判据）。
+    /// 只念出手里的张数（§6.1 坑 30 同一条：可见位要有它的全部判据）。
     possessions: Query<'w, 's, &'static Possession>,
     /// 路上站着什么 + 他在哪一格、朝哪边走。这三样只为**送神符与请神符**那两颗按钮读
     /// （P6d）：一张问「身上有没有可送的那位」，一张问「路上还有没有一位」——
@@ -388,21 +387,21 @@ fn aim_text(def: &CardDef) -> &'static str {
     }
 }
 
-/// 护身那一行。没挂护身就不写这一句；0 层也不写 —— 规则层在用完那一层就把组件
-/// 摘了，这里再兜一次，免得面板说出「免罪护身 0 层」这种自相矛盾的话。
+/// 被动卡那一行。P13b② 把「打过免罪卡挂上的那层护身」整个删掉了 —— 免罪卡现在**留在手里
+/// 就是资格**，门在花掉那一刻直接从手牌摘一张，所以这一栏念的是「手里有几张被动卡」，
+/// 而不再念一个会骗人的层数（组件与手牌两处数同一副牌，就是 P6b② 那条「抄一份层数」的坑）。
 ///
-/// `god` 是那位神给的那半（P6b② 的大福神／天使＝厄运豁免）。它**不在这个组件里**
-/// （见 `game_core::afflict::Insulation` 的注），所以这里要把两半一起念，否则面板会在
-/// 玩家其实免疫的时候只写「护身 2 层」—— 那句话说的是卡，而玩家问的是「为什么这次没关进去」。
-/// 两半都在时那句必须说清是两层**加**免疫：免疫期间卡上的层数不会被吃掉，这是玩法信息。
-fn shield_text(shield: Option<&Insulation>, god: Option<God>) -> Option<String> {
+/// `god` 是那半（P6b② 的大福神／天使＝厄运豁免）。它**不在手牌里**，所以要两半一起念，
+/// 否则面板会在玩家其实免疫的时候只写「手里 2 张被动卡」—— 那句话说的是卡，而玩家问的是
+/// 「为什么这次没关进去」。两半都在时那句必须说清是**加**免疫：免疫期间卡不会被吃掉，
+/// 这是玩法信息（门的顺序是先问神、再问卡）。
+fn shield_text(passives: u32, god: Option<God>) -> Option<String> {
     let immune = god.is_some_and(resists);
-    let charges = shield.map(|s| s.charges).filter(|n| *n > 0);
-    match (immune, charges) {
-        (true, Some(n)) => Some(format!("护身：免疫（另有卡 {n} 层）")),
-        (true, None) => Some("护身：免疫".into()),
-        (false, Some(n)) => Some(format!("护身 {n} 层")),
-        (false, None) => None,
+    match (immune, passives) {
+        (true, n) if n > 0 => Some(format!("护身：免疫（另有被动卡 {n} 张）")),
+        (true, _) => Some("护身：免疫".into()),
+        (false, n) if n > 0 => Some(format!("被动卡 {n} 张")),
+        (false, _) => None,
     }
 }
 
@@ -505,8 +504,19 @@ pub(crate) fn sync_hand_panel(
         .and_then(|p| view.hands.get(p).ok())
         .map(|h| h.cards.iter().copied().collect())
         .unwrap_or_default();
+    // 被动卡的张数从手牌数（P13b②：`Insulation` 组件删了，卡在手里就是资格）。
+    // 按 `passive` 那一位数而不是按卡 id：门问的就是这一位，面板跟着门念才不会出现
+    // 「读数说有两张、门一张都没问」这种分叉
+    let passives = hand
+        .iter()
+        .filter(|id| {
+            view.shelf
+                .get(CardKind::Item, **id)
+                .is_some_and(|def| def.passive.is_some())
+        })
+        .count() as u32;
     let shield = shield_text(
-        player.and_then(|p| view.shields.get(p).ok()),
+        passives,
         player
             .and_then(|p| view.possessions.get(p).ok())
             .map(|held| held.god),
@@ -1071,31 +1081,27 @@ mod tests {
 
     #[test]
     fn the_shield_line_names_both_sources_and_never_shows_zero() {
-        assert_eq!(shield_text(None, None), None, "两样都没有就不写这一句");
+        assert_eq!(shield_text(0, None), None, "两样都没有就不写这一句");
         assert_eq!(
-            shield_text(Some(&Insulation { charges: 2 }), None),
-            Some("护身 2 层".into())
+            shield_text(2, None),
+            Some("被动卡 2 张".into()),
+            "P13b②：免罪卡不再挂组件 —— 卡在手里就是资格，面板念的是张数"
         );
+        // 神明那一半不在手牌里（P6b②），所以它由第二个参数带进来：大福神＝免疫
         assert_eq!(
-            shield_text(Some(&Insulation { charges: 0 }), None),
-            None,
-            "用完的那一层规则层已经摘了组件，面板不许说「护身 0 层」"
-        );
-        // 神明那一半不在组件里（P6b②），所以它由第二个参数带进来：大福神＝免疫
-        assert_eq!(
-            shield_text(None, Some(God::BigFortune)),
+            shield_text(0, Some(God::BigFortune)),
             Some("护身：免疫".into()),
             "免疫要写成「免疫」，不是「∞」也不是一个大数"
         );
         assert_eq!(
-            shield_text(None, Some(God::SmallFortune)),
+            shield_text(0, Some(God::SmallFortune)),
             None,
             "小福神不免厄运（PLAN §三 只给大的那一半），面板不该替他吹"
         );
         assert_eq!(
-            shield_text(Some(&Insulation { charges: 2 }), Some(God::Angel)),
-            Some("护身：免疫（另有卡 2 层）".into()),
-            "两半都要念出来：免疫期间卡上的层数不消耗，这是玩家要知道的玩法"
+            shield_text(2, Some(God::Angel)),
+            Some("护身：免疫（另有被动卡 2 张）".into()),
+            "两半都要念出来：免疫期间卡不会被门吃掉，这是玩家要知道的玩法"
         );
     }
 

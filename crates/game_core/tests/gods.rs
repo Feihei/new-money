@@ -937,7 +937,7 @@ fn every_doom_day_a_god_multiplies_covers_all_three_places() {
 #[test]
 fn the_fortune_god_shrugs_off_every_affliction_while_his_rival_does_not() {
     // 大福神「厄运豁免」＝期间每一次都不生效。判据现读 `Possession`，
-    // 不往 `Insulation` 里塞一格（理由写在那个组件的注里）
+    // 而卡的免罪走另一条（P13b②：门先问神、神不挡才问人 —— 理由写在 gods::resists 的注里）
     let (mut app, p0, p1) = two_players();
     let p1_tile = tile_of(&app, p1);
     attach_god(&mut app, p1, God::BigFortune, Some(40));
@@ -981,38 +981,52 @@ fn the_fortune_god_shrugs_off_every_affliction_while_his_rival_does_not() {
 #[test]
 fn immunity_spends_no_card_layers() {
     // 两个来源、一个出口，而**顺序是有内容的**：反过来写，大福神在场时每一件事都会
-    // 白白吃掉一层免罪卡，玩家那两层会在他还「免疫」的时候悄悄清零 —— 而那件事只有到
+    // 白白花掉一张免罪卡，玩家那两张会在他还「免疫」的时候悄悄清零 —— 而那件事只有到
     // 他不再免疫的下一件上才看得见，也就是看不见。
+    //
+    // P13b② 之后这条用例有了**三句**证据而不是两句：门问没问（`gate_asking`）、
+    // 卡少没少（`forgive_in_hand`）、人进去没进去（`detain_of`）。少了第一句，
+    // 「神挡下了」与「门压根没运转」在测试里就是同一个形状
     let (mut app, p0, p1) = two_players();
+    app.insert_resource(DecisionPolicy::Hold);
     let frame = item_index(&app, "item_frame");
     let insulate = item_index(&app, "item_insulate");
-    // 两张免罪卡**由他自己打**（免罪卡没有目标那一格，卡面写的是「落到自己头上的一次」），
-    // 而出牌的资格是「当前回合玩家」—— 所以这里把轮次交给他，别用夹具绕过那条判据
+    // 免罪卡从此**不用打**（10-27 拍板：被动卡没有出牌这个动作），躺在手里就是资格
     make_current(&mut app, p1);
-    for _ in 0..2 {
-        deal(&mut app, p1, insulate.0);
-        play_card(&mut app, p1, insulate.0, None);
-        settle(&mut app, 2);
-    }
-    assert_eq!(shield_of(&app, p1), Some(2), "前置：两张卡该叠成两层");
+    deal(&mut app, p1, insulate.0);
+    deal(&mut app, p1, insulate.0);
+    settle(&mut app, 2);
+    assert_eq!(forgive_in_hand(&app, p1), 2, "前置：两张都在手里");
     make_current(&mut app, p0);
 
-    // 1) 没有神：陷害吃掉一层
+    // 1) 没有神：门问那一位，他答「用」，卡少一张
     deal(&mut app, p0, frame.0);
     play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
     settle(&mut app, 2);
+    assert_eq!(
+        gate_asking(&app),
+        Some((p1, Ask::Offset, PassiveEvent::JailTrip)),
+        "没神而有卡：这一问必须挂出来"
+    );
+    answer_gate(&mut app, p1, PassiveMove::Use);
+    settle(&mut app, 2);
     assert_eq!(detain_of(&app, p1), None, "第一件被卡挡住");
-    assert_eq!(shield_of(&app, p1), Some(1), "卡挡的事要消耗卡");
+    assert_eq!(forgive_in_hand(&app, p1), 1, "卡挡的事要消耗卡");
 
-    // 2) 大福神在场：陷害整件不生效，而**那一层卡分文不动**
+    // 2) 大福神在场：陷害整件不生效，而**那张卡分文不动，门连问都不问**
     attach_god(&mut app, p1, God::BigFortune, Some(40));
     deal(&mut app, p0, frame.0);
     play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
     settle(&mut app, 2);
     assert_eq!(detain_of(&app, p1), None, "那位神在场，这一件同样没发生");
     assert_eq!(
-        shield_of(&app, p1),
-        Some(1),
+        gate_asking(&app),
+        None,
+        "先问神、后问卡 —— 写成反过来，这里就挂着一句「要不要花你的卡」"
+    );
+    assert_eq!(
+        forgive_in_hand(&app, p1),
+        1,
         "免疫期间不许吃卡 —— 两个来源的顺序写反了红在这里"
     );
 
@@ -1021,10 +1035,17 @@ fn immunity_spends_no_card_layers() {
     deal(&mut app, p0, frame.0);
     play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
     settle(&mut app, 2);
-    assert_eq!(detain_of(&app, p1), None, "最后一层还挡得住一次");
-    assert_eq!(shield_of(&app, p1), None, "用完那一层之后组件要被摘掉");
+    assert_eq!(
+        gate_asking(&app),
+        Some((p1, Ask::Offset, PassiveEvent::JailTrip)),
+        "神一走，那一问就得回来 —— 它不在资源里存着"
+    );
+    answer_gate(&mut app, p1, PassiveMove::Use);
+    settle(&mut app, 2);
+    assert_eq!(detain_of(&app, p1), None, "最后一张还挡得住一次");
+    assert_eq!(forgive_in_hand(&app, p1), 0, "两张都花掉了");
 
-    // 4) 两层都用掉了：第三件照关，这条用例不能永远绿下去
+    // 4) 没卡了：第三件照关，而**没人被问**
     deal(&mut app, p0, frame.0);
     play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
     settle(&mut app, 2);

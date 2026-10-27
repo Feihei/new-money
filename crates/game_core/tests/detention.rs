@@ -219,24 +219,36 @@ fn two_detentions_of_equal_length_move_him_to_the_newer_place() {
 }
 
 #[test]
-fn an_insulated_victim_shrugs_off_a_trip_abroad_too() {
-    // 抵消判据挂在「事」那一族上（`AfflictDomain::Detention`），不是挂在「监狱」那一个名字上：
-    // 免罪卡挡得住坐牢，就同样挡得住住院与出国
+fn a_forgive_card_in_hand_shrugs_off_a_trip_abroad_too() {
+    // 抵消判据挂在表上那一**行**，不挂在「监狱」那一个名字上：免罪卡挡得住坐牢，
+    // 就同样挡得住住院与出国。P13b② 之后「有卡」= 手里那张，而门替他去问。
+    //
+    // 这一条同时是验收①的另一半：`AwayTrip` 那一行**可免**（命运牌的出国），
+    // 与 `passive::tests::the_same_trip_is_two_rows_from_one_place` 钉住的 `AirlineTrip`
+    // （踩联合航空，不可免）是同一句「同一去处、两种来源」的两边 —— 后者今天还没有
+    // 门上的来路（公司到访那一处归 ③），所以那一格目前只有表上的答案可钉
     let (mut app, p0, _) = about_to_draw("fate_008");
+    app.insert_resource(DecisionPolicy::Hold);
     let insulate = item_index(&app, "item_insulate");
     deal(&mut app, p0, insulate.0);
-    play_card(&mut app, p0, insulate.0, None);
     settle(&mut app, 2);
-    assert_eq!(shield_of(&app, p0), Some(1), "刚挂上两层？");
 
     draw_it(&mut app);
+
+    assert_eq!(
+        gate_asking(&app),
+        Some((p0, Ask::Offset, PassiveEvent::AwayTrip)),
+        "命运牌的出国该被问一句 —— 那一行答的是「可免」"
+    );
+    answer_gate(&mut app, p0, PassiveMove::Use);
+    settle(&mut app, 2);
 
     assert_eq!(detention_of(&app, p0), None, "挡住了就没有出国这回事");
     assert_eq!(tile_of(&app, p0), FATE, "也没被搬到任何接入点");
     assert_eq!(
-        shield_of(&app, p0),
-        None,
-        "那一层护身吃掉了这次厄运，就该空掉"
+        forgive_in_hand(&app, p0),
+        0,
+        "那一张卡吃掉了这次厄运，就该没了"
     );
 }
 

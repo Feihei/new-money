@@ -22,11 +22,12 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::card::{CardDef, CardEffect, CardKind, CardTarget};
-use crate::deck::{CardId, CardSink, Shelf, apply_card};
+use crate::deck::{CardId, CardSink, Shelf};
 use crate::land::LandId;
 use crate::landing::PendingDecision;
-use crate::msg::{CardGained, CardNotice, CardPlayed, PlayCardRequested};
+use crate::msg::{CardGained, CardNotice, PlayCardRequested};
 use crate::occupancy::OccupancyKind;
+use crate::passive::{Job, Tail, submit};
 use crate::player::PlayerId;
 use crate::settle::Books;
 use crate::turn::{TurnOrder, TurnPhase};
@@ -247,7 +248,7 @@ fn unmet_precondition(
                     None => Some(format!("他没有被关在{}", place.label())),
                 }
             }
-            // 其余每一条效果都不需要「此刻有没有对象」这一问：免罪与免费是挂上去就等着，
+            // 其余每一条效果都不需要「此刻有没有对象」这一问：免费卡是挂上去就等着，
             // 拘留/停留/乌龟/转向打在谁身上都成立，地块类（涨价、查封、拆房）由 `aim_is_legal` 管。
             // `Levy` 也在这群里：税打在谁身上都成立，**抽到 0 元也是一笔办成的税**（流水里那条
             // `Lost(0)` 说的就是这件事），不是「没有对象」。
@@ -257,7 +258,6 @@ fn unmet_precondition(
             | CardEffect::Levy { .. }
             | CardEffect::Detain { .. }
             | CardEffect::MoveTo { .. }
-            | CardEffect::Insulate { .. }
             | CardEffect::FreePass { .. }
             | CardEffect::Reverse
             | CardEffect::Stay { .. }
@@ -279,18 +279,23 @@ fn unmet_precondition(
 /// 「现在能不能替谁出牌」的三份读数。打包成一个参数包是为了让出牌 system 留在
 /// clippy 的参数上限内，也因为这三份判据本来就是**一起成立或一起不成立**的：
 /// 阶段、轮转、待决事项，少看任何一份都会开出一条不该有的窗口。
+///
+/// ⚠️ `pending` **不在这张包里**（P13b②）：出牌现在要把这件事交给那道门，而
+/// [`GateDesk`](crate::passive::GateDesk) 带着它的**可写**版本 —— 同一条 system 里
+/// 一写一读就是参数建立期的冲突（B0002，与 [`crate::gods::GodDesk`] 那条
+/// 「`corrections` 不单独成字段」同一条坑）。判据一个字没改：`opener` 收一份读数，
+/// 调用方从自己那张包递进来。
 #[derive(SystemParam)]
 pub struct PlayWindow<'w> {
     phase: Res<'w, State<TurnPhase>>,
     order: Option<Res<'w, TurnOrder>>,
-    pending: Res<'w, PendingDecision>,
 }
 
 impl<'w> PlayWindow<'w> {
     /// 此刻能出牌的人；`None` = 窗口关着。表现层用它决定按钮亮不亮，与规则层认不认
     /// 是同一句判据（同 `bank_op_allowed` 与 `can_bank_op` 的关系）。
-    pub fn opener(&self) -> Option<Entity> {
-        if self.phase.get() != &TurnPhase::WaitRoll || self.pending.active().is_some() {
+    pub fn opener(&self, pending: &PendingDecision) -> Option<Entity> {
+        if self.phase.get() != &TurnPhase::WaitRoll || pending.active().is_some() {
             return None;
         }
         self.order.as_ref()?.current()
@@ -301,14 +306,22 @@ impl<'w> PlayWindow<'w> {
 ///
 /// 三种拒绝都**静默返回**（同 `bank_op_system`）：面板该把办不动的按钮亮成灰的，
 /// 而不是按下去没声音。
+///
+/// 第四道门不在这里：**这张卡办成的那件事**。P13b② 之后这里只把一次调用交给
+/// [`submit`](crate::passive::submit)，那条 `CardPlayed` 由门在落完之后发
+/// （[`finish_played`](crate::deck::finish_played)）—— 出牌与「踩到命运格」共用同一条尾巴，
+/// 而那条尾巴上挂着「谁手里有什么卡」这一问。
+///
+/// `shelf` 仍是这条 system 自己的参数而不是 `desk.sink.kit.shelf`：那张卡面要一路活到
+/// `submit` 之后，让它借在 `desk` 里面就会与那次 `&mut` 撞掉（共享读可以并存，
+/// 而 `&mut desk` 不行）。
 pub fn play_card_system(
-    mut sink: CardSink,
+    mut desk: crate::passive::GateDesk<'_, '_>,
     mut requests: MessageReader<PlayCardRequested>,
     window: PlayWindow<'_>,
     shelf: Shelf<'_>,
-    mut played: MessageWriter<CardPlayed>,
 ) {
-    let Some(current) = window.opener() else {
+    let Some(current) = window.opener(&desk.pending) else {
         return;
     };
     for request in requests.read() {
@@ -329,43 +342,50 @@ pub fn play_card_system(
             debug!("出牌被拒：{} 是被动卡，{PASSIVE_WORD}", def.id);
             continue;
         }
-        if !hand_holds(&sink.kit.hands, current, request.card) {
+        if !hand_holds(&desk.sink.kit.hands, current, request.card) {
             debug!("出牌被拒：手里没有 {}", def.id);
             continue;
         }
-        if !aim_is_legal(def, request.aim, current, &sink.books) {
+        if !aim_is_legal(def, request.aim, current, &desk.sink.books) {
             debug!("出牌被拒：{} 的目标不合法", def.id);
             continue;
         }
         // 「这块地归谁」是读世界，交给调用方查；表本身只管「谁承受」（见 `victim_of`）
         let land_owner = match request.aim {
-            Some(CardAim::Land(land)) => sink.books.owner_of(land),
+            Some(CardAim::Land(land)) => desk.sink.books.owner_of(land),
             Some(CardAim::Player(_)) | None => None,
         };
         let Some(victim) = victim_of(def, request.aim, current, land_owner) else {
             debug!("出牌被拒：{} 找不到承受者", def.id);
             continue;
         };
-        if let Some(why) = unmet_precondition(def, current, victim, request.aim, &sink) {
+        if let Some(why) = unmet_precondition(def, current, victim, request.aim, &desk.sink) {
             debug!("出牌被拒：{} —— {why}", def.id);
             continue;
         }
-        // 先扣卡再结算：效果执行到一半崩了，也不该留下一张还能再打一次的卡
-        if let Ok(mut hand) = sink.kit.hands.get_mut(current) {
+        // 先扣卡再交给门：效果执行到一半也不该留下一张还能再打一次的卡。
+        // **交出去而不是办完**：这张卡若带着一件「灾」，门要先问那位挨它的人
+        // （手里有没有免罪卡、要不要嫁祸给谁），而问完才发那条 `CardPlayed`
+        // —— 凭据上的承受者因此可能是**嫁祸之后的那一位**（见 `finish_played`）
+        if let Ok(mut hand) = desk.sink.kit.hands.get_mut(current) {
             hand.spend(request.card);
         }
-        let outcomes = apply_card(&mut sink, current, victim, def, request.aim);
-        played.write(CardPlayed {
-            player: current,
-            victim,
-            card: CardNotice {
-                id: def.id.clone(),
-                kind: def.kind,
-                title: def.title.clone(),
-                desc: def.desc.clone(),
-                outcomes,
-            },
-        });
+        let todo = crate::deck::effect_steps(&def.effects);
+        let source = def.id.clone();
+        submit(
+            &mut desk,
+            Job::new(
+                victim,
+                todo,
+                source,
+                request.aim,
+                crate::auction::Gavel::Card(current),
+                Tail::Played {
+                    card: request.card,
+                    player: current,
+                },
+            ),
+        );
     }
 }
 

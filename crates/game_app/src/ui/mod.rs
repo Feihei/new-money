@@ -29,10 +29,10 @@ use game_core::prelude::{
     BuildRequested, BuildingKind, BuyTicketRequested, CardAim, CardId, Decision, DecisionChosen,
     FinancingDrawRequested, GameKind, GameSession, Halt, HolidaySet, Institution, ItemKind, LandId,
     MagicFilter, MagicFilterPicked, MagicSpell, MagicSpellPicked, MarketClock, MinigameResult,
-    MortgageOp, MortgageRequested, Paused, Pending, PendingDecision, PlaceItemRequested,
-    PlayCardRequested, RemoteUpgradeRequested, RequestRemoteDice, RequestRoll, RequestStay,
-    ShopOpRequested, StaySentence, StockId, StockTradeRequested, TileIndex, TradeSide, TurnOrder,
-    TurnPhase, bank_op_allowed, date_of, market_halt,
+    MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, Paused, Pending, PendingDecision,
+    PlaceItemRequested, PlayCardRequested, RemoteUpgradeRequested, RequestRemoteDice, RequestRoll,
+    RequestStay, ShopOpRequested, StaySentence, StockId, StockTradeRequested, TileIndex, TradeSide,
+    TurnOrder, TurnPhase, bank_op_allowed, date_of, market_halt,
 };
 
 use theme::{col, layout, size};
@@ -314,6 +314,10 @@ pub enum UiAction {
     /// 主语也不在按钮里（派发时取「此刻被问的那一位」），而那一位在拍卖过程中**每帧都可能换人**，
     /// 这是它与其余六种窗口的差别。
     Bid(BidMove),
+    /// 对被动卡那道门那一句问话的一个动作（P13b②）。**主语不在按钮里**（派发时取
+    /// 挂着这一问的那一位，而他每帧都可能换人），而「嫁祸给谁」那一位**在**按钮里 ——
+    /// 点名是意图的一部分，与 [`Self::Bail`] 那颗「保释 阿土伯」同一条形状
+    Gate(PassiveMove),
     /// 在女巫那里挑一条**筛选条件**（P13 第一步）。主语不在按钮里（派发时取挂着
     /// 这一步窗口的那一位），而「这一条筛出谁」全交给规则层那一条 `filter_targets` ——
     /// 面板的灰按钮与它读的是同一个函数，所以「亮着却筛出没人」在结构上写不出来。
@@ -434,6 +438,15 @@ pub(crate) fn lottery_customer(pending: &PendingDecision) -> Option<Entity> {
 pub(crate) fn auction_customer(pending: &PendingDecision) -> Option<Entity> {
     match pending.active() {
         Some((player, Pending::Auction)) => Some(player),
+        _ => None,
+    }
+}
+
+/// 门挂着谁（P13b②）。与拍卖那一条同形：**主语在窗口里而不在按钮里**，
+/// 而这一位每帧都可能换人（A 转给 B 之后是 B 在答）。
+pub(crate) fn gate_asked(pending: &PendingDecision) -> Option<Entity> {
+    match pending.active() {
+        Some((player, Pending::Passive)) => Some(player),
         _ => None,
     }
 }
@@ -835,6 +848,10 @@ struct Sends<'w> {
     /// 拍卖台上的两个动作共用一条消息（P9）：「加一档」与「放弃」是同一件事的两半 ——
     /// 都是此刻被问的那一位对一个**正在进行**的场作出的反应
     bids: MessageWriter<'w, AuctionMove>,
+    /// 被动卡那道门的一句回答（P13b②）。三个动作一条消息：用／不用／嫁祸给谁是
+    /// **同一个问题的三种答案**，而「问的是哪一问」在门里，不在按钮里 ——
+    /// 拆成三条消息就多了三处可以各说各话的地方
+    gates: MessageWriter<'w, PassiveAnswer>,
     /// 魔法屋的两步回答（P13）：条件与法术各一条，与那两个窗口一一对应。
     /// 分成两条而不是「一个魔法屋请求带两个位」：第二步的候选是第一步筛出来的，
     /// 规则层要在中间改窗口 —— 一条消息说不清「答完了条件、还没答法术」那个状态
@@ -1054,6 +1071,20 @@ fn dispatch_ui_actions(
             // 这一支不认 `gate.paused`：暂停时那颗按钮本来就点不着（上面 `Disabled` 那一格
             // 与遮罩的命中测试都挡着），而拍卖是规则层在转的一台机器，不是一个可以「先想想」
             // 的报价 —— 暂停期间回合机整个停住，窗口也不会被回答。
+            // 被动卡那道门的三个动作（P13b②）。主语取窗口而不是取当前回合玩家：
+            // 这一问挂在谁身上，就只有他答得出去（`gate_system` 比对的就是那一位）
+            UiAction::Gate(what) => {
+                if gate.paused.0 {
+                    continue;
+                }
+                let Some(player) = gate_asked(&gate.pending) else {
+                    continue;
+                };
+                sends.gates.write(PassiveAnswer {
+                    player,
+                    what: *what,
+                });
+            }
             UiAction::Bid(what) => {
                 if gate.paused.0 {
                     continue;
@@ -1394,6 +1425,9 @@ mod tests {
         /// 消息（规则层从窗口里读它），所以这一栏记的是「发出去的是什么」，
         /// 「条件不匹配就没发」由断言用 `is_empty` 说
         magic_spells: Vec<(Entity, MagicSpell)>,
+        /// 被动卡那道门按下的那一句（P13b②）：`(谁, 哪个动作)`。这一栏的主语是**这一阶段
+        /// 唯一的看点**：门问的是挨事的那一位，而他在回合序里通常不是当前玩家
+        gates: Vec<(Entity, PassiveMove)>,
     }
 
     /// 派发出口的读者们。装成参数包而不是八个函数参数：这仓库遇到 `too_many_arguments`
@@ -1416,6 +1450,7 @@ mod tests {
         builds: MessageReader<'w, 's, BuildRequested>,
         magic_filters: MessageReader<'w, 's, MagicFilterPicked>,
         magic_spells: MessageReader<'w, 's, MagicSpellPicked>,
+        gates: MessageReader<'w, 's, PassiveAnswer>,
     }
 
     fn collect(mut seen: ResMut<Seen>, mut r: Readers<'_, '_>) {
@@ -1452,6 +1487,8 @@ mod tests {
             .extend(r.magic_filters.read().map(|m| (m.player, m.filter)));
         seen.magic_spells
             .extend(r.magic_spells.read().map(|m| (m.player, m.spell)));
+        seen.gates
+            .extend(r.gates.read().map(|a| (a.player, a.what)));
     }
 
     /// 一套只装配到「能跑 UI 派发」的对局骨架：两名玩家、一颗掷骰按钮（文字是它的子节点）、
@@ -1493,6 +1530,10 @@ mod tests {
         /// 道具面板上的两颗（P5）：放一个路障到 5 号格、用遥控骰子走 3 步
         place_rock: Entity,
         remote_three: Entity,
+        /// 被动卡那道门的两颗（P13b②）：「用那张卡」与「不用」。动作烤在按钮里，
+        /// 而**主语在窗口里** —— 这一对正是「决策主体能在回合内跳动」的派发侧形状
+        gate_use: Entity,
+        gate_decline: Entity,
         /// 带颗数掷骰（载具 2 颗）
         roll_two: Entity,
         toggle_atm: Entity,
@@ -1533,6 +1574,13 @@ mod tests {
                 // 顶栏那两行播报的读侧（施法凭据与「被挡下」凭据各一条）
                 .add_message::<game_core::prelude::MagicCast>()
                 .add_message::<game_core::prelude::MagicBlocked>()
+                // P13b②：被动卡那道门的出口与两条凭据。同一条坑的第五遍 —— 少注册一条
+                // 的症状不是「那颗按钮不灵」，而是 `dispatch_ui_actions` 整个建不出来，
+                // 于是这一整片按钮全死（`BlameShifted` 派发不读，但顶栏那句「转给了谁」
+                // 读的 `PassiveUsed` 里已经带着它，所以两条都登记，免得将来读的时候再死一片）
+                .add_message::<PassiveAnswer>()
+                .add_message::<game_core::prelude::PassiveUsed>()
+                .add_message::<game_core::prelude::BlameShifted>()
                 // P10d②：远程建设与融资那两颗按钮的出口（漏了它同样是「整片按钮全死」）
                 .add_message::<RemoteUpgradeRequested>()
                 .add_message::<FinancingDrawRequested>()
@@ -1675,6 +1723,12 @@ mod tests {
                 .spawn(UiAction::UseRemoteDice { steps: 3 })
                 .id();
             let roll_two = app.world_mut().spawn(UiAction::RollWith(2)).id();
+            // 门那两颗（P13b②）：与拍卖那两颗同一个形状 —— 动作在按钮里，主语在窗口里
+            let gate_use = app.world_mut().spawn(UiAction::Gate(PassiveMove::Use)).id();
+            let gate_decline = app
+                .world_mut()
+                .spawn(UiAction::Gate(PassiveMove::Decline))
+                .id();
 
             // 先把阶段落实，再点击才不会落在 `Boot` 上
             app.update();
@@ -1702,6 +1756,8 @@ mod tests {
                 magic_jail,
                 place_rock,
                 remote_three,
+                gate_use,
+                gate_decline,
                 roll_two,
                 toggle_atm,
                 toggle_stock,
@@ -2191,6 +2247,63 @@ mod tests {
         assert!(paused.seen().bids.is_empty(), "暂停时还派发了出价");
     }
 
+    /// 被动卡那道门那两颗按钮（P13b②）只认「此刻挂着 `Pending::Passive` 的那一位」。
+    ///
+    /// 这是这一阶段最尖的一条派发断言：其它窗口的顾客**通常就是当前回合玩家**，而门不是 ——
+    /// 它问的是挨那一下的人，通常正是别人。派发若错写成 `order.current()`，症状不是报错，
+    /// 而是「A 按了一颗按钮，把 B 手里的免罪卡花掉了」：面板两边看着都正常，只有那两张
+    /// 卡在替错的人付出代价。
+    #[test]
+    fn a_gate_answer_names_the_one_asked_not_the_current_player() {
+        // 没有窗口时按那颗按钮：一句回答都不该发出去（凭空就能替人花掉一张卡）
+        let mut h = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        h.click(h.gate_use);
+        assert!(
+            h.seen().gates.is_empty(),
+            "门没问话也派发了回答 —— 而且主语还是当前玩家"
+        );
+
+        // 窗口挂在**不是当前玩家**的那一位身上：动作从按钮里来，主语从窗口里来
+        let asked = h.other;
+        assert_ne!(asked, h.player, "前置：这一问挂在一个不是当前玩家的人身上");
+        h.offer(asked, Pending::Passive);
+        h.click(h.gate_use);
+        assert_eq!(
+            h.seen().gates,
+            vec![(asked, PassiveMove::Use)],
+            "答话的必须是被问的那一位，而不是轮到他的那一位"
+        );
+
+        // 另一颗按钮带的是另一个动作，而主语同一条：两颗按钮的区别只在 `PassiveMove`
+        let mut decline = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let asked = decline.other;
+        decline.offer(asked, Pending::Passive);
+        decline.click(decline.gate_decline);
+        assert_eq!(
+            decline.seen().gates,
+            vec![(asked, PassiveMove::Decline)],
+            "「不用」那句也得挂在被问的人身上"
+        );
+
+        // 别的窗口挂着时按门的按钮：不该办成（门与拍卖台、彩票柜台是三个不同的问题）
+        let mut other_window =
+            Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
+        let bidder = other_window.other;
+        other_window.offer(bidder, Pending::Auction);
+        other_window.click(other_window.gate_use);
+        assert!(
+            other_window.seen().gates.is_empty(),
+            "拍卖台上按下一颗「用免罪卡」不该被当成门的回答"
+        );
+
+        // 暂停挡住一切：与其余窗口同一条
+        let mut paused = Harness::new(TurnPhase::WaitDecision, true, PendingDecision::default());
+        let asked = paused.other;
+        paused.offer(asked, Pending::Passive);
+        paused.click(paused.gate_use);
+        assert!(paused.seen().gates.is_empty(), "暂停时还派发了回答");
+    }
+
     /// 抵押与赎回走的是**银行**那个人（`counter_of`）。它与上面那条同形，但守的是另一件事：
     /// 两个柜台共用一个 `Pending` 家族，派发要是错用了 `shop_customer`，面板上按「押」
     /// 就会在百货柜台里办成银行的事。
@@ -2404,6 +2517,10 @@ mod tests {
             .add_message::<game_core::prelude::MagicSpellPicked>()
             .add_message::<game_core::prelude::MagicCast>()
             .add_message::<game_core::prelude::MagicBlocked>()
+            // P13b②：门的那一颗按钮的出口 + 顶栏读的两条凭据（同一格坑的第五遍）
+            .add_message::<PassiveAnswer>()
+            .add_message::<game_core::prelude::PassiveUsed>()
+            .add_message::<game_core::prelude::BlameShifted>()
             // P10d②：派发多了远程建设与融资两个出口，顶栏多了保险/特权五条播报 ——
             // 请求由派发写、凭据由顶栏读，漏任何一条崩的都是「一片按钮全死」
             .add_message::<game_core::prelude::RemoteUpgradeRequested>()

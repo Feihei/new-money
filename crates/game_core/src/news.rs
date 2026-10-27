@@ -26,6 +26,7 @@ use crate::data::DataHandles;
 use crate::deck::{CardSink, apply_effects};
 use crate::landing::{Landed, Landing, LandingDomain};
 use crate::msg::{NewsAudience, NewsFired, NewsHit, NewsNotice};
+use crate::passive::{Job, Step, Tail};
 
 /// 一条新闻在池子里的位置。**存下标而不是 id 字符串**（与 [`crate::deck::CardId`] 同构）：
 /// `GameSession::last_news` 要进存档，而下标在「策划改了 id 命名」时不会失效——
@@ -154,7 +155,6 @@ const fn family_of(effect: &CardEffect) -> Family {
         | CardEffect::Detain { .. }
         | CardEffect::Release { .. }
         | CardEffect::MoveTo { .. }
-        | CardEffect::Insulate { .. }
         | CardEffect::FreePass { .. }
         | CardEffect::Reverse
         | CardEffect::Stay { .. }
@@ -514,18 +514,20 @@ fn people(scope: NewsScope, actor: Entity, sink: &mut CardSink) -> Vec<Entity> {
     }
 }
 
-/// `settle_news_landing_system` 的输入包：卡池那一份参数包 + 新闻池资产 + 播新闻的凭据。
+/// `settle_news_landing_system` 的输入包：**那道门的工具包** + 新闻池资产。
 ///
-/// 直接**内含** [`CardSink`] 而不是重列那十几格：效果动词的执行者与出牌/抽卡是同一个
-/// （[`apply_effects`]），而三样东西（账本、Commands、那一堆查询）少借一个都会在某条效果上
-/// 缺一格。`Books` 与 `Commands` 在同一条 system 里出现两次会直接在参数建立期撞
-/// （§6.1 坑 33），所以只能嵌套、不能并列。
+/// 直接**内含** [`GateDesk`](crate::passive::GateDesk) 而不是重列那十几格：人档那条路的
+/// 执行者与出牌/抽卡是同一个（都交 [`submit`](crate::passive::submit)），而三样东西
+/// （账本、Commands、那一堆查询）少借一个都会在某条效果上缺一格。`Books` 与 `Commands`
+/// 在同一条 system 里出现两次会直接在参数建立期撞（§6.1 坑 33），所以只能嵌套、不能并列。
+///
+/// ⚠️ 那条 `NewsFired` 的写手也在 `desk` 上（[`GateDesk::newsfired`]）：一次广播**一条**
+/// 凭据，而名单可能拖到几十帧之后才落完 —— 两处各写一次就是两条新闻。
 #[derive(SystemParam)]
 pub struct NewsSink<'w, 's> {
-    pub card: CardSink<'w, 's>,
+    pub desk: crate::passive::GateDesk<'w, 's>,
     sets: Res<'w, Assets<NewsSet>>,
     data: Res<'w, DataHandles>,
-    pub fired: MessageWriter<'w, NewsFired>,
 }
 
 impl<'w> NewsSink<'w, '_> {
@@ -557,8 +559,8 @@ pub fn settle_news_landing_system(landing: Res<Landing>, mut sink: NewsSink) {
     };
     let pool = set.0.len();
     // 取数与映射成对读 [`roll_span`]：值域随「这一局播过没有」变，而两条都在同一个文件里
-    let last = sink.card.books.session.last_news;
-    let roll = sink.card.kit.rng.pick_news(roll_span(pool, last));
+    let last = sink.desk.sink.books.session.last_news;
+    let roll = sink.desk.sink.kit.rng.pick_news(roll_span(pool, last));
     let Some(id) = draw(pool, last, roll) else {
         return;
     };
@@ -576,50 +578,66 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
         warn!("新闻池资产读不到，没能播 {id:?}");
         return false;
     };
-    let Some(def) = news_of(set, id) else {
+    let Some(def) = news_of(set, id).cloned() else {
         // 下标越界：只有可能是调用方自己算的（落格那条永远在域内），所以这里响一声
         warn!("新闻池里没有 #{id:?} 这一条");
         return false;
     };
+    // 整条定义**克隆一份**带走：`set` 借在 `sink.sets` 上，而下面每一格都要 `&mut sink.desk`
+    // （门里的效果执行要动账本），那条借用在第一个 `&mut` 之前就得结束 ——
+    // 这不是为了绕过借用检查才克隆的：一条新闻要活过「门问人」那几十帧，它本来就得是自己的。
     // 「上一条是哪一条」由**播**这一处写，而不是由抽那一处：`NM_NEWS` 点名的那一条同样
     // 算「这一场刚播过的」，于是它之后第一次踩新闻中心不会又摸到同一条。写在两处会分叉
-    sink.card.books.session.last_news = Some(id);
-    let (title, desc, effects, news_id) = (
-        def.title.clone(),
-        def.desc.clone(),
-        def.effects.clone(),
-        def.id.clone(),
-    );
+    sink.desk.sink.books.session.last_news = Some(id);
+    let (effects, news_id) = (def.effects.clone(), def.id.clone());
     let scope = def.scope;
     let audience = match scope {
         NewsScope::Everyone | NewsScope::One(_) | NewsScope::EveryoneIf(_) => {
-            let targets = people(scope, actor, &mut sink.card);
-            let mut hits = Vec::with_capacity(targets.len());
-            for target in targets {
-                hits.push(NewsHit {
-                    player: target,
-                    outcomes: apply_effects(
-                        &mut sink.card,
-                        target,
-                        &effects,
-                        &news_id,
-                        None,
-                        // 人档今天拿不到拍卖那一槌（[`mismatch`] 把 `Auction` 留在地档），
-                        // 所以这一格是一条走不到的路。它写 `Public` 而不是留空位：
-                        // 「新闻中心这一播」开的槌就是公家那一把，与地档同一句
-                        crate::auction::Gavel::Public,
-                    ),
-                });
+            let targets = people(scope, actor, &mut sink.desk.sink);
+            // **人档交门，地档与机构档不交**：这一档带的动词是「事」（停走、拘留、课税），
+            // 前两条在门那张表上有行。门可能一句都不问（豪雨那条是 `Hold`，不可免不可转），
+            // 也可能问到人手里那张免罪卡 —— 两种情况下收尾的都是 [`finish_news`]，
+            // 而它只在**名单上最后一个落完**那一刻发那条 `NewsFired`（一次广播一条凭据）。
+            // 逐个当场发会变成「五条新闻」，而玩家看见的明明是一条。
+            if targets.is_empty() {
+                // 空集也要播出去（那句「场上没有步行的人」是说得出原因的空），
+                // 而空名单没有要问的人 —— 不必进门，直接收尾
+                finish_news(&mut sink.desk, actor, &def, Vec::new());
+                return true;
             }
-            NewsAudience::People(hits)
+            let mut waiting: Vec<(Entity, Vec<Step>)> = targets
+                .into_iter()
+                .rev()
+                .map(|who| (who, crate::deck::effect_steps(&effects)))
+                .collect();
+            let (first, todo) = waiting.remove(0);
+            crate::passive::submit(
+                &mut sink.desk,
+                Job::new(
+                    first,
+                    todo,
+                    news_id.clone(),
+                    None,
+                    crate::auction::Gavel::Public,
+                    Tail::News {
+                        broadcaster: actor,
+                        item: def.clone(),
+                        hits: Vec::new(),
+                        waiting,
+                    },
+                ),
+            );
+            // 交出去之后这里**什么都不发**：`hits` 那份清单要等门答完才凑得齐，
+            // 而 `NewsFired` 的收尾已经装在那条尾巴上（`finish_news`）
+            return true;
         }
         NewsScope::Around => {
             // 锚点是播报者脚下那块地。`None` 只可能是「这张盘上一块地都没有」——
             // 那时这一播扫不到任何东西，但仍然要播出去：顶栏那句「这一带没有地可打」与
             // 「场上没有可点名的人」是同一条纪律，空手要说得出为什么空
-            let center = ground_anchor(actor, &mut sink.card);
+            let center = ground_anchor(actor, &mut sink.desk.sink);
             let lands = match center {
-                Some(at) => touched(&mut sink.card, at, &effects),
+                Some(at) => touched(&mut sink.desk.sink, at, &effects),
                 None => Vec::new(),
             };
             // `victim` 那一格对地块类动词是死的（[`mismatch`] 保证走到这里的只有地块类动词），
@@ -627,7 +645,7 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
             // `Gavel::Public` 是这条新闻的**身份**而不是一个占位：新闻不替某个玩家敲槌，
             // 它替公家挂牌 —— 所得因此归银行（✅ 10-24 拍板），而不是归刚踩到那一格的玩家
             let outcomes = apply_effects(
-                &mut sink.card,
+                &mut sink.desk.sink,
                 actor,
                 &effects,
                 &news_id,
@@ -648,7 +666,7 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
             // `apply_effects` 的返回值在这里**不另存一份**：那条 `Suspended` 凭据与下面
             // audience 里那个数是同一件事，存两处就有各自漂的一天
             apply_effects(
-                &mut sink.card,
+                &mut sink.desk.sink,
                 actor,
                 &effects,
                 &news_id,
@@ -659,10 +677,35 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
             // 报条目那个数会念出一个世界不认的答案
             NewsAudience::Institution {
                 what,
-                days: sink.card.books.session.suspensions.days_left(what),
+                days: sink.desk.sink.books.session.suspensions.days_left(what),
             }
         }
     };
+    fire_news_notice(&mut sink.desk, actor, &def, audience);
+    true
+}
+
+/// 门答完之后的人档收尾：把那份「谁挨了哪一下」的清单成一条广播。
+///
+/// 它是 [`fire_news`] 人档那一支的**尾巴**（装在
+/// [`Tail::News`](crate::passive::Tail::News) 上），与地档／机构档共用同一个出口
+/// [`fire_news_notice`] —— 三条来路各写一遍 `NewsFired` 的下一步就是三条流水各漂一半。
+pub fn finish_news(
+    desk: &mut crate::passive::GateDesk,
+    broadcaster: Entity,
+    def: &NewsDef,
+    hits: Vec<NewsHit>,
+) {
+    fire_news_notice(desk, broadcaster, def, NewsAudience::People(hits));
+}
+
+/// 一条新闻的**唯一**出口：日志一行、凭据一条。
+fn fire_news_notice(
+    desk: &mut crate::passive::GateDesk,
+    broadcaster: Entity,
+    def: &NewsDef,
+    audience: NewsAudience,
+) {
     let readout = match &audience {
         NewsAudience::People(hits) => format!("点到 {} 个人", hits.len()),
         NewsAudience::Ground { lands, .. } => format!("扫到 {} 块地", lands.len()),
@@ -670,18 +713,20 @@ pub fn fire_news(sink: &mut NewsSink, actor: Entity, id: NewsId) -> bool {
             format!("{} {} 剩 {days} 天", what.label(), what.halt_phrase())
         }
     };
-    info!("新闻「{title}」（{news_id}）：由 {actor:?} 播出，{readout}");
-    sink.fired.write(NewsFired {
-        broadcaster: actor,
+    info!(
+        "新闻「{}」（{}）：由 {broadcaster:?} 播出，{readout}",
+        def.title, def.id
+    );
+    desk.newsfired.write(NewsFired {
+        broadcaster,
         news: NewsNotice {
-            id: news_id,
-            title,
-            desc,
-            scope,
+            id: def.id.clone(),
+            title: def.title.clone(),
+            desc: def.desc.clone(),
+            scope: def.scope,
             audience,
         },
     });
-    true
 }
 
 /// 这一条新闻的锚点：播报者**脚下那块地**（他站的那一格不是地时，往环上找最近的一块）。
@@ -714,7 +759,6 @@ fn verb_area(effect: &CardEffect) -> Option<crate::plot::PlotArea> {
         | CardEffect::Detain { .. }
         | CardEffect::Release { .. }
         | CardEffect::MoveTo { .. }
-        | CardEffect::Insulate { .. }
         | CardEffect::FreePass { .. }
         | CardEffect::BuyLand
         | CardEffect::Reverse
@@ -747,7 +791,6 @@ fn only_public(effect: &CardEffect) -> bool {
         | CardEffect::Detain { .. }
         | CardEffect::Release { .. }
         | CardEffect::MoveTo { .. }
-        | CardEffect::Insulate { .. }
         | CardEffect::FreePass { .. }
         // 购地卡今天连范围都没有，而它**确实**只挑无主的地 —— 那条判据住在
         // `Books::buy_price`（无主 + 付得起），不在这里。这一格填 `false` 说的是
@@ -1073,7 +1116,6 @@ mod tests {
             CardEffect::MoveTo {
                 tile_name: "南京路".into(),
             },
-            CardEffect::Insulate { charges: 1 },
             CardEffect::LandStatus {
                 status: Plot::PriceHike,
                 days: 5,

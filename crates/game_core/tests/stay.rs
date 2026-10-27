@@ -281,33 +281,43 @@ fn a_shorter_stay_does_not_cut_a_longer_one_short() {
 }
 
 #[test]
-fn a_shield_does_not_eat_a_stay_card() {
+fn a_forgive_card_is_not_even_asked_about_a_stay() {
     // P13 定稿的免疫口径（10-25 拍板）：免罪卡只挡「被关起来」那一族，停留不在里面 ——
-    // 被人按住一回合是处境变了，不是一件灾落下来。牙齿在第二句断言：挡不掉的事
-    // 如果把那层护身也吃了，玩家手里就少了一张他根本没用上的卡
+    // 被人按住一回合是处境变了，不是一件灾落下来。
+    //
+    // P13b② 之后这条口径有**两句**证据，而不是一句：门连问都不问（`gate_asking` 为空），
+    // 而那张卡照样留在他手里。只断言后一句的话，「门压根没运转」与「门问过又落下」
+    // 在测试里是同一个形状 —— 空跑的断言等于没断言。
     let (mut app, p0, p1) = two_of_them(4, 3);
     let insulate = item_index(&app, "item_insulate");
     make_current(&mut app, p1);
     deal(&mut app, p1, insulate.0);
-    play_card(&mut app, p1, insulate.0, None);
     settle(&mut app, 2);
     make_current(&mut app, p0);
 
     hold_there(&mut app, p0, p1);
 
-    assert_eq!(stay_of(&app, p1), Some(1), "停留照样落地：护身不吃这一族");
-    assert_eq!(shield_of(&app, p1), Some(1), "挡不掉的事不该白吃一张免罪卡");
+    assert_eq!(stay_of(&app, p1), Some(1), "停留照样落地：免罪卡不吃这一族");
+    assert_eq!(
+        gate_asking(&app),
+        None,
+        "门不许对着一句「被按住」问人 —— 问了就是替玩家决定这张卡值不值"
+    );
+    assert_eq!(
+        forgive_in_hand(&app, p1),
+        1,
+        "没问的那一句不该白吃一张免罪卡"
+    );
     assert!(
         ledger(&app).contains(&"Play(P0->P1:item_stay)".to_string()),
         "流水里不该带「挡」：{:?}",
         ledger(&app)
     );
 
-    // 那层护身留给真正挡得住的那一族：同一张停留卡再打一次还是照样生效，
-    // 而陷害卡（拘留族）来了才吃它 —— 两边各归 [`game_core::afflict::AfflictDomain::forgivable`]
+    // 再打一次还是照样生效，而那张卡还是没被碰 —— 两边各归 [`game_core::passive`] 那张表
     hold_there(&mut app, p0, p1);
     assert_eq!(stay_of(&app, p1), Some(1), "第二次也没被挡");
-    assert_eq!(shield_of(&app, p1), Some(1), "两张停留卡都没吃到护身");
+    assert_eq!(forgive_in_hand(&app, p1), 1, "两张停留卡都没吃到免罪卡");
 }
 
 #[test]

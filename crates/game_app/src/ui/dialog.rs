@@ -13,14 +13,15 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Books, BuildingKind,
-    BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind, CompanyCharged,
-    Decision, Detention, DetentionPlace, EffectOutcome, Facility, Gavel, Hand, Institution,
-    Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets, MagicFilter,
-    MagicRitual, MagicSpell, MortgageDeny, MortgageOp, Owner, Pending, PendingDecision, PlayerId,
-    PlayerName, Rng, ServiceCharged, Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder,
-    bail_op_allowed, bid_allowed, bidders, buy_allowed, buyback, counter_plots, filter_targets,
-    mortgage_op_allowed, read_facts, restock, shop_op_allowed,
+    ActiveBoard, Ask, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Blocker, Books,
+    BuildingKind, BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind,
+    CompanyCharged, Decision, Detention, DetentionPlace, EffectOutcome, Facility, Gate, Gavel,
+    Hand, Institution, Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets,
+    MagicFilter, MagicRitual, MagicSpell, MortgageDeny, MortgageOp, Owner, PassiveCard,
+    PassiveEvent, PassiveMove, Pending, PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged,
+    Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders,
+    blame_candidates, buy_allowed, buyback, counter_plots, filter_targets, mortgage_op_allowed,
+    read_facts, restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -239,6 +240,9 @@ pub(crate) struct ModalView<'w, 's> {
     hands: Query<'w, 's, &'static Hand, With<PlayerId>>,
     /// 彩票柜台要读的第三张账（P8）。它是资源而不是世界状态：同一时刻只有柜台前那位看得见
     jackpot: Res<'w, Jackpot>,
+    /// 被动卡那道门（P13b②）。这一屏念的是「门在问哪一句」，而那句话只有门自己说得出 ——
+    /// 面板不许从 `Pending::Passive` 猜（那一格不带问句，也不带「已经转过一次」那位）
+    gate: Res<'w, Gate>,
     /// 魔法屋这一场法事的草稿（P13）：第二步那一屏念的是「女巫按这条条件筛出了谁」，
     /// 而那份名单只在资源里 —— 面板不许自己再筛一遍，两处各筛迟早漂
     ritual: Res<'w, MagicRitual>,
@@ -403,6 +407,67 @@ pub(crate) fn sync_modal(
         }),
         _ => None,
     };
+    // 门这一屏的读数（P13b②）。窗口挂着而门里没有问句的那一帧确实存在（答完一问与队列空
+    // 之间隔着一次消息投递），所以这里当它可能没有 —— 与拍卖台那一格同一个形状
+    let gate_ask: Option<GateAsk> = match (want, view.gate.asking()) {
+        (Some((_, Pending::Passive)), Some((who, ask, event))) => {
+            // 这一问由哪张卡答，与门里 `next_question` 读的是**同一句**（表上的 `offset_card`）：
+            // 面板自己挑一张就会出现「按钮写着嫁祸卡、门问的是免罪」
+            let card = match ask {
+                Ask::Offset => event.offset_card(),
+                Ask::Shift => Some(PassiveCard::Shift),
+            };
+            // 手里的张数按 `passive` 那一位数（与 `GateDesk::holds`／`count` 同一格），
+            // 不许按卡 id 数 —— 数据改一次行序，面板就会写着「2 张」而门只吃掉那一张
+            let held = view
+                .hands
+                .get(who)
+                .map(|hand| {
+                    hand.cards
+                        .iter()
+                        .filter(|id| {
+                            view.shelf
+                                .get(CardKind::Item, **id)
+                                .is_some_and(|def| def.passive == card)
+                        })
+                        .count() as u32
+                })
+                .unwrap_or(0);
+            Some(GateAsk {
+                ask,
+                event,
+                card,
+                held,
+                blame: match ask {
+                    // 候选与门里「这一问要不要挂出来」用的是同一句（[`blame_candidates`]）：
+                    // 两处各筛一遍的形状是「按钮亮着而门说不能转」。
+                    // 名字在这里查好 —— 收屏那一侧只管画（与 `bails`/`magic` 同一条分工）
+                    Ask::Shift => blame_candidates(
+                        &books
+                            .solvent()
+                            .into_iter()
+                            .map(|(other, _)| other)
+                            .collect::<Vec<_>>(),
+                        who,
+                    )
+                    .into_iter()
+                    .map(|other| (other, seat(&names, other)))
+                    .collect(),
+                    Ask::Offset => Vec::new(),
+                },
+                // 「后面还排着几份」与拍卖台那句「后面还排着几块」同一条读数：答完这一问
+                // 未必回到回合机，还有一份在等**下一个人**答（主语会跳动）
+                queued: view.gate.queue.len().saturating_sub(1),
+                // 回合主人是谁由轮转指针读，与窗口上那位比对 —— 「替别人答」那一句
+                // 要有两个人才说得出（同拍卖台读 `lot.bidder()` 那一条分工）
+                owner: view
+                    .order
+                    .current()
+                    .map_or_else(|| "没人".to_string(), |who| seat(&names, who)),
+            })
+        }
+        _ => None,
+    };
     let stamp = want.map_or(String::new(), |(player, about)| {
         let mut stamp = modal_stamp(
             about,
@@ -419,6 +484,7 @@ pub(crate) fn sync_modal(
                 company: company.as_ref(),
                 magic: &magic_rows,
                 draft: magic_draft.as_ref(),
+                gate: gate_ask.as_ref(),
             },
         );
         // 卡面这一屏的内容不在 `Pending` 里，而在 `RecentCard` 那份记忆里（消息驱动的
@@ -543,6 +609,15 @@ pub(crate) fn sync_modal(
             // 魔法屋的两步（P13）：两个窗口两个 builder，因为**候选来源不同** ——
             // 第一步读 `MagicFilter::ALL` 加现筛的名单，第二步读的是规则层存进草稿的那一份。
             // 合成一屏的话，「答完条件之后名单变了」这件事就没有地方说
+            // 被动卡那道门（P13b②）。这一屏与拍卖台同一条形状：**主语每帧都可能换人**，
+            // 而拿不到读数那一帧（问句与窗口之间隔着一次投递）整块不重建，
+            // 下一帧 `gate_system` 自己会把问句挂上来 —— 与 `fallback_note` 不同的是
+            // 这里没有一句假话可说（「门在问人」而问的是什么读不出）
+            Pending::Passive => {
+                if let Some(desk) = gate_ask.as_ref() {
+                    passive_modal(&mut commands, &font, &names, desk, player, stamp);
+                }
+            }
             Pending::Magic => {
                 magic_filter_modal(&mut commands, &font, player, &magic_rows, stamp);
             }
@@ -597,6 +672,9 @@ struct ModalExtra<'a> {
     /// 魔法屋第一步的候选（P13）：每条条件筛出谁 —— 「哪几颗该灰、行右写谁」都由它决定，
     /// 所以它是判据而不是文案。`Pending::Magic` 之外那一屏传空表
     magic: &'a [MagicRow],
+    /// 门这一屏的读数（P13b②）。哪一问、由哪张卡答、手里几张、能点名给谁 ——
+    /// 这四样每一样都决定屏幕上有一颗按钮，所以它们是判据而不是文案（坑 30 同一条）
+    gate: Option<&'a GateAsk>,
     /// 魔法屋第二步的草稿（P13）：条件 + 已筛出的名单。名单变了这一屏就得重建 ——
     /// 否则玩家对着一份「还写着三个人」的名单点出一道只落到两个人头上的法术
     draft: Option<&'a (MagicFilter, Vec<String>)>,
@@ -749,6 +827,25 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
             .map(|row| format!("{}:{}", row.filter.label(), row.who.join("+")))
             .collect::<Vec<_>>()
             .join(","),
+        // 门（P13b②）：问序两问的内容、手里的张数、可点名的名单、后面还排着几份 ——
+        // 四样都会变，而**主语每一帧都可能换人**（同拍卖台那条：A 转给 B 之后是 B 在答）。
+        // 少任何一位都会出现「那张卡已经花掉了、按钮还亮着」或「名单上写着三个人、
+        // 点下去落到两个人头上」
+        Pending::Passive => extra.gate.map_or(String::new(), |desk| {
+            format!(
+                "{}|{}|{}|{}|{}|{}",
+                desk.ask as u8,
+                desk.event as u8,
+                desk.card.map_or(0u8, |c| c as u8),
+                desk.held,
+                desk.blame
+                    .iter()
+                    .map(|(e, _)| e.to_bits().to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                desk.queued,
+            )
+        }),
         // 第二步（P13）：条件 + 草稿名单。条件是窗口自己带的（换条件＝换一场法事），
         // 名单是资源里的那一份 —— 两位都进签名，因为面板上那行字就是这两样
         Pending::MagicSpell(_) => extra.draft.map_or(String::new(), |(f, who)| {
@@ -2376,6 +2473,194 @@ fn lottery_modal(
     )
 }
 
+/// 门这一屏的读数（P13b②）。与 [`BidDesk`] 同一条形状：几样判据收在一块，面板不许自己
+/// 发明「这张能不能用」—— 张数与候选都是门里那两个函数（`holds`／`shift_candidates`）
+/// 读的同一份事实。
+pub(crate) struct GateAsk {
+    /// 问到哪一问（免罪？→ 嫁祸给谁？）。问序在规则层（PLAN §五 第 3 条），这里只念
+    pub ask: Ask,
+    /// 表上哪一行（「坐牢」）。玩家按下之前必须知道自己要挡掉的是哪一件事
+    pub event: PassiveEvent,
+    /// 这一问由哪张卡答。`None` = 表上这一行没有抵消卡 —— 门不会为它挂出第一问，
+    /// 所以这一格走不到；真走到了就念一个问号而不是替规则层编一张卡
+    pub card: Option<PassiveCard>,
+    /// 他手里有几张这一种。门问的就是这一位，所以这一格与「有资格」是同一句话
+    pub held: u32,
+    /// 可以点名给谁（转嫁那一问的候选，已排除自己，名字在这里查好）
+    pub blame: Vec<(Entity, String)>,
+    /// 这一问之后还排着几份信封。主语会跳动，而这一格是「答完这一句为什么还没回到回合机」
+    /// 的唯一说明（与拍卖台那句「后面还排着几块」同一条读数）
+    pub queued: usize,
+    /// 回合主人叫什么。这一格必须念出来：一张卡从甲手上打到乙身上时，这一屏问的是乙，
+    /// 而按钮按下去改的是乙的处境 —— 玩家有权知道自己在替谁答（PLAN §五 第 2 条的画面对照）
+    pub owner: String,
+}
+
+/// 门这一屏（P13b②）：一句问话、一排动作，而**主语每一帧都可能换人**（同拍卖台那条）。
+///
+/// 三格动作与门里 `PassiveMove` 的三臂逐字对应：用（花一张）、不用（放弃）、嫁祸给谁
+/// （点名 + 花一张）。**放弃不消耗卡**是验收⑤，所以那颗按钮旁边永远写着那一句 ——
+/// 玩家在两问之间按「不用」时，要知道手里那几张一张都没少。
+fn passive_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    names: &Query<&PlayerName>,
+    desk: &GateAsk,
+    player: Entity,
+    stamp: String,
+) -> Entity {
+    // 「谁在答」与「谁是回合主人」两句都要念得出，否则替别人答那一下看着像自己做了决定
+    let seat_of = seat(names, player);
+    frame(
+        commands,
+        (player, Pending::Passive),
+        stamp,
+        layout::AUCTION_PANEL,
+        col::BORDER_AUCTION,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                "被动卡",
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            // 问话原文在规则层（`Ask::label`）：面板只念，不改写 —— 两处各写一遍就会出现
+            // 「门问『要用免罪卡吗』而按钮写着『挡掉这次』」
+            p.spawn(center_label(&font.0, desk.ask.label(), size::ROW, col::KEY));
+            p.spawn(center_label(
+                &font.0,
+                format!("{seat_of} 正挨一次「{}」", desk.event.label()),
+                size::ROW,
+                col::MUTED,
+            ));
+            if desk.owner != seat_of {
+                p.spawn(center_label(
+                    &font.0,
+                    // 两个名字都要念出来，且「他」不许只有一个先行词：写成「现在是甲的回合 ——
+                    // 这一问挂在他身上」时，那个「他」在屏幕上读起来像甲，而问的是乙
+                    format!(
+                        "现在是 {} 的回合，而这一问挂在 {} 身上 —— 答完也由他挨",
+                        desk.owner, seat_of
+                    ),
+                    size::SMALL,
+                    col::JAILED,
+                ));
+            }
+            p.spawn(separator());
+            match desk.ask {
+                Ask::Offset => {
+                    // 卡名与张数都来自门里那一句判据读的同一格（`PassiveEvent::offset_card`
+                    // ＋`GateDesk::holds`），所以「写着 2 张、门吃掉 1 张」这种分叉画不出来
+                    let card = desk.card.map(PassiveCard::label).unwrap_or("?");
+                    p.spawn(label(
+                        &font.0,
+                        format!("手里有 {card} {held} 张", held = desk.held),
+                        size::ROW,
+                        col::KEY,
+                    ));
+                    p.spawn(label(
+                        &font.0,
+                        // 「同类多张只问一次」（PLAN §五 第 7 条）：这句话要说得出按一次
+                        // 只花一张、剩下的那张还在
+                        format!(
+                            "用一张就把这一次「{}」抵消掉；剩下的留着挨下一次",
+                            desk.event.label()
+                        ),
+                        size::SMALL,
+                        col::MUTED,
+                    ));
+                    button_row(p, |line| {
+                        button(
+                            line,
+                            &font.0,
+                            ButtonSpec::new(
+                                &format!("用{card}（手里 {} 张）", desk.held),
+                                layout::AUCTION_BUTTON,
+                                super::PRIMARY,
+                                UiAction::Gate(PassiveMove::Use),
+                            ),
+                        );
+                        button(
+                            line,
+                            &font.0,
+                            ButtonSpec::new(
+                                "不用（不花卡）",
+                                layout::AUCTION_BUTTON,
+                                super::SECONDARY,
+                                UiAction::Gate(PassiveMove::Decline),
+                            ),
+                        );
+                    });
+                }
+                Ask::Shift => {
+                    p.spawn(label(
+                        &font.0,
+                        format!(
+                            "把这一次「{}」推给点名的那一位；他自己手里有卡，还能接着挡",
+                            desk.event.label()
+                        ),
+                        size::ROW,
+                        col::KEY,
+                    ));
+                    p.spawn(label(
+                        &font.0,
+                        // 「链最长两跳」在屏幕上的那一格：接住的那位不能再往下转
+                        "他转到别人之后，别人只可以被挡、不可以再往下转 —— 一条链最多两跳",
+                        size::SMALL,
+                        col::MUTED,
+                    ));
+                    if desk.blame.is_empty() {
+                        // 门不会为「没有可点名的人」挂出这一问（`next_question` 那句判据），
+                        // 走到这里只可能是问出之后场上少了一个人。说一句而不是摆一排空按钮
+                        p.spawn(label(
+                            &font.0,
+                            "场上没有可点名的别人了",
+                            size::ROW,
+                            col::JAILED,
+                        ));
+                    }
+                    for (other, name) in &desk.blame {
+                        let _ = other;
+                        button_row(p, |line| {
+                            button(
+                                line,
+                                &font.0,
+                                ButtonSpec::new(
+                                    &format!("嫁祸给{name}（花一张嫁祸卡）"),
+                                    layout::AUCTION_BUTTON,
+                                    super::PRIMARY,
+                                    UiAction::Gate(PassiveMove::Shift { to: *other }),
+                                ),
+                            );
+                        });
+                    }
+                    button_row(p, |line| {
+                        button(
+                            line,
+                            &font.0,
+                            ButtonSpec::new(
+                                "不转（不花卡）",
+                                layout::AUCTION_BUTTON,
+                                super::SECONDARY,
+                                UiAction::Gate(PassiveMove::Decline),
+                            ),
+                        );
+                    });
+                }
+            }
+            if desk.queued > 0 {
+                // 同拍卖台那句：不说清楚，玩家会把「答完这一句回合还没动」当成面板卡住了
+                p.spawn(label(
+                    &font.0,
+                    format!("后面还排着 {} 份，一份答完才轮到下一个", desk.queued),
+                    size::SMALL,
+                    col::MUTED,
+                ));
+            }
+        },
+    )
+}
+
 /// 拍卖这一屏的读数（P9）。与 [`LotteryDesk`] 同一条形状：判据要读的几样收在一块，
 /// 面板不许自己发明「能不能喊」。
 ///
@@ -3661,10 +3946,12 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
         // 表上那一行的人话（`PassiveEvent::label`）就是这句话的内容，所以 UI 不再自己
         // 摆一张「族 → 词」的映射 —— 那是 P13b① 删掉的第一份冗余：五行词与表上十五行
         // 各有一份答案，而加一行时只有表会被编译器逼着表态。
-        // ⚠️ 「被谁挡的」今天还说不出（卡挡的还是神豁免的，这条凭据没带那一格）：
-        // 那句话归 ② 的门（门才知道是哪一张卡答的「可免」）
-        EffectOutcome::Blocked { event } => format!("一次{}被抵消", event.label()),
-        EffectOutcome::Shielded { charges } => format!("护身 {charges} 次"),
+        // 「被谁挡的」由 P13b② 的门带上来（[`Blocker`]）：**卡挡的要花一张卡、神挡的分文不花**，
+        // 两句混成一条「被抵消」就等于替玩家宣布少了一张卡（或少了一层永不消耗的免疫）
+        EffectOutcome::Blocked { event, by } => match by {
+            Blocker::Card => format!("一次{}被免罪卡抵消", event.label()),
+            Blocker::God(god) => format!("一次{}被{}豁免", event.label(), god.label()),
+        },
         // 块数要说：「整街」在缺路段键的盘上可能只盖到一块，玩家有权知道自己办成了多大一片
         EffectOutcome::Stamped {
             status,

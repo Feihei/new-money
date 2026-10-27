@@ -12,9 +12,10 @@
     "id": "item_insulate",
     "type": "item",
     "title": "免罪卡",
-    "desc": "只挡得住下一次「把人关起来」的事（坐牢／住院／出国）—— 停留、转向、乌龟与女巫的法术不吃它",
+    "desc": "不能主动打出去：事件落到你头上那一刻才问你 —— 挡掉那一次「把人关起来」的事（坐牢／住院／出国），一张抵一次。停留、转向、乌龟、女巫的法术与踩到联合航空那一下都不吃它",
     "cost_points": 20,
-    "effects": [{ "action": "insulate", "charges": 1 }]
+    "passive": "forgive",
+    "effects": []
   },
   {
     "id": "item_hike",

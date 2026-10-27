@@ -8,12 +8,17 @@
 //! 所以「受神明修正」不是魔法屋写的特例，是它根本没挡）。
 //!
 //! 免疫规则是这一格的全部难度（PLAN §三 那行），而它的答案是**构造方式**的差别：
-//! 十二条法术里只有坐牢与住院两条构造 [`crate::afflict::Affliction`] 过护身（那两行在
+//! 十二条法术里只有坐牢与住院两条构造 [`crate::afflict::Affliction`]（那两行在
 //! [`crate::passive`] 那张事件表上答"可免"），其余十条根本不进那条路 ——
-//! 于是「不受任何卡影响」不需要任何查询去逐条挡，漏挡与误挡在类型上都没有位置。坐牢与住院
-//! **刻意不接**神明那一半（`resist` 里的 `resists` 分支，连 [`crate::gods::doom_days`]
-//! 的天数加倍也不接）：大福神豁免的是厄运、大衰神加倍的也是厄运，而女巫的法术不是厄运 ——
-//! 免疫矩阵里「身上有大福神／大衰神」那两格的期望都是**照常生效、照 3 天**。
+//! 于是「不受任何卡影响」不需要任何查询去逐条挡，漏挡与误挡在类型上都没有位置。
+//! P13b② 之后那两条不再自己挡：它们整份交给 [`crate::passive::submit`]，
+//! 由那道门去问「手里有没有免罪卡、要不要嫁祸」；而**神明那一半仍然不接**
+//! （那四条在 [`crate::passive::affair_of`] 里被标成
+//! [`is_ritual`](crate::afflict::Affliction::is_ritual)，而神明那一族 —— 大福神的免疫与
+//! 大衰神的天数加倍 —— 只量**法事以外**的厄运），
+//! 连 [`crate::gods::doom_days`] 的天数加倍也不接：大福神豁免的是厄运、
+//! 大衰神加倍的也是厄运，而女巫的法术不是厄运 —— 免疫矩阵里
+//! 「身上有大福神／大衰神」那两格的期望都是**照常生效、照 3 天**。
 //!
 //! 两步窗口：[`crate::landing::Pending::Magic`]（选条件）→ [`crate::landing::Pending::MagicSpell`]
 //! （施法）。筛出的人在 [`MagicRitual`] 那份草稿里，随窗口同生同灭 —— 玩家在第一步
@@ -22,17 +27,15 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::afflict::Affliction;
 use crate::board::TileIndex;
-use crate::deck::{CardId, CardSink, apply_card};
+use crate::deck::{CardId, CardSink};
 use crate::land::LandId;
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
-use crate::msg::{
-    CardDrawn, MagicBlocked, MagicCast, MagicFilterPicked, MagicOffered, MagicSpellPicked,
-    MagicTargets, PlayerDetained,
-};
+use crate::msg::{MagicFilterPicked, MagicOffered, MagicSpellPicked, MagicTargets};
+use crate::passive::{GateDesk, Job, Step, Tail, submit};
 use crate::player::{Gender, Mount, PlayerId};
 use crate::settle::Books;
+use crate::turn::TurnPhase;
 use crate::world::ActiveBoard;
 
 /// 女巫给的条件（P13，PLAN §三 那一行的 11 种）。
@@ -377,33 +380,19 @@ pub fn magic_filter_system(
     pending.offer(asked, Pending::MagicSpell(filter));
 }
 
-/// 施法的全套工具。`CardSink` 是那把瑞士军刀（P3a 起它就是「把一件厄运落到
-/// 某人头上」的工具包）—— 坐牢/住院/停留/转向四条直接借它的查询与账本；
-/// 随机流、货架、手牌、发卡凭据在它的 `kit`（`BestowKit`，P6b 为神明发卡建的
-/// 那一包）—— 这里再自带一份就是同一个 system 里两把 `ResMut<Rng>`，
+/// 施法那一步：把这道法术**整份交给那道门**，然后收掉自己的窗口。
+///
+/// 工具包是 [`GateDesk`]（内含 `CardSink`）—— 坐牢/住院/停留/转向四条走门，
+/// 其余八条走 [`cast_step`]；随机流、货架、手牌、发卡凭据在 `desk.sink.kit`，
+/// 牌堆与道具栏在 `desk` 上。这里再自带一份就是同一个 system 里两把 `ResMut<Rng>`，
 /// 参数建立期直接撞成 B0001（坑 33 的资源版）。
-#[allow(clippy::too_many_arguments)]
-pub fn magic_spell_system(
-    mut ritual: ResMut<MagicRitual>,
-    mut pending: ResMut<PendingDecision>,
-    mut next: ResMut<NextState<crate::turn::TurnPhase>>,
-    mut sink: CardSink,
-    mut picks: MessageReader<MagicSpellPicked>,
-    active: Res<ActiveBoard>,
-    mut decks: Query<&'static mut crate::deck::Deck>,
-    mut inventories: Query<&'static mut crate::items::Inventory, With<PlayerId>>,
-    mut cast: MessageWriter<MagicCast>,
-    mut blocked: MessageWriter<MagicBlocked>,
-    // 「抽命运 3 张」那三张卡面的凭据（见 `cast_one` 里那一支的注）。与 `MagicCast` 分开：
-    // 那一条说这场法事落到谁头上，这一条说抽到了哪张牌 —— 命运格那条路本来就这么分
-    mut drawn: MessageWriter<CardDrawn>,
-) {
-    let Some((asked, Pending::MagicSpell(_))) = pending.active() else {
+pub fn magic_spell_system(mut desk: GateDesk, mut picks: MessageReader<MagicSpellPicked>) {
+    let Some((asked, Pending::MagicSpell(_))) = desk.pending.active() else {
         // 草稿与第二步窗口**同生同灭**：玩家按「离开」时 `decision_system` 只收窗口，
         // 而「这场法事筛出了谁」是资源里的东西 —— 不收它就会留下一份过期名单，
         // dump 与面板都读得到它，且回主菜单那一帧也没有任何东西替它清账（坑 22/25 同族）
-        if ritual.draft.is_some() {
-            ritual.draft = None;
+        if desk.ritual.draft.is_some() {
+            desk.ritual.draft = None;
         }
         return;
     };
@@ -416,141 +405,149 @@ pub fn magic_spell_system(
     let Some(spell) = answer else {
         return;
     };
-    let Some((_filter, wanted)) = ritual.draft.clone() else {
+    let Some((_filter, wanted)) = desk.ritual.draft.clone() else {
         // 草稿与窗口分叉了（不该发生 —— 两步同生同灭）。窗口照关，法术不施：
         // 宁可落空，也不把一个查不到名单的窗口留给下一位。交还回合与上面那条纪律同一条：
         // **谁清窗口谁交回合**，这里也一样不能只 `clear`
         warn!("魔法屋的草稿没了，法术落空");
-        pending.clear();
-        next.set(crate::turn::TurnPhase::TurnEnd);
+        desk.pending.clear();
+        desk.next.set(TurnPhase::TurnEnd);
         return;
     };
-    // 逐人施法：生效的进 `hit`，被免罪挡掉的那一位自己有凭据（`MagicBlocked`）
-    let mut hit: Vec<Entity> = Vec::new();
-    for target in &wanted {
-        if cast_one(
-            &mut sink,
-            asked,
-            *target,
-            spell,
-            &active,
-            &mut decks,
-            &mut inventories,
-            &mut blocked,
-            &mut drawn,
-        ) {
-            hit.push(*target);
-        }
+    // 草稿与名单一次消耗掉：门里那份 `Tail::Witch` 现在就是「还剩谁」的唯一记录，
+    // 资源里再留一份就是第二份真相（而它在门挂着的几十帧里会读到过期名单）
+    desk.ritual.draft = None;
+    // 窗口先收掉再交出去 —— 顺序反了也不出错（`offer` 会覆盖同一个槽），但这句话
+    // 说的是**归属**：从这一行起，那条窗口是门的，不再是法事的。
+    // 交还回合因此也归门（`finish_witch`），这里不能再写 `next.set`（坑 37）
+    desk.pending.clear();
+    let mut waiting = wanted;
+    if waiting.is_empty() {
+        // 第一步已经把空名单挡成落空了（`magic_filter_system`），这一格走不到。
+        // 写出来是为了让「一场没人可施的法事」也有一个凭据上的答案：空名单、空阻塞
+        finish_witch(&mut desk, asked, spell, Vec::new(), Vec::new());
+        return;
     }
-    // 「拍卖当格土地」那一道把回合**押给了拍卖机**：`auction_hold_system` 建场之后自己
-    // `next.set(WaitDecision)` 并把窗口挂到该出价的人身上。这里若也写 `TurnEnd`，同一回合
-    // 就有两处各写一个 `NextState` 而次序没人保证（§6.1 坑 37），症状是回合指针已经交给
-    // 下一个人、拍卖台还挂着 —— 而一句错话也不说。落空（`hit` 为空）不算押出去，仍由这里交回合。
+    let first = waiting.remove(0);
+    let source = format!("女巫「{}」", spell.label());
+    submit(
+        &mut desk,
+        Job::new(
+            first,
+            steps_of(spell),
+            source,
+            None,
+            crate::auction::Gavel::Card(asked),
+            Tail::Witch {
+                caster: asked,
+                spell,
+                hit: Vec::new(),
+                blocked: Vec::new(),
+                waiting,
+            },
+        ),
+    );
+}
+
+/// 一道法术在门里是几行条目。
+///
+/// 十一道是**一条**（`Step::Spell`，或者它本身就是那件「事」），只有「抽命运 3 张」是三条：
+/// 每一张都要单独办完（其中任何一张都可能是「直接入狱」那种要问一句的事），
+/// 而它们的消耗次序与旧 `cast_one` 那个循环逐字相同 —— 抽一张、办一张，
+/// 同一个种子因此跑出同一局。
+pub fn steps_of(spell: MagicSpell) -> Vec<Step> {
+    if spell == MagicSpell::DrawFate {
+        return vec![Step::FateDraw; 3];
+    }
+    vec![Step::Spell(spell)]
+}
+
+/// 施法完成：落槌名单与「被挡掉的那几位」各自成凭据，然后交还回合。
+///
+/// **交还回合的是这一句而不是 `magic_spell_system`**（坑 38 那条「谁清窗口谁交回合」）：
+/// 名单可能一次跑完（没有门要问），也可能拖到几十帧之后（有人在答免罪卡），
+/// 而两种情况下收尾的都是这最后一位。
+///
+/// `AuctionHere` 那一道把回合**押给了拍卖机**：`auction_hold_system` 建场之后自己
+/// `next.set(WaitDecision)` 并把窗口挂到该出价的人身上。这里若也写 `TurnEnd`，同一回合
+/// 就有两处各写一个 `NextState` 而次序没人保证（§6.1 坑 37），症状是回合指针已经交给
+/// 下一个人、拍卖台还挂着 —— 而一句错话也不说。落空（`hit` 为空）不算押出去，仍由这里交回合。
+pub fn finish_witch(
+    desk: &mut GateDesk,
+    caster: Entity,
+    spell: MagicSpell,
+    hit: Vec<Entity>,
+    blocked: Vec<Entity>,
+) {
+    for victim in blocked {
+        desk.blocked.write(crate::msg::MagicBlocked {
+            player: caster,
+            spell,
+            victim,
+        });
+    }
+    // **施法就是这一步的收尾**：一颗法术按钮既办完事又交还回合，与建设柜台那种
+    // 「办完窗口照开、还要再按一次先不建」不同 —— 草稿一次就消耗掉，留着窗口只会让
+    // 玩家对着一排「点下去只会落空」的按钮。
     let handed_to_auction = spell == MagicSpell::AuctionHere && !hit.is_empty();
-    cast.write(MagicCast {
-        player: asked,
+    desk.cast.write(crate::msg::MagicCast {
+        player: caster,
         spell,
         targets: hit,
     });
-    ritual.draft = None;
-    pending.clear();
-    // **施法就是这一步的收尾**：一颗法术按钮既办完事又交还回合，与建设柜台那种
-    // 「办完窗口照开、还要再按一次先不建」不同 —— 草稿一次就消耗掉，留着窗口只会让
-    // 玩家对着一排「点下去只会落空」的按钮。所以这里必须自己交回合（见上面那条纪律）：
-    // 只 `clear` 的写法会让回合机停在 `WaitDecision` 且不报错，真人鼠标一点就复现。
     if !handed_to_auction {
-        next.set(crate::turn::TurnPhase::TurnEnd);
+        desk.next.set(TurnPhase::TurnEnd);
     }
 }
 
-/// 把一道法术落到一个人头上。返回 `true` = 生效了（进 [`MagicCast::targets`]）。
+/// 把一道**不需要问人**的法术落到一个人头上。返回 `true` = 生效了（进 [`MagicCast::targets`]）。
 ///
-/// 免疫规则的**全部实现**就在前两条分支里：坐牢与住院构造 `Affliction`
-/// （表上 `JailTrip`／`HospitalTrip` 两行答「可免」）过护身 —— 但**只过卡那一半**（[`crate::afflict::Insulation`]
-/// 的 `absorb`），不走 `deck::resist` 里的神明分支：大福神豁免的是厄运，女巫的
-/// 法术不是厄运。其余十条**根本不构造 Affliction**，直接落 —— 「不受任何卡与神
-/// 影响」于是没有一处需要逐条挡。
+/// 「不需要问人」这一判据不在这里，而在 [`crate::passive::affair_of`]：坐牢、住院、原地停留、
+/// 向后转四条是**事**，它们在门里就被截住，走不到这一句。剩下的六道（得卡、加盖、存现金、
+/// 变卖两样、拆除、拍卖）改的是钱、资产或手牌 —— 「十二条里只有两条挡得住」这句话
+/// 今天仍然由**类型**说，而不是由这里的一条 `if` 说。
+///
+/// `DrawFate` 那一格走不到（它的条目是三条 `Step::FateDraw`），写成 `warn!` 而不是静默 `false`：
+/// 一个永远不会被走的臂与一条永远不会响的静默降级，在代码里是同一件事。
+///
+/// `gavel` 是**这一槌凭什么敲**，由门里那份信封带来（[`Job::gavel`](crate::passive::Job)）而不是
+/// 在这里现编：旧 `cast_one` 那一份写的是「开槌的人＝施法者」，而这一格若由这里替成
+/// 「被施法的人」，`can_open` 就会把「他把自己的地挂上自己的拍卖台」那条拒掉 —— 症状不是报错，
+/// 是顶栏念出「女巫把他挂上拍卖台」而台上没有这一槌（名单空着）。
 #[allow(clippy::too_many_arguments)]
-fn cast_one(
-    sink: &mut CardSink,
-    caster: Entity,
-    target: Entity,
+pub fn cast_step(
+    desk: &mut GateDesk,
     spell: MagicSpell,
-    active: &ActiveBoard,
-    decks: &mut Query<&'static mut crate::deck::Deck>,
-    inventories: &mut Query<&'static mut crate::items::Inventory, With<PlayerId>>,
-    blocked: &mut MessageWriter<MagicBlocked>,
-    drawn: &mut MessageWriter<CardDrawn>,
+    target: Entity,
+    gavel: crate::auction::Gavel,
 ) -> bool {
-    // 随机流 / 货架 / 手牌 / 发卡凭据都从 `sink.kit` 取，但**不预借**：DrawFate 那一支
-    // 要把整个 `sink` 递给 `apply_card`（命运牌的效果本来就走那条路），任何一次
-    // 跨分支的借用都会把那一下挡死 —— 所以各分支内现借现还（NLL 的形状）
+    // 随机流 / 货架 / 手牌 / 发卡凭据都从 `desk.sink.kit` 取，而且**现借现还**：
+    // 任何一次跨分支的借用都会把下一条挡住（NLL 的形状，与旧 `cast_one` 同一条）
     match spell {
-        // ===== 两条可被免罪抵消的 =====
-        MagicSpell::Jail | MagicSpell::Hospital => {
-            let place = match spell {
-                MagicSpell::Jail => crate::player::DetentionPlace::Jail,
-                _ => crate::player::DetentionPlace::Hospital,
-            };
-            let affliction = Affliction::detain(target, place);
-            // **只过卡**：`Insulation::absorb` 而不是 `deck::resist` —— 两者的差别
-            // 是神明那一半，而大福神的厄运豁免管不到女巫（见函数头那条注）
-            let shielded = sink
-                .insulations
-                .get_mut(target)
-                .is_ok_and(|mut shield| shield.absorb(&affliction));
-            if shielded {
-                // 挡住之后那一层就没了，而空护身不该留在身上（与 `deck::resist` 同一条收尾）：
-                // 否则面板上多出一个「有免罪卡但什么都不挡」的玩家，而他下一次照样被关进去
-                if sink
-                    .insulations
-                    .get(target)
-                    .is_ok_and(|shield| shield.is_empty())
-                {
-                    sink.commands
-                        .entity(target)
-                        .remove::<crate::afflict::Insulation>();
-                }
-                blocked.write(MagicBlocked {
-                    player: caster,
-                    spell,
-                    victim: target,
-                });
-                return false;
-            }
-            let Some((sentence, junction, end)) = crate::landing::detain(
-                &mut sink.commands,
-                &mut sink.positions,
-                &mut sink.books.detained,
-                &active.def,
-                target,
-                place,
-                crate::player::Term::Turns(MAGIC_DAYS),
-            ) else {
-                return false;
-            };
-            sink.detained.write(PlayerDetained {
-                player: target,
-                place: sentence.place,
-                junction,
-                end,
-            });
-            true
+        MagicSpell::Jail | MagicSpell::Hospital | MagicSpell::Stay | MagicSpell::TurnBack => {
+            // 那四条是「事」，归门管（`affair_of` 对它们答 `Some`）。走到这里只可能是
+            // 两条表分叉了 —— 宁可响一声，也不要替门把那一问吞掉
+            warn!("门里那四条法术走进了「不问人」那一条路（affair_of 与这里分叉了）");
+            false
         }
-        // ===== 作用于人的其余五条 =====
+        MagicSpell::DrawFate => {
+            warn!("「抽命运 3 张」的条目应该是 `Step::FateDraw`（steps_of 与这里分叉了）");
+            false
+        }
+        // ===== 作用于人的其余三条 =====
         MagicSpell::GainCard => {
             // 「得一张卡」发的是**道具卡**（货架那一副）：与「得一张命运牌」的差别
             // 在卡有没有 target——而这一格的玩家直觉就是「从货架上摸一张」。
             // 下标走专用子流：这一局施过几次法不该改变牌堆序
             let picked = {
-                let count = sink.kit.shelf.items().len() as u32;
+                let count = desk.sink.kit.shelf.items().len() as u32;
                 if count == 0 {
                     return false;
                 }
-                CardId(sink.kit.rng.pick_magic(0..=count - 1))
+                CardId(desk.sink.kit.rng.pick_magic(0..=count - 1))
             };
-            let limit = sink.books.rules.hand_limit;
-            let Ok(mut hand) = sink.kit.hands.get_mut(target) else {
+            let limit = desk.sink.books.rules.hand_limit;
+            let Ok(mut hand) = desk.sink.kit.hands.get_mut(target) else {
                 return false;
             };
             crate::hand::deal_to(
@@ -558,52 +555,17 @@ fn cast_one(
                 limit,
                 picked,
                 target,
-                &sink.kit.shelf,
-                &mut sink.kit.gained,
+                &desk.sink.kit.shelf,
+                &mut desk.sink.kit.gained,
             );
             true
         }
         MagicSpell::BankCash => {
-            let all = sink.books.bank_all_cash(target);
+            let all = desk.sink.books.bank_all_cash(target);
             all > 0
         }
-        MagicSpell::DrawFate => {
-            // 三张命运牌，每张照常 `apply_card` —— 「受神明修正」因此不是特例：
-            // 命运牌本来就走 stage 链，这里什么都不挡。
-            // 抽与施分成两步、卡面当场 clone：`apply_card` 要整个 `sink`（见函数头
-            // 那条注），任何一条跨过它的借用都得先松手
-            let mut drawn_any = false;
-            for _ in 0..3 {
-                let Some(id) = draw_fate_id(decks, &mut sink.kit.rng) else {
-                    break;
-                };
-                let Some(def) = (|| {
-                    let set = sink.kit.shelf.set(crate::card::CardKind::Fate)?;
-                    crate::deck::card_of(set, id).cloned()
-                })() else {
-                    break;
-                };
-                let outcomes = apply_card(sink, target, target, &def, None);
-                // 卡面照常上报，与踩到命运格**同一条凭据**（`CardDrawn`）：三张只留一句
-                // 「抽命运 3 张」的话，顶栏与 dump 念不出这三张是哪三张，玩家看见的只是
-                // 平白多出来的三笔账。刻意**不挂** `Pending::Card` —— 那张卡面窗口一次装
-                // 不下三张，而此刻说话的是法事窗口（它自己会收尾）
-                drawn.write(CardDrawn {
-                    player: target,
-                    card: crate::msg::CardNotice {
-                        id: def.id.clone(),
-                        kind: def.kind,
-                        title: def.title.clone(),
-                        desc: def.desc.clone(),
-                        outcomes,
-                    },
-                });
-                drawn_any = true;
-            }
-            drawn_any
-        }
         MagicSpell::SellCards => {
-            let Ok(mut hand) = sink.kit.hands.get_mut(target) else {
+            let Ok(mut hand) = desk.sink.kit.hands.get_mut(target) else {
                 return false;
             };
             if hand.is_empty() {
@@ -613,7 +575,8 @@ fn cast_one(
             // 售价从同一副池的定义里读 —— 两处对不上是数据错，按 0 卖并照发凭据
             let mut earned = 0u32;
             while let Some(id) = hand.cards.pop_front() {
-                let price = sink
+                let price = desk
+                    .sink
                     .kit
                     .shelf
                     .items()
@@ -623,12 +586,12 @@ fn cast_one(
                 earned += crate::shop::buyback(price, 90);
             }
             if earned > 0 {
-                sink.books.award_points(target, earned);
+                desk.sink.books.award_points(target, earned);
             }
             true
         }
         MagicSpell::SellItems => {
-            let Ok(mut inventory) = inventories.get_mut(target) else {
+            let Ok(mut inventory) = desk.inventories.get_mut(target) else {
                 return false;
             };
             let rows = inventory.clear_all();
@@ -642,48 +605,24 @@ fn cast_one(
                 .map(|(kind, count)| kind.price_points() * count)
                 .sum();
             if earned > 0 {
-                sink.books.award_points(target, earned);
+                desk.sink.books.award_points(target, earned);
             }
-            true
-        }
-        MagicSpell::Stay => {
-            // 字面 1 回合（P4④ 口径），就地写、取较大 —— 与停留卡同一条形状
-            let left = match sink.stays.get_mut(target) {
-                Ok(mut held) => {
-                    held.turns_left = held.turns_left.max(1);
-                    held.turns_left
-                }
-                Err(_) => {
-                    sink.commands
-                        .entity(target)
-                        .insert(crate::player::StaySentence { turns_left: 1 });
-                    1
-                }
-            };
-            let _ = left;
-            true
-        }
-        MagicSpell::TurnBack => {
-            let Ok(mut heading) = sink.headings.get_mut(target) else {
-                return false;
-            };
-            *heading = heading.flipped();
             true
         }
         // ===== 作用于脚下地的那三条 =====
         MagicSpell::BuildHere => {
-            let Some(land) = land_under(active, target, sink) else {
+            let Some(land) = land_under(&desk.sink.books.active, target, &desk.sink) else {
                 return false;
             };
-            sink.books.upgrade_witch(land).is_some()
+            desk.sink.books.upgrade_witch(land).is_some()
         }
         MagicSpell::Demolish => {
-            let Some(land) = land_under(active, target, sink) else {
+            let Some(land) = land_under(&desk.sink.books.active, target, &desk.sink) else {
                 return false;
             };
             // 降一级、保所有权（与定时炸弹同一支损害形状）—— 女巫的「拆除」不是征收
-            let before = sink.books.view(land).map(|view| view.level);
-            let tally = sink.books.damage(
+            let before = desk.sink.books.view(land).map(|view| view.level);
+            let tally = desk.sink.books.damage(
                 land,
                 crate::damage::LandDamage::Degrade { levels: 1 },
                 crate::plot::PlotArea::One,
@@ -693,42 +632,31 @@ fn cast_one(
             // 顶栏会对一块空地念出「女巫拆掉了她的楼」—— 面板说的与世界上发生的分叉，
             // 与 P9 那句「写的与扣的必须同一个表达式」是同一条纪律。
             tally.hit > 0
-                && before
-                    .is_some_and(|was| sink.books.view(land).is_some_and(|now| now.level < was))
+                && before.is_some_and(|was| {
+                    desk.sink
+                        .books
+                        .view(land)
+                        .is_some_and(|now| now.level < was)
+                })
         }
         MagicSpell::AuctionHere => {
-            let Some(land) = land_under(active, target, sink) else {
+            let Some(land) = land_under(&desk.sink.books.active, target, &desk.sink) else {
                 return false;
             };
-            let listing = crate::auction::Listing {
-                land,
-                gavel: crate::auction::Gavel::Card(caster),
-            };
+            let listing = crate::auction::Listing { land, gavel };
             // 这一问与拍卖机用的是**同一句**（[`crate::auction::can_open`]，只读且不依赖座位序，
             // 它的注早就写了「既能在出牌前当『会不会落空』那一问，也能在建场前用」）。
             // 不问的后果不是钱而是**话**：那块地若押着、无主、是施法者自己的、或场上没有别人，
             // 机器下一帧会把这一槌丢掉并只留一句 `warn!`，而顶栏已经说了「女巫把他挂上拍卖台」——
             // 面板报的「生效」与世界上发生的事分叉。机器在开场那一刻还会再问一次，两处不冲突
-            if crate::auction::can_open(&sink.books, land, listing.gavel).is_err() {
+            if crate::auction::can_open(&desk.sink.books, land, listing.gavel).is_err() {
                 return false;
             }
             // 与拍卖卡同一条快道（`requested`）：开槌的是施法的玩家、钱归他
-            sink.books.auction.requested = Some(listing);
+            desk.sink.books.auction.requested = Some(listing);
             true
         }
     }
-}
-
-/// 从命运牌堆抽一张（DrawFate 每一轮的那一下）。独立成函数是因为循环里的
-/// `let-else` 嵌套会让块表达式的形状读起来像语法错误 —— 这里的两步各自发散。
-fn draw_fate_id(
-    decks: &mut Query<&'static mut crate::deck::Deck>,
-    rng: &mut crate::rng::Rng,
-) -> Option<CardId> {
-    let mut deck = decks
-        .iter_mut()
-        .find(|d| d.kind == crate::card::CardKind::Fate)?;
-    deck.draw(rng)
 }
 
 /// 他脚下那一格绑定的地（`TileDef.land_id`）。三条地法术共用这一个读数：

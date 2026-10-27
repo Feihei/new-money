@@ -14,8 +14,7 @@ mod common;
 use bevy::prelude::*;
 use common::*;
 use game_core::prelude::{
-    Bankrupt, CardAim, CardId, GameRules, GameSeed, GameSetup, Insulation, Pending,
-    PendingDecision, TurnPhase,
+    Bankrupt, CardAim, CardId, GameRules, GameSeed, GameSetup, Pending, PendingDecision, TurnPhase,
 };
 
 /// 装配到「P0 的回合、掷骰之前」，返回 app 与两名玩家（按 `PlayerId` 认人：P0、P1）。
@@ -42,13 +41,24 @@ fn a_card_sits_in_hand_doing_nothing_until_it_is_played() {
     let (mut app, p0, p1) = two_players_before_the_roll();
     let frame = item_index(&app, "item_frame");
     deal(&mut app, p0, frame.0);
+    let insulate = item_index(&app, "item_insulate");
+    deal(&mut app, p1, insulate.0);
 
     assert_eq!(hand_of(&app, p0), vec![frame], "卡该按获得顺序躺在手里");
-    assert!(hand_of(&app, p1).is_empty(), "另一只手是空的");
+    assert_eq!(
+        hand_of(&app, p1),
+        vec![insulate],
+        "另一只手只躺着那张被动卡"
+    );
     assert_eq!(turns_left(&app, p1), None, "拿着陷害卡不等于谁坐牢");
     assert!(
-        app.world().entity(p1).get::<Insulation>().is_none(),
-        "发牌那一刻不该有护身"
+        gate_asking(&app).is_none() && gate_depth(&app) == 0,
+        "P13b②：被动卡不是护身组件 —— 没有事件就没有一问，手里那张只是资格"
+    );
+    assert_eq!(
+        forgive_in_hand(&app, p1),
+        1,
+        "而那张资格照样数得出来（门问的就是这一位）"
     );
 }
 
@@ -79,35 +89,52 @@ fn playing_a_framing_card_locks_the_target_up_and_empties_the_slot() {
 }
 
 #[test]
-fn an_insulated_victim_shrugs_off_the_frame_and_both_sides_keep_their_trail() {
-    // PLAN §四 P3 验收的原文形状：A 用陷害打 B，B 有免罪卡则**完全抵消**并各留流水
+fn a_forgive_card_in_hand_blocks_the_frame_and_both_sides_keep_their_trail() {
+    // PLAN §四 P3 验收的原文形状：A 用陷害打 B，B 有免罪卡则**完全抵消**并各留流水。
+    //
+    // P13b② 改的是「有免罪卡」这四个字的含义：它不再需要先打出去挂上一层，
+    // **躺在手里就是资格**，而门在花掉那一刻从 `Hand` 里摘走那一张。于是这条用例
+    // 多断言两样以前没有的东西：这一问挂在 **B** 身上（不是出牌的 A，PLAN §五 第 2 条
+    // 「决策主体能在回合内跳动」），以及答完之后门是空的（没留下第二个没人答的窗口）。
     let (mut app, p0, p1) = two_players_before_the_roll();
+    // 这道门要人工答：自动玩家对 `Pending::Passive` 一律答「不用」（与拍卖那格同一条理由），
+    // 而这条用例测的就是「用」那一侧
+    app.insert_resource(DecisionPolicy::Hold);
     let frame = item_index(&app, "item_frame");
     let insulate = item_index(&app, "item_insulate");
 
-    // 免罪卡只能由本人在自己的回合打，所以先把轮转挪到 P1 身上
-    make_current(&mut app, p1);
     deal(&mut app, p1, insulate.0);
-    play_card(&mut app, p1, insulate.0, None);
-    settle(&mut app, 2);
-    assert_eq!(shield_of(&app, p1), Some(1), "一张免罪 = 一层护身");
-    assert!(hand_of(&app, p1).is_empty(), "打过就没了");
-
     make_current(&mut app, p0);
     deal(&mut app, p0, frame.0);
     play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
     settle(&mut app, 2);
 
+    assert_eq!(
+        pending_of(&app),
+        Some((p1, Pending::Passive)),
+        "该被问的是挨打的那位，不是出牌的那位"
+    );
+    assert_eq!(
+        gate_asking(&app),
+        Some((p1, Ask::Offset, PassiveEvent::JailTrip)),
+        "门问的是「免罪」那一问，而那一行是坐牢"
+    );
+    assert_eq!(turns_left(&app, p1), None, "问还没答完，人先不该进去");
+
+    answer_gate(&mut app, p1, PassiveMove::Use);
+    settle(&mut app, 2);
+
     assert_eq!(turns_left(&app, p1), None, "抵消了就没有入狱这回事");
-    assert_eq!(shield_of(&app, p1), None, "用掉的那一层要跟着收走");
+    assert_eq!(forgive_in_hand(&app, p1), 0, "用掉的那一张要从手里消失");
+    assert_eq!(gate_asking(&app), None, "答完的门该是空的");
     let log = ledger(&app);
     assert!(
-        log.contains(&"Play(P1->P1:item_insulate)".to_string()),
-        "B 那边要看得见自己打过卡：{log:?}"
+        log.contains(&"Play(P0->P1:item_frame挡卡)".to_string()),
+        "A 那边要看得见这次被挡了：{log:?}"
     );
     assert!(
-        log.contains(&"Play(P0->P1:item_frame挡1)".to_string()),
-        "A 那边要看得见这次被挡了：{log:?}"
+        log.iter().any(|l| l.starts_with("Used(")),
+        "B 那边要看得见自己花掉了一张卡：{log:?}"
     );
     assert!(
         !log.iter().any(|l| l.starts_with("Detain(")),
@@ -116,32 +143,76 @@ fn an_insulated_victim_shrugs_off_the_frame_and_both_sides_keep_their_trail() {
 }
 
 #[test]
-fn two_shields_block_two_frames_and_the_third_one_lands() {
-    // 一次性消耗品按次计：两张免罪卡 = 抵两次，而不是「这段时间免疫」
+fn declining_the_gate_costs_no_card_and_the_frame_lands() {
+    // 验收⑤：放弃 = 事件照原样落，且**不消耗卡**（P3d④a ⑤ 那条纪律：卡没了事没成＝缺陷）。
+    // 这一条与上面那条是一对 —— 只测「用」的那一侧，测试自己就分不清
+    // 「门没花卡」与「门根本没问」这两种世界
     let (mut app, p0, p1) = two_players_before_the_roll();
+    app.insert_resource(DecisionPolicy::Hold);
     let frame = item_index(&app, "item_frame");
     let insulate = item_index(&app, "item_insulate");
 
-    make_current(&mut app, p1);
-    for _ in 0..2 {
-        deal(&mut app, p1, insulate.0);
-        play_card(&mut app, p1, insulate.0, None);
-        settle(&mut app, 2);
-    }
-    assert_eq!(shield_of(&app, p1), Some(2), "护身是叠层不是刷新");
-
+    deal(&mut app, p1, insulate.0);
     make_current(&mut app, p0);
-    for _ in 0..2 {
-        deal(&mut app, p0, frame.0);
-        play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
-        settle(&mut app, 2);
-        assert_eq!(turns_left(&app, p1), None, "两层还没用完");
-    }
     deal(&mut app, p0, frame.0);
     play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
     settle(&mut app, 2);
-    assert_eq!(turns_left(&app, p1), Some(5), "第三张没人挡了");
-    assert_eq!(shield_of(&app, p1), None, "两层都用掉了");
+    assert_eq!(
+        gate_asking(&app),
+        Some((p1, Ask::Offset, PassiveEvent::JailTrip))
+    );
+
+    answer_gate(&mut app, p1, PassiveMove::Decline);
+    settle(&mut app, 2);
+
+    assert_eq!(turns_left(&app, p1), Some(5), "放弃之后那一下照原样落下来");
+    assert_eq!(forgive_in_hand(&app, p1), 1, "说「不用」不该花掉任何一张卡");
+    assert_eq!(
+        phase(&app),
+        TurnPhase::WaitRoll,
+        "门答完把回合交还给出牌那一格"
+    );
+}
+
+#[test]
+fn two_forgive_cards_are_asked_once_and_only_one_is_spent() {
+    // 验收⑨（PLAN §五 第 7 条）：两张同类卡在门上是**同一问**。
+    // 按张数循环的实现在这里红 —— 它会弹两次窗，而玩家两次点的是同一句话。
+    let (mut app, p0, p1) = two_players_before_the_roll();
+    app.insert_resource(DecisionPolicy::Hold);
+    let frame = item_index(&app, "item_frame");
+    let insulate = item_index(&app, "item_insulate");
+
+    deal(&mut app, p1, insulate.0);
+    deal(&mut app, p1, insulate.0);
+    assert_eq!(forgive_in_hand(&app, p1), 2, "前置：两张都在手里");
+    make_current(&mut app, p0);
+    deal(&mut app, p0, frame.0);
+    play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
+    settle(&mut app, 2);
+
+    // 一次调用只挂出一问：`gate_depth` 是 1，而那一句问完门就空了
+    assert_eq!(gate_depth(&app), 1, "两张卡不该问两遍");
+    answer_gate(&mut app, p1, PassiveMove::Use);
+    settle(&mut app, 2);
+
+    assert_eq!(turns_left(&app, p1), None, "第一张挡掉了那一下");
+    assert_eq!(forgive_in_hand(&app, p1), 1, "一张抵一次，另一张留着");
+    assert_eq!(gate_asking(&app), None, "答完就收，不留第二问");
+
+    // 留着的那一张对**下一次**还有答案 —— 这才是「按次」而不是「按天免疫」
+    deal(&mut app, p0, frame.0);
+    play_card(&mut app, p0, frame.0, Some(CardAim::Player(p1)));
+    settle(&mut app, 2);
+    assert_eq!(
+        gate_asking(&app),
+        Some((p1, Ask::Offset, PassiveEvent::JailTrip)),
+        "第二张照样要被问"
+    );
+    answer_gate(&mut app, p1, PassiveMove::Decline);
+    settle(&mut app, 2);
+    assert_eq!(turns_left(&app, p1), Some(5), "说不用就没人挡得住这一张");
+    assert_eq!(forgive_in_hand(&app, p1), 1, "不用那一问，两张都留着");
 }
 
 #[test]

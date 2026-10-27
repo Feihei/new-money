@@ -14,12 +14,13 @@ use std::collections::HashSet;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, ArcadeDeal, Auction, BankBalance, BuildingLevel, BuyTicketRequested, Detention,
-    DetentionPlace, GameKind, GameRules, GameSession, Gavel, God, GodDesk, Hired, Inventory,
-    ItemKind, LandId, Listing, Mount, MountChanged, NewsSink, Occupancy, OccupancyKind, Owner,
-    Pending, PendingDecision, PlayerDetained, PlayerId, Points, RemoteBuildOffered, Rng, Term,
-    TileIndex, TokenPosition, TurnOrder, TurnPhase, Villain, VillainHired, VillainKind, Walker,
-    detain, find_id, fire_news, place,
+    ActiveBoard, ArcadeDeal, Auction, BankBalance, BuildingLevel, BuyTicketRequested, CardAim,
+    CardGained, CardId, Detention, DetentionPlace, GameKind, GameRules, GameSession, Gavel, God,
+    GodDesk, Hand, Hired, Inventory, ItemKind, LandId, Listing, Mount, MountChanged, NewsSink,
+    Occupancy, OccupancyKind, Owner, Pending, PendingDecision, PlayCardRequested, PlayerDetained,
+    PlayerId, Points, RemoteBuildOffered, Rng, Shelf, Term, TileIndex, TokenPosition, TurnOrder,
+    TurnPhase, Villain, VillainHired, VillainKind, Walker, deal_to, detain, find_id, fire_news,
+    place,
 };
 
 pub struct DevPlugin;
@@ -41,6 +42,7 @@ pub fn install_if_requested(app: &mut App) {
     let villain = ForceVillain::from_env();
     let magic = ForceMagic::from_env();
     let spell = ForceSpell::from_env();
+    let gate = ForceGate::from_env();
     if forced.0.is_none()
         && bail.0.is_none()
         && !items.0
@@ -59,6 +61,7 @@ pub fn install_if_requested(app: &mut App) {
         // 与本模块上面那条「拼错的旋钮值不崩也不红」是同一族坑（P13 第一次冒烟就踩到了）
         && magic.0.is_none()
         && spell.0.is_none()
+        && !gate.0
     {
         return;
     }
@@ -152,6 +155,12 @@ pub fn install_if_requested(app: &mut App) {
             wanted.0.label()
         );
     }
+    if gate.0 {
+        info!(
+            "开发注入已开启（NM_GATE）：当前玩家手里一张陷害卡，另一位玩家手里免罪卡与嫁祸卡各一张，\
+             并替他打出那张陷害卡 —— 门于是问到**不是当前回合玩家**的那一位面前（这一问由鼠标按）"
+        );
+    }
     app.add_plugins(DevPlugin);
 }
 
@@ -215,6 +224,25 @@ struct ForceItems(bool);
 impl ForceItems {
     fn from_env() -> Self {
         Self(std::env::var_os("NM_ITEMS").is_some())
+    }
+}
+
+/// `NM_GATE=1`：让门向**不是当前回合玩家**的那一位开口。
+///
+/// 为什么非要有这个旋钮：门只在「有人即将挨那一下」的那一刻开口，而那一下要同时凑齐三件事 ——
+/// 有人手里有陷害卡、轮到他出牌、被打的那一位手里正好有一张被动卡。运气押不住截图时刻
+/// （同 `NM_DETAIN`／`NM_AUCTION` 那两条理由），而 P13b 的验收原话是「窗口挂到**我**这儿、
+/// 回合停住、答完再落」，这个「我」按设计**不是**当前回合玩家：「决策主体能在回合内跳动」
+/// 正是这一阶段的整条理由，拍不到就等于没做。
+///
+/// 它只发牌、只替当前玩家打出那张陷害卡，**不替他回答门** —— 那颗「用免罪卡」按下去省掉一次
+/// 坐牢，而那颗「不用」按下去才问出第二句（嫁祸），于是两问在同一局里都拍得到，且两问的答案
+/// 都来自鼠标或自动玩家，不是来自这个旋钮。
+#[derive(Resource)]
+struct ForceGate(bool);
+impl ForceGate {
+    fn from_env() -> Self {
+        Self(std::env::var_os("NM_GATE").is_some())
     }
 }
 
@@ -386,6 +414,7 @@ impl Plugin for DevPlugin {
             .insert_resource(ForceVillain::from_env())
             .insert_resource(ForceMagic::from_env())
             .insert_resource(ForceSpell::from_env())
+            .insert_resource(ForceGate::from_env())
             // 回菜单时清掉「已经注入过」：`NM_DETAIN` 配 `NM_MENULOOP` 要能在第二局再注入一次，
             // 而留在 true 就等于「新局什么都没有」，看着像注入失效（跨局残留那类坑的反面）
             .add_systems(OnEnter(crate::scene::Scene::Menu), clear_injected)
@@ -413,6 +442,9 @@ impl Plugin for DevPlugin {
                     force_villain,
                     // 魔法屋第一步与保释/彩票同一族门（`WaitRoll` 时才有「当前玩家」可摆）
                     force_magic,
+                    // 门那一问也要 `WaitRoll`：出牌入口在规则层只认这一格相位（`PlayWindow`），
+                    // 在别的相位写 `PlayCardRequested` 等于什么都没发生，而症状是「面板是空的」
+                    force_gate,
                 )
                     .run_if(in_state(crate::scene::Scene::Board))
                     .run_if(in_state(TurnPhase::WaitRoll)),
@@ -456,6 +488,7 @@ struct Injected {
     /// 两次回答，共用一位的话后给的那个永远轮不到（上面那段「每个旋钮一位」的同一条理由）
     magic: bool,
     spell: bool,
+    gate: bool,
 }
 
 fn clear_injected(mut done: ResMut<Injected>) {
@@ -1048,6 +1081,86 @@ fn force_spell(force: Res<ForceSpell>, mut desk: MagicInject<'_>) {
         spell: wanted.0,
     });
     info!("注入：{player:?} 求了一道「{}」", wanted.0.label());
+}
+
+/// 门那一幕要发的两条消息 + 要读的三样。打包（§六 坑 8）。
+#[derive(SystemParam)]
+struct GateScene<'w, 's> {
+    order: Res<'w, TurnOrder>,
+    rules: Res<'w, GameRules>,
+    /// 手牌里存的是下标，可读的名字在货架上 —— 注入按**卡面 id** 找那张卡，理由见 [`item_of`]
+    shelf: Shelf<'w>,
+    hands: Query<'w, 's, &'static mut Hand, With<PlayerId>>,
+    gained: MessageWriter<'w, CardGained>,
+    plays: MessageWriter<'w, PlayCardRequested>,
+    done: ResMut<'w, Injected>,
+}
+
+/// 卡面 id → `Item` 池里的那个下标。
+///
+/// 旋钮不按名字发牌就按什么发？写死下标的话，`item_cards.json` 里插一行会让注入发给
+/// 别人一张别的卡，而症状是「门问了一句谁手里都没有的话」—— 面板一片空白，日志一句没错。
+fn item_of(shelf: &Shelf<'_>, wanted: &str) -> Option<CardId> {
+    shelf
+        .items()
+        .iter()
+        .position(|def| def.id == wanted)
+        .map(|at| CardId(at as u32))
+}
+
+/// `NM_GATE=1` 的那一幕：当前玩家手里一张陷害卡，另一位玩家手里免罪卡与嫁祸卡各一张，
+/// 然后**走真出牌入口**打出去 —— 门由规则层自己开，问谁、问哪一句、答完回哪一格都不归这里管。
+///
+/// 两个人手里都放一张免罪卡：被问的那一位要能挡下那一下，而接住嫁祸的那一位也要能挡 ——
+/// 「同一件事最多转一次，但接住的人自己的免罪照样吃」这句卡面话，只有在他被问第二次时才拍得到。
+fn force_gate(force: Res<ForceGate>, mut desk: GateScene<'_, '_>) {
+    if !force.0 || desk.done.gate {
+        return;
+    }
+    let Some(current) = desk.order.current() else {
+        return;
+    };
+    // 被打的那一位取座位序里第一个不是当前玩家的人：这一幕的全部理由就是「答的不是他」，
+    // 而场上只剩一个人时嫁祸那一问的候选名单是空的，门只会问出一句没人接的话
+    let Some(victim) = desk.order.order.iter().copied().find(|who| *who != current) else {
+        desk.done.gate = true;
+        warn!("NM_GATE：场上找不到第二个人，门问不出去");
+        return;
+    };
+    // 名额一次就消耗（同 `NM_AUCTION`）：卡面 id 找不到时每帧重试就是把日志刷满
+    desk.done.gate = true;
+    let (Some(frame), Some(forgive), Some(shift)) = (
+        item_of(&desk.shelf, "item_frame"),
+        item_of(&desk.shelf, "item_insulate"),
+        item_of(&desk.shelf, "item_shift"),
+    ) else {
+        warn!("NM_GATE：道具池里找不到陷害卡／免罪卡／嫁祸卡，什么都没注入");
+        return;
+    };
+    let limit = desk.rules.hand_limit;
+    // 走 [`deal_to`] 而不是直接改 `Hand`：上限与「满了挤掉最前面那张」住在那一句里，
+    // 而它顺手发的 `CardGained` 让手牌面板与顶栏流水都说得出这几张是怎么来的
+    for (who, card) in [
+        (victim, forgive),
+        (victim, shift),
+        (current, frame),
+        (current, forgive),
+    ] {
+        let Ok(mut hand) = desk.hands.get_mut(who) else {
+            warn!("NM_GATE：{who:?} 手上没有牌栏，注入停在这里");
+            return;
+        };
+        deal_to(&mut hand, limit, card, who, &desk.shelf, &mut desk.gained);
+    }
+    desk.plays.write(PlayCardRequested {
+        player: current,
+        card: frame,
+        aim: Some(CardAim::Player(victim)),
+    });
+    info!(
+        "注入：当前玩家对 {victim:?} 打出「陷害卡」—— 门现在问到的是**不是当前回合玩家**的那一位，\
+         他手里有免罪卡与嫁祸卡各一张（答完这一问才落那一判）"
+    );
 }
 
 /// `NM_AUCTION=<地块号>`：把那块地挂上拍卖台。`None` = 没开。

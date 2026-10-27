@@ -16,30 +16,33 @@ use bevy::asset::AssetPlugin;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::CoreGamePlugin;
-use game_core::prelude::{
-    ActiveBoard, Adjustment, ArcadeDeal, AtmAccess, Auction, AuctionFailed, AuctionMove,
+/// P13b② 起改成 `pub use`：门的新类型（[`Ask`]／[`PassiveEvent`]／[`PassiveMove`]）要在
+/// 好几份测试里写，而每个文件补一行 import 会让 `use common::*;` 这条约定名存实亡。
+pub use game_core::prelude::{
+    ActiveBoard, Adjustment, ArcadeDeal, Ask, AtmAccess, Auction, AuctionFailed, AuctionMove,
     AuctionStarted, AuctionWon, BailRequested, BankBalance, BankOp, BankOpDone, BankOpRequested,
-    BankVisited, BidMove, BidPlaced, BidWithdrawn, BombTransferred, Books, BuildOffered,
-    BuildRequested, BuildingLevel, BuyOffered, BuyTicketRequested, CardAim, CardDrawn, CardGained,
-    CardId, CardKind, CardLost, CardPlayed, CardSet, CardSnatched, CashChanged, ChairmanTook,
-    ChargeKind, ChargeWaived, ChestOpened, CompanyCharged, CompanyLedgers, CompanyPayout,
-    Correction, Corrections, CouponBoxes, DamageTally, DataHandles, Date, Decision, DecisionChosen,
-    Deck, DepositsRobbed, Detention, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride,
-    FacilityBuilt, FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameKind, GameOver,
-    GameRules, GameSeed, GameSession, GameSetup, Gameplay, GiftsGiven, God, GodAppeared, GodDeed,
-    GodLeft, GodPossessed, Hand, IndemnityPaid, Insulation, Insured, Inventory, ItemKind,
-    ItemPlaced, ItemThieved, Jackpot, JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId,
-    LandStatus, LandTaken, LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought,
-    LotteryDrawn, LotteryTickets, LotteryWon, MagicBlocked, MagicCast, MagicFilter,
-    MagicFilterPicked, MagicSpell, MagicSpellPicked, Market, MarketClock, MinigameResult,
-    MinigameScore, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged,
-    MoveCap, MoveCapped, NewsSink, Occupancy, OccupancyAt, OccupancyKind, Owner, Pending,
-    PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed,
-    PlayerBankrupt, PlayerDetained, PlayerId, PlayerName, PlayerTeleported, PlotArea, Points,
-    PointsChanged, PointsStolen, PolicyBought, Possession, Presence, RedEnvelope,
-    RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RentRerouted,
-    RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, ServiceCharged, Shelf, ShopOpDone,
-    ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId,
+    BankVisited, BidMove, BidPlaced, BidWithdrawn, BlameShifted, Blocker, BombTransferred, Books,
+    BuildOffered, BuildRequested, BuildingLevel, BuyOffered, BuyTicketRequested, CardAim,
+    CardDrawn, CardGained, CardId, CardKind, CardLost, CardPlayed, CardSet, CardSnatched,
+    CashChanged, ChairmanTook, ChargeKind, ChargeWaived, ChestOpened, CompanyCharged,
+    CompanyLedgers, CompanyPayout, Correction, Corrections, CouponBoxes, DamageTally, DataHandles,
+    Date, Decision, DecisionChosen, Deck, DepositsRobbed, Detention, DetentionLifted,
+    DetentionSkipped, DiceRolled, EffectOutcome, EpochOverride, FacilityBuilt,
+    FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameKind, GameOver, GameRules,
+    GameSeed, GameSession, GameSetup, Gameplay, Gate, GiftsGiven, God, GodAppeared, GodDeed,
+    GodLeft, GodPossessed, Hand, IndemnityPaid, Insured, Inventory, ItemKind, ItemPlaced,
+    ItemThieved, Jackpot, JackpotChanged, JackpotWhy, LandBought, LandDamage, LandId, LandStatus,
+    LandTaken, LandUpgraded, LandView, LiquidationPlan, Lot, LotteryBought, LotteryDrawn,
+    LotteryTickets, LotteryWon, MagicBlocked, MagicCast, MagicFilter, MagicFilterPicked,
+    MagicSpell, MagicSpellPicked, Market, MarketClock, MinigameResult, MinigameScore, MortgageDone,
+    MortgageOp, MortgageRequested, Mortgaged, Mount, MountChanged, MoveCap, MoveCapped, NewsSink,
+    Occupancy, OccupancyAt, OccupancyKind, Owner, PassiveAnswer, PassiveCard, PassiveEvent,
+    PassiveMove, PassiveUsed, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
+    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId, PlayerName,
+    PlayerTeleported, PlotArea, Points, PointsChanged, PointsStolen, PolicyBought, Possession,
+    Presence, RedEnvelope, RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue,
+    RentRerouted, RequestRemoteDice, RequestRoll, RequestStay, Rng, Scope, ServiceCharged, Shelf,
+    ShopOpDone, ShopOpRequested, ShopStock, Source, StayLifted, StaySentence, StaySkipped, StockId,
     StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileIndex, TileStepped,
     Timed, TokenPosition, TollExtorted, TradeSide, TurnEnded, TurnOrder, TurnPhase, TurnStarted,
     UpgradeOffered, VillainHired, WalkHalted, WalkStarted, Wallet, deal_to, find_id, fire_news,
@@ -122,6 +125,12 @@ pub struct MagicFilterRequests(pub Vec<MagicFilterPicked>);
 #[derive(Resource, Default)]
 pub struct MagicSpellRequests(pub Vec<MagicSpellPicked>);
 
+/// 测试侧的「答被动卡那道门一句」（P13b②）。同样走队列 → 真消息，于是
+/// 「这一问挂在谁身上」「他手里到底有没有那张卡」「答完之后事件落到谁头上」
+/// 三道判据都被真走到，而不是被测试直接改世界绕过。
+#[derive(Resource, Default)]
+pub struct PassiveRequests(pub Vec<PassiveAnswer>);
+
 /// 测试侧的「按下拍卖面板上那两颗按钮之一」（P9）。同样走队列 → 真消息，于是
 /// 「不是他的回合要拒」「加不起这一档要拒」「放弃永远办得成」三道门都被真走到，
 /// 而不是被测试绕过。
@@ -169,6 +178,7 @@ fn auto_answer_system(
     mut answers: MessageWriter<DecisionChosen>,
     mut scores: MessageWriter<MinigameResult>,
     mut moves: MessageWriter<AuctionMove>,
+    mut answers_passive: MessageWriter<PassiveAnswer>,
 ) {
     if *policy == DecisionPolicy::Hold {
         return;
@@ -230,6 +240,18 @@ fn auto_answer_system(
             moves.write(AuctionMove {
                 player,
                 what: BidMove::Withdraw,
+            });
+            return;
+        }
+        // 被动卡那道门（P13b②）同样**不是一句 `Decision`**：它的三个动作走 `PassiveAnswer`。
+        // 自动玩家一律**答「不用」**—— 那条口径与拍卖的 `Withdraw`、彩票的「不买券」同一条理由：
+        // 长跑用例的现金与归属断言钉的是既有的那几笔，而「花掉手里那张免罪卡」会把
+        // 一整片「他进了监狱」的断言改成「他没进」。真正问那一句的路由 `tests/passive.rs` 自己走。
+        // **必须**答这一句：不答就等于把门永久挂在 `WaitDecision`，所有长跑整片停死。
+        (Pending::Passive, _) => {
+            answers_passive.write(PassiveAnswer {
+                player,
+                what: PassiveMove::Decline,
             });
             return;
         }
@@ -313,6 +335,10 @@ struct BookReaders<'w, 's> {
     bailed: MessageReader<'w, 's, PlayerBailed>,
     cards: MessageReader<'w, 's, CardDrawn>,
     played: MessageReader<'w, 's, CardPlayed>,
+    /// 被动卡那道门花的两张（P13b②）。与 `played` 同域、紧随其后：一张卡被门花掉与它
+    /// 作为出牌凭据落进流水，是同一件事的两半
+    passive_used: MessageReader<'w, 's, PassiveUsed>,
+    blame_shifted: MessageReader<'w, 's, BlameShifted>,
     gained: MessageReader<'w, 's, CardGained>,
     bank: MessageReader<'w, 's, BankVisited>,
     bank_ops: MessageReader<'w, 's, BankOpDone>,
@@ -682,22 +708,49 @@ fn collect_books(
     // 出牌流水把「谁打的」与「打在谁头上」都写出来 —— 这正是 `CardPlayed` 存在的意义，
     // 断言「A 陷害 B 但被 B 的免罪抵消」要能同时看见这两半
     for m in r.played.read() {
-        let blocked = m
+        // 「挡」要分得出**谁**挡的：卡（P13b 那道门）与神明（P13 花整阶段那条豁免）
+        // 在断言里是两个不同的原因，压成一个数就没法说「神挡的没花卡」
+        let blocked: Vec<&'static str> = m
             .card
             .outcomes
             .iter()
-            .filter(|o| matches!(o, game_core::prelude::EffectOutcome::Blocked { .. }))
-            .count();
+            .filter_map(|o| match o {
+                EffectOutcome::Blocked { by, .. } => Some(match by {
+                    Blocker::Card => "卡",
+                    Blocker::God(_) => "神",
+                }),
+                _ => None,
+            })
+            .collect();
         log.0.push(format!(
             "Play({}->{}:{}{})",
             who(&players, &names, m.player),
             who(&players, &names, m.victim),
             m.card.id,
-            if blocked > 0 {
-                format!("挡{blocked}")
-            } else {
+            if blocked.is_empty() {
                 String::new()
+            } else {
+                format!("挡{}", blocked.join("+"))
             }
+        ));
+    }
+    // 被动卡那道门的两条凭据（P13b②）。它们与上面那条 `Play` 同域（都是「一张卡没了」），
+    // 所以同住这一张表。分开记是主语的分别：`Used` 说的是**卡**没了，`Blame` 说的是**事**
+    // 换人挨了 —— 合成一条就成了「用了嫁祸卡」与「嫁祸给了谁」在同一行里互相冒充
+    for u in r.passive_used.read() {
+        log.0.push(format!(
+            "Used({}花{}挡{})",
+            who(&players, &names, u.player),
+            u.card.id,
+            u.event.label()
+        ));
+    }
+    for s in r.blame_shifted.read() {
+        log.0.push(format!(
+            "Blame({}→{}的{})",
+            who(&players, &names, s.from),
+            who(&players, &names, s.to),
+            s.event.label()
         ));
     }
     for m in r.gained.read() {
@@ -1202,6 +1255,7 @@ struct Pump<'w> {
     financings: ResMut<'w, FinancingRequests>,
     magic_filters: ResMut<'w, MagicFilterRequests>,
     magic_spells: ResMut<'w, MagicSpellRequests>,
+    passives: ResMut<'w, PassiveRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
     stay_writes: MessageWriter<'w, RequestStay>,
     trade_writes: MessageWriter<'w, StockTradeRequested>,
@@ -1220,6 +1274,7 @@ struct Pump<'w> {
     financing_writes: MessageWriter<'w, FinancingDrawRequested>,
     magic_filter_writes: MessageWriter<'w, MagicFilterPicked>,
     magic_spell_writes: MessageWriter<'w, MagicSpellPicked>,
+    passive_writes: MessageWriter<'w, PassiveAnswer>,
 }
 
 fn pump_inputs(mut pump: Pump<'_>) {
@@ -1277,6 +1332,9 @@ fn pump_inputs(mut pump: Pump<'_>) {
     for s in pump.magic_spells.0.drain(..) {
         pump.magic_spell_writes.write(s);
     }
+    for a in pump.passives.0.drain(..) {
+        pump.passive_writes.write(a);
+    }
 }
 
 pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
@@ -1297,6 +1355,7 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<Trades>()
         .init_resource::<BankRequests>()
         .init_resource::<Plays>()
+        .init_resource::<PassiveRequests>()
         .init_resource::<ShopRequests>()
         .init_resource::<MortgageRequests>()
         .init_resource::<BailRequests>()
@@ -1323,9 +1382,13 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
             },
         )
         .add_systems(PreUpdate, pump_inputs)
-        // 自动应答排在 `decision_system` 之前写入即可：消息下一帧才被读，顺序不敏感
+        // 自动应答写在 **PreUpdate**，而不是「排在 decision_system 之前」那种隐式顺序：
+        // 0.20 的消息按 tick 记账，同帧读得到读不到完全取决于两条 system 在图里的先后，
+        // 而先后没人保证（§6.1 坑 36）。P13b② 把门并进出牌/拍卖那条链之后，隐式顺序翻了个
+        // 面，`leave_the_counter` 那一类「空跑两帧刚好关掉窗口」的用例整片慢一帧 —— 这就是
+        // 那条坑说要防的形状。写在 PreUpdate 之后：任何 Update 里的读者都在同一帧读得到。
         .add_systems(
-            Update,
+            PreUpdate,
             auto_answer_system.run_if(in_state(TurnPhase::WaitDecision)),
         )
         .add_systems(PostUpdate, (collect_flow, collect_books));
@@ -2683,15 +2746,84 @@ pub fn deal(app: &mut App, player: Entity, index: u32) {
     app.update();
 }
 
-/// 某人身上还剩几层**卡给的**护身（`None` = 没有护身组件）。
+/// 替 `player` 答被动卡那道门一句（P13b②）。走队列 → 真消息，所以「这一问挂在他身上吗」
+/// 那条主语判据被真走到 —— 别人替不了他答，正如真人鼠标只能点自己那一份模态。
+pub fn answer_gate(app: &mut App, player: Entity, what: PassiveMove) {
+    app.world_mut()
+        .resource_mut::<PassiveRequests>()
+        .0
+        .push(PassiveAnswer { player, what });
+}
+
+/// 门此刻在问谁、问哪一问、问的是表上哪一行（`None` = 门是空的）。
+/// 这是「窗口挂上了吗」那句验收唯一的活证据 —— 断言事件没落地是不够的，
+/// 它可能只是**根本没被问**（空跑的断言等于没断言）。
+pub fn gate_asking(app: &App) -> Option<(Entity, Ask, PassiveEvent)> {
+    app.world().resource::<Gate>().asking()
+}
+
+/// 门里还排着几份信封。用于「同类多张只问一次」（验收⑨）与「链最长两跳」（验收③）
+/// 那两条：它们说的是**问了几遍**，而问的遍数只能从队列上数。
+pub fn gate_depth(app: &App) -> usize {
+    app.world().resource::<Gate>().queue.len()
+}
+
+/// 把门问的每一句都按同一个动作答掉，返回**被问过的那些**（谁、哪一问、表上哪一行）。
 ///
-/// 神给的那一半不在这里（P6b②：它现读 `Possession`，见 [`possession_of`]）—— 两半共用一个
-/// 读数的话，「免疫期间卡上的层数没被吃掉」这件事就测不出来。
-pub fn shield_of(app: &App, player: Entity) -> Option<u32> {
-    app.world()
-        .entity(player)
-        .get::<Insulation>()
-        .map(|i| i.charges)
+/// 返回值是这批矩阵用例的主要证据：「门问了哪几行」说的就是「哪几条法术构造了事」，
+/// 而那句答案在世界上只有一个位置可读。上限 8 圈只为挡死循环（真走不到 —— 每一圈
+/// 要么消耗掉一个信封，要么门已经空了）。
+pub fn ask_the_gate(app: &mut App, what: PassiveMove) -> Vec<(Entity, Ask, PassiveEvent)> {
+    let mut asked = Vec::new();
+    for _ in 0..8 {
+        let Some((who, ask, event)) = gate_asking(app) else {
+            break;
+        };
+        asked.push((who, ask, event));
+        answer_gate(app, who, what);
+        settle(app, 2);
+    }
+    asked
+}
+
+/// 某人手里还有几张**免罪卡**（P13b②：`Insulation` 组件删了 —— 卡在手里就是资格，
+/// 抄一份层数到组件上就是同一副牌两处数）。
+///
+/// 给的是张数而不是「有没有」：既有那批断言数的是「挡掉一次少一张」，
+/// 而「免罪卡一张抵一次」这条口径的正身就是**张数会减**。
+pub fn forgive_in_hand(app: &App, player: Entity) -> u32 {
+    passive_in_hand(app, player, PassiveCard::Forgive)
+}
+
+/// 门到今天为止花掉了几张被动卡（数 `Used(` 那一条流水）。
+///
+/// 为什么不数手牌：这一列里有一道法术（变卖所有卡）自己就把整只手清空了，而这里要问的是
+/// 「**门**有没有多花一张」—— 两只手在同一个读数里分不开，按张数断言的那一条会把它自己的
+/// 账算到门头上。凭据只有一条来源，那就按它数。
+pub fn gate_spends(app: &App) -> usize {
+    ledger(app)
+        .iter()
+        .filter(|line| line.starts_with("Used("))
+        .count()
+}
+/// 某人手里还有几张某一**种**被动卡。按 `passive` 那一位数而不是按卡 id：
+/// 门问的就是这一位，测试若按 id 数，数据改一次行序就全红。
+pub fn passive_in_hand(app: &App, player: Entity, card: PassiveCard) -> u32 {
+    let hand = match app.world().entity(player).get::<Hand>() {
+        Some(hand) => hand,
+        None => return 0,
+    };
+    let sets = app.world().resource::<Assets<CardSet>>();
+    let handle = &app.world().resource::<DataHandles>().items;
+    let items = &sets.get(handle).expect("道具牌没加载").0;
+    hand.cards
+        .iter()
+        .filter(|id| {
+            items
+                .get(id.0 as usize)
+                .is_some_and(|def| def.passive == Some(card))
+        })
+        .count() as u32
 }
 
 /// 某人现在被拘留在哪儿、还剩几回合（`None` = 人在场上）。

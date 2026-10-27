@@ -649,19 +649,19 @@ pub enum EffectOutcome {
     UnknownTile {
         name: String,
     },
-    /// 一件厄运被挡下来了（免罪卡生效，或身上那位神豁免）。与 `Detained` 互斥 ——
-    /// 抵消了就没有入狱这回事，而流水里必须留下「被抵消」这一条，否则玩家只看见
-    /// 「什么都没发生」。
+    /// 一件厄运被挡下来了。与 `Detained` 互斥 —— 抵消了就没有入狱这回事，而流水里必须留下
+    /// 「被抵消」这一条，否则玩家只看见「什么都没发生」。
     ///
     /// 带的是**表上的那一行**而不是旧那个「族」：`Hold`（停留／乌龟／掉头）与 `JailTrip`
     /// 在屏幕上是两句话，而 P13b① 之后「能不能免」这件事只在行上有答案
-    /// （见 [`crate::passive`]）。谁挡的（卡还是神）今天说不出 —— 那半句归 ② 的门。
+    /// （见 [`crate::passive`]）。
+    ///
+    /// `by` 是 P13b② 补的那半句：① 之前这条说不出**是谁**挡的，于是面板那句
+    /// 「一次出国旅游被抵消」在神明挡下时是句假话（免罪卡一张没花）。门的回答与神的回答
+    /// 在玩家眼里是两件事 —— 前者刚少了手里一张卡。
     Blocked {
         event: PassiveEvent,
-    },
-    /// 挂上了护身。`charges` 是**叠完之后剩余**的层数（两张免罪卡 = 2）。
-    Shielded {
-        charges: u32,
+        by: Blocker,
     },
     /// 给一片地块盖上了限时状态（涨价 / 查封，P3c）。`lands` 是被盖到的块数 ——
     /// 要说清块数，因为「整街」在缺路段键的盘上可能只有一块，玩家有权知道自己
@@ -703,8 +703,8 @@ pub enum EffectOutcome {
     /// 说的是**接下来**他要自己停几个回合，而不是「已经跳过了」—— 第一次停发生在他
     /// 下一次进入 `WaitRoll` 并按下「停留」的时候，由 [`StaySkipped`] 播报，
     /// 两条之间可以隔着别人的回合。
-    /// `turns` 是**叠完之后**的剩余回合数（同 [`Self::Shielded`] 的 `charges`）：
-    /// 身上已有 2 的人再吃一张 1，这里报的是 2，不是 1。
+    /// `turns` 是**叠完之后**的剩余回合数：身上已有 2 的人再吃一张 1，这里报的是 2，不是 1
+    /// （`max` 那条口径与 [`Self::Detained`] 的 `turns` 同一条理由）。
     Stayed {
         turns: u32,
     },
@@ -776,6 +776,71 @@ pub enum Decision {
     Decline,
     /// 关闭只需阅读的通知（租金单 / 卡面）
     Acknowledge,
+}
+
+// ===== 被动卡这道门的回答（P13b②）=====
+
+/// 那一件事被挡下来了。**谁**挡的两臂不合成一个 bool：
+/// 卡挡的那一次玩家手里少了一张卡，而神挡的那一次什么都没少 ——
+/// 这两句话在顶栏上是两句，而「少了一张卡」这件事必须有处可查（P3d④a 那条纪律：
+/// 「卡没了事没成」是缺陷，「事没成而卡还在」才是正确的那一侧）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Blocker {
+    /// 手里那张被动卡花掉了（免罪卡；账那侧是免费卡，归 ③）
+    Card,
+    /// 身上那位神豁免了这一族厄运，不消耗任何东西
+    God(crate::gods::God),
+}
+
+/// 被动卡那道门的一句话回答（P13b②）。
+///
+/// 它**不是** [`Decision`] 的第四臂：那三臂说的是「一个报价的三种态度」，而这里要带
+/// 「转给谁」那个 `Entity`，`Decision` 是 `Copy` 而没有 `Entity` 的位置。另开一条消息
+/// 还与 P9 的拍卖同形（`AuctionMove` 也不走 `DecisionChosen`，理由写在 `Pending::Auction`
+/// 那一格）：门在等的那一句不是「要不要买」，而是「用哪张、给谁」。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassiveAnswer {
+    pub player: Entity,
+    pub what: PassiveMove,
+}
+
+/// 回答的三种动作。**没有「用哪一张」这一格**：同类多张卡在门上是同一问
+/// （PLAN §五 第 7 条），由哪一位答、门就花他手里的那一张。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassiveMove {
+    /// 用掉那张抵消卡（免罪／免费），这件事不落下来
+    Use,
+    /// 不用：什么都不消耗，事件照原样往下走
+    Decline,
+    /// 嫁祸：把这件事转给点名的那一位（`to` 由门校验，不在面板上猜）
+    Shift { to: Entity },
+}
+
+/// 一张被动卡**真的花掉了**。
+///
+/// 与管线那条 `ChargeWaived`（一笔钱没付）分开：这里说的是「一件事没落下来」。
+/// 两条都不与 `CashChanged` 混（这里可能一分钱都没动），
+/// 也都不与 [`EffectOutcome::Blocked`] 混 —— 那一条是「这一次调用里的那条效果」的凭据，
+/// 进的是卡面/法事/新闻那份清单；这一条说的是**卡**没了，顶栏与 dump 要单独念它。
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct PassiveUsed {
+    pub player: Entity,
+    pub card: CardNotice,
+    pub event: PassiveEvent,
+    /// 嫁祸那一句带来的下一位（抵消那一句是 `None`）。顶栏那句「嫁祸给谁」读的就是它
+    pub moved_to: Option<Entity>,
+}
+
+/// 一件事被从甲转到乙（P13b② 嫁祸卡）。
+///
+/// 它与 [`PassiveUsed`] 同时发（一条说卡没了、一条说事换人了），因为两句话的主语不同：
+/// 一句是甲的钱包少了张卡，一句是乙接下来要挨这一下。合成一条的话，「用了嫁祸卡」
+/// 与「嫁祸给了谁」在流水里就成了同一个事件，而后者才是别人那一条记录里的事。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlameShifted {
+    pub from: Entity,
+    pub to: Entity,
+    pub event: PassiveEvent,
 }
 
 // ===== 日历事件（P2b）=====

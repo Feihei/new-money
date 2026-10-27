@@ -44,9 +44,10 @@ use bevy::ecs::entity::Entity;
 use bevy::prelude::Assets;
 use common::*;
 use game_core::prelude::{
-    BankBalance, Bankrupt, CardId, CardSet, DataHandles, Detention, DetentionPlace, GameRules,
-    GameSeed, GameSetup, Gender, God, Heading, Insulation, ItemKind, LandId, MagicFilter,
-    MagicRitual, MagicSpell, Mount, Pending, PlayerName, Rng, Term, TileKind, TurnPhase, Villain,
+    Ask, BankBalance, Bankrupt, CardId, CardSet, DataHandles, Detention, DetentionPlace, GameRules,
+    GameSeed, GameSetup, Gender, God, Heading, ItemKind, LandId, MagicFilter, MagicRitual,
+    MagicSpell, Mount, PassiveEvent, PassiveMove, Pending, PlayerName, Rng, Term, TileKind,
+    TurnPhase, Villain,
 };
 
 /// 0 号地（南京路）—— 三条「作用于脚下地」的法术共用它当道具。
@@ -975,16 +976,27 @@ fn arm(app: &mut App, target: Entity, spell: MagicSpell) {
     }
 }
 
-/// 矩阵第一列：目标身上带着**一层免罪卡**。
+/// 矩阵第一列：目标手里**带着免罪卡**。
 ///
 /// 期望值就是 PLAN §三 那句话加上 10-25 的拍板：十二道里**只有**坐牢与住院挡得住，
-/// 且挡住时吃掉一层；其余十道**一层不花** —— 免疫规则免的是事，不是卡。
+/// 且挡住时吃掉一张；其余十道**一张不花** —— 免疫规则免的是事，不是卡。
+///
+/// P13b② 之后这一列多读一样东西：**门问过的那几行**。它是「哪些法术构造了 Affliction」
+/// 这句话在测试里的正身 —— 以前那条证据藏在「护身层数变没变」里，而层数说不出**为什么**没变
+/// （没问、问了又落、挡下来，三者在层数上都是「少一层或没少」）。
 #[test]
-fn a_forgiveness_card_stops_only_the_two_that_lock_someone_up() {
+fn a_forgive_card_in_hand_stops_only_the_two_that_lock_someone_up() {
     for spell in MagicSpell::ALL {
         let (mut app, p0, p1) = at_the_witch();
         arm(&mut app, p1, spell);
-        insert(&mut app, p1, (Insulation { charges: 2 },));
+        let insulate = item_index(&app, "item_insulate").0;
+        deal(&mut app, p1, insulate);
+        deal(&mut app, p1, insulate);
+        assert_eq!(
+            forgive_in_hand(&app, p1),
+            2,
+            "前置：两张都该在她手里（免罪卡从此不用先打出去）"
+        );
 
         assert_eq!(
             pick(&mut app, p0, MagicFilter::AllGirls),
@@ -995,22 +1007,36 @@ fn a_forgiveness_card_stops_only_the_two_that_lock_someone_up() {
         cast(&mut app, p0, spell);
 
         let forgivable = matches!(spell, MagicSpell::Jail | MagicSpell::Hospital);
-        // 「抽命运 3 张」是**间接效果**：这一道本身挡不住（牌已经发到头上，三张真的抽了，
-        // 所以名单里仍有他），但它抽来的那张 fate_001「直接入狱」走的正是命运那条路 ——
-        // 而那条路认护身。PLAN §三 那句「受神明修正」说的是同一条通道：修正与抵消都落在
-        // **牌**上，不落在女巫身上。
+        // 「抽命运 3 张」是**间接效果**：这一道本身挡不住（三张真的抽了，名单里仍有她），
+        // 而她抽来的那张 fate_001「直接入狱」走的正是命运那条路 —— 而那条路认免罪卡。
+        // PLAN §三 那句「受神明修正」说的是同一条通道：修正与抵消都落在**牌**上，
+        // 不落在女巫身上。
         let indirect = spell == MagicSpell::DrawFate;
+        // 每一问都答「用」。被问过几行、问的是哪一行，就是这一列的真正读数
+        let asked = ask_the_gate(&mut app, PassiveMove::Use);
         assert_eq!(
-            shield_of(&app, p1),
-            Some(if forgivable || indirect { 1 } else { 2 }),
-            "{}：{} —— 护身层数",
+            asked.len(),
+            usize::from(forgivable) + usize::from(indirect),
+            "{}：问了 {} 句，而该问的是{}句 —— 门多问一句就是替女巫发明了一条免疫，\
+             少问一句就是那张卡白躺在手里",
+            spell.label(),
+            asked.len(),
+            usize::from(forgivable) + usize::from(indirect)
+        );
+        // 门花的卡数才是这一列的读数，而不是「她手里还剩几张」。理由：十二道里有一道
+        // （变卖所有卡）自己就把整只手清空了，按张数断言等于把法术自己的账算到门头上 ——
+        // 症状会是「门没花卡而那条断言红了」。花的每一张都发一条 `PassiveUsed`，按它数。
+        assert_eq!(
+            gate_spends(&app),
+            usize::from(forgivable) + usize::from(indirect),
+            "{}：{} —— 门花的卡数",
             spell.label(),
             if forgivable {
-                "挡下了，该吃掉一层"
+                "挡下了，该吃掉一张"
             } else if indirect {
-                "吃掉一层的是抽来的那张牌"
+                "吃掉一张的是抽来的那张牌"
             } else {
-                "不吃卡，一层都不该花"
+                "不吃卡，一张都不该花"
             }
         );
         assert_eq!(
@@ -1035,7 +1061,7 @@ fn a_forgiveness_card_stops_only_the_two_that_lock_someone_up() {
         if indirect {
             assert!(
                 detention_of(&app, p1).is_none(),
-                "抽来的那张「直接入狱」被她自己的护身挡了 —— 这就是『间接效果』四个字的形状"
+                "抽来的那张「直接入狱」被她手里那张卡挡了 —— 这就是『间接效果』四个字的形状"
             );
         }
     }
@@ -1043,9 +1069,11 @@ fn a_forgiveness_card_stops_only_the_two_that_lock_someone_up() {
 
 /// 矩阵第二列：目标是**大福神**附身（厄运豁免）。十二道**全部照常生效**。
 ///
-/// 这一列才是这一阶段真正的难点，而它的答案在**构造方式**上：女巫那两条走
-/// `Insulation::absorb`，刻意不接 `deck::resist` 里的神明分支 —— 祂豁免的是厄运，
-/// 女巫的法术不是厄运。所以这里既没有一条查询去「逐条挡」，也没有一处特例。
+/// 这一列才是这一阶段真正的难点，而它的答案在**构造方式**上：女巫那几条挨得人事的法术
+/// 今天照旧进门，而门把神明那一格钉成「不吃」—— 判据挂在**事**上而不是来路上
+/// （[`is_ritual`](game_core::afflict::Affliction::is_ritual) 为真的那四条既不挨大福神的免疫，
+/// 也不挨大衰神的加倍），刻意不接 `deck::resist` 里的那位 —— 祂豁免的是厄运，女巫的法术不是厄运。
+/// 所以这里既没有一条查询去「逐条挡」，也没有一处特例。
 #[test]
 fn a_god_on_the_body_does_not_stop_the_witch() {
     for spell in MagicSpell::ALL {
@@ -1100,28 +1128,44 @@ fn doom_does_not_lengthen_the_witch_s_sentence() {
     }
 }
 
-/// 挡住那一下的**最后一层**要跟着摘掉 —— 与 P3a 那条同一格。
+/// 门问完之后**没有第二问**：一张卡答一句，答完那一格就空了。
 ///
-/// 「有免罪卡但什么都不挡」的玩家在面板上是一句假话，而这条路径（女巫的坐牢）与
-/// 命运那条（`deck::resist`）共用同一个 `Insulation`，所以两处都得做同一件收尾。
+/// ① 之前这条用例数的是「耗尽的护身组件要被摘掉」—— 那个组件从此不存在，而它留下的
+/// 那句话仍然要说得出：面板上不许有一个「手里有免罪卡却谁也不挡」的状态，
+/// 而现在那个状态的替身就是**门里挂着一句没人能答的第二问**。
 #[test]
-fn the_last_layer_is_taken_off_with_the_card() {
+fn the_gate_asks_once_and_then_is_empty() {
     let (mut app, p0, p1) = at_the_witch();
-    insert(&mut app, p1, (Insulation { charges: 1 },));
+    let insulate = item_index(&app, "item_insulate").0;
+    deal(&mut app, p1, insulate);
 
     assert_eq!(pick(&mut app, p0, MagicFilter::AllGirls), vec![p1]);
     cast(&mut app, p0, MagicSpell::Jail);
+    assert_eq!(
+        gate_asking(&app),
+        Some((p1, Ask::Offset, PassiveEvent::JailTrip)),
+        "前置：门真的在问她"
+    );
 
-    assert_eq!(shield_of(&app, p1), None, "耗尽的护身要被摘掉");
+    answer_gate(&mut app, p1, PassiveMove::Use);
+    settle(&mut app, 2);
+
+    assert_eq!(gate_asking(&app), None, "答完不该留下第二问");
+    assert_eq!(gate_depth(&app), 0, "信封也要一起走空");
+    assert_eq!(forgive_in_hand(&app, p1), 0, "那一张花掉了");
     assert!(was_blocked(&app, MagicSpell::Jail, "P1"));
     assert!(detention_of(&app, p1).is_none());
 }
 
-/// 护身是**个人的**事：同一批里没挡住的那个人照样挨，包括施法者自己。
+/// 卡是**个人的**事：同一批里没挡住的那个人照样挨，包括施法者自己。
+///
+/// 这一条在门上的形状比旧写法更硬：一次法事筛出两个人，门问的是**两个人各一次**，
+/// 而每次的主语都不同 —— 这正是「决策主体能在回合内跳动」（PLAN §五 第 2 条）的最小样本。
 #[test]
-fn a_shield_protects_its_own_holder_only() {
+fn a_forgive_card_protects_its_own_holder_only() {
     let (mut app, p0, p1) = at_the_witch();
-    insert(&mut app, p1, (Insulation { charges: 1 },));
+    let insulate = item_index(&app, "item_insulate").0;
+    deal(&mut app, p1, insulate);
     // 「所有女生」在她这儿只剩她一个，所以把施法者也改成女生才能一次点到两个人
     insert(&mut app, p0, (Gender::Female,));
 
@@ -1129,11 +1173,23 @@ fn a_shield_protects_its_own_holder_only() {
     assert_eq!(hits, vec![p0, p1], "前置：两人都是女生，回合序 P0 在前");
     cast(&mut app, p0, MagicSpell::Jail);
 
+    // 第一问落在 P0 身上 —— 他自己没有卡，所以门**根本不该问他**
+    assert_eq!(
+        gate_asking(&app),
+        Some((p1, Ask::Offset, PassiveEvent::JailTrip)),
+        "名单里只有拿着卡的那一位该被问"
+    );
+    answer_gate(&mut app, p1, PassiveMove::Use);
+    settle(&mut app, 2);
+
     assert!(
         detention_of(&app, p0).is_some(),
-        "他自己没有护身，就该被自己的法术关进去"
+        "他自己没有免罪卡，就该被自己的法术关进去"
     );
-    assert!(detention_of(&app, p1).is_none(), "她的护身挡住了她那一份");
+    assert!(
+        detention_of(&app, p1).is_none(),
+        "她手里那一张挡住了她那一份"
+    );
     assert!(
         was_cast(&app, MagicSpell::Jail, "P0"),
         "生效名单里只留下没挡住的那一位"

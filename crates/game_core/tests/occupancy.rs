@@ -478,11 +478,11 @@ fn the_turtle_card_stacks_by_max_and_is_not_shortened_by_a_second_one() {
 }
 
 #[test]
-fn a_shield_does_not_eat_a_turtle_card() {
+fn a_forgive_card_is_not_even_asked_about_a_turtle() {
     // P13 定稿的免疫口径（10-25 拍板）：免罪卡只挡「被关起来」那一族。走不远是这一趟
-    // 的处境变了，不是一件灾落在他头上 —— 所以乌龟照挂，而玩家那层护身**一层都不该少**。
-    // 后半句才是这条用例的牙齿：挡不掉的事如果还白吃一张卡，玩家就永远不知道自己那张
-    // 免罪卡其实挡不住这个（`Insulation::absorb` 的注写的是同一条纪律）
+    // 的处境变了，不是一件灾落在他头上 —— 所以乌龟照挂，而玩家那张卡**一张都不该少**。
+    // 两句证据：门连问都不问（`gate_asking` 为空）+ 卡还在手里。只断言后一句的话，
+    // 「门没运转」与「门问过又落下」在测试里是同一个形状
     let (mut app, p0) = ready_on(4, 3, DecisionPolicy::DeclineAll);
     let p1 = other_of(&mut app, p0);
     clear_occupancies(&mut app);
@@ -490,7 +490,6 @@ fn a_shield_does_not_eat_a_turtle_card() {
     let insulate = item_index(&app, "item_insulate");
     make_current(&mut app, p1);
     deal(&mut app, p1, insulate.0);
-    play_card(&mut app, p1, insulate.0, None);
     settle(&mut app, 2);
     make_current(&mut app, p0);
 
@@ -502,9 +501,18 @@ fn a_shield_does_not_eat_a_turtle_card() {
     assert_eq!(
         move_cap_of(&app, p1),
         Some(3),
-        "乌龟照样生效：护身不吃这一族"
+        "乌龟照样生效：免罪卡不吃这一族"
     );
-    assert_eq!(shield_of(&app, p1), Some(1), "挡不掉的事不该白吃一张免罪卡");
+    assert_eq!(
+        gate_asking(&app),
+        None,
+        "门不许对着一句「走不远」问人 —— 问了就是替玩家决定这张卡值不值"
+    );
+    assert_eq!(
+        forgive_in_hand(&app, p1),
+        1,
+        "没问的那一句不该白吃一张免罪卡"
+    );
     assert!(
         ledger(&app).contains(&"Play(P0->P1:item_turtle)".to_string()),
         "流水里不该带「挡」：{:?}",

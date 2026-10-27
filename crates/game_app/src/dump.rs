@@ -18,11 +18,11 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiCon
 use game_core::prelude::{
     ActiveBoard, ArcadeDeal, AtmAccess, Auction, BankBalance, Bankrupt, BuildingLevel, CardKind,
     CompanyLedgers, Corrections, CouponBoxes, Deck, DeckOrder, Detention, Facility, GameRules,
-    GameSeed, GameSession, Gavel, Hand, Heading, Hired, HolidaySet, Institution, Insulation,
-    Insured, Inventory, Jackpot, LandId, LandStatus, Landing, LotteryTickets, MarketClock,
-    Mortgaged, Mount, MoveCap, Occupancy, OccupancyAt, Owner, Paused, Pending, PendingDecision,
-    PlayerId, PlayerName, Points, Possession, Shelf, ShopStock, StaySentence, StockHoldings, Timed,
-    TokenPosition, TurnOrder, TurnPhase, Villain, Wallet, resists,
+    GameSeed, GameSession, Gate, Gavel, Hand, Heading, Hired, HolidaySet, Institution, Insured,
+    Inventory, Jackpot, LandId, LandStatus, Landing, LotteryTickets, MarketClock, Mortgaged, Mount,
+    MoveCap, Occupancy, OccupancyAt, Owner, Paused, Pending, PendingDecision, PlayerId, PlayerName,
+    Points, Possession, Shelf, ShopStock, StaySentence, StockHoldings, Timed, TokenPosition,
+    TurnOrder, TurnPhase, Villain, Wallet, resists,
 };
 
 use crate::asset_root;
@@ -118,11 +118,12 @@ type PlayerRow = (
     Option<&'static StaySentence>,
     Option<&'static Bankrupt>,
     Option<&'static Hand>,
-    // 护身的**两个来源**成对读：卡给的层数（组件）与神给的免疫（现读 `Possession`，
-    // P6b②）。合成一格而不是相邻两格有两个理由：语义上它们回答同一个问题（「这次陷害
-    // 为什么没生效」），而 Bevy 的 `QueryData` 元组实现到 15 元为止 —— 第 16 格会在这里
-    // 报「not valid to request as data in a Query」，症状看着像查询写坏了而不是行数超限。
-    (Option<&'static Insulation>, Option<&'static Possession>),
+    // 被动的**两个来源**成对读：手里那几张被动卡（卡在手里就是资格，P13b② 删了 `Insulation`
+    // 组件）与神给的免疫（现读 `Possession`，P6b②）。合成一格而不是相邻两格有两个理由：
+    // 语义上它们回答同一个问题（「这次陷害为什么没生效」），而 Bevy 的 `QueryData` 元组
+    // 实现到 15 元为止 —— 第 16 格会在这里报「not valid to request as data in a Query」，
+    // 症状看着像查询写坏了而不是行数超限。
+    Option<&'static Possession>,
     &'static Heading,
     // P5：道具栏、载具、乌龟夹步。三样都是「他这回合怎么走」的输入 / 结果，
     // 与手牌分开念 —— 查「遥控骰子为什么没生效」时，道具栏与夹步必须同时看得见
@@ -196,6 +197,10 @@ pub struct DumpView<'w, 's> {
     /// 全在这一个资源上 —— 而面板每帧都在换主语（问的是下一个出价的人），
     /// 顶栏那一行只活两三帧。查「拍卖为什么停在半空」只有这一条路。
     auction: Res<'w, Auction>,
+    /// 被动卡那道门（P13b②）。它与拍卖同一类：状态**不在任何组件里** —— 队列里排着几份
+    /// 信封、此刻该谁答哪一问、答完回哪一格，全在这一个资源上。查「这张免罪卡为什么没被问」
+    /// 与「回合为什么停在掷骰之前」只有这一条路。
+    gate: Res<'w, Gate>,
     /// 公司损益账（P10d①）。分红按它分，查「这次分红为什么是这个数」先看这一页
     ledgers: Res<'w, CompanyLedgers>,
     /// 每位玩家持有什么股 —— 董事长那一半要从这里现算（持股最多者，破产者不算）
@@ -267,6 +272,9 @@ fn dump_panel(mut contexts: EguiContexts, view: DumpView) {
                 row(ui, "恶人", line);
             }
             row(ui, "待决", format_pending(&view));
+            // 门（P13b②）紧跟待决：那一句问的是「这个窗口在等谁」，而门等的答案是
+            // 「谁在答哪一问」。它们分在两行才看得出「窗口写着被动卡、门里却没有信封」这种分叉
+            row(ui, "门", format_gate(&view));
             row(ui, "资格", format_access(&view));
             row(ui, "牌堆", format_decks(&view));
             row(ui, "货架", format_stock(&view));
@@ -689,6 +697,41 @@ fn format_magic(view: &DumpView) -> String {
     format!("条件「{}」筛出 {} 人：{who}", filter.label(), found.len())
 }
 
+/// 门那一行。它要说的是**此刻谁在答哪一问**，而这三样（谁、哪一问、表上哪一行）
+/// 只有 [`Gate::asking`] 给得出 —— 队列里那份信封是问题的另一半，而「归还地址」
+/// 是「答完为什么没回到掷骰前」的唯一答案。
+fn format_gate(view: &DumpView) -> String {
+    let gate = &view.gate;
+    let depth = gate.queue.len();
+    let Some((who, ask, event)) = gate.asking() else {
+        return format!(
+            "没在问人{}",
+            if depth > 0 {
+                format!(" · 还排着 {depth} 份")
+            } else {
+                String::new()
+            }
+        );
+    };
+    // 主语是**该答的那一位**而不是挨事的那一位：一张卡从甲手上打到乙身上，
+    // 面板若念甲，看的人会以为门问错了人（PLAN §五 第 2 条那一句的正身）
+    // 「行」数的是最前面那份信封还剩几条要办：一句「没在问人」分不清
+    // 「这条不吃卡」与「门里压根没有信封」，而这一格答得出后者
+    let head = gate.front().map_or(0, |job| job.todo.len()).to_string();
+    // 「后面排着」数的是**除了正在被问的那一份之外**还有几份 —— 与面板那一句同一条读数
+    // （`dialog.rs` 的 `queued`）。把正在被问的那一份也算进「后面」，这一行就在说
+    // 「答完这一句还要再等一份」，而那是假话：答完就交还回合了
+    format!(
+        "问 {} · {} · {}（行 {}）· 后面排着 {} 份 · 答完回 {:?}",
+        who_are(view, who),
+        ask.label(),
+        event.label(),
+        head,
+        depth.saturating_sub(1),
+        gate.resume,
+    )
+}
+
 fn format_auction(view: &DumpView) -> String {
     let machine = &view.auction;
     let queued = machine.standby.len() + machine.liquidation.len();
@@ -790,7 +833,7 @@ fn format_players(view: &DumpView) -> Vec<String> {
                 stay,
                 bankrupt,
                 hand,
-                (shield, god),
+                god,
                 heading,
                 inventory,
                 mount,
@@ -858,17 +901,30 @@ fn format_players(view: &DumpView) -> Vec<String> {
                         .collect::<Vec<_>>()
                         .join("·")
                 });
-                // 护身是「打过免罪卡之后」唯一留下的状态。查陷害为什么没生效，
+                // 被动卡是「有资格被门问到」的唯一留下的状态。查陷害为什么没生效，
                 // 看的就是这一栏 —— 它在手牌面板上只有一行小字，容易被当成装饰。
-                // 两个来源分开念：`免疫` 是那位神给的（不消耗、随神消失），数字是卡给的层数
+                // P13b② 之后卡给的不再是层数：`Insulation` 组件删了，**卡在手里就是资格**，
+                // 门在花掉那一刻直接从手牌摘一张。所以这里数的是「手里有几张被动卡」，
+                // 而神那一半仍然现读（不消耗、随神消失）。两个来源念法不同是事实本身，
+                // 不是两处各说各话：一个会消耗、一个不会。
+                let passives = hand.map_or(0, |h| {
+                    h.cards
+                        .iter()
+                        .filter(|c| {
+                            view.shelf
+                                .get(CardKind::Item, **c)
+                                .is_some_and(|def| def.passive.is_some())
+                        })
+                        .count()
+                });
                 let guard = match (
                     god.map(|held| held.god).is_some_and(resists),
-                    shield.map(|s| s.charges).filter(|n| *n > 0),
+                    passives,
                 ) {
-                    (true, Some(n)) => format!("免疫+卡{n}"),
-                    (true, None) => "免疫".to_string(),
-                    (false, Some(n)) => n.to_string(),
-                    (false, None) => "-".to_string(),
+                    (true, n) if n > 0 => format!("免疫+被动{n}"),
+                    (true, _) => "免疫".to_string(),
+                    (false, n) if n > 0 => format!("被动{n}"),
+                    (false, _) => "-".to_string(),
                 };
                 // 道具栏按 kind 数：与手牌分开念 —— 这两条库存的规则本来就不一样
                 let items = if inventory.is_empty() {
