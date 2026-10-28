@@ -88,13 +88,26 @@
 //! 抵消与嫁祸的分岔不在「敢不敢」，而在**两个数比出来的**：放弃抵消换来的是一次推给别人的
 //! 机会，它的价钱是「最挡路那位要付的这个数 × 害意」。于是大佬奸手里两张都有时先推出去、
 //! 普通人先护住自己、乖宝宝连嫁祸那一问都不上桌 —— 三档读的是同一张表上的三个数。
+//!
+//! ## 建设（P14c④）：五类设施同价，差别在「谁会被收钱」
+//!
+//! `Pending::Build` 的五颗按钮造价一样，所以 AI 挑的不是价钱而是**访客会被收多少**：
+//! 购物中心摇档收、旅馆按天收、加油站只对载具收 —— 三类都按棋盘数据折成「一次访问的
+//! 期望收费」，再乘 `harm`；研究所与公园没有把产出折成钱的尺（道具只值点券，而两套账
+//! 永不通兑），所以它们永远上不了桌。害意门槛之下**一类都不建** —— 商业地在他手里保持
+//! 空地，那正是 P14b 落地记录里认下的那条代价，到这里才按性格分叉。
+//!
+//! `Pending::RemoteBuild`（日产建设公司）问的不是「建什么」而是「升哪块地」：与本地加盖
+//! 同一把尺（`plot_value(uplift, cost, leverage(build))`）。董事长那一格单独一条：他的
+//! 远程升级**不花钱、一次升两层**，所以留底那道闸门对他不成立 —— 免费的东西没有
+//! 「留着钱干别的」这回事。
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::afflict::Afflict;
 use crate::bank::bank_op_allowed;
-use crate::board::TileIndex;
+use crate::board::{BuildingKind, FeeDef, TileIndex};
 use crate::calendar::HolidaySet;
 use crate::card::{CardDef, CardEffect, CardKind, PassiveCard};
 use crate::charge::ChargeKind;
@@ -110,9 +123,10 @@ use crate::market::{MarketClock, market_halt_now};
 use crate::minigame::GameKind;
 use crate::mortgage::{counter_plots, mortgage_op_allowed, read_facts};
 use crate::msg::{
-    AuctionMove, BankOp, BankOpRequested, BidMove, BuyTicketRequested, Decision, DecisionChosen,
-    MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, PlaceItemRequested,
-    PlayCardRequested, RequestRoll, RequestStay, StockTradeRequested, TradeSide,
+    AuctionMove, BankOp, BankOpRequested, BidMove, BuildRequested, BuyTicketRequested, Decision,
+    DecisionChosen, MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove,
+    PlaceItemRequested, PlayCardRequested, RemoteUpgradeRequested, RequestRoll, RequestStay,
+    StockTradeRequested, TradeSide,
 };
 use crate::occupancy::{MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt, place_denied};
 use crate::passive::{Affair, Ask, Gate};
@@ -356,6 +370,13 @@ pub struct AiErrands {
     /// 之后他还没掷骰，画面上的「他放了一件什么」会被自己挤掉。放开它没有规则上的理由，
     /// 只有「一次动作只做一件」这条给 AI 的节流。
     pub planted: Option<(Entity, u32)>,
+    /// `(谁, 第几回合)`：这位这一回合已经**动过一次土**了（P14c④）。
+    ///
+    /// 两个建设窗口共用这一格：本地建一类设施（`Pending::Build`）与远程升一级
+    /// （`Pending::RemoteBuild`）。两者都**不花这一格就各办几遍**：建设窗口办完照开
+    /// （`Acknowledge` 才关），远程柜台每笔请求升一级 —— 没有这一格，AI 一回合能把现金
+    /// 全灌进同一块地。与上面两格同一条生命周期。
+    pub built: Option<(Entity, u32)>,
 }
 
 /// 回合前理财那一笔（P14b③）：**一只股**，买或卖，不给第二只。
@@ -504,6 +525,10 @@ pub enum AiMove {
     Play(PlayMove),
     /// 往路上埋一件（P14c②；每回合最多一件，与出牌同一条窗口）
     Place(PlaceMove),
+    /// 建设窗口：在这块空商业地上立起一类设施（P14c④）
+    Build { land: LandId, kind: BuildingKind },
+    /// 远程建设柜台：升一块自己的地（P14c④；董事长那一格免费双升由柜台自己判）
+    RemoteBuild { land: LandId },
 }
 
 /// 这一问的答案里**不打分**的那一份：P14a 的全部，也是 AI 还没学会算账时那些格子的默认值。
@@ -537,9 +562,9 @@ pub fn greedy(about: Pending, rules: &GameRules) -> AiMove {
         | Pending::Shop
         | Pending::CompanyNotice
         | Pending::Bail(_) => AiMove::Decide(Decision::Acknowledge),
-        // 建设窗口（P10c）：答「先不建」——五类设施同价而效果差得很远，「建哪一类」问的是
-        // 「谁会被收钱」＝`harm`，那是 P14c 那一批的判据（PLAN §四・十五 的 P14b ④）。
-        // 这一格的代价说清楚：AI 局里商业地保持空地。
+        // 建设窗口（P10c）：答「先不建」。会算账的那一半在 `AiHand::build_table`
+        // （P14c④：五类设施同价，「建哪一类」问的是谁会被收钱＝`harm`），这里只剩
+        // 「还没有先验的座位」与人类座位那条退路。
         Pending::Build(_) => AiMove::Decide(Decision::Acknowledge),
         // 远程建设窗口（P10d②）：与本地建设同一条回答，理由相同
         Pending::RemoteBuild => AiMove::Decide(Decision::Acknowledge),
@@ -673,6 +698,10 @@ pub struct AiHand<'w, 's> {
     /// 被动门（P14c③）。**只读**：门自己由 `gate_system` 推，AI 只回答「问的是哪一问、
     /// 问到谁头上」。`Books` 里没有这一格，所以同参数并存不会撞。
     pub gate: Res<'w, Gate>,
+    /// 两个建设窗口的入口（P14c④）：本地立设施、远程升一级。与真人点的那两颗按钮
+    /// 走同一条消息，判据全在 `property::build_op_system`／`company::remote_build_system`。
+    pub builds: MessageWriter<'w, BuildRequested>,
+    pub remote_builds: MessageWriter<'w, RemoteUpgradeRequested>,
     /// 卡面（静态定义）。与 `play_card_system` 读的是同一份资产，所以「这张卡是什么」
     /// 在规则层只有一处答案。
     pub shelf: Shelf<'w>,
@@ -790,7 +819,7 @@ impl AiHand<'_, '_> {
     /// 因为「不加盖」这一头收的是此刻那个数，两边同量纲才可比。
     fn upgrade_table(&self, subject: Entity, profile: &AiProfile, land: LandId) -> Candidates {
         let mut table = Candidates::new();
-        if let Some((cost, uplift)) = self.upgrade_uplift(subject, land)
+        if let Some((cost, uplift)) = self.upgrade_uplift(subject, land, false)
             && self.books.balance(subject) - cost >= self.reserve(subject)
         {
             table.add(
@@ -804,16 +833,22 @@ impl AiHand<'_, '_> {
 
     /// 加盖要付多少、多收多少。`None` = 这一格不许加盖（不是我的地、抵押着、满级、
     /// 不是组内最低层、身上有衰神、付不起）—— 判据一条都不重写，读 `economy::can_upgrade`。
-    fn upgrade_uplift(&self, subject: Entity, land: LandId) -> Option<(i64, i64)> {
+    ///
+    /// `free` 只给建设公司的董事长开：他的远程升级**不花钱**（`Books::upgrade_chairman`），
+    /// 所以报价那一格跳过管线、直接是 0 —— 与 `upgrade_inner` 里那句「董事长免价」同一条。
+    fn upgrade_uplift(&self, subject: Entity, land: LandId, free: bool) -> Option<(i64, i64)> {
         let view = self.books.view(land)?;
         let me = self.books.id_of(subject)?;
         if view.owner != Some(me) || self.books.acquire_denied(subject) {
             return None;
         }
         let base = economy::upgrade_cost(&self.books.active.def, &view)?;
-        let cost = self
-            .books
-            .quoted(ChargeKind::Upgrade { land }, subject, base);
+        let cost = if free {
+            0
+        } else {
+            self.books
+                .quoted(ChargeKind::Upgrade { land }, subject, base)
+        };
         let views = self.books.views();
         let cash = self.books.balance(subject);
         if !economy::can_upgrade(&view, me, &views, cost, cash, &self.books.rules) {
@@ -1548,6 +1583,132 @@ impl AiHand<'_, '_> {
         })
     }
 
+    /// 建设窗口那一问（P14c④）：五类设施同价，挑的是**访客会被收多少**。
+    ///
+    /// 三类收费型按棋盘数据折成「一次访问的期望收费」（A 型取档位均值、B 型取天数均值、
+    /// C 型取骰面均值再乘「场上开得起车的人」的比例）；研究所与公园没有这把尺 ——
+    /// 道具只值点券而两套账永不通兑，公园明文不收钱 —— 所以它们恒为 0 分，上不了桌。
+    ///
+    /// 三道闸门在打分之前（与买地／加盖同一条）：`build_probe`（一格一设施、未抵押未查封、
+    /// 现金够、收费型有参数）、留底、以及 `harm` 门槛 —— 设施收的是**别人**的钱，
+    /// 害意不够的人不往自家地上架收银台。
+    ///
+    /// 已经动过土的那一回合表上只剩「先不建」：窗口办完照开，`Acknowledge` 才关。
+    fn build_table(&self, subject: Entity, profile: &AiProfile, land: LandId) -> Candidates {
+        let mut table = Candidates::new();
+        table.add(0.0, AiMove::Decide(Decision::Acknowledge));
+        if self.errands.built == Some((subject, self.books.session.turn_count))
+            || profile.harm < AiProfile::HARM_START
+        {
+            return table;
+        }
+        let cash = self.books.balance(subject);
+        for kind in BuildingKind::ALL {
+            let Ok(cost) = self.books.build_probe(subject, land, kind) else {
+                continue;
+            };
+            if cash - cost < self.reserve(subject) {
+                continue;
+            }
+            let fee = self.visit_fee(land, kind);
+            if fee <= 0.0 {
+                continue;
+            }
+            table.add(fee * profile.harm, AiMove::Build { land, kind });
+        }
+        table
+    }
+
+    /// 这一类设施「一个访客」交多少（期望值）。数据里没有收费参数的（研究所／公园）
+    /// 就是 0 —— 不是「不好」，是今天**没有把产出折成钱的尺**。
+    fn visit_fee(&self, land: LandId, kind: BuildingKind) -> f32 {
+        let Some(fee) = self.books.active.def.facility_fee(land.0, kind) else {
+            return 0.0;
+        };
+        match fee {
+            FeeDef::RandomAmount { tiers, .. } => {
+                if tiers.is_empty() {
+                    0.0
+                } else {
+                    tiers.iter().sum::<i64>() as f32 / tiers.len() as f32
+                }
+            }
+            // 平均天数：1..=sides 的均值 (sides + 1) / 2
+            FeeDef::RandomStay { sides, per_day } => *per_day as f32 * (*sides as f32 + 1.0) / 2.0,
+            // 平均骰面 × 单价；C 型只对载具收，所以再乘「场上开得起车的人」的比例
+            FeeDef::PerStep {
+                rate,
+                requires_mount,
+            } => {
+                let share = if *requires_mount {
+                    self.vehicle_share()
+                } else {
+                    1.0
+                };
+                *rate as f32 * (DIE_FACES as f32 + 1.0) / 2.0 * share
+            }
+        }
+    }
+
+    /// 场上还有几位行动者开得起车（只数玩家，与 `Books::solvent` 同一张名单）。
+    fn vehicle_share(&self) -> f32 {
+        let mut all = 0u32;
+        let mut mounted = 0u32;
+        for (who, _) in self.books.solvent() {
+            all += 1;
+            if self
+                .mounts
+                .get(who)
+                .copied()
+                .unwrap_or(Mount::Foot)
+                .is_vehicle()
+            {
+                mounted += 1;
+            }
+        }
+        if all == 0 {
+            0.0
+        } else {
+            mounted as f32 / all as f32
+        }
+    }
+
+    /// 远程建设柜台那一问（P14c④）：**升哪块地**。与本地加盖同一把尺，所以「哪块多收得
+    /// 最多」就是哪块；董事长那一格把价码换成 0、并且**不吃留底**（免费的东西没有
+    /// 「留着钱干别的」这回事）。
+    ///
+    /// 一格一进：`AiErrands::built` 挡的是「同一回合把现金全灌进同一块地」—— 柜台每笔
+    /// 请求升一级、办完窗口照开。
+    fn remote_build_table(&self, subject: Entity, profile: &AiProfile) -> Candidates {
+        let mut table = Candidates::new();
+        table.add(0.0, AiMove::Decide(Decision::Acknowledge));
+        if self.errands.built == Some((subject, self.books.session.turn_count)) {
+            return table;
+        }
+        let Some(me) = self.books.id_of(subject) else {
+            return table;
+        };
+        let free =
+            crate::company::chairman_of(&self.books, crate::company::BUILD_STOCK) == Some(subject);
+        let cash = self.books.balance(subject);
+        let mut views = self.books.views();
+        views.sort_by_key(|view| view.id.0);
+        for view in views.iter().filter(|view| view.owner == Some(me)) {
+            let land = view.id;
+            let Some((cost, uplift)) = self.upgrade_uplift(subject, land, free) else {
+                continue;
+            };
+            if !free && cash - cost < self.reserve(subject) {
+                continue;
+            }
+            table.add(
+                plot_value(uplift, cost, leverage(profile.build)),
+                AiMove::RemoteBuild { land },
+            );
+        }
+        table
+    }
+
     /// 这一问的答案（会算账的那一份）。
     ///
     /// 只显式列出**已经会打分**的格子，其余一律落到 [`greedy`] 那份表上 —— 穷尽匹配留在
@@ -1562,6 +1723,9 @@ impl AiHand<'_, '_> {
             Pending::Buy(land) => self.buy_table(subject, &profile, land),
             Pending::Upgrade(land) => self.upgrade_table(subject, &profile, land),
             Pending::BankTeller => self.teller_table(subject, &profile),
+            // 两个建设窗口（P14c④）：本地选设施、远程选地
+            Pending::Build(land) => self.build_table(subject, &profile, land),
+            Pending::RemoteBuild => self.remote_build_table(subject, &profile),
             // 被动门那一问（P14c③）：问哪一句、问到谁头上，由门说；AI 只管答那一句。
             // 门没挂到这一问上（或已经换了人）时落到那份「不用」—— 而调用侧还有一道
             // 同一条判据的早退，所以那一句只在判据分叉的帧里才会被写出去。
@@ -1708,6 +1872,25 @@ impl AiHand<'_, '_> {
                 });
                 // 与柜台、理财那两格同一条：这一回合的「出牌」到此用完
                 self.errands.played_card = Some((subject, self.books.session.turn_count));
+                true
+            }
+            AiMove::Build { land, kind } => {
+                // 窗口办完照开：这一帧只发请求，关窗口是下一帧那句 `Acknowledge`
+                self.builds.write(BuildRequested {
+                    player: subject,
+                    land,
+                    kind,
+                });
+                self.errands.built = Some((subject, self.books.session.turn_count));
+                true
+            }
+            AiMove::RemoteBuild { land } => {
+                // 与本地建设同一手：一帧升一级，下一帧收摊
+                self.remote_builds.write(RemoteUpgradeRequested {
+                    player: subject,
+                    land,
+                });
+                self.errands.built = Some((subject, self.books.session.turn_count));
                 true
             }
             AiMove::Place(what) => {

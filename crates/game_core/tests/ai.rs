@@ -31,11 +31,11 @@ use bevy::ecs::entity::Entity;
 use bevy::prelude::{MessageReader, NextState, ResMut, Resource, Update};
 use common::*;
 use game_core::prelude::{
-    ActiveBoard, Affair, Affliction, AiCadence, AiClock, AiProfile, Ask, CardAim, Charge,
-    ChargeKind, Controller, Detention, DetentionPlace, GameRules, GameSeed, GameSession, GameSetup,
-    Gate, Gavel, Gender, Institution, ItemKind, Job, LandId, LandStatus, Mount, OccupancyKind,
-    PLAYER_COLORS, Paused, Pending, PendingDecision, PlayerSetup, PriceHistory, StaySentence,
-    StockId, StockPrice, StockTradeRequested, Tail, Timed, TurnPhase,
+    ActiveBoard, Affair, Affliction, AiCadence, AiClock, AiProfile, Ask, BuildingKind, CardAim,
+    Charge, ChargeKind, Controller, Detention, DetentionPlace, Facility, GameRules, GameSeed,
+    GameSession, GameSetup, Gate, Gavel, Gender, Institution, ItemKind, Job, LandId, LandStatus,
+    Mount, OccupancyKind, PLAYER_COLORS, Paused, Pending, PendingDecision, PlayerSetup,
+    PriceHistory, StaySentence, StockId, StockPrice, StockTradeRequested, Tail, Timed, TurnPhase,
 };
 use game_core::rng::Rng;
 
@@ -1660,4 +1660,87 @@ fn the_shark_blames_the_opponent_with_the_fattest_street() {
     let held = detention_of(&app, plain).expect("名下有街的那位最挡路，该轮到他");
     assert_eq!(held.term.turns(), Some(5), "一天都没少（判 5 天）");
     assert_eq!(detention_of(&app, human), None, "没地的那位不该被点名");
+}
+
+// ============================ P14c④：建设 ============================
+//
+// 这一节钉「AI 会建设」这句话里可测的三件事：
+//
+// - **五类设施同价，挑的是「访客会被收多少」** → [`a_shark_builds_the_facility_that_charges_the_most`]；
+// - **害意门槛之下不往自家地上架收银台** → [`the_goody_leaves_the_commercial_lot_empty`]；
+// - **远程柜台与本地加盖同一把尺**（升多收得最多的那块、董事长免费双升不吃留底）→
+//   [`the_remote_counter_upgrades_the_plot_that_gains_most`]、
+//   [`the_building_chairman_upgrades_for_free`]。
+
+/// 摘掉某块地上的预建设施 —— 演示盘唯一那块商业地（外滩）开局就立着购物中心，
+/// 而建设窗口只在**空**商业地上开（与 `tests/commercial.rs` 的那个夹具同一手）。
+fn strip_facility(app: &mut App, land: u32) {
+    let entity = app.world().resource::<ActiveBoard>().lands[&LandId(land)];
+    app.world_mut().entity_mut(entity).remove::<Facility>();
+}
+
+#[test]
+fn a_shark_builds_the_facility_that_charges_the_most() {
+    // 外滩那块空商业地（造价 2200）。三类收费型折成「一次访问的期望收费」：
+    // 购物中心 (200+400+600+800+1200+1600)/6 = 800、旅馆 500 × (1+4)/2 = 1250、
+    // 加油站 100 × 3.5 × 场上开得起车的比例（开局全员步行 = 0）；研究所与公园没有这把尺。
+    // 于是旅馆胜出 —— 而它恰好也是三件里最「害人」的那一件（还把人按在旅馆里）。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    strip_facility(&mut app, 2);
+    own(&mut app, 2, Some(1), 0, false);
+
+    ask(&mut app, seat, Pending::Build(LandId(2)));
+    assert_eq!(
+        facility_of(&mut app, 2),
+        Some(BuildingKind::Hotel),
+        "该建收得最多的那一类（旅馆 1250 > 购物中心 800 > 加油站 0）"
+    );
+    assert_eq!(cash_of(&mut app, seat), 17_800, "造价 2200 从现金里走");
+    assert_eq!(
+        window(&app),
+        None,
+        "建完还得有人关窗口（下一帧那句「先不建」）"
+    );
+}
+
+#[test]
+fn the_goody_leaves_the_commercial_lot_empty() {
+    // 同一个窗口、同一块地：乖宝宝的害意没过门槛 —— 设施收的是别人的钱，
+    // 他不往自家地上架收银台。窗口照样要关（不然整局就停在这一格）。
+    let (mut app, seat) = solo_ai(AiProfile::GOODY);
+    strip_facility(&mut app, 2);
+    own(&mut app, 2, Some(1), 0, false);
+
+    ask(&mut app, seat, Pending::Build(LandId(2)));
+    assert_eq!(facility_of(&mut app, 2), None, "乖宝宝往自家地上架了收银台");
+    assert_eq!(cash_of(&mut app, seat), 20_000, "没建就不许动钱");
+    assert_eq!(window(&app), None, "「先不建」也得把窗口关掉");
+}
+
+#[test]
+fn the_remote_counter_upgrades_the_plot_that_gains_most() {
+    // 黄组两块都归他（垄断）、都在 Lv1：王府井多收 480 − 160 = 320、西单 540 − 180 = 360。
+    // 造价一样，于是西单该被升 —— 这一格钉的是「与本地加盖同一把尺」。
+    let (mut app, seat) = solo_ai(AiProfile::PLAIN);
+    own(&mut app, 4, Some(1), 1, false);
+    own(&mut app, 5, Some(1), 1, false);
+
+    ask(&mut app, seat, Pending::RemoteBuild);
+    assert_eq!(level_of(&mut app, 5), 2, "该升多收得最多的那块（西单）");
+    assert_eq!(level_of(&mut app, 4), 1, "王府井只该看着");
+    assert_eq!(window(&app), None, "升完还得有人关窗口");
+}
+
+#[test]
+fn the_building_chairman_upgrades_for_free() {
+    // 建设公司的董事长远程升级不花钱、一次升两层：现金为 0 也该办成 ——
+    // 留底那道闸门对「免费」不成立（这一格就是 `free` 参数的牙齿）。
+    let (mut app, seat) = solo_ai(AiProfile::PLAIN);
+    own(&mut app, 3, Some(1), 1, false);
+    set_shares(&mut app, seat, "stock_002", 100);
+    set_cash(&mut app, seat, 0);
+
+    ask(&mut app, seat, Pending::RemoteBuild);
+    assert_eq!(level_of(&mut app, 3), 3, "董事长一次升两层（Lv1 → Lv3）");
+    assert_eq!(cash_of(&mut app, seat), 0, "他的升级不花钱");
 }
