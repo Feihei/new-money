@@ -31,10 +31,11 @@ use bevy::ecs::entity::Entity;
 use bevy::prelude::{MessageReader, NextState, ResMut, Resource, Update};
 use common::*;
 use game_core::prelude::{
-    ActiveBoard, AiCadence, AiClock, AiProfile, CardAim, Controller, Detention, GameRules,
-    GameSeed, GameSession, GameSetup, Gender, Institution, ItemKind, LandId, LandStatus, Mount,
-    OccupancyKind, PLAYER_COLORS, Paused, Pending, PendingDecision, PlayerSetup, PriceHistory,
-    StaySentence, StockId, StockPrice, StockTradeRequested, Timed, TurnPhase,
+    ActiveBoard, Affair, Affliction, AiCadence, AiClock, AiProfile, Ask, CardAim, Charge,
+    ChargeKind, Controller, Detention, DetentionPlace, GameRules, GameSeed, GameSession, GameSetup,
+    Gate, Gavel, Gender, Institution, ItemKind, Job, LandId, LandStatus, Mount, OccupancyKind,
+    PLAYER_COLORS, Paused, Pending, PendingDecision, PlayerSetup, PriceHistory, StaySentence,
+    StockId, StockPrice, StockTradeRequested, Tail, Timed, TurnPhase,
 };
 use game_core::rng::Rng;
 
@@ -1500,4 +1501,163 @@ fn one_trap_per_turn() {
         1,
         "第二颗该还在道具栏里"
     );
+}
+
+// ============================ P14c③：被动门那一问 ============================
+//
+// 这一节钉「AI 答那道门」这句话里可测的四件事：
+//
+// - **抵消与嫁祸的价钱是同一把尺**：罚款多少、被关的那几天少收多少租 →
+//   [`the_ai_spends_its_free_pass_on_a_big_bill`]、
+//   [`a_jail_trip_costs_nothing_to_a_seat_without_a_street`]；
+// - **有嫁祸就先别花免罪**（放弃抵消换来的是「他替我付」）→
+//   [`the_shark_blames_someone_else_instead_of_spending_his_own_card`]；
+// - **门槛之下不嫁祸**，宁可花自己那张 → [`the_goody_pays_with_its_own_card_rather_than_blame_anyone`]；
+// - **点名点最挡路的那位** → [`the_shark_blames_the_opponent_with_the_fattest_street`]。
+
+/// 把一道门的一问挂到 `bearer` 头上（夹具）。
+///
+/// 不走 `submit`：那条路要 `GateDesk`（一个 SystemParam，测试里造不出来），而这一节要测的是
+/// 「AI 被问到那一句时怎么答」，不是「门怎么把这一笔问出来」（后者归 `tests/passive.rs`）。
+/// 所以只摆出 `gate.asking()` 会读的几格：队首那份信封、它的 `front` 与 `parked`、
+/// 以及该答哪一问（手里只有嫁祸卡时 `next_question` 会把 `ask` 推到 `Shift`，这里照抄）。
+fn gate_asks(app: &mut App, bearer: Entity, ask: Ask, affair: Affair) {
+    let mut job = Job::new(
+        bearer,
+        Vec::new(),
+        "夹具".to_string(),
+        None,
+        Gavel::Public,
+        Tail::Quiet,
+    );
+    job.front = Some(affair);
+    job.ask = ask;
+    job.parked = true;
+    app.world_mut().resource_mut::<Gate>().queue.push_back(job);
+    hang(app, bearer, Pending::Passive);
+    thaw(app);
+    settle(app, 4);
+    freeze(app);
+}
+
+/// 一笔交给银行的罚款：行归 `Bill`（可免也可转），收款方为空，所以「能转给谁」
+/// 就是场上另外那几位。
+fn bill(payer: Entity, base: i64) -> Affair {
+    Affair::Bill(Charge::new(ChargeKind::Penalty, Some(payer), None, base))
+}
+
+/// 手牌里那几个下标（`CardId` 与 `u32` 之间只差一层，断言里直接比下标更好读）。
+fn hand_ids(app: &App, seat: Entity) -> Vec<u32> {
+    hand_of(app, seat).into_iter().map(|id| id.0).collect()
+}
+
+#[test]
+fn the_ai_spends_its_free_pass_on_a_big_bill() {
+    // 罚款 3000 过了大额那把尺（2000 × 物价 1.0），手里有免费卡、没有嫁祸卡：
+    // 这一笔的价钱就是这张卡省下来的钱，于是它该被用掉 —— 账落成一笔 0 元。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    let free = item_index(&app, "item_free").0;
+    deal(&mut app, seat, free);
+    let before = cash_of(&mut app, seat);
+
+    gate_asks(&mut app, seat, Ask::Offset, bill(seat, 3_000));
+    assert_eq!(cash_of(&mut app, seat), before, "免掉的账不该从现金里走");
+    assert!(hand_of(&app, seat).is_empty(), "免费卡该被花掉");
+}
+
+#[test]
+fn a_jail_trip_costs_nothing_to_a_seat_without_a_street() {
+    // 事那侧的价钱是「被关的那几天收不到多少租」（P4②）。名下一块地都没有的人，
+    // 关五天一分钱也不亏 —— 于是这张免罪卡留着，事件照原样落下来。
+    // 这一条钉的是**尺**而不是「乖不乖」：没有地的人不吃这一张，哪怕他是大佬奸。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    let forgive = item_index(&app, "item_insulate").0;
+    deal(&mut app, seat, forgive);
+
+    gate_asks(
+        &mut app,
+        seat,
+        Ask::Offset,
+        Affair::Event(Affliction::detain(seat, DetentionPlace::Jail, 5)),
+    );
+    let held = detention_of(&app, seat).expect("这一件该照原样落下来");
+    assert_eq!(held.term.turns(), Some(5), "判 5 天，一天都没少");
+    assert_eq!(
+        hand_ids(&app, seat),
+        vec![forgive],
+        "没有街可丢的人不花卡 —— 这几天他本来也收不到租"
+    );
+}
+
+#[test]
+fn the_shark_blames_someone_else_instead_of_spending_his_own_card() {
+    // 两张都在手里、对方也没有卡接得住：放弃抵消换来的是「他替我付」——
+    // 于是这一笔落到真人头上，而 AI 花掉的是嫁祸卡、免费卡留下来。
+    // 反过来写（把「推出去的收益」单独当成分）会让害意 ≤ 1 变成「永远先花自己的卡」，
+    // 这一条就是那个式子的牙齿。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    let human = roster(&mut app)[0].0;
+    let free = item_index(&app, "item_free").0;
+    let shift = item_index(&app, "item_shift").0;
+    deal(&mut app, seat, free);
+    deal(&mut app, seat, shift);
+
+    gate_asks(&mut app, seat, Ask::Offset, bill(seat, 3_000));
+    assert_eq!(cash_of(&mut app, seat), 20_000, "这一笔不该由他付");
+    assert_eq!(
+        cash_of(&mut app, human),
+        17_000,
+        "罚款该落到被点名的那位头上"
+    );
+    assert_eq!(
+        hand_ids(&app, seat),
+        vec![free],
+        "花掉的是嫁祸卡，免费卡留着"
+    );
+}
+
+#[test]
+fn the_goody_pays_with_its_own_card_rather_than_blame_anyone() {
+    // 同一个世界、同样两张卡：乖宝宝的害意没过门槛，嫁祸那条路根本不出价 ——
+    // 于是他花自己的免费卡护住自己，而这一笔没有落到别人头上。
+    let (mut app, seat) = solo_ai(AiProfile::GOODY);
+    let human = roster(&mut app)[0].0;
+    let free = item_index(&app, "item_free").0;
+    let shift = item_index(&app, "item_shift").0;
+    deal(&mut app, seat, free);
+    deal(&mut app, seat, shift);
+
+    gate_asks(&mut app, seat, Ask::Offset, bill(seat, 3_000));
+    assert_eq!(cash_of(&mut app, seat), 20_000, "免掉的账不该从现金里走");
+    assert_eq!(cash_of(&mut app, human), 20_000, "乖宝宝不该把账推给别人");
+    assert_eq!(
+        hand_ids(&app, seat),
+        vec![shift],
+        "花掉的是免费卡，嫁祸卡留着"
+    );
+}
+
+#[test]
+fn the_shark_blames_the_opponent_with_the_fattest_street() {
+    // 三个人、手里只有嫁祸卡（门直接把第二问挂出来）：被关五天在普通人身上值
+    // 「南京路一轮 60 × 5」、在真人身上是 0，于是该点普通人。
+    // 这一格钉的是嫁祸那一问的排序也读钱，而不是「先遇到谁就推给谁」。
+    let (mut app, players) = quiet_field(2);
+    let shark = players[1];
+    let plain = players[2];
+    let human = players[0];
+    own(&mut app, 0, Some(2), 0, false);
+    let shift = item_index(&app, "item_shift").0;
+    deal(&mut app, shark, shift);
+
+    gate_asks(
+        &mut app,
+        shark,
+        Ask::Shift,
+        Affair::Event(Affliction::detain(shark, DetentionPlace::Jail, 5)),
+    );
+    assert_eq!(detention_of(&app, shark), None, "他自己该脱身");
+    let held = detention_of(&app, plain).expect("名下有街的那位最挡路，该轮到他");
+    assert_eq!(held.term.turns(), Some(5), "一天都没少（判 5 天）");
+    assert_eq!(detention_of(&app, human), None, "没地的那位不该被点名");
 }

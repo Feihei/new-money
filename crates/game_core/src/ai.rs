@@ -77,14 +77,26 @@
 //! 街上」—— 前者没有尺（进度的尺归 P14d 的「谁领先」），后者有。于是同一次动作在三档性格
 //! 手里读得出差别（`harm` 门槛之下乖宝宝根本不往路上放东西），而一回合只放一件
 //! （[`AiErrands::planted`]）。
+//!
+//! ## 被动门那一问（P14c③）：卡也有价钱
+//!
+//! 门只在「够大」时才问人（账那侧要过 `big_money_line`，事那侧只在表上可免的那几行），
+//! 所以 AI 要答的不是「这一笔大不大」而是**「这张卡留着是不是更值」**。两问共用一把尺
+//! （[`AiHand::affair_value`]）：账＝这一笔按他的修正实付多少，事＝被关的那几天收不到多少租
+//! （P4②，与地雷那一格同源）。
+//!
+//! 抵消与嫁祸的分岔不在「敢不敢」，而在**两个数比出来的**：放弃抵消换来的是一次推给别人的
+//! 机会，它的价钱是「最挡路那位要付的这个数 × 害意」。于是大佬奸手里两张都有时先推出去、
+//! 普通人先护住自己、乖宝宝连嫁祸那一问都不上桌 —— 三档读的是同一张表上的三个数。
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use crate::afflict::Afflict;
 use crate::bank::bank_op_allowed;
 use crate::board::TileIndex;
 use crate::calendar::HolidaySet;
-use crate::card::{CardDef, CardEffect, CardKind};
+use crate::card::{CardDef, CardEffect, CardKind, PassiveCard};
 use crate::charge::ChargeKind;
 use crate::deck::{CardId, Shelf};
 use crate::economy;
@@ -103,6 +115,7 @@ use crate::msg::{
     PlayCardRequested, RequestRoll, RequestStay, StockTradeRequested, TradeSide,
 };
 use crate::occupancy::{MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt, place_denied};
+use crate::passive::{Affair, Ask, Gate};
 use crate::player::{Heading, Mount, PlayerId, StaySentence, TokenPosition};
 use crate::rng::{DIE_FACES, Rng};
 use crate::rules::GameRules;
@@ -657,6 +670,9 @@ pub struct AiHand<'w, 's> {
     /// 路上已经有什么。读它只是**不让注定被拒的候选进表**（与 `buy_price`／`reserve`
     /// 那两道闸门同一个理由）；真正的闸门仍只有 `place` 一处。
     pub occupancies: Query<'w, 's, &'static Occupancy>,
+    /// 被动门（P14c③）。**只读**：门自己由 `gate_system` 推，AI 只回答「问的是哪一问、
+    /// 问到谁头上」。`Books` 里没有这一格，所以同参数并存不会撞。
+    pub gate: Res<'w, Gate>,
     /// 卡面（静态定义）。与 `play_card_system` 读的是同一份资产，所以「这张卡是什么」
     /// 在规则层只有一处答案。
     pub shelf: Shelf<'w>,
@@ -1430,6 +1446,108 @@ impl AiHand<'_, '_> {
         (told > 0).then_some(told)
     }
 
+    /// 被动门那一问的答案（P14c③）。
+    ///
+    /// 门问的两句**不是**「敢不敢」，而是「这一件值不值这张卡」。两个数用同一把尺
+    /// （[`Self::affair_value`]），于是候选表的形状与别处一模一样（0 分基准先入表、
+    /// 平局归「不办」、`fumble` 取第二名）：
+    /// - **抵消**：`Use` 的分是这一件落下来要花的钱；`Decline` 的分是**放弃换来的那次机会** ——
+    ///   推给别人之后这一笔不用自己付、而对方还要挨一下，所以它是「自己省下的 + 对方的损失」。
+    ///   ⚠️ 不是「对方的损失」单独一项：害意 ≤ 1，那样写会让放弃**永远**低一档，
+    ///   「有嫁祸就先别花免罪」就成了永远不响的一条路。
+    /// - **嫁祸**：每个可点名的人各一条，价钱是「这件事落到他头上值多少 × 害意」；
+    ///   害意门槛之下表上只剩那条 0 分的「算了」。
+    fn gate_table(
+        &self,
+        subject: Entity,
+        profile: &AiProfile,
+        ask: Ask,
+        affair: Affair,
+    ) -> Candidates {
+        let mut table = Candidates::new();
+        match ask {
+            Ask::Offset => {
+                let budget = self.affair_value(subject, affair);
+                let escape =
+                    if affair.shiftable() && self.holds_passive(subject, PassiveCard::Shift) {
+                        let worth = self.shift_worth(subject, profile, affair);
+                        if worth > 0.0 { budget + worth } else { 0.0 }
+                    } else {
+                        0.0
+                    };
+                // 0 分基准先入表：平局归「不用」（这张卡留到下一次）
+                table.add(escape, AiMove::Gate(PassiveMove::Decline));
+                if budget > 0.0 {
+                    table.add(budget, AiMove::Gate(PassiveMove::Use));
+                }
+            }
+            Ask::Shift => {
+                table.add(0.0, AiMove::Gate(PassiveMove::Decline));
+                if profile.harm < AiProfile::HARM_START {
+                    return table;
+                }
+                for foe in self.foes(subject) {
+                    let worth = self.affair_value(foe, affair) * profile.harm;
+                    if worth > 0.0 {
+                        table.add(worth, AiMove::Gate(PassiveMove::Shift { to: foe }));
+                    }
+                }
+            }
+        }
+        table
+    }
+
+    /// 这一件落到 `who` 头上值多少钱。**两把尺都是钱**，与门上那把门槛同一量纲：
+    ///
+    /// - 账：按**他的**修正实付多少。用 `quoted` 而不是 `staged(charge)`
+    ///   （门里问「够不够大」用的那个）：嫁祸之后这一笔的主语换了人、价钱也会跟着变，
+    ///   而这一格要答的正是「对他而言多少」。
+    /// - 事：他被关着的那几天收不到租（P4②），即「他名下那轮租金 × 天数」——
+    ///   与地雷那一格（P14c②）同一把尺，所以「关他三天」在两处的价钱是同一个数。
+    ///
+    /// 停留／掉头那几行本来就不进这道门（表上不可免），走到了按 0 算：它们没有钱的后果，
+    /// 而「没有价钱」在这里的意思就是「不值得为它花掉一张卡」。
+    fn affair_value(&self, who: Entity, affair: Affair) -> f32 {
+        match affair {
+            Affair::Bill(charge) => self.books.quoted(charge.kind, who, charge.base) as f32,
+            Affair::Event(aff) => {
+                let days = match aff.what {
+                    Afflict::Detain { turns, .. }
+                    | Afflict::Stay { turns }
+                    | Afflict::Slow { turns } => turns,
+                    Afflict::Reverse => 0,
+                };
+                (self.rent_sum(who, who) * i64::from(days)) as f32
+            }
+        }
+    }
+
+    /// 把这一件推出去值多少：推到最贵那位头上的代价 × 害意。推不出去（这一行不可转、
+    /// 场上没有别人可点名、或者害意没过门槛）就是 0 —— 于是「放弃抵消」在表上落到 0 分。
+    fn shift_worth(&self, subject: Entity, profile: &AiProfile, affair: Affair) -> f32 {
+        if profile.harm < AiProfile::HARM_START {
+            return 0.0;
+        }
+        self.foes(subject)
+            .into_iter()
+            .map(|foe| self.affair_value(foe, affair) * profile.harm)
+            .fold(0.0, f32::max)
+    }
+
+    /// 手里有没有这一张被动卡。与门的 `GateDesk::holds` 是同一句判据（按卡上那一位找，
+    /// 不按卡 id、也不数张数 —— 「同类多张只问一次」），只是这里读的是只读的那一份手牌。
+    fn holds_passive(&self, who: Entity, card: PassiveCard) -> bool {
+        let Ok(hand) = self.hands.get(who) else {
+            return false;
+        };
+        let items = self.shelf.items();
+        hand.cards.iter().any(|id| {
+            items
+                .get(id.0 as usize)
+                .is_some_and(|def| def.passive == Some(card))
+        })
+    }
+
     /// 这一问的答案（会算账的那一份）。
     ///
     /// 只显式列出**已经会打分**的格子，其余一律落到 [`greedy`] 那份表上 —— 穷尽匹配留在
@@ -1444,6 +1562,18 @@ impl AiHand<'_, '_> {
             Pending::Buy(land) => self.buy_table(subject, &profile, land),
             Pending::Upgrade(land) => self.upgrade_table(subject, &profile, land),
             Pending::BankTeller => self.teller_table(subject, &profile),
+            // 被动门那一问（P14c③）：问哪一句、问到谁头上，由门说；AI 只管答那一句。
+            // 门没挂到这一问上（或已经换了人）时落到那份「不用」—— 而调用侧还有一道
+            // 同一条判据的早退，所以那一句只在判据分叉的帧里才会被写出去。
+            Pending::Passive => match self.gate.asking() {
+                Some((asked, ask, _row)) if asked == subject => {
+                    let Some(affair) = self.gate.affair() else {
+                        return greedy(about, &self.books.rules);
+                    };
+                    self.gate_table(subject, &profile, ask, affair)
+                }
+                _ => return greedy(about, &self.books.rules),
+            },
             _ => return greedy(about, &self.books.rules),
         };
         table
@@ -1796,6 +1926,13 @@ pub fn ai_answer_system(mut pace: AiPace<'_>, mut hand: AiHand<'_, '_>) {
         return;
     };
     if pace.held() {
+        return;
+    }
+    // 被动门那一格：窗口挂在谁身上由**门**决定（嫁祸会把第二问挂到别人头上）。窗口刚
+    // 换上而门那一格还没跟上的那一帧，这里不发答案 —— 一条没人问的答案只会被读掉，
+    // 而真正的问题还在下一帧等着。不 `charge` 是刻意的：下一次检查不该等那几秒。
+    if matches!(about, Pending::Passive) && hand.gate.asking().map(|(who, ..)| who) != Some(subject)
+    {
         return;
     }
     pace.charge();
