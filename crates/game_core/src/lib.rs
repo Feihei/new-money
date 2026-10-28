@@ -59,8 +59,8 @@ pub mod world;
 pub mod prelude {
     pub use crate::afflict::{Afflict, Affliction};
     pub use crate::ai::{
-        AiCadence, AiClock, AiHand, AiMove, AiProfile, Controller, ai_answer_system,
-        ai_roll_system, decide,
+        AiCadence, AiClock, AiHand, AiMove, AiProfile, Candidates, Controller, ai_answer_system,
+        ai_roll_system, greedy, leverage,
     };
     pub use crate::auction::{
         Auction, AuctionDesk, BidDeny, BidFacts, Gavel, LiquidationPlan, Listing, Lot, OpenDeny,
@@ -808,13 +808,24 @@ impl Plugin for CoreGamePlugin {
             //
             // `not_paused` 那道门是给 AI 的：少了它，暂停菜单开着的时候电脑照样掷骰、
             // 照样答门，人类那一侧全停而 AI 那一侧全走 —— 玩家会以为游戏自己动起来了。
+            //
+            // ⚠️ `resource_exists::<ActiveBoard>` 这一道是 **P14b 才加上的，而且不是可选的**：
+            // 那一步把 `Books` 交给了这两条 system（打分要读账本），而 `Books` 要求
+            // `ActiveBoard`/`GameSession` 在场。`PreUpdate` 排在 `StateTransition` 之前，
+            // 于是它读到的相位**晚一帧**（§6.1 坑 39）—— 局被收掉的那一帧里相位还写着
+            // `WaitRoll`，资源已经没了，参数校验当场炸。`Update` 里那些带 `Books` 的 system
+            // 靠相位就够，因为它们跑在转移之后；`PreUpdate` 里不够，必须再问一句
+            // 「这一局还在世界里吗」。症状是「回主菜单必崩」（`tests/auction.rs` 的
+            // `a_rebooted_world_starts_with_an_idle_machine` 第一次就把它抓了出来）。
             .add_systems(
                 PreUpdate,
                 (
                     ai::ai_roll_system
+                        .run_if(resource_exists::<ActiveBoard>)
                         .run_if(in_state(TurnPhase::WaitRoll))
                         .run_if(not_paused),
                     ai::ai_answer_system
+                        .run_if(resource_exists::<ActiveBoard>)
                         .run_if(in_state(TurnPhase::WaitDecision))
                         .run_if(not_paused),
                 ),

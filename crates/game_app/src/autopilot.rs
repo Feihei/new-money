@@ -7,14 +7,17 @@
 //! ## P14a 之后它只剩一半，而且是次要的那一半
 //!
 //! 它原来揣着那张「每种窗口答什么」的表（`answer_for`）。那张表在 P14a **搬进规则层**
-//! （[`game_core::ai::decide`] / [`game_core::ai::emit`]），理由不是整理房间：
-//! 那一份是纯函数、只有规则表，**拿不到账本**，而 AI 要打分就必须读账本 —— 于是它变成了
-//! 一个只能永远「一律接受」的东西。搬完之后：
+//! （[`game_core::ai::greedy`] / [`game_core::ai::AiHand::emit`]），理由不是整理房间：
+//! 那一份是纯函数、只有规则表，**拿不到世界**。装进 core 还换来第二条更硬的：验收那句
+//! 「3 AI + 1 人类可完局」从此在 `cargo test -p game_core` 里成立，不必开窗口。
 //!
 //! | 谁 | 答哪些座位 | 答案出自 |
 //! |---|---|---|
-//! | core 的 `ai_answer_system` | [`Controller::Ai`] | `ai::decide`（P14b/c/d 换成打分） |
-//! | 这一份脚手架 | 其余（＝人类座位） | 同一个 `ai::decide`，因为「答一句要写几条消息」这份知识世界上只有一份 |
+//! | core 的 `ai_answer_system` | [`Controller::Ai`] | `AiHand::decide`（读账本打分，P14b 起）→ 没学会的那些格落到 `greedy` |
+//! | 这一份脚手架 | 其余（＝人类座位） | `ai::greedy` —— 替的是一个**不在键盘前的人**，不是一份先验 |
+//!
+//! 两边共用同一个 [`game_core::ai::AiHand::emit`]，所以「答一句话到底要写几条消息」这份知识
+//! 世界上只有一份；两边的**判据**从 P14b 起故意不共用，因为那不是一个东西。
 //!
 //! 两边靠 [`Controller`] 分开，**永远不会同一个窗口收到两份回答**（那的症状不是崩，
 //! 是「买地买了两次」）。所以 `NM_AUTOROLL` 从此的含义也换了一句更有用的：
@@ -27,7 +30,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::ai::AiHand;
 use game_core::prelude::{
-    Controller, RequestRoll, RequestStay, StaySentence, TurnOrder, TurnPhase, decide,
+    Controller, RequestRoll, RequestStay, StaySentence, TurnOrder, TurnPhase, greedy,
 };
 
 pub struct AutopilotPlugin;
@@ -119,7 +122,7 @@ fn auto_roll(
 
 /// 脚手架在 `WaitDecision` 里的那一下：**读的是 core 那张表，写的是 core 那只手**。
 ///
-/// 它自己不认任何一种窗口 —— 新增一种窗口时这里不必改（穷尽匹配在 `ai::decide` 里响），
+/// 它自己不认任何一种窗口 —— 新增一种窗口时这里不必改（穷尽匹配在 `ai::greedy` 里响），
 /// 这一条正是 P14a 把那张表搬进规则层想换来的东西。
 fn auto_answer(time: Res<Time>, gap: Res<AutoGap>, mut hand: AiHand<'_, '_>, mut due: Local<f32>) {
     let Some((player, about)) = hand.pending.active() else {
@@ -132,7 +135,7 @@ fn auto_answer(time: Res<Time>, gap: Res<AutoGap>, mut hand: AiHand<'_, '_>, mut
         return;
     }
     *due = time.elapsed_secs() + gap.0;
-    hand.emit(player, decide(about, &hand.rules));
+    hand.emit(player, greedy(about, &hand.books.rules));
 }
 
 // 这里原来那条「每种窗口都有答案」的守序用例跟着 `answer_for` 一起搬进了规则层

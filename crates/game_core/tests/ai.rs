@@ -41,16 +41,17 @@ use game_core::rng::Rng;
 const LAND: u32 = 3;
 
 /// 一位真人 + `ai` 位电脑（P14 给玩家看到的那个阵容），**AI 冻在原地**。
+fn field(ai: usize) -> (App, Vec<Entity>) {
+    field_with(GameSetup::seats(ai))
+}
+
+/// `field` 的那一层壳：摆任意阵容，装配完就把 AI 冻住。
 ///
 /// 冻是两步而不是拧一个数：`begin_game_system` 装配时会把 `AiClock` 归零，所以在装配**之前**
 /// 把间隔调大挡不住那第一次动作（`ready_at = 0` 意味着「现在就能动手」）。装配之后
 /// 先 [`freeze`] 才算冻住 —— 这一条本来就是 [`thaw`] 那条用例翻出来的。
-fn field(ai: usize) -> (App, Vec<Entity>) {
-    let mut app = boot(
-        GameSetup::seats(ai),
-        GameRules::instant(),
-        GameSeed::default(),
-    );
+fn field_with(setup: GameSetup) -> (App, Vec<Entity>) {
+    let mut app = boot(setup, GameRules::instant(), GameSeed::default());
     assert!(run_until_world(&mut app), "棋盘资产没能在时限内装配成世界");
     freeze(&mut app);
     let first = boot_to_wait_roll(&mut app);
@@ -59,6 +60,31 @@ fn field(ai: usize) -> (App, Vec<Entity>) {
     assert_eq!(rows[0].0, first);
     let players = rows.iter().map(|(e, ..)| *e).collect();
     (app, players)
+}
+
+/// 三档先验都在，但**失误率统一拧成 0**。
+///
+/// 测打分时要按住噪声，否则红下来分不清是式子变了还是骰子变了 —— 而这两件事各自有用例
+/// （[`a_fumble_trades_the_best_answer_for_the_next_one`] 测噪声本身）。
+fn quiet_field(ai: usize) -> (App, Vec<Entity>) {
+    let mut setup = GameSetup::seats(ai);
+    for p in &mut setup.players {
+        if let Controller::Ai(profile) = &mut p.controller {
+            profile.fumble = 0.0;
+        }
+    }
+    field_with(setup)
+}
+
+/// 把窗口挂在某位座位上、放松钟让他答一次、答完再冻回去。
+///
+/// 四帧而不是两帧：`hang` 写的 `NextState` 要到下一帧的 `StateTransition` 才落地，而 AI 那条
+/// system 挂在 `PreUpdate`（排在它之前），所以第一帧读到的还是旧相位（§6.1 新增坑 39）。
+fn ask(app: &mut App, seat: Entity, about: Pending) {
+    hang(app, seat, about);
+    thaw(app);
+    settle(app, 4);
+    freeze(app);
 }
 
 /// 全员皆机的阵容：`n` 位座位各领一档性格（没有人类座位，所以局只能靠 AI 往前走）。
@@ -383,7 +409,7 @@ fn a_paused_game_freezes_the_ai_too() {
 
 #[test]
 fn the_ai_leaves_the_dice_and_the_deck_alone() {
-    // 第 20 条子流的两半：core 的默认（0..=0）**一次数都不抽**，而抽过的数只落在自己那条流上。
+    // 第 20 条子流的两半（P14b 之后）：**别人的流一位都不许动，自己这条必须被走过**。
     // 这里比纯函数用例多钉一层——真的跑一局有 AI 的棋，让「装配期之外有没有人动过骰子流」
     // 变成一条世界级的断言（与 `turn_flow` 那批同一条纪律）
     let seed = GameSeed(0x5EED_1234);
@@ -406,12 +432,221 @@ fn the_ai_leaves_the_dice_and_the_deck_alone() {
     assert!(got.len() >= 6, "这一局没摇出六次骰子，前置不成立：{got:?}");
     assert_eq!(&got[..6], &expected[..6], "AI 的取数挪动了骰子流");
 
-    // 而那条 AI 自己的流一位数都没被消耗：`gap()` 在 0..=0 时不抽（抽了就等于让
-    // 「AI 动手了几次」去扰动回放的对齐点 —— 那正是每一条子流要防的事）
-    let used_next = app.world_mut().resource_mut::<Rng>().pick_ai().to_bits();
-    let fresh_next = Rng::new(seed.0).pick_ai().to_bits();
-    assert_eq!(
-        used_next, fresh_next,
-        "core 的默认延迟抽了随机数：整局的回放从此跟着 AI 动手的次数漂移"
+    // ⚠️ **10-28 P14b 把这半条的方向掉过来了**。原来断的是「AI 那条流一位都没被消耗」
+    // （那时 `pick_ai` 只有 `AiCadence::gap` 一个读者，而 core 的默认间隔是 0 → 不抽）。
+    // 今天它有第二个读者：每次决策掷一次失误率（`AiPace::fumble`）。于是「没被消耗」从一条
+    // 保证变成一条**缺陷证据** —— 这一句红，说的正是「打分写完了却没人掷骰、`fumble` 是个死字段」。
+    // 现在钉的是两件相反方向的事：**别人的流一位都不许动**（上面那条骰子），
+    // **自己这条流必须被走过**（下面这一条）。而「间隔为 0 不抽数」那半条仍由纯函数用例
+    // `the_headless_default_cadence_never_holds` 钉着，没有丢。
+    let after = app.world_mut().resource_mut::<Rng>().pick_ai().to_bits();
+    let fresh = Rng::new(seed.0).pick_ai().to_bits();
+    assert_ne!(
+        after, fresh,
+        "跑完一局 AI 却没碰过自己那条流：`fumble` 没有读者，那一格是死字段"
     );
+}
+
+// ============================ P14b：钱 ============================
+//
+// 上面那一节钉的是「AI 是一个座位」，这一节钉的是「这个座位会算账」。三条判据各自有名：
+//
+// - **同一块地在三档先验上分出两个结果** → [`three_personalities_divide_on_the_same_plot`]；
+// - **「值不值」读的是以后的收益而不是钱包** → [`the_monopoly_jump_is_what_makes_goody_reach_for_his_wallet`]。
+//   同一档先验、同样两万块：差一块才成那一族时不买，补全得了就买 —— 这一条才是
+//   「打分」与「有钱就买」的分界线（P14a 那份一律 `Accept` 的脚手架在这里必须被推翻）；
+// - **留底那条闸门读的是下一笔要付的账**，不是「买不买得起」 → [`the_reserve_gate_is_the_next_bill`]；
+// - **`fumble` 在世界里真的换动作** → [`a_fumble_trades_the_best_answer_for_the_next_one`]。
+//
+// 这一节的用例几乎都先把 `fumble` 拧成 0（[`quiet_field`]）：测式子的时候按住噪声，
+// 否则红下来分不清是判据变了还是骰子变了。噪声本身另有那一条专项用例。
+
+/// 西单（地块 5）与王府井（地块 4）：yellow 那一族的**两块**，一次租金 180／160，
+/// 地价 3000／2800。用它们而不是用 `LAND` 做「值不值」那两条用例，是因为
+/// **单地块的那一族（red 的徐家汇、orange 的外滩）一买下就是垄断**，租金当场翻倍，
+/// 「差一块才成一组」那个跳变在它们身上根本写不出来。
+const WEST: u32 = 5;
+const PALACE: u32 = 4;
+
+fn level_of(app: &mut App, land: u32) -> u8 {
+    let w = app.world_mut();
+    let mut q = w.query::<(&LandId, &game_core::prelude::BuildingLevel)>();
+    q.iter(w)
+        .find(|(id, _)| id.0 == land)
+        .map(|(_, level)| level.0)
+        .expect("地块实体不在世界里")
+}
+
+/// 一位真人 + 一位电脑（大佬奸），但失误率由调用侧给。
+fn seat_with_fumble(fumble: f32) -> (App, Entity) {
+    let mut setup = GameSetup::seats(1);
+    let Controller::Ai(profile) = &mut setup.players[1].controller else {
+        panic!("`seats(1)` 的第二位必须是电脑座位");
+    };
+    profile.fumble = fumble;
+    let (app, players) = field_with(setup);
+    (app, players[1])
+}
+
+#[test]
+fn three_personalities_divide_on_the_same_plot() {
+    // 西单（yellow 那一族的一块）：一次租金 180、地价 3000 —— **16.7 倍回本**。
+    // 三档的倍数是 25.6 / 17.2 / 11.2，于是两端各差出一截：大佬奸余 1608、乖宝宝差 984。
+    // 中间那一档（普通人 3096 对 3000）只余 3%，所以**不断他** —— 一条靠 3% 余量站住的
+    // 断言会在任何人挪一次地价时红，而那不是它想守的东西。
+    // 断的是**谁把手举起来**，不是谁付了多少钱：那是这一刀唯一的可见产物。
+    let (mut app, players) = quiet_field(3);
+    let (shark, goody) = (players[1], players[3]);
+    let mut took = Vec::new();
+    for (index, seat) in players[1..].iter().enumerate() {
+        own(&mut app, WEST, None, 0, false);
+        own(&mut app, PALACE, None, 0, false);
+        set_cash(&mut app, *seat, 20_000);
+        ask(&mut app, *seat, Pending::Buy(LandId(WEST)));
+        if owner_of(&mut app, WEST) == Some(index as u32 + 1) {
+            took.push(*seat);
+        }
+    }
+    assert!(
+        took.contains(&shark),
+        "大佬奸（25.6 倍）该吃下这块 16.7 倍回本的地，实际举手的：{took:?}"
+    );
+    assert!(
+        !took.contains(&goody),
+        "乖宝宝（11.2 倍）不该买这块 16.7 倍回本的地 —— 三档在同一块地上读不出差别就是白建"
+    );
+    assert_cash_audit(&mut app, GameRules::default().start_cash);
+}
+
+#[test]
+fn the_monopoly_jump_is_what_makes_goody_reach_for_his_wallet() {
+    // **这一条是「打分」与「有钱就买」的分界线，也是「值不值」读的是以后的收益的证据**：
+    // 同一块地、同一档先验、同样的两万块 —— 手上没有那一族时他不买（180 × 11.2 = 2016
+    // 盖不住 3000），先把同族的另一块给他，再买这一块就补全该族、租金翻倍
+    // （360 × 11.2 = 4032 > 3000）→ 买。
+    //
+    // 它顺带钉住一件更隐蔽的事：`rent_if_mine` 必须把**假想我名下**那份视图喂给
+    // `calculate_rent`。若图省事改读此刻的 `rent_of`（无主地收 0），两种情况都是 0 分，
+    // 于是「不买 / 买」这一对断言同时红 —— 而 P14a 那份一律 `Accept` 的脚手架反倒全绿，
+    // 所以这条红的不只是实现，还替「打分比不打分强」这句话立了据。
+    let (mut app, players) = quiet_field(3);
+    let goody = players[3];
+
+    own(&mut app, PALACE, None, 0, false);
+    own(&mut app, WEST, None, 0, false);
+    set_cash(&mut app, goody, 20_000);
+    ask(&mut app, goody, Pending::Buy(LandId(WEST)));
+    assert_eq!(
+        owner_of(&mut app, WEST),
+        None,
+        "差一块才成那一族时，乖宝宝不该为一块 16.7 倍回本的地掏钱"
+    );
+
+    own(&mut app, PALACE, Some(3), 0, false);
+    own(&mut app, WEST, None, 0, false);
+    ask(&mut app, goody, Pending::Buy(LandId(WEST)));
+    assert_eq!(
+        owner_of(&mut app, WEST),
+        Some(3),
+        "同一块地，只因为买下它就补全了 yellow 那一族（租金翻倍），乖宝宝就该伸手"
+    );
+}
+
+#[test]
+fn the_reserve_gate_is_the_next_bill() {
+    // 留底 ＝ 下一笔要付的账，而这一格里它是**别人名下最贵的那一笔租金**：
+    // 让真人拿着王府井（yellow 那一族只有一块在他手上 → 不成垄断，租金就是表上那个 160）。
+    // 于是「买完只剩 60」与「买完还剩 400」是两个世界，而两块地的价格完全一样。
+    let (mut app, players) = quiet_field(1);
+    let seat = players[1];
+    own(&mut app, 4, Some(0), 0, false);
+
+    // 买价 3800：60 的余量低于那笔 160 的账 → 不举手续
+    own(&mut app, LAND, None, 0, false);
+    set_cash(&mut app, seat, 3_860);
+    ask(&mut app, seat, Pending::Buy(LandId(LAND)));
+    assert_eq!(
+        owner_of(&mut app, LAND),
+        None,
+        "付完之后连下一笔租金都盖不住，这一格该放弃"
+    );
+    assert_eq!(
+        cash_of(&mut app, seat),
+        3_860,
+        "该放弃的那一笔不许动钱（「钱少了而地没拿到」是这一族最坏的形状）"
+    );
+
+    // 同一块地、同一份先验，只是余量越过那道账 → 举手续
+    set_cash(&mut app, seat, 4_200);
+    ask(&mut app, seat, Pending::Buy(LandId(LAND)));
+    assert_eq!(
+        owner_of(&mut app, LAND),
+        Some(1),
+        "400 的余量盖得住那笔 160 的账，该买 —— 这一半是防「留底被写成一条永远不放的闸门」"
+    );
+}
+
+#[test]
+fn a_fumble_trades_the_best_answer_for_the_next_one() {
+    // 同一块地、同样现金、同一档先验，只差 `fumble`：0 那一头买，1 那一头不买。
+    // **这一条是「次优」这个词在世界上的唯一证据** —— 没有它，`fumble` 就是一个没人读的字，
+    // 而「大佬奸偶尔手滑」这句话在代码里根本不存在（与「空跑的断言等于没断言」同一条教训）。
+    for (fumble, bought) in [(0.0_f32, true), (1.0_f32, false)] {
+        let (mut app, seat) = seat_with_fumble(fumble);
+        own(&mut app, LAND, None, 0, false);
+        set_cash(&mut app, seat, 20_000);
+        ask(&mut app, seat, Pending::Buy(LandId(LAND)));
+        assert_eq!(
+            owner_of(&mut app, LAND),
+            if bought { Some(1) } else { None },
+            "失误率 {fumble} 那一头的结果不对"
+        );
+    }
+
+    // 而**只有一条候选时不许越界**：乖宝宝在 100% 失误下仍然「不买」，
+    // 既不 panic 也不改成买 —— 表上第二名不存在，那一次手滑就没有代价可言
+    let mut setup = GameSetup::seats(1);
+    let Controller::Ai(_profile) = &mut setup.players[1].controller else {
+        panic!("`seats(1)` 的第二位必须是电脑座位");
+    };
+    setup.players[1].controller = Controller::Ai(AiProfile {
+        fumble: 1.0,
+        ..AiProfile::GOODY
+    });
+    let (mut app, players) = field_with(setup);
+    let seat = players[1];
+    own(&mut app, LAND, None, 0, false);
+    set_cash(&mut app, seat, 20_000);
+    ask(&mut app, seat, Pending::Buy(LandId(LAND)));
+    assert_eq!(
+        owner_of(&mut app, LAND),
+        None,
+        "只有一条候选时，失误不该凭空变出一个动作来"
+    );
+    assert_eq!(
+        window(&app),
+        None,
+        "窗口该照常收掉，回合不许停在没人答的地方"
+    );
+}
+
+#[test]
+fn an_ai_seat_upgrades_its_own_plot() {
+    // 升级那一格读 `build`，而读的是**增量租金**（加盖之后少付/多收的那一段）。
+    // 这一条只钉正路：等级 1→2、钱真的少了一笔。三档在升级上分不出档（演示盘的
+    // 加盖比买地划算得多，10 倍与 23 倍都盖得过），所以「按 `build` 分叉」的证据
+    // 长在买地那两条上，这里不假装。
+    let (mut app, players) = quiet_field(1);
+    let seat = players[1];
+    own(&mut app, LAND, Some(1), 1, false);
+    set_cash(&mut app, seat, 20_000);
+    let before = cash_of(&mut app, seat);
+    ask(&mut app, seat, Pending::Upgrade(LandId(LAND)));
+    assert_eq!(level_of(&mut app, LAND), 2, "加盖没落地");
+    let after = cash_of(&mut app, seat);
+    assert!(
+        after < before,
+        "加盖是花钱的：现金分文没动就说明那一步没走账本"
+    );
+    assert_cash_audit(&mut app, GameRules::default().start_cash);
 }

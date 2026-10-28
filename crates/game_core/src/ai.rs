@@ -26,19 +26,27 @@
 //! 想的结果一样。取那个间隔走第 20 条子流 [`pick_ai`](crate::rng::Rng::pick_ai)：
 //! 「AI 想了多久」不该改变下一张机会牌是谁，就像「这一局进过几次店」不该改变它一样。
 //!
-//! ## 穷尽但不打分（P14a 的边界）
+//! ## 穷尽留在 [`greedy`]，打分长在 [`AiHand::decide`]
 //!
-//! [`decide`] 对 17 个 [`Pending`] 变体**每一格都有答案**，而 P14a 的答案全是「今天脚手架那一份」
-//! —— 不是留半截，而是这一刀的产物是「AI 是一个座位」而不是「AI 会算账」（那是 P14b/c/d）。
-//! 为什么必须先穷尽：[`Pending::Auction`] 与 [`Pending::Passive`] 对三种 [`Decision`] 一条都不认
-//! （[`decision_system`](crate::landing::decision_system) 里那一格），答成 `Acknowledge` 等于没答，
-//! 而**症状是整局静默停住** —— 不 panic、不 warn，画面还在动，只是再没人行动。
-//! 新增一种窗口而忘了给 AI 答案，编译器当场替我们响（与 `landing::domain_of` 同一条纪律）。
+//! [`greedy`] 对 17 个 [`Pending`] 变体**每一格都有答案**，而那份答案就是 P14a 交付的「今天
+//! 脚手架那一份」。为什么必须先穷尽：[`Pending::Auction`] 与 [`Pending::Passive`] 对三种
+//! [`Decision`] 一条都不认（[`decision_system`](crate::landing::decision_system) 里那一格），
+//! 答成 `Acknowledge` 等于没答，而**症状是整局静默停住** —— 不 panic、不 warn，画面还在动，
+//! 只是再没人行动。新增一种窗口而忘了给答案，编译器当场替我们响（与 `landing::domain_of`
+//! 同一条纪律）。
+//!
+//! P14b 起 [`AiHand::decide`] 在**它已经会算账的那几格**上盖过它（钱那一刀先接 `Buy` 与
+//! `Upgrade`），其余一律落回 `greedy`。这条分工有两个后果，都是要的：
+//! ① 穷尽匹配只有一处，所以「AI 会不会把回合机挂死」那条编译期网不会因为新增一臂而漏；
+//! ② `decide` 里少写一臂只是「还没学会」，不是「会停住」——于是这一刀可以真的只切两格，
+//!    不必为了对称而把十七格各改一遍（PLAN §四・十五 切五刀的理由）。
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::auction::Auction;
+use crate::charge::ChargeKind;
+use crate::economy;
+use crate::land::LandId;
 use crate::landing::{Pending, PendingDecision};
 use crate::lottery::Jackpot;
 use crate::minigame::GameKind;
@@ -46,9 +54,10 @@ use crate::msg::{
     AuctionMove, BidMove, BuyTicketRequested, Decision, DecisionChosen, MinigameResult,
     PassiveAnswer, PassiveMove, RequestRoll, RequestStay,
 };
-use crate::player::{StaySentence, Wallet};
+use crate::player::StaySentence;
 use crate::rng::Rng;
 use crate::rules::GameRules;
+use crate::settle::Books;
 use crate::turn::TurnOrder;
 
 /// 这个座位由谁开车。**必挂**：查不到组件的人按 [`Controller::Human`] 处理。
@@ -198,6 +207,7 @@ pub struct AiClock {
 /// 后面四臂存在的最低理由是**别把回合机挂死**：`decision_system` 对拍卖与门连三种
 /// `Decision` 都不认，答成 `Acknowledge` 只是让长跑停在第一个破产或第一个被关的人那儿，
 /// 而且不报错。
+#[derive(Debug)]
 pub enum AiMove {
     /// 报价与收据那两类窗口：接受／放弃／已阅
     Decide(Decision),
@@ -211,7 +221,7 @@ pub enum AiMove {
     Gate(PassiveMove),
 }
 
-/// 这一问的答案。P14a 全部是「今天脚手架那一份」——**穷尽而不打分**（模块头有理由）。
+/// 这一问的答案里**不打分**的那一份：P14a 的全部，也是 AI 还没学会算账时那些格子的默认值。
 ///
 /// 分工不是讲究：柜台类窗口只认「已阅」（`decision_system` 那一格），一律发 `Accept` 的写法
 /// 会让 AI 第一个踩到银行格的回合就永久停在 `WaitDecision`。
@@ -221,7 +231,13 @@ pub enum AiMove {
 /// 「每笔进池的钱都能从流水追溯」就只在单测里成立过。
 /// 门答「不用」而不是「用」：手里那张卡花掉一次会把一整片「他进了监狱」的既有断言
 /// 翻成「他没进」——P14c 换成按 `harm` 与那道门槛打分之前，这一格维持原样。
-pub fn decide(about: Pending, rules: &GameRules) -> AiMove {
+///
+/// ⚠️ **穷尽匹配留在这里而不是留在 [`AiHand::decide`]**：那张守「AI 不会把回合机挂死」的
+/// 编译期网必须罩住所有窗口，而 `decide` 只打算显式列出**已经会打分**的那几格、其余一律
+/// 落到这一份表上。于是新增一种窗口时编译器照样当场响（在这一格里），而 `decide` 里少写一臂
+/// 只是「还没学会」，不是「会停住」。表现层那份替人类座位按按钮的脚手架读的也是这一份
+/// （`game_app/src/autopilot.rs`）—— 它替的是一个不在键盘前的人，不是一份先验。
+pub fn greedy(about: Pending, rules: &GameRules) -> AiMove {
     match about {
         Pending::Buy(_) | Pending::Upgrade(_) => AiMove::Decide(Decision::Accept),
         Pending::Minigame(game) => AiMove::Score {
@@ -236,9 +252,9 @@ pub fn decide(about: Pending, rules: &GameRules) -> AiMove {
         | Pending::Shop
         | Pending::CompanyNotice
         | Pending::Bail(_) => AiMove::Decide(Decision::Acknowledge),
-        // 建设窗口（P10c）：答「先不建」——建哪一类要读账本（棋盘默认表配了哪几类、这块地的价、
-        // 灰按钮的理由全在 `Books::build_probe`），而 `decide` 现在只有规则表。
-        // 今天这条的代价只有一句：AI 局里商业地保持空地。P14b 那一刀换掉它。
+        // 建设窗口（P10c）：答「先不建」——五类设施同价而效果差得很远，「建哪一类」问的是
+        // 「谁会被收钱」＝`harm`，那是 P14c 那一批的判据（PLAN §四・十五 的 P14b ④）。
+        // 这一格的代价说清楚：AI 局里商业地保持空地。
         Pending::Build(_) => AiMove::Decide(Decision::Acknowledge),
         // 远程建设窗口（P10d②）：与本地建设同一条回答，理由相同
         Pending::RemoteBuild => AiMove::Decide(Decision::Acknowledge),
@@ -252,26 +268,88 @@ pub fn decide(about: Pending, rules: &GameRules) -> AiMove {
     }
 }
 
-/// AI 的「一只手」：它读得着的世界状态与写得出去的那几种消息。
+/// 「我肯为一块地（或一级楼）付出它一次租金的 N 倍」里的那个 N。
 ///
-/// 打包成参数包是房规（§6.1 坑 8）：这条要写五种消息、读六样状态，散装就是十几个参数，
+/// 一条直线而不是一个表：`0` 那一端要留一个**大于 1 的下限**（乖宝宝也不是不买房，他只是
+/// 只肯买稳赚的），`1` 那一端要能盖住「回本就买」那种人（大佬奸）。`4..=28` 是按演示盘的
+/// 租金表与地价比例挑的：一块 Lv1 的南京路一次租金 180、地价 1500，`1500/180 ≈ 8.3` 倍
+/// 回本，所以中间那一档（普通人 `buy = 0.55 → 17.2` 倍）买得下它，而乖宝宝
+/// （`0.30 → 11.2`）也买得下、只是补不成同色组就不买最贵的那几块。
+pub fn leverage(x: f32) -> f32 {
+    4.0 + 24.0 * x
+}
+
+/// 一块（或一级）产出的期望租金折成今天的钱，值不值那个价。
+///
+/// **不除价**：这一格比的是「绝对赚多少」而不是「回本比」，因为候选表上另一头永远是
+/// 「什么都不做 ＝ 0 分」，两者同量纲才可比（除过价之后「一块便宜而没用的地」会盖过
+/// 「一块贵而垄断的地」，那不是我要的判断）。
+fn plot_value(rent_next: i64, price: i64, leverage: f32) -> f32 {
+    rent_next as f32 * leverage - price as f32
+}
+
+/// 候选表：**「次优」这个词只有在一张表上才有定义**（PLAN §四・十五 的 P14b ③）。
+///
+/// 所以打分不产出「一个 bool」而产出这张表，最后一步才从表里取一条。取法：按分从高到低，
+/// `fumble` 命中且表里还有第二名就交第二名。两条纪律住在类型上：
+/// ① **被拒的候选不许 `add` 进来**（付不起、不够格、神挡着）—— 否则失误会变成「发一条
+///    注定被拒的请求」，那不是手滑而是白扣一次动作，而且它在账上什么都没动，伪装得极好；
+/// ② 并列时按**加入次序**定胜负（`sort_by` 是稳定排序），所以调用侧必须以确定的顺序 `add`
+///    （格号、枚举序），不许依赖 `HashMap` 的迭代序 —— 同种子同轨迹这条就靠它。
+#[derive(Debug, Default)]
+pub struct Candidates {
+    items: Vec<(f32, AiMove)>,
+}
+
+impl Candidates {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add(&mut self, score: f32, mv: AiMove) {
+        self.items.push((score, mv));
+    }
+
+    /// 取走这一问的答案。表是空的＝这一格没给任何合法动作，调用侧要当「没答」处理。
+    pub fn take(mut self, fumble: bool) -> Option<AiMove> {
+        if self.items.is_empty() {
+            return None;
+        }
+        self.items.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let pick = if fumble && self.items.len() > 1 { 1 } else { 0 };
+        Some(self.items.swap_remove(pick).1)
+    }
+}
+
+/// AI 的「一只手」：它读得着的**世界**与写得出去的那几种消息。
+///
+/// 打包成参数包是房规（§6.1 坑 8）：这条要写五种消息、读账本与棋盘，散装就是十几个参数，
 /// 而 `#[allow(clippy::too_many_arguments)]` 会把「一个 system 要动这么多」这个信号吃掉。
 ///
 /// 它也是**表现层那套脚手架的手**（`game_app/src/autopilot.rs`）—— 两边共用同一个
 /// [`AiHand::emit`]，于是「答一句话到底要写几条消息」这份知识世界上只有一份。
-/// 那份脚手架替的是**不在键盘前的人类座位**，与这里替的 AI 座位由 [`Controller`] 分开，
-/// 永远不会同一个人收到两份回答。
+/// 那份脚手架替的是**不在键盘前的人类座位**（读 [`greedy`] 那份表，不读先验），与这里替的
+/// AI 座位由 [`Controller`] 分开，永远不会同一个人收到两份回答。
+///
+/// ## 为什么这里必须有 `Books`
+///
+/// 打分要读账本（这块地买得起吗、下一次收多少、名下押着几块），而**报价与成交必须问同一句**：
+/// `decide` 里那句「买得起」读的就是 [`Books::buy_price`] —— 与 `decision_system` 成交时调的
+/// 是同一条式子。P14a 之前这一格根本不存在（那份表只看规则表），也正是因此它永远只能
+/// 「一律接受」。
+///
+/// ⚠️ **带了 `Books` 之后就不许再带这几样**（同一条 system 参数里两条对同一资源的可变借用
+/// 会在参数建立期直接撞，坑 37 那一族；`Books` 内部字段清单见 `settle.rs:39-126`）：
+/// `Res<Auction>`（走 `books.auction`）、`Query<&Wallet>`（走 `books.balance`）、
+/// `Res<GameRules>`（走 `books.rules`）、`Res<GameSession>`、`Res<Corrections>`、
+/// `Query<&Detention>`（走 `books.held`）、`Query<&StockHoldings>`（走 `books.holdings_of`）、
+/// `Market` 与任何 `ResMut<Rng>`（后者归 [`AiPace`] 那一格）。
 #[derive(SystemParam)]
 pub struct AiHand<'w, 's> {
+    pub books: Books<'w, 's>,
     pub pending: Res<'w, PendingDecision>,
-    pub rules: Res<'w, GameRules>,
     /// 上期开出的号：跟着上期买是真玩家会做的事，而这个选择不需要世界状态之外的东西
     pub jackpot: Res<'w, Jackpot>,
-    /// 拍卖机。读的是**资源**而不是 `Books`：`Books` 里已经揣着一条 `ResMut<Auction>`，
-    /// 同一条 system 参数里两条对同一资源的可变借用会在参数建立期直接撞（坑 37 那一族）
-    pub auction: Res<'w, Auction>,
-    /// 各人的现金：要问「这一档加不加得起」，而不必把整个账本借进来
-    pub wallets: Query<'w, 's, &'static Wallet, With<crate::player::PlayerId>>,
     pub controllers: Query<'w, 's, &'static Controller>,
     pub answers: MessageWriter<'w, DecisionChosen>,
     pub scores: MessageWriter<'w, MinigameResult>,
@@ -284,6 +362,170 @@ impl AiHand<'_, '_> {
     /// 这个座位是不是电脑开的。**查不到组件算人类**（见 [`Controller`] 那条理由）。
     pub fn is_ai(&self, player: Entity) -> bool {
         self.controllers.get(player).is_ok_and(Controller::is_ai)
+    }
+
+    /// 这个座位领的是哪一份先验。`None` ＝ 不是电脑开的（人类，或漏挂组件）。
+    ///
+    /// 有了这一句，`is_ai` 与「读他的性格」就不是两次查询之间会漂移的事实：判据只有
+    /// 「拿得到先验吗」这一条。
+    pub fn profile_of(&self, player: Entity) -> Option<AiProfile> {
+        self.controllers
+            .get(player)
+            .ok()
+            .and_then(Controller::profile)
+            .copied()
+    }
+
+    /// **下一笔要付的账** —— 「付完之后手里剩下的钱」的底线（PLAN §四・十五 的 P14b ②）。
+    ///
+    /// 三条凑出来的，全部是现成读数，所以它随物价与处境一起动，而不是一个要人盯着的常数：
+    /// ① 场上别人名下**最贵的那一笔租金**（折过物价与我的修正）—— 下一掷踩中它就要付这个数，
+    ///    这是「我可能付的账」里最大的那一格；② 我的贷款到下个月末的利息；③ 名下押着的地
+    ///    的赎回款（付不起赎回就是丢地，而「丢地」比「少买一块地」贵得多）。
+    ///
+    /// 场上还没有任何人有地时它是 0 —— 那不是漏洞，是开局那一手的真账：谁都没地可踩，
+    /// 留底本来就该是零，于是三个 AI 开局都买地（与真人一样）。
+    fn reserve(&self, subject: Entity) -> i64 {
+        let Some(me) = self.books.id_of(subject) else {
+            return 0;
+        };
+        let views = self.books.views();
+        let worst_rent = views
+            .iter()
+            .filter(|view| view.owner.is_some() && view.owner != Some(me))
+            .map(|view| {
+                let nominal = self.books.rent_of(view.id);
+                self.books
+                    .quoted(ChargeKind::Rent { land: view.id }, subject, nominal)
+            })
+            .max()
+            .unwrap_or(0);
+        let interest = economy::loan_interest(self.books.bank_of(subject).loan, &self.books.rules);
+        let redeem = views
+            .iter()
+            .filter(|view| view.owner == Some(me) && view.mortgaged)
+            .map(|view| self.books.redeem_cost_of(view.id).unwrap_or(0))
+            .sum::<i64>();
+        worst_rent + interest + redeem
+    }
+
+    /// **买下这块地之后**它一次收多少钱（假想我名下的那份视图喂给同一条租金式子）。
+    ///
+    /// 不另写一条租金函数：`economy::calculate_rent` 就是成交之后真会读的那一条，这里只是
+    /// 把「这块地的 `owner` 换成我」这件事在**快照**上做一遍（`LandView` 本来就是为「判定
+    /// 不去查世界」设计的，所以假想不需要同步任何状态，也不可能与成交分叉）。
+    ///
+    /// 补全同色组那一跳就在这一个数里：`owns_full_group` 读的是同一份假想视图，所以「差一块
+    /// 就垄断」的地天然比别的地贵出 `monopoly_rent_multiplier` 倍 —— 不是一条特例，是式子本身。
+    fn rent_if_mine(&self, subject: Entity, land: LandId) -> i64 {
+        let Some(me) = self.books.id_of(subject) else {
+            return 0;
+        };
+        let mut views = self.books.views();
+        let Some(index) = views.iter().position(|view| view.id == land) else {
+            return 0;
+        };
+        views[index].owner = Some(me);
+        // 无主地立着的楼是破产留下的那种「无主而立着楼」，买下它连楼一起得到；
+        // 而它若正押着（押着的地不会无主）就当作不押 —— 成交那一刻抵押是要赎回的
+        views[index].mortgaged = false;
+        let nominal = economy::calculate_rent(
+            &self.books.active.def,
+            &views[index],
+            &views,
+            &self.books.rules,
+        );
+        self.books
+            .quoted(ChargeKind::Rent { land }, subject, nominal)
+    }
+
+    /// 这一问值不值：`Accept` 与 `Decline` 两条候选，闸门在打分之前。
+    ///
+    /// 两条闸门都不许写成「扣分」：`buy_price` 是 `None`（无主地没了、付不起、身上有衰神）
+    /// 与「过了留底」都是**这一格不许做**，而不是「做了但分低」。把它们混进分数里，
+    /// `fumble` 就会把一条注定被规则层拒掉的请求挑成第一名 —— 那正是 ③ 要挡的形状。
+    fn buy_table(&self, subject: Entity, profile: &AiProfile, land: LandId) -> Candidates {
+        let mut table = Candidates::new();
+        if let Some(price) = self.books.buy_price(subject, land)
+            && self.books.balance(subject) - price >= self.reserve(subject)
+        {
+            let rent = self.rent_if_mine(subject, land);
+            table.add(
+                plot_value(rent, price, leverage(profile.buy)),
+                AiMove::Decide(Decision::Accept),
+            );
+        }
+        table.add(0.0, AiMove::Decide(Decision::Decline));
+        table
+    }
+
+    /// 加盖那一问：读的是**多出来的那一段租金**（不是加盖之后的总租金），
+    /// 因为「不加盖」这一头收的是此刻那个数，两边同量纲才可比。
+    fn upgrade_table(&self, subject: Entity, profile: &AiProfile, land: LandId) -> Candidates {
+        let mut table = Candidates::new();
+        if let Some((cost, uplift)) = self.upgrade_uplift(subject, land)
+            && self.books.balance(subject) - cost >= self.reserve(subject)
+        {
+            table.add(
+                plot_value(uplift, cost, leverage(profile.build)),
+                AiMove::Decide(Decision::Accept),
+            );
+        }
+        table.add(0.0, AiMove::Decide(Decision::Decline));
+        table
+    }
+
+    /// 加盖要付多少、多收多少。`None` = 这一格不许加盖（不是我的地、抵押着、满级、
+    /// 不是组内最低层、身上有衰神、付不起）—— 判据一条都不重写，读 `economy::can_upgrade`。
+    fn upgrade_uplift(&self, subject: Entity, land: LandId) -> Option<(i64, i64)> {
+        let view = self.books.view(land)?;
+        let me = self.books.id_of(subject)?;
+        if view.owner != Some(me) || self.books.acquire_denied(subject) {
+            return None;
+        }
+        let base = economy::upgrade_cost(&self.books.active.def, &view)?;
+        let cost = self
+            .books
+            .quoted(ChargeKind::Upgrade { land }, subject, base);
+        let views = self.books.views();
+        let cash = self.books.balance(subject);
+        if !economy::can_upgrade(&view, me, &views, cost, cash, &self.books.rules) {
+            return None;
+        }
+        let now = self
+            .books
+            .quoted(ChargeKind::Rent { land }, subject, self.books.rent_of(land));
+        let mut after = views.clone();
+        let index = after.iter().position(|v| v.id == land)?;
+        after[index].level = view.level.saturating_add(1);
+        let later = economy::calculate_rent(
+            &self.books.active.def,
+            &after[index],
+            &after,
+            &self.books.rules,
+        );
+        let later = self.books.quoted(ChargeKind::Rent { land }, subject, later);
+        Some((cost, later - now))
+    }
+
+    /// 这一问的答案（会算账的那一份）。
+    ///
+    /// 只显式列出**已经会打分**的格子，其余一律落到 [`greedy`] 那份表上 —— 穷尽匹配留在
+    /// `greedy` 里，所以新增一种窗口仍然会编译失败，而这里少写一臂只是「还没学会」。
+    /// `fumble` 由调用侧掷好传进来（那条子流握在 [`AiPace`] 手里，与 `Books` 里的
+    /// `ResMut<GameSession>` 是两条不同的可变借用）。
+    pub fn decide(&self, subject: Entity, about: Pending, fumble: bool) -> AiMove {
+        let Some(profile) = self.profile_of(subject) else {
+            return greedy(about, &self.books.rules);
+        };
+        let table = match about {
+            Pending::Buy(land) => self.buy_table(subject, &profile, land),
+            Pending::Upgrade(land) => self.upgrade_table(subject, &profile, land),
+            _ => return greedy(about, &self.books.rules),
+        };
+        table
+            .take(fumble)
+            .unwrap_or_else(|| greedy(about, &self.books.rules))
     }
 
     /// 把一条回答落成消息。**返回「这一问真的被答出去了没有」**——拍卖那一格可能因为
@@ -309,7 +551,7 @@ impl AiHand<'_, '_> {
                 true
             }
             AiMove::Ticket => {
-                let numbers = self.rules.lottery_numbers;
+                let numbers = self.books.rules.lottery_numbers;
                 // 夹进号码池：上期那个号在「改过号码池的设置」之后可能已经不存在了
                 let number = self
                     .jackpot
@@ -342,21 +584,18 @@ impl AiHand<'_, '_> {
                 // （`auction_move_system` 改机器、`auction_hold_system` 挂窗口），而这两条之间
                 // 没排过序 —— 读到「新机器 + 旧窗口」那一帧是可能的。不一致时这一帧什么都不发，
                 // 下一帧自然一致：发一条注定被「还没轮到你」拒掉的请求，除了刷日志什么也不换。
-                let Some(lot) = self.auction.lot.as_ref() else {
+                // 拍卖机读 `books.auction` 而不是另带一条 `Res<Auction>`（`Books` 里那条是
+                // `ResMut`，同参数里并存会在建立期撞 —— 坑 37 那一族，`auction::AuctionDesk` 同例）
+                let Some(lot) = self.books.auction.lot.as_ref() else {
                     return false;
                 };
                 if lot.bidder() != Some(subject) {
                     return false;
                 }
                 let needed = lot.next_amount();
-                let cash = self
-                    .wallets
-                    .get(subject)
-                    .map(|wallet| wallet.cash)
-                    .unwrap_or_default();
                 // 加得起就一直加：这样长跑里**一定**会有拍卖成交。反过来一律放弃也能让机器转完，
                 // 但那一局里 P9 的过户与所得两条路径一次都没被走过
-                let what = if cash >= needed {
+                let what = if self.books.balance(subject) >= needed {
                     BidMove::Raise
                 } else {
                     BidMove::Withdraw
@@ -396,6 +635,15 @@ impl AiPace<'_> {
     fn charge(&mut self) {
         let gap = self.cadence.gap(&mut self.rng);
         self.clock.ready_at = self.time.elapsed_secs() + gap;
+    }
+
+    /// 这一次决策算不算错（PLAN §四・十五 的 P14b ③）。
+    ///
+    /// 掷在**这一格**而不是 `decide` 里，因为那条子流握在 [`AiPace`] 手上而 `decide` 只拿得到
+    /// 账本 —— 同一条 `ResMut<Rng>` 不许有第二个主人（那才是「同种子同轨迹」真正的守门人）。
+    /// 每问掷一次、不问不掷：人类座位走的是 `greedy` 那条路，一次都不该消耗这条流。
+    fn fumble(&mut self, profile: AiProfile) -> bool {
+        self.rng.pick_ai() < profile.fumble
     }
 }
 
@@ -448,6 +696,10 @@ pub fn ai_roll_system(mut pace: AiPace<'_>, mut turn: AiTurn<'_, '_>) {
 
 /// AI 座位在 `WaitDecision` 里的那一下：谁被挂着、被挂的是不是电脑开的座位。
 ///
+/// 「是不是电脑开的」这一句问的是 [`AiHand::profile_of`] 拿不拿得到先验 —— 与 [`Controller`]
+/// 是同一条事实的两种说法，所以这里不再有第二次查询，也不会有「两次读之间被人换了座位」那种
+/// 帧相关的形状。
+///
 /// 人类座位那一侧由表现层的脚手架（`NM_AUTOROLL`）替不在键盘前的人按按钮，两侧靠
 /// [`Controller`] 分开 —— **同一个人收到两份回答**的症状不是崩溃而是「买地买了两次」，
 /// 那比崩难查得多，所以这道分界有专项用例（`tests/ai.rs`）。
@@ -455,14 +707,15 @@ pub fn ai_answer_system(mut pace: AiPace<'_>, mut hand: AiHand<'_, '_>) {
     let Some((subject, about)) = hand.pending.active() else {
         return;
     };
-    if !hand.is_ai(subject) {
+    let Some(profile) = hand.profile_of(subject) else {
         return;
-    }
+    };
     if pace.held() {
         return;
     }
     pace.charge();
-    let mv = decide(about, &hand.rules);
+    let fumble = pace.fumble(profile);
+    let mv = hand.decide(subject, about, fumble);
     if !hand.emit(subject, mv) {
         trace!("AI 这一问没答出去（轮转与窗口不一致），下一帧再问");
     }
@@ -482,20 +735,20 @@ mod tests {
         for game in GameKind::ALL {
             assert!(
                 matches!(
-                    decide(Pending::Minigame(game), &rules),
+                    greedy(Pending::Minigame(game), &rules),
                     AiMove::Score { .. }
                 ),
                 "游乐场被答成了别的 —— 长跑会停在那一格"
             );
         }
-        assert!(matches!(decide(Pending::Auction, &rules), AiMove::Bid));
+        assert!(matches!(greedy(Pending::Auction, &rules), AiMove::Bid));
         assert!(matches!(
-            decide(Pending::Passive, &rules),
+            greedy(Pending::Passive, &rules),
             AiMove::Gate(PassiveMove::Decline)
         ));
-        assert!(matches!(decide(Pending::Lottery, &rules), AiMove::Ticket));
+        assert!(matches!(greedy(Pending::Lottery, &rules), AiMove::Ticket));
         assert!(matches!(
-            decide(Pending::Buy(crate::land::LandId(0)), &rules),
+            greedy(Pending::Buy(crate::land::LandId(0)), &rules),
             AiMove::Decide(Decision::Accept)
         ));
     }
@@ -506,13 +759,85 @@ mod tests {
     fn the_arcade_answer_scores_half_of_perfect() {
         let rules = GameRules::default();
         for game in GameKind::ALL {
-            let AiMove::Score { game: g, score } = decide(Pending::Minigame(game), &rules) else {
+            let AiMove::Score { game: g, score } = greedy(Pending::Minigame(game), &rules) else {
                 panic!("游乐场不该被答成别的形状");
             };
             assert_eq!(g, game);
             assert!(score > 0, "{} 报 0 分", game.label());
             assert_eq!(score, rules.minigames.of(game).perfect / 2);
         }
+    }
+
+    /// 候选表是「次优」这个词唯一的落脚点：命中失误交第二名。两条边界各钉一头 ——
+    /// **只有一条时不许乱交**（拿越界当特色，那条 `swap_remove(1)` 会 panic），
+    /// **并列时按加入次序分得出胜负**（同种子同轨迹这条靠它，而不是靠哈希的脾气）。
+    #[test]
+    fn a_fumble_takes_the_second_place_and_ties_break_by_insertion_order() {
+        let mut table = Candidates::new();
+        table.add(5.0, AiMove::Decide(Decision::Accept));
+        table.add(1.0, AiMove::Decide(Decision::Decline));
+        assert!(matches!(
+            table.take(false),
+            Some(AiMove::Decide(Decision::Accept))
+        ));
+        let mut table = Candidates::new();
+        table.add(5.0, AiMove::Decide(Decision::Accept));
+        table.add(1.0, AiMove::Decide(Decision::Decline));
+        assert!(matches!(
+            table.take(true),
+            Some(AiMove::Decide(Decision::Decline))
+        ));
+
+        // 只有一条：失误没有第二名可取，交出去的仍是那一条
+        let mut lone = Candidates::new();
+        lone.add(0.0, AiMove::Decide(Decision::Decline));
+        assert!(matches!(
+            lone.take(true),
+            Some(AiMove::Decide(Decision::Decline))
+        ));
+
+        // 同分：先加入的赢（稳定排序），所以调用侧的 `add` 次序就是判据的一部分
+        let mut tie = Candidates::new();
+        tie.add(0.0, AiMove::Decide(Decision::Accept));
+        tie.add(0.0, AiMove::Decide(Decision::Decline));
+        assert!(matches!(
+            tie.take(false),
+            Some(AiMove::Decide(Decision::Accept))
+        ));
+        let mut tie = Candidates::new();
+        tie.add(0.0, AiMove::Decide(Decision::Accept));
+        tie.add(0.0, AiMove::Decide(Decision::Decline));
+        assert!(matches!(
+            tie.take(true),
+            Some(AiMove::Decide(Decision::Decline))
+        ));
+    }
+
+    /// `leverage` 的两端都要有名字：`0` 那一端不是「不买」（下限仍是四次租金），
+    /// `1` 那一端是「回本就买」。中段的三档预设落在什么位置，这条用例念一遍给人听。
+    #[test]
+    fn the_leverage_span_is_the_whole_personality_range() {
+        assert_eq!(leverage(0.0), 4.0);
+        assert_eq!(leverage(1.0), 28.0);
+        let [shark, plain, goody] = AiProfile::THREE;
+        assert!(
+            leverage(shark.buy) > leverage(plain.buy) && leverage(plain.buy) > leverage(goody.buy)
+        );
+    }
+
+    /// 打分的量纲必须与「什么都不做 ＝ 0 分」可比：收益 × 倍数 刚好抵掉代价时是 0，
+    /// 而那一格正是候选表上 Decline 的分。除过价就没了这件事（一块便宜而没用的地会盖过
+    /// 一块贵而垄断的地），所以这条钉的是**式子的形状**而不只是数。
+    #[test]
+    fn a_break_even_plot_scores_exactly_like_doing_nothing() {
+        let rent = 180;
+        let price = (rent as f32 * leverage(0.5)) as i64;
+        assert!(plot_value(rent, price, leverage(0.5)).abs() < 1.0);
+        // 同一次租金、贵一倍的价：分是负的，于是 Decline 赢
+        assert!(plot_value(rent, price * 2, leverage(0.5)) < 0.0);
+        // 补全同色组那一跳（垄断翻倍）能把同一块地从「不买」翻成「买」
+        let doubled = rent * GameRules::default().monopoly_rent_multiplier;
+        assert!(plot_value(doubled, price, leverage(0.5)) > 0.0);
     }
 
     /// 三档先验必须是**能读出差别**的三行读数：`harm` 单调、`fumble` 单调，
