@@ -40,28 +40,48 @@
 //! ① 穷尽匹配只有一处，所以「AI 会不会把回合机挂死」那条编译期网不会因为新增一臂而漏；
 //! ② `decide` 里少写一臂只是「还没学会」，不是「会停住」——于是这一刀可以真的只切两格，
 //!    不必为了对称而把十七格各改一遍（PLAN §四・十五 切五刀的理由）。
+//!
+//! ## 回合前理财（P14b③）：掷骰之前先看一眼活钱
+//!
+//! 变现这件事在规则层有两个入口，而它们**互不重叠**：押地与借贷只能在银行柜台的窗口里办，
+//! 卖股与取款却挂在「自己回合、掷骰之前」（`market::trade_request_system` 只在 `WaitRoll`
+//! 跑）。于是 [`ai_roll_system`] 从「一发掷骰」变成两步：先问一句「活钱够不够水位」，
+//! 不够就卖股，**每回合最多理一次、最多动一只股**，第二帧才掷骰。
+//!
+//! 三个约束是刻意的：
+//! ① **每回合只一次、只一只**（[`AiErrands::rebalanced`] 带回合号）：「AI 炒股要尽量少」
+//!    不是一句口味，它得在结构上成立。一次动作只动一只股，而一次动作之后这条 system 才掷骰。
+//! ② **只卖不买除非闲钱多得没处去**：有主的地一块都不剩（[`AiHand::land_left`]）才轮到股票，
+//!    而买只在「跌到近一均值以下」时发生（[`AiProfile::STOCK_DIP`]）—— 见着有闲钱就买，
+//!    那不是理财是做市。
+//! ③ **取款那一档不写**：AI 的存款恒为 0（存钱只有柜台存现金与女巫的「存现金」两条路，
+//!    AI 两条都不走），写进来就是一条永远不响的候选 —— 与 P14b② 那条赎回空档同一类坑。
+//!    真要有存款了，这里加一档的判据是 `market_halt_now` 之外什么都不用问。
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::bank::bank_op_allowed;
+use crate::calendar::HolidaySet;
 use crate::charge::ChargeKind;
 use crate::economy;
 use crate::institution::Institution;
 use crate::land::LandId;
 use crate::landing::{Pending, PendingDecision};
 use crate::lottery::Jackpot;
+use crate::market::{MarketClock, market_halt_now};
 use crate::minigame::GameKind;
 use crate::mortgage::{counter_plots, mortgage_op_allowed, read_facts};
 use crate::msg::{
     AuctionMove, BankOp, BankOpRequested, BidMove, BuyTicketRequested, Decision, DecisionChosen,
     MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, RequestRoll,
-    RequestStay,
+    RequestStay, StockTradeRequested, TradeSide,
 };
 use crate::player::StaySentence;
 use crate::rng::Rng;
 use crate::rules::GameRules;
 use crate::settle::Books;
+use crate::stock::{PriceHistory, StockId, StockPrice};
 use crate::turn::TurnOrder;
 
 /// 这个座位由谁开车。**必挂**：查不到组件的人按 [`Controller::Human`] 处理。
@@ -171,6 +191,21 @@ impl AiProfile {
     /// （−0.15）—— 中间那一档要留得出余量，否则挪一次预设值就翻掉「谁会自救」这句话
     /// （P14b① 在买地那格上刚被同样的 3% 余量咬过一口）。
     pub const LIQUIDIZE: f32 = 0.25;
+
+    /// **肯不肯拿闲钱去买股的那道门槛**：`stock` 低于它的座位，闲钱再多也只是躺着。
+    ///
+    /// 「AI 炒股要尽量少」在这一格里落成一条门槛而不是一个折扣：三档离它是 +0.30 / −0.20 /
+    /// −0.50，于是**一局里只有一个座位会碰股票**（大佬奸），而另外两档的 `stock` 仍然照旧
+    /// 上屏、照旧在文档里读得出档次（它们是同一张表里的三行，只是这一行只有一个读者）。
+    /// 与 [`Self::LIQUIDIZE`] 同一手：门槛是设计值，不是算出来的，改一次要连着看用例。
+    pub const STOCK_APPETITE: f32 = 0.60;
+
+    /// **跌到近一均价的几成才算「便宜」**（现价 ÷ 历史均价 ≤ 它才买）。
+    ///
+    /// 有闲钱是一件事，见着有闲钱就下单是另一件 —— 这条是「尽量少」的第二半：
+    /// 现价还在均价之上时不买，只有真跌下去才接。`0.90` 是一个设计值（跌幅 10%），
+    /// 与演示盘五只股 5–15% 的日波动同量级：跌得出来，但不会天天发生。
+    pub const STOCK_DIP: f32 = 0.90;
 }
 
 /// 两次按按钮之间的人味：`NM_AUTOROLL` 那种长跑要 0，看人下棋要半秒到一秒半。
@@ -246,6 +281,29 @@ pub enum TellerMove {
 pub struct AiErrands {
     /// `(谁, 第几回合)`：这位在这一回合已经在柜台办过一笔了。
     pub banked: Option<(Entity, u32)>,
+    /// `(谁, 第几回合)`：这位这一回合的**回合前理财**已经问过了。
+    ///
+    /// 它挡的不是「柜台」而是「同一回合掷骰之前反复下单」：AI 卖出之后要等下一帧才掷骰，
+    /// 中间那几帧如果没有这一格，`treasury` 会再算一遍 —— 而缺口还在（卖一笔地租可能
+    /// 补不满），于是同一回合里会一只一只卖下去。用户那句「每回合前最多买卖一只股票」
+    /// 就是靠这一格**在结构上**成立的，不是靠候选表里只有一条。
+    ///
+    /// 与 `banked` 同一条生命周期：资源、每局清空（`Local` 会带着上一局的回合号），
+    /// 且带回合号 —— 「谁在第几回合」这句话少一半就会跨人、跨回合误挡。
+    pub rebalanced: Option<(Entity, u32)>,
+}
+
+/// 回合前理财那一笔（P14b③）：**一只股**，买或卖，不给第二只。
+///
+/// 只带「哪只、几股」而不带方向之外的东西：股数按缺口或闲钱算好，成交价与部分成交由
+/// `Market::trade` 自己定 —— 与真人拖那条浮层的滑杆走的是同一条 `StockTradeRequested`，
+/// 于是 AI 这边的「多少钱」与规则层那边不可能分叉。
+///
+/// 没有 `Idle`：没得办就是不办（[`AiHand::treasury`] 返 `None`），而「不办」不需要一条消息。
+#[derive(Debug, Clone, PartialEq)]
+pub enum TradeMove {
+    Buy { stock: StockId, shares: u32 },
+    Sell { stock: StockId, shares: u32 },
 }
 
 /// AI 对一问的回答。**六种答案形状，与真人点按钮时点的那六类东西一模一样**。
@@ -272,6 +330,8 @@ pub enum AiMove {
     Gate(PassiveMove),
     /// 银行柜台：办一件业务（**不带**「办完」，那一句在下一帧 —— 见 [`AiErrands`]）
     Teller(TellerMove),
+    /// 回合前理财：卖一只股补水位／买一只跌下去的股（在 `WaitRoll` 里、掷骰之前）
+    Trade(TradeMove),
 }
 
 /// 这一问的答案里**不打分**的那一份：P14a 的全部，也是 AI 还没学会算账时那些格子的默认值。
@@ -413,6 +473,14 @@ pub struct AiHand<'w, 's> {
     pub passives: MessageWriter<'w, PassiveAnswer>,
     pub bank_ops: MessageWriter<'w, BankOpRequested>,
     pub mortgages: MessageWriter<'w, MortgageRequested>,
+    pub trades: MessageWriter<'w, StockTradeRequested>,
+    /// 行情表（只读）。**不借 `Market`**：那一条参数包里握着 `ResMut<Rng>`，与本模块
+    /// 的 [`AiPace`] 是同一个资源的第二个主人（同种子同轨迹靠的正是「只有一处抽」）。
+    pub stocks: Query<'w, 's, (&'static StockId, &'static StockPrice, &'static PriceHistory)>,
+    /// 休市的两条来源（P2b 日历 / P11c② 停牌）：理财那一步问的与下单那一步是**同一句**
+    /// [`market_halt_now`]，两边各拼一遍就会有一边读着旧世界。
+    pub holidays: Res<'w, HolidaySet>,
+    pub clock: Res<'w, MarketClock>,
 }
 
 impl AiHand<'_, '_> {
@@ -699,6 +767,144 @@ impl AiHand<'_, '_> {
         table
     }
 
+    /// 场上还有没有**无主的地**。理财那一步读它：「有地可买的时候，钱是留着买地的」。
+    ///
+    /// 这一句比任何「现金超过多少才谈得上投资」的常数都稳：地价随棋盘走、物价指数随
+    /// 全场资产走，而「还剩几块无主地」是规则层自己的读数。演示盘六块地卖完之后 AI 才开始
+    /// 炒股，真棋盘上这自然把这件事推到中局 —— 「AI 炒股要尽量少」的一半靠它。
+    fn land_left(&self) -> bool {
+        self.books.views().iter().any(|view| view.owner.is_none())
+    }
+
+    /// 此刻开不开盘。与 `trade_request_system` 读的是**同一句**（[`market_halt_now`]）。
+    fn market_open(&self) -> bool {
+        market_halt_now(&self.holidays, &self.books.session, self.clock.tick).is_open()
+    }
+
+    /// 持仓按 `StockId` 排过序。**这一步不是洁癖**：`Books::holdings_of` 走的是 `HashMap`
+    /// 的迭代序，而 std 的 `RandomState` 每个进程一份随机种子 —— 不排序的话「先挑到哪一只」
+    /// 每次启动都不同，「同一颗种子同一条轨迹」当场破功（`Candidates` 那条 tie-break 是
+    /// 同一条纪律，只是这里连并列都谈不上：顺序本身就是随机的）。
+    fn holdings_sorted(&self, subject: Entity) -> Vec<(StockId, u32)> {
+        let mut held = self.books.holdings_of(subject);
+        held.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        held
+    }
+
+    fn price_of(&self, id: &StockId) -> Option<f32> {
+        self.stocks
+            .iter()
+            .find(|(stock, ..)| *stock == id)
+            .map(|(_, price, _)| price.0)
+    }
+
+    /// 卖股补缺口：**一只股，卖够为止**。
+    ///
+    /// 挑法照 [`Self::pick_pawn`] 那一手（押哪块地）：先找「整笔卖得掉、且值 ≥ 缺口里最小的
+    /// 那一笔」（别为一个小缺口把最大的持仓一次清掉），都比缺口小时卖最大那一笔（少卖一点
+    /// 是一点）。两个比较都是严格的、而 `holdings_sorted` 已按 id 排过序，于是并列时留下的是
+    /// id 靠前的那一只 —— 同种子同轨迹靠这一句，不靠 `HashMap` 的脾气。
+    fn sell_plan(&self, subject: Entity, gap: i64) -> Option<TradeMove> {
+        let mut fits: Option<(StockId, u32, i64, f32)> = None;
+        let mut biggest: Option<(StockId, u32, i64, f32)> = None;
+        for (id, shares) in self.holdings_sorted(subject) {
+            let Some(price) = self.price_of(&id) else {
+                continue;
+            };
+            if shares == 0 || price <= 0.0 {
+                continue;
+            }
+            let value = (price * shares as f32) as i64;
+            if value <= 0 {
+                continue;
+            }
+            if value >= gap && fits.as_ref().is_none_or(|(_, _, best, _)| value < *best) {
+                fits = Some((id.clone(), shares, value, price));
+            }
+            if biggest.as_ref().is_none_or(|(_, _, best, _)| value > *best) {
+                biggest = Some((id, shares, value, price));
+            }
+        }
+        let (stock, held, _, price) = fits.or(biggest)?;
+        let need = ((gap as f32) / price).ceil().max(1.0) as u32;
+        Some(TradeMove::Sell {
+            stock,
+            shares: need.min(held),
+        })
+    }
+
+    /// 买股只用**闲钱**，而且只接跌下去的那一只。
+    ///
+    /// 现价 ÷ 历史均价最小者胜、并列按 id：这一格是「抄底」而不是「挑便宜的」—— 股息按股价
+    /// 派生（`dividend_per_share`），贵贱与分红无关，涨跌才是买股赚得到的唯一那一笔。
+    /// 没有历史时当 1.0（「没跌过」），而装配时历史里本来就塞了基准价，所以那只是防御。
+    ///
+    /// 跌得不够（[`AiProfile::STOCK_DIP`]）就什么都不买：有闲钱是一件事，见着有闲钱就下单
+    /// 是另一件 —— 「尽量少」的第二半在这里。
+    fn buy_plan(&self, spare: i64) -> Option<TradeMove> {
+        let mut best: Option<(StockId, f32, f32)> = None;
+        for (id, price, history) in self.stocks.iter() {
+            let price = price.0;
+            if price <= 0.0 {
+                continue;
+            }
+            let mean = if history.0.is_empty() {
+                0.0
+            } else {
+                history.0.iter().sum::<f32>() / history.0.len() as f32
+            };
+            let ratio = if mean > 0.0 { price / mean } else { 1.0 };
+            let better = best.as_ref().is_none_or(|(best_id, _, best_ratio)| {
+                ratio
+                    .total_cmp(best_ratio)
+                    .then_with(|| id.0.cmp(&best_id.0))
+                    .is_lt()
+            });
+            if better {
+                best = Some((id.clone(), price, ratio));
+            }
+        }
+        let (stock, price, ratio) = best?;
+        if ratio > AiProfile::STOCK_DIP {
+            return None;
+        }
+        let shares = (spare as f32 / price).floor() as u32;
+        if shares == 0 {
+            return None;
+        }
+        Some(TradeMove::Buy { stock, shares })
+    }
+
+    /// 回合前理财那一笔：`None` ＝ 这一回合没得办（调用侧把手滑也归进这一格）。
+    ///
+    /// 三档判据自上而下：
+    /// ① 活钱低于水位 → 卖股。卖股是「动身家」，所以资格读 [`AiProfile::LIQUIDIZE`]
+    ///    （与押地借钱同一个门槛），**不读 `stock`** —— `stock` 说的是买不买；
+    /// ② 闲钱多出「水位 + 一整笔留底」→ 且 `stock` 过门槛、且场上已没有无主的地 → 买一只
+    ///    跌下去的股。多留一整笔留底是买与卖之间那道缝：贴着水位买，下一笔账就会把它逼回来
+    ///    卖，同一只股一进一出只是白跑一趟；
+    /// ③ 其余什么都不办。
+    ///
+    /// 取款不在这里（AI 的存款恒为 0，理由见模块头那条 ③）。
+    pub fn treasury(&self, subject: Entity, profile: &AiProfile) -> Option<TradeMove> {
+        if !self.market_open() {
+            return None;
+        }
+        let cash = self.books.balance(subject);
+        let target = self.target(subject, profile);
+        if cash < target {
+            if profile.debt < AiProfile::LIQUIDIZE {
+                return None;
+            }
+            return self.sell_plan(subject, target - cash);
+        }
+        let spare = cash - target - self.reserve(subject);
+        if spare > 0 && profile.stock >= AiProfile::STOCK_APPETITE && !self.land_left() {
+            return self.buy_plan(spare);
+        }
+        None
+    }
+
     /// 这一问的答案（会算账的那一份）。
     ///
     /// 只显式列出**已经会打分**的格子，其余一律落到 [`greedy`] 那份表上 —— 穷尽匹配留在
@@ -819,6 +1025,21 @@ impl AiHand<'_, '_> {
                 }
                 true
             }
+            AiMove::Trade(what) => {
+                let (stock, side, shares) = match what {
+                    TradeMove::Buy { stock, shares } => (stock, TradeSide::Buy, shares),
+                    TradeMove::Sell { stock, shares } => (stock, TradeSide::Sell, shares),
+                };
+                self.trades.write(StockTradeRequested {
+                    player: subject,
+                    stock,
+                    side,
+                    shares,
+                });
+                // 与柜台那一格同一条：这一回合的理财到此用完（见 [`AiErrands::rebalanced`]）
+                self.errands.rebalanced = Some((subject, self.books.session.turn_count));
+                true
+            }
             AiMove::Bid => {
                 // **主语取机器而不是取窗口**：轮转指针与窗口由两条 system 写
                 // （`auction_move_system` 改机器、`auction_hold_system` 挂窗口），而这两条之间
@@ -898,13 +1119,20 @@ pub struct AiTurn<'w, 's> {
     stays: MessageWriter<'w, RequestStay>,
 }
 
-/// AI 座位在 `WaitRoll` 里的那一下：与真人点那颗按钮同一条意图。
+/// AI 座位在 `WaitRoll` 里的那一下：**先理财、再掷骰**，两步不同帧。
+///
+/// 与真人点那颗按钮同一条意图：真人也是先能买卖证券、再按掷骰（`trade_request_system`
+/// 只在 `WaitRoll` 受理）。第一步只在真有得办时发生（[`AiHand::treasury`] 返 `Some`），
+/// 并且写一格 [`AiErrands::rebalanced`] —— 于是「每回合最多买卖一只股」是结构而不是约定。
 ///
 /// 身上挂着 [`StaySentence`] 的人**发「停留」而不是掷骰** —— 少这一支是**死锁**而不是「少走一步」：
 /// `roll_dice_system` 对被按住的人直接 `return`（那条判据在规则层，不认 UI），于是 `RequestRoll`
 /// 每帧被写、每帧被吞，回合机停在 `WaitRoll` 不动也不报错。P4④ 当时把这一条写成「P14 的前置」，
 /// 就是等这一刻。
-pub fn ai_roll_system(mut pace: AiPace<'_>, mut turn: AiTurn<'_, '_>) {
+///
+/// 理财排在停留之前：被按住的人还在牌桌上（P4④ 的新口径），这一回合照样可以买卖证券，
+/// 而「停留」只是他这一回合迈不开步。
+pub fn ai_roll_system(mut pace: AiPace<'_>, mut turn: AiTurn<'_, '_>, mut hand: AiHand<'_, '_>) {
     let Some(current) = turn.order.current() else {
         return;
     };
@@ -917,6 +1145,24 @@ pub fn ai_roll_system(mut pace: AiPace<'_>, mut turn: AiTurn<'_, '_>) {
     }
     if pace.held() {
         return;
+    }
+    // P14b③ 回合前理财：掷骰之前先看一眼活钱。**这一帧只办这一件**，掷骰在下一帧 ——
+    // 卖股的消息要与下单那条 system 同帧生效，而它和掷骰谁先被读没有保证（坑 36 那一族）；
+    // 分成两帧之后先后根本不出现在判据里，与柜台那两帧同一手。
+    let turn_no = hand.books.session.turn_count;
+    if hand.errands.rebalanced != Some((current, turn_no))
+        && let Some(profile) = hand.profile_of(current)
+    {
+        match hand.treasury(current, &profile) {
+            // 手滑：候选表第二名就是「什么都不办」（这条表只有一件真事），于是这一回合的
+            // 理财就这么忘了 —— 标记照写，免得下一帧再掷一次骰把它想回来
+            Some(mv) if !pace.fumble(profile) => {
+                pace.charge();
+                hand.emit(current, AiMove::Trade(mv));
+                return;
+            }
+            _ => hand.errands.rebalanced = Some((current, turn_no)),
+        }
     }
     pace.charge();
     if let Ok(sentence) = turn.staying.get(current) {

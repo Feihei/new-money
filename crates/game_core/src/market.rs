@@ -99,6 +99,23 @@ pub fn market_halt(closed_by_calendar: bool, suspended_for: u32) -> Halt {
     }
 }
 
+/// 此刻开不开盘 —— 把日历与停牌两条来源读成一句。
+///
+/// **下单处与 AI 读的是这一句**（P14b③）：`trade_request_system` 挡请求、AI 决定要不要
+/// 下单，两边若各拼一遍 `market_halt(..)`，改一条判据就会有一边暂时读着旧世界 ——
+/// 而症状是「AI 发了一条注定被静默吞掉的请求」，账上什么都没动，最难查（与 `market_halt`
+/// 自己那条「两处各写 `||` 早晚忘一处」同一条纪律）。
+pub fn market_halt_now(
+    holidays: &HolidaySet,
+    session: &crate::turn::GameSession,
+    tick: u32,
+) -> Halt {
+    market_halt(
+        holidays.is_market_closed(date_of(tick, session.epoch)),
+        session.suspensions.days_left(Institution::StockMarket),
+    )
+}
+
 /// 市场侧的运行时访问：股票实体 + 静态定义 + 随机流。
 /// 现金与持仓仍归 [`Books`]（两个参数包合起来才是一次完整成交），所以这里刻意不碰钱包。
 #[derive(SystemParam)]
@@ -335,17 +352,7 @@ pub fn trade_request_system(
     // 周末与节假日休市（P2b）、新闻停牌（P11c②）：不开盘就不许下单。只挡股市 ——
     // 银行全年无休（它的停摆另问一处，见 `bank::bank_op_allowed`）。
     // 挡在这里而不是 `economy::buy_plan` 里 —— 成交函数不该知道今天是星期几。
-    if !market_halt(
-        market
-            .holidays
-            .is_market_closed(date_of(market.tick_count(), books.session.epoch)),
-        books
-            .session
-            .suspensions
-            .days_left(Institution::StockMarket),
-    )
-    .is_open()
-    {
+    if !market_halt_now(&market.holidays, &books.session, market.tick_count()).is_open() {
         for r in requests.read() {
             debug!("交易被拒：股市没开盘（{:?} {}）", r.player, r.stock.0);
         }

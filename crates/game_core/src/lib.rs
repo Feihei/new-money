@@ -60,7 +60,7 @@ pub mod prelude {
     pub use crate::afflict::{Afflict, Affliction};
     pub use crate::ai::{
         AiCadence, AiClock, AiErrands, AiHand, AiMove, AiProfile, Candidates, Controller,
-        TellerMove, ai_answer_system, ai_roll_system, greedy, leverage,
+        TellerMove, TradeMove, ai_answer_system, ai_roll_system, greedy, leverage,
     };
     pub use crate::auction::{
         Auction, AuctionDesk, BidDeny, BidFacts, Gavel, LiquidationPlan, Listing, Lot, OpenDeny,
@@ -134,7 +134,7 @@ pub mod prelude {
         magic_spell_system, settle_magic_landing,
     };
     pub use crate::market::{
-        Halt, Market, MarketClock, market_halt, market_tick_on_turn_end_system,
+        Halt, Market, MarketClock, market_halt, market_halt_now, market_tick_on_turn_end_system,
         settle_market_landing, trade_request_system,
     };
     pub use crate::minigame::{

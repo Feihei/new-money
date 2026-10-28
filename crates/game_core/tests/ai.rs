@@ -28,12 +28,12 @@ mod common;
 
 use bevy::app::App;
 use bevy::ecs::entity::Entity;
-use bevy::prelude::NextState;
+use bevy::prelude::{MessageReader, NextState, ResMut, Resource, Update};
 use common::*;
 use game_core::prelude::{
     AiCadence, AiClock, AiProfile, CardAim, Controller, GameRules, GameSeed, GameSession,
-    GameSetup, Gender, LandId, PLAYER_COLORS, Paused, Pending, PendingDecision, PlayerSetup,
-    StaySentence, TurnPhase,
+    GameSetup, Gender, Institution, LandId, PLAYER_COLORS, Paused, Pending, PendingDecision,
+    PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice, StockTradeRequested, TurnPhase,
 };
 use game_core::rng::Rng;
 
@@ -834,4 +834,282 @@ fn one_counter_visit_does_one_business() {
         "同上（第二块）—— 循环的入口就是「押完还能赎、赎完还能押」"
     );
     assert_eq!(window(&app), None, "办完那一句在下一帧发，窗口该已经收了");
+}
+
+// ======================== P14b③：回合前理财那一步 ========================
+//
+// 这一节钉的是「AI 在掷骰之前先看一眼活钱」这一刀在**结构上**成立的四件事：
+//
+// - **每回合最多一只股** → [`the_housekeeping_step_sells_one_stock_per_turn`]。它不是约定，
+//   而是 `AiErrands::rebalanced` 那一格：卖完之后要等下一帧才掷骰，中间没有这格闸门的话
+//   「缺口还没补满」会让同一回合一只一只卖下去。
+// - **变现读 `debt`、买股读 `stock`**，两格各归各的 → [`the_goody_would_rather_go_broke_than_sell`]、
+//   [`only_the_shark_dabbles_in_stocks`]。
+// - **有地可买时先买地、跌得不够不买** → [`the_shark_keeps_his_money_for_the_land`]、
+//   [`a_flat_market_is_not_worth_a_trade`] —— 「AI 炒股要尽量少」的两半。
+// - **不开盘不下单**，与 `trade_request_system` 读同一句 → [`a_closed_market_keeps_the_ai_out`]。
+
+/// 一档性格的电脑 + 一位等人点的真人，且**电脑是当前回合**。
+///
+/// `field_with` 按「当前是真人」建好（推到 `WaitRoll` 就停），这里再把轮转指针拨到电脑
+/// 那一格 —— 理财那一步只读「现在轮到谁 + 相位」，与 `begin_turn` 无关。
+/// 失误率统一按住：这一节测的是判据，「手滑」另有专项用例。
+fn solo_ai(profile: AiProfile) -> (App, Entity) {
+    let mut setup = GameSetup::seats(1);
+    setup.players[1].controller = Controller::Ai(AiProfile {
+        fumble: 0.0,
+        ..profile
+    });
+    let (mut app, players) = field_with(setup);
+    make_current(&mut app, players[1]);
+    (app, players[1])
+}
+
+/// 让 AI 只动一次：先把钟调到「现在就能动」，动完 `charge` 把他按到一小时之后。
+///
+/// core 的默认钟是即时（`0..=0`，且不抽流），所以「逐帧观察 AI」在这里写不出来 ——
+/// 一次性夹具要的是「一步一停」，而不是「跑几帧碰运气」。
+fn step_ai(app: &mut App) {
+    app.insert_resource(AiCadence {
+        min: 3600.0,
+        max: 3600.0,
+    });
+    app.insert_resource(AiClock::default());
+    settle(app, 2);
+}
+
+/// 让这一动**只可能理财、不掷骰**：给他一句停留。
+///
+/// 「什么都没办」之后 AI 会紧接着掷骰，而 `GameRules::instant()` 下骰子可能当帧就落地收租 ——
+/// 那会让「现金没动」这条断言红在一笔与本用例无关的账上。停留把那一动换成「不掷骰」，
+/// 而理财排在它前面（P4④ 的新口径：被按住的人也还在牌桌上），于是判据不受影响。
+fn hold_the_roll(app: &mut App, seat: Entity) {
+    app.world_mut()
+        .entity_mut(seat)
+        .insert(StaySentence { turns_left: 1 });
+}
+
+/// 摆一只股的现价与历史。理财那一步读的是「现价 ÷ 历史均价」，所以历史也得摆。
+fn quote(app: &mut App, id: &str, price: f32, history: &[f32]) {
+    let w = app.world_mut();
+    let mut q = w.query::<(&StockId, &mut StockPrice, &mut PriceHistory)>();
+    let mut found = false;
+    for (stock, mut now, mut past) in q.iter_mut(w) {
+        if stock.0 == id {
+            now.0 = price;
+            past.0.clear();
+            past.0.extend(history.iter().copied());
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "stocks.json 里没有 {id}");
+}
+
+/// 记下 AI 发出去的每一条下单请求。
+///
+/// 停牌那一条不能用「股数没变」来断：`trade_request_system` 自己也会拒绝，于是
+/// 「AI 发了一条注定被吞掉的请求」与「AI 根本没发」在账上长得一模一样 —— 那正是
+/// 「空跑的断言等于没断言」的形状。只有把请求本身抓住，才分得开这两件事。
+#[derive(Resource, Default)]
+struct TradeLog(Vec<String>);
+
+fn watch_trades(app: &mut App) {
+    app.init_resource::<TradeLog>();
+    app.add_systems(
+        Update,
+        |mut log: ResMut<TradeLog>, mut requests: MessageReader<StockTradeRequested>| {
+            for r in requests.read() {
+                log.0.push(r.stock.0.clone());
+            }
+        },
+    );
+}
+
+/// 六块地全有主 —— 「有地可买时先买地」那道闸门放行的前提。
+fn sell_out_the_board(app: &mut App) {
+    for land in 0..6 {
+        own(app, land, Some(0), 0, false);
+    }
+}
+
+#[test]
+fn the_housekeeping_step_sells_one_stock_per_turn() {
+    // 缺口远大于任何一笔持仓（一笔 18000 的租金把水位撑到 21600），于是他会把最大那一笔
+    // 清掉；清完之后活钱还是不够，**第二动**如果还能卖就会接着卖另一只 —— 标记是那道闸门。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    own(&mut app, 2, Some(0), 5, false);
+    set_cash(&mut app, seat, 0);
+    quote(&mut app, "stock_001", 80.0, &[80.0]);
+    quote(&mut app, "stock_002", 60.0, &[60.0]);
+    set_shares(&mut app, seat, "stock_001", 100);
+    set_shares(&mut app, seat, "stock_002", 100);
+
+    step_ai(&mut app);
+    assert_eq!(shares_of(&mut app, seat, "stock_001"), 0, "第一只该被卖掉");
+    assert_eq!(cash_of(&mut app, seat), 8_000, "卖 100 股 × 80 元");
+    assert_eq!(
+        shares_of(&mut app, seat, "stock_002"),
+        100,
+        "一只股：同一动里第二只不许跟着卖"
+    );
+
+    // 同一回合的第二动：标记已经写下了，他该掷骰而不是接着卖
+    step_ai(&mut app);
+    assert_eq!(
+        shares_of(&mut app, seat, "stock_002"),
+        100,
+        "同一回合里第二只股也被卖了 —— 「每回合最多一只」那道闸门没关上"
+    );
+}
+
+#[test]
+fn the_goody_would_rather_go_broke_than_sell() {
+    // 卖股是「动身家」，所以资格读 `debt` 那一格（与押地借钱同一个门槛），不读 `stock` ——
+    // 乖宝宝缺钱也不动自己的资产，§七 那条 4 代实测的归宿在这里原样保留。
+    let (mut app, seat) = solo_ai(AiProfile::GOODY);
+    own(&mut app, 2, Some(0), 5, false);
+    set_cash(&mut app, seat, 0);
+    quote(&mut app, "stock_001", 80.0, &[80.0]);
+    set_shares(&mut app, seat, "stock_001", 100);
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    assert_eq!(
+        shares_of(&mut app, seat, "stock_001"),
+        100,
+        "乖宝宝那一档不该动身家 —— 缺钱也不卖股"
+    );
+    assert_eq!(cash_of(&mut app, seat), 0, "没成交就不许动钱");
+}
+
+#[test]
+fn only_the_shark_dabbles_in_stocks() {
+    // 同一份世界、同样两万闲钱、同一只跌了两成的股：只有 `stock` 过门槛的那一档会买。
+    // 三档在这里读出两个结果 —— 这就是「性格是数不是枚举」在股票那一格上的证据。
+    for (profile, buys) in [
+        (AiProfile::SHARK, true),
+        (AiProfile::PLAIN, false),
+        (AiProfile::GOODY, false),
+    ] {
+        let (mut app, seat) = solo_ai(profile);
+        sell_out_the_board(&mut app);
+        set_cash(&mut app, seat, 20_000);
+        // 只有 001 真跌下去了（72 对均价 90 → 0.8 倍），其余四只是平的
+        for (id, base) in [
+            ("stock_002", 60.0),
+            ("stock_003", 45.0),
+            ("stock_004", 35.0),
+            ("stock_005", 55.0),
+        ] {
+            quote(&mut app, id, base, &[base]);
+        }
+        quote(&mut app, "stock_001", 72.0, &[90.0]);
+        hold_the_roll(&mut app, seat);
+
+        step_ai(&mut app);
+        assert_eq!(
+            shares_of(&mut app, seat, "stock_001") > 0,
+            buys,
+            "{} 那一档对「跌到 0.8 倍」的反应不对",
+            profile.who
+        );
+        if buys {
+            assert!(cash_of(&mut app, seat) < 20_000, "买股是要掏钱的");
+        } else {
+            assert_eq!(cash_of(&mut app, seat), 20_000, "没买就不许动钱");
+        }
+        for id in ["stock_002", "stock_003", "stock_004", "stock_005"] {
+            assert_eq!(
+                shares_of(&mut app, seat, id),
+                0,
+                "{id} 不该被碰 —— 一动只动一只"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_shark_keeps_his_money_for_the_land() {
+    // 同一份富裕条件，只差「场上还有一块无主的地」：这时钱是留着买地的。
+    // 这一格是「尽量少」的第一半 —— 它比任何「现金超过多少才投资」的常数都稳，
+    // 因为地价与物价都会动，而「还剩几块无主地」是棋盘自己的读数。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    for land in 0..5 {
+        own(&mut app, land, Some(0), 0, false);
+    }
+    set_cash(&mut app, seat, 20_000);
+    quote(&mut app, "stock_001", 72.0, &[90.0]);
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    assert_eq!(
+        shares_of(&mut app, seat, "stock_001"),
+        0,
+        "还有地可买就去炒股 —— 那一步该等棋盘卖完"
+    );
+    assert_eq!(cash_of(&mut app, seat), 20_000, "没买就不许动钱");
+}
+
+#[test]
+fn a_flat_market_is_not_worth_a_trade() {
+    // 闲钱条件全满足，只是没有一只跌到 0.9 倍 → 一股也不买。
+    // 「有闲钱」是一件事，「见着有闲钱就下单」是另一件 —— 这一条是「尽量少」的第二半。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    sell_out_the_board(&mut app);
+    set_cash(&mut app, seat, 20_000);
+    for (id, base) in [
+        ("stock_001", 80.0),
+        ("stock_002", 60.0),
+        ("stock_003", 45.0),
+        ("stock_004", 35.0),
+        ("stock_005", 55.0),
+    ] {
+        quote(&mut app, id, base, &[base]);
+    }
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    for id in [
+        "stock_001",
+        "stock_002",
+        "stock_003",
+        "stock_004",
+        "stock_005",
+    ] {
+        assert_eq!(shares_of(&mut app, seat, id), 0, "平盘也买：{id}");
+    }
+    assert_eq!(cash_of(&mut app, seat), 20_000, "没买就不许动钱");
+}
+
+#[test]
+fn a_closed_market_keeps_the_ai_out() {
+    // 下单处与 AI 读的是同一句 `market_halt_now`（停牌／休市）。少了这一句，AI 会在停牌那几天
+    // 每回合发一条注定被静默吞掉的请求 —— 账上什么都没动，而「他为什么不理财」没人查得出来。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    own(&mut app, 2, Some(0), 5, false);
+    set_cash(&mut app, seat, 0);
+    quote(&mut app, "stock_001", 80.0, &[80.0]);
+    set_shares(&mut app, seat, "stock_001", 100);
+    run_op(&mut app, |books, _| {
+        books
+            .session
+            .suspensions
+            .suspend(Institution::StockMarket, 3);
+    });
+    hold_the_roll(&mut app, seat);
+    watch_trades(&mut app);
+
+    step_ai(&mut app);
+    let sent = app.world().resource::<TradeLog>().0.clone();
+    assert!(
+        sent.is_empty(),
+        "停牌时 AI 还是发了下单请求 {sent:?} —— 下单处会把它静默吞掉，账上什么都不会动"
+    );
+    assert_eq!(
+        shares_of(&mut app, seat, "stock_001"),
+        100,
+        "停牌时不许下单"
+    );
+    assert_eq!(cash_of(&mut app, seat), 0, "没成交就不许动钱");
 }
