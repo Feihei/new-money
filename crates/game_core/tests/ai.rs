@@ -650,3 +650,188 @@ fn an_ai_seat_upgrades_its_own_plot() {
     );
     assert_cash_audit(&mut app, GameRules::default().start_cash);
 }
+
+/// 直接摆上负债 —— 还款那一格的夹具（与 `set_cash`／`own`／`set_shares` 同一类「只改读数」）。
+fn set_loan(app: &mut App, player: Entity, loan: i64) {
+    let w = app.world_mut();
+    let mut entity = w.entity_mut(player);
+    let mut balance = entity
+        .get_mut::<game_core::prelude::BankBalance>()
+        .expect("玩家身上该有 `BankBalance`");
+    balance.loan = loan;
+}
+
+/// 让某一档先验单独走一次柜台：把世界摆回同一条起跑线，挂上窗口，让他办。
+///
+/// 三档共用这一句而不是各写一遍，是为了让「同一块世界」这件事真的成立 —— 任何一处
+/// 忘了重置（比如忘了把 `LAND` 的归属换回来），读出的差别就是夹具的而不是性格的。
+fn counter_visit(app: &mut App, seat: Entity, index: u32) {
+    own(app, 2, Some(0), 5, false); // 真人拿着外滩商业区、Lv5：一笔租金 18000
+    own(app, LAND, Some(index), 0, false); // 他自己名下有一块，才撑得出可借额度
+    set_cash(app, seat, 0);
+    set_loan(app, seat, 0);
+    hang(app, seat, Pending::BankTeller);
+    ask(app, seat, Pending::BankTeller);
+}
+
+#[test]
+fn the_three_ladders_at_the_counter_reach_different_amounts() {
+    // 同一块世界、同样身无分文、同一个柜台：三档各自借一次，借到的数**必须不同**。
+    // 这就是 PLAN §四・十五 的 ② 那句「按性格分叉」在世界上的样子 —— 而它不是一句
+    // 「肯 / 不肯」：大佬奸与普通人都肯，差别在**借这一层的几成**（`debt` 是档位不是开关）。
+    //
+    // 乖宝宝那一档是这条用例的另一半：他 `debt = 0.10` 在门槛（0.25）之下，于是
+    // **不借、也不押**，名下那块地照原样站着 —— 4 代实测那句「AI 从不抵押，直到破产」
+    // 在这里被保留成一种性格，而不是一条全局规则。
+    let (mut app, players) = quiet_field(3);
+    for (index, seat) in players[1..].iter().enumerate() {
+        counter_visit(&mut app, *seat, index as u32 + 1);
+    }
+    let (shark, plain, goody) = (players[1], players[2], players[3]);
+    let (_, shark_loan) = bank_of(&mut app, shark);
+    let (_, plain_loan) = bank_of(&mut app, plain);
+    let (_, goody_loan) = bank_of(&mut app, goody);
+    assert!(
+        shark_loan > plain_loan && plain_loan > 0,
+        "同一世界里两档都该自救，且借的额度按 `debt` 分档：大佬奸 {shark_loan} / 普通人 {plain_loan}"
+    );
+    assert_eq!(
+        goody_loan, 0,
+        "乖宝宝那一档不该动身家 —— 他宁可死扛（§七 那条实测的归宿）"
+    );
+    assert_eq!(
+        mortgage_of(&app, LAND),
+        None,
+        "而且他也不押：名下那块地照原样站着（柜台上的两档筹钱业务他都不办）"
+    );
+    assert_cash_audit(&mut app, GameRules::default().start_cash);
+}
+
+#[test]
+fn a_counter_visit_always_gives_the_turn_back() {
+    // 就算**什么都不办**，柜台也得收摊。少了 `TellerMove::Idle` 那一句 `Acknowledge`，
+    // 症状不是崩而是「整局静默停住、画面还在动」（坑 38 那一族），而乖宝宝那一档
+    // 每一局都会走到这一格 —— 所以这一条不是补白，是这一刀的门。
+    let (mut app, players) = quiet_field(3);
+    let goody = players[3];
+    counter_visit(&mut app, goody, 3);
+    assert_eq!(
+        window(&app),
+        None,
+        "柜台没关：他什么都没办，可回合还停在那儿"
+    );
+    assert_ne!(
+        phase(&app),
+        TurnPhase::WaitDecision,
+        "窗口关了而相位还钉在 `WaitDecision` —— 交还回合由这一步做"
+    );
+}
+
+#[test]
+fn a_rich_seat_pays_down_its_loan_at_the_counter() {
+    // 有余钱又欠着钱 → 还。分是「这一笔下个月不再长息」，与筹钱那两档同一把尺。
+    let (mut app, players) = quiet_field(1);
+    let seat = players[1];
+    // 这里**不**给别人摆一块高价地：留底会把「余钱」吃掉 —— 一笔 18000 的最贵租金让
+    // 两万现金变成缺口而不是余量，于是这一档根本不上桌（第一版就是这么红的）。
+    // 留底只由那五千欠款的月息撑出来，正好够说明「还钱这一档读的是省下的息」。
+    set_loan(&mut app, seat, 5_000);
+    set_cash(&mut app, seat, 20_000);
+    hang(&mut app, seat, Pending::BankTeller);
+    ask(&mut app, seat, Pending::BankTeller);
+    let (_, loan) = bank_of(&mut app, seat);
+    assert_eq!(loan, 0, "两万现金压着五千欠款，这一档该还掉");
+    assert!(
+        cash_of(&mut app, seat) < 20_000,
+        "还掉的钱是从现金里走的（不是凭空清零）"
+    );
+    assert_cash_audit(&mut app, GameRules::default().start_cash);
+}
+
+#[test]
+fn a_rich_seat_redeems_the_plot_it_pawned() {
+    // 押着的地**收不到租**（`calculate_rent` 里抵押那一格短路成 0），所以赎回换回的是
+    // 「下一次有人踩它」那笔钱 —— 而这个数**不能**直接读 `rent_of`（读出来就是 0，
+    // 于是这一档永远上不了桌，且画面上一切正常）。这一条钉的就是那个假想视图。
+    let (mut app, players) = quiet_field(1);
+    let seat = players[1];
+    own(&mut app, LAND, Some(1), 0, true); // 自己的地，押着
+    set_cash(&mut app, seat, 20_000);
+    hang(&mut app, seat, Pending::BankTeller);
+    ask(&mut app, seat, Pending::BankTeller);
+    assert_eq!(
+        mortgage_of(&app, LAND),
+        None,
+        "两万现金压着一块押着的地，该把它赎回来 —— 赎回那一档的分读的是「假想没押」的租金"
+    );
+    assert_eq!(owner_of(&mut app, LAND), Some(1), "赎回不改归属");
+    assert!(cash_of(&mut app, seat) < 20_000, "赎回是要付钱的");
+}
+
+#[test]
+fn a_fumble_at_the_counter_drops_from_one_rung_to_the_next() {
+    // 「次优」在**多档表**上同样要成立：不失误时他借（补得最多的一档），
+    // 失误时他掉到第二档 —— 押一块地出去。这一条与 P14b① 那条两候选的失误用例
+    // 不是重复：那一格只有「买 / 不买」，这一格有四档，第二名是**另一种业务**而不是同一件的反面。
+    let (mut app, seat) = seat_with_fumble(0.0);
+    own(&mut app, 2, Some(0), 5, false);
+    own(&mut app, LAND, Some(1), 0, false);
+    set_cash(&mut app, seat, 0);
+    hang(&mut app, seat, Pending::BankTeller);
+    ask(&mut app, seat, Pending::BankTeller);
+    let (_, loan) = bank_of(&mut app, seat);
+    assert!(
+        loan > 0,
+        "不失误的大佬奸该先借（借来的那一档补得最多），实际 {loan}"
+    );
+    assert_eq!(mortgage_of(&app, LAND), None, "第一档成了，就不该再动地");
+
+    let (mut app, seat) = seat_with_fumble(1.0);
+    own(&mut app, 2, Some(0), 5, false);
+    own(&mut app, LAND, Some(1), 0, false);
+    set_cash(&mut app, seat, 0);
+    hang(&mut app, seat, Pending::BankTeller);
+    ask(&mut app, seat, Pending::BankTeller);
+    let (_, loan) = bank_of(&mut app, seat);
+    assert_eq!(
+        loan, 0,
+        "手滑了就不该借成：这一局他借到的钱该是 0，实际 {loan}"
+    );
+    assert!(
+        mortgage_of(&app, LAND).is_some(),
+        "手滑之后他办的是第二档：把名下那块地押出去"
+    );
+}
+
+#[test]
+fn one_counter_visit_does_one_business() {
+    // 「一次访问只办一件」不是补白，它挡的是两件具体的事：
+    // ① 业务与「办完」不同帧（那两条 system 与 `decision_system` 没排过序，坑 36）；
+    // ② **押完一块地立刻有资格赎回它** —— 那是一台不需要外力就能永远转下去的循环。
+    // 这一条钉 ① 与「只办一件」本身：大佬奸面对一个借不满的缺口（两块地撑出来的额度
+    // 远小于留底），只借一次就收摊，名下两块地一块都没动。
+    // 把 `AiErrands` 那一格去掉，他会借到额度见底、再把地押出去 —— 两条断言同时红。
+    let (mut app, players) = quiet_field(1);
+    let seat = players[1];
+    own(&mut app, 2, Some(0), 5, false); // 别人那块 Lv5 让缺口大到一笔业务补不满
+    own(&mut app, LAND, Some(1), 0, false);
+    own(&mut app, PALACE, Some(1), 0, false);
+    set_cash(&mut app, seat, 0);
+    set_loan(&mut app, seat, 0);
+    hang(&mut app, seat, Pending::BankTeller);
+    ask(&mut app, seat, Pending::BankTeller);
+
+    let (_, loan) = bank_of(&mut app, seat);
+    assert!(loan > 0, "第一档该办成：借到了一笔，实际 {loan}");
+    assert_eq!(
+        mortgage_of(&app, LAND),
+        None,
+        "借过一笔就收摊：这一次访问不该顺手把地也押出去"
+    );
+    assert_eq!(
+        mortgage_of(&app, PALACE),
+        None,
+        "同上（第二块）—— 循环的入口就是「押完还能赎、赎完还能押」"
+    );
+    assert_eq!(window(&app), None, "办完那一句在下一帧发，窗口该已经收了");
+}

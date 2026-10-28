@@ -1427,6 +1427,18 @@ impl<'w, 's> Books<'w, 's> {
             .sum()
     }
 
+    /// 名下**未抵押**地块撑出来的贷款上限（缺陷 #1 修的就是这个数在 Godot 里恒为 0）。
+    ///
+    /// 收成一处之前有三个手拼的调用点（柜台面板的「还可借」、dump、以及 P14b 的 AI 档位）。
+    /// 它不是「还能借多少」—— 那是 `max_loan(…) − bank_of(…).loan`，而减法要留给调用方，
+    /// 因为「已借的那一笔算不算在额度里」这句话在柜台与在 AI 嘴里是同一句，写两遍就会分叉。
+    pub fn max_loan(&self, player: Entity) -> i64 {
+        let Some(pid) = self.id_of(player) else {
+            return 0;
+        };
+        economy::calc_max_loan(&self.active.def, &self.views(), pid, &self.rules)
+    }
+
     /// 某人名下的**地块数**（「第一大地主」先数地、再比价那一格）。
     ///
     /// 为什么块数排在价值前面：「大地主」那个词说的是地多，而一个握着五块空地的人

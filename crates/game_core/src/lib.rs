@@ -59,8 +59,8 @@ pub mod world;
 pub mod prelude {
     pub use crate::afflict::{Afflict, Affliction};
     pub use crate::ai::{
-        AiCadence, AiClock, AiHand, AiMove, AiProfile, Candidates, Controller, ai_answer_system,
-        ai_roll_system, greedy, leverage,
+        AiCadence, AiClock, AiErrands, AiHand, AiMove, AiProfile, Candidates, Controller,
+        TellerMove, ai_answer_system, ai_roll_system, greedy, leverage,
     };
     pub use crate::auction::{
         Auction, AuctionDesk, BidDeny, BidFacts, Gavel, LiquidationPlan, Listing, Lot, OpenDeny,
@@ -295,6 +295,7 @@ impl Plugin for CoreGamePlugin {
             // `AiClock` 是**这一局的状态**，所以装配时归零而不是只 init（见 `world.rs`）。
             .init_resource::<crate::ai::AiCadence>()
             .init_resource::<crate::ai::AiClock>()
+            .init_resource::<crate::ai::AiErrands>()
             .init_resource::<Landing>()
             .init_resource::<PendingDecision>()
             .init_resource::<AtmAccess>()

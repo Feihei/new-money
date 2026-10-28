@@ -44,15 +44,19 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use crate::bank::bank_op_allowed;
 use crate::charge::ChargeKind;
 use crate::economy;
+use crate::institution::Institution;
 use crate::land::LandId;
 use crate::landing::{Pending, PendingDecision};
 use crate::lottery::Jackpot;
 use crate::minigame::GameKind;
+use crate::mortgage::{counter_plots, mortgage_op_allowed, read_facts};
 use crate::msg::{
-    AuctionMove, BidMove, BuyTicketRequested, Decision, DecisionChosen, MinigameResult,
-    PassiveAnswer, PassiveMove, RequestRoll, RequestStay,
+    AuctionMove, BankOp, BankOpRequested, BidMove, BuyTicketRequested, Decision, DecisionChosen,
+    MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, RequestRoll,
+    RequestStay,
 };
 use crate::player::StaySentence;
 use crate::rng::Rng;
@@ -154,6 +158,19 @@ impl AiProfile {
 
     /// 三档预设。座位不够分时按这个次序领。
     pub const THREE: [AiProfile; 3] = [AiProfile::SHARK, AiProfile::PLAIN, AiProfile::GOODY];
+
+    /// **肯不肯动身家的那道门槛**：`debt`（或 `stock`）低于它的座位，缺钱时宁可破产也不
+    /// 押地、不借、不卖股。
+    ///
+    /// 这是一个设计值而不是算出来的数，理由要说清：PLAN §四・十五 的 ② 拍的是「按性格分叉」
+    /// 而不是「按缺口分叉」—— 4 代实测那条「AI 从不抵押，直到破产」是一个**人**的行为，
+    /// 所以它必须能被某一档性格复现，而不是被某一档的算术复现。放在门槛而不是门槛之外，
+    /// 是为了让它可被一句断言钉住（乖宝宝在同一个世界里看着自己破产，见 `tests/ai.rs`）。
+    ///
+    /// 三档与它的距离是刻意的：大佬奸 0.80（+0.55）、普通人 0.40（+0.15）、乖宝宝 0.10
+    /// （−0.15）—— 中间那一档要留得出余量，否则挪一次预设值就翻掉「谁会自救」这句话
+    /// （P14b① 在买地那格上刚被同样的 3% 余量咬过一口）。
+    pub const LIQUIDIZE: f32 = 0.25;
 }
 
 /// 两次按按钮之间的人味：`NM_AUTOROLL` 那种长跑要 0，看人下棋要半秒到一秒半。
@@ -197,14 +214,48 @@ pub struct AiClock {
     pub ready_at: f32,
 }
 
-/// AI 对一问的回答。**五种答案形状，与真人手上的五种点击一模一样**。
+/// AI 在银行柜台那一次访问里办的那一件。**一次访问只办一件**，理由见 [`AiErrands`]。
+///
+/// 金额是这一格里唯一由性格决定的东西：`debt` 不决定「借不借」（那是门槛
+/// [`AiProfile::LIQUIDIZE`]），它决定「借这一层的几成」—— 于是同一句「敢不敢动身家」
+/// 在大佬奸嘴里是 2400、在普通人嘴里是 1200，而不是一句「是 / 否」。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TellerMove {
+    /// 什么都不办，直接按「办完」
+    Idle,
+    Borrow(i64),
+    Repay(i64),
+    Mortgage(LandId),
+    Redeem(LandId),
+}
+
+/// 这一回合已经办过的那件「不改变世界状态就看不出来」的差事。
+///
+/// 为什么必须是**资源**而不是 system 的 `Local`：`Local` 跟着 schedule 活，回主菜单再开一局
+/// 时它带着上一局的记录（§6.1 坑 22/25 那一族），症状是「新一局第一个路过银行的人什么业务
+/// 都办不成」。由 `begin_game_system` 每局清空。
+///
+/// 为什么这一格非要有：柜台那两条业务（`bank_op_system`／`mortgage_op_system`）与
+/// `decision_system` 分属两条 `add_systems(Update, ..)`，之间**没排过序** —— 于是「同一帧里
+/// 既发业务又发『办完』」是一件靠调度运气的事（业务会被自己的『办完』挡在门外，因为
+/// `at_counter` 读的就是窗口还开不开）。P8 用 `chain` 解过同一道题（`lottery_op_system`
+/// 排在前），这里选另一条路：**分成两帧**，第一帧只发业务、第二帧只发『办完』，于是谁先谁后
+/// 根本不出现在判据里。代价就是这一格记忆 —— 而它顺带把「一次访问只办一件」变成规则，
+/// 挡住了另一条更坏的形状：押完一块地立刻有资格赎回它，那是一台不需要外力就能永远转下去的循环。
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct AiErrands {
+    /// `(谁, 第几回合)`：这位在这一回合已经在柜台办过一笔了。
+    pub banked: Option<(Entity, u32)>,
+}
+
+/// AI 对一问的回答。**六种答案形状，与真人点按钮时点的那六类东西一模一样**。
 ///
 /// 单开一个类型而不是直接返回 [`Decision`]：游乐场那一格要回的是一份**成绩**、彩票柜台那
 /// 一格要的是一笔**买券请求**、拍卖台那一个要的是**喊价**、被动门那一个要的是
-/// **用／不用／给谁** —— 这四种在类型上都不是 `Decision`，而把它们并成一个 enum 之后，
-/// 新增一种窗口时必须当场决定 AI 怎么答它（穷尽匹配替我们响）。
+/// **用／不用／给谁**、银行柜台那一个要的是**一笔业务** —— 这五种在类型上都不是 `Decision`，
+/// 而把它们并成一个 enum 之后，新增一种窗口时必须当场决定 AI 怎么答它（穷尽匹配替我们响）。
 ///
-/// 后面四臂存在的最低理由是**别把回合机挂死**：`decision_system` 对拍卖与门连三种
+/// 后面五臂存在的最低理由是**别把回合机挂死**：`decision_system` 对拍卖与门连三种
 /// `Decision` 都不认，答成 `Acknowledge` 只是让长跑停在第一个破产或第一个被关的人那儿，
 /// 而且不报错。
 #[derive(Debug)]
@@ -219,6 +270,8 @@ pub enum AiMove {
     Bid,
     /// 被动卡那道门：用／不用／嫁祸给谁
     Gate(PassiveMove),
+    /// 银行柜台：办一件业务（**不带**「办完」，那一句在下一帧 —— 见 [`AiErrands`]）
+    Teller(TellerMove),
 }
 
 /// 这一问的答案里**不打分**的那一份：P14a 的全部，也是 AI 还没学会算账时那些格子的默认值。
@@ -351,11 +404,15 @@ pub struct AiHand<'w, 's> {
     /// 上期开出的号：跟着上期买是真玩家会做的事，而这个选择不需要世界状态之外的东西
     pub jackpot: Res<'w, Jackpot>,
     pub controllers: Query<'w, 's, &'static Controller>,
+    /// 这一回合办过的差事（柜台「一次访问只办一件」记在这儿）
+    pub errands: ResMut<'w, AiErrands>,
     pub answers: MessageWriter<'w, DecisionChosen>,
     pub scores: MessageWriter<'w, MinigameResult>,
     pub tickets: MessageWriter<'w, BuyTicketRequested>,
     pub bids: MessageWriter<'w, AuctionMove>,
     pub passives: MessageWriter<'w, PassiveAnswer>,
+    pub bank_ops: MessageWriter<'w, BankOpRequested>,
+    pub mortgages: MessageWriter<'w, MortgageRequested>,
 }
 
 impl AiHand<'_, '_> {
@@ -508,6 +565,140 @@ impl AiHand<'_, '_> {
         Some((cost, later - now))
     }
 
+    /// 目标水位：他愿意让活钱低到哪儿。
+    ///
+    /// `留底 × (2 − debt)` —— **敢动身家的人可以揣着少一点活钱**（他随时押得动、借得动、
+    /// 卖得动，不必自己当自己的银行），不敢动的人必须把那道账留在口袋里。方向与 `debt`
+    /// 相反是这一格的全部要点：写成 `× (1 + debt)` 就造出一个「越敢借钱越怕缺钱」的人。
+    fn target(&self, subject: Entity, profile: &AiProfile) -> i64 {
+        (self.reserve(subject) as f32 * (2.0 - profile.debt)).floor() as i64
+    }
+
+    /// 银行此刻放不放款（新闻「银行停止放款」那一条，P11c②）。
+    ///
+    /// 只有 `Borrow` 读它：还款、存取款不受影响 —— 那条新闻说的是「不借新的」，
+    /// 把还款一起挡掉等于凭空给欠债的人多记一笔逾期，而那句惩罚没有任何规则配得上它。
+    fn lending_open(&self) -> bool {
+        !self.books.session.suspensions.halted(Institution::Bank)
+    }
+
+    /// 押哪一块：缺口小就别押大地。先取「到手额 ≤ 缺口」里最大的那一块（正好补齐、不多押），
+    /// 一块都嫌大时取最小的那块（少押一点是一点）。
+    ///
+    /// 两个 `if` 都用**严格**比较，于是并列时留下的是先遇到的，而 `counter_plots` 按 `LandId`
+    /// 排过序 —— 同种子同轨迹这条就靠这一句，不靠 `>` 与 `>=` 的手感。
+    fn pick_pawn(&self, subject: Entity, gap: i64) -> Option<(LandId, i64)> {
+        let mut fits: Option<(LandId, i64)> = None;
+        let mut least: Option<(LandId, i64)> = None;
+        for (land, view) in counter_plots(&self.books, subject) {
+            let facts = read_facts(&self.books, subject, land, true);
+            if mortgage_op_allowed(MortgageOp::Take, &facts).is_err() {
+                continue;
+            }
+            let raised =
+                economy::mortgage_cashout(&self.books.active.def, &view, &self.books.rules);
+            if raised <= 0 {
+                continue;
+            }
+            if raised <= gap && fits.is_none_or(|(_, got)| raised > got) {
+                fits = Some((land, raised));
+            }
+            if least.is_none_or(|(_, got)| raised < got) {
+                least = Some((land, raised));
+            }
+        }
+        fits.or(least)
+    }
+
+    /// 押着的那块地**赎回来之后**一次收多少 —— 与 [`Self::rent_if_mine`] 同一手：把「押着」
+    /// 这一位在快照上抹掉，再喂给同一条租金式子。
+    ///
+    /// 直接读 `rent_of` 会得到 0（`calculate_rent` 里抵押那一格是短路成 0 的），于是赎回这一档
+    /// 永远 0 分、永远上不了桌 —— 而它恰恰是「有余钱时该做的事」里最该被想到的那一件。
+    /// 这一格是写完赎回之后回读才发现的：一条永远不会被选中的候选，与一条没写的候选
+    /// 在画面上长得一模一样。
+    fn rent_if_free(&self, subject: Entity, land: LandId) -> i64 {
+        let mut views = self.books.views();
+        let Some(index) = views.iter().position(|view| view.id == land) else {
+            return 0;
+        };
+        views[index].mortgaged = false;
+        let nominal = economy::calculate_rent(
+            &self.books.active.def,
+            &views[index],
+            &views,
+            &self.books.rules,
+        );
+        self.books
+            .quoted(ChargeKind::Rent { land }, subject, nominal)
+    }
+
+    /// 柜台那一次访问的候选表。
+    ///
+    /// **分全部用同一把尺：这一档替我换回多少钱**（借到手的、还掉之后省下的利息、押到手
+    /// 的、赎回之后收得回来的那一次租）。同一把尺才允许四档坐在同一张表上比，而
+    /// 「什么都不做 ＝ 0 分」那条基准**先** `add` 进来 —— 于是任何平局都归「不办事」，
+    /// 而 `add` 的次序就是 tie-break（P14b① 立的纪律）。
+    ///
+    /// 资格与额度是两件事，各由一个数管：肯不肯动身家是门槛 [`AiProfile::LIQUIDIZE`]
+    /// （乖宝宝那一档就是照它定的），动哪一层、动几成是 `debt` 那一格。所以同一句话在
+    /// 大佬奸嘴里是 2400、在普通人嘴里是 1200、在乖宝宝嘴里是「不办」。
+    fn teller_table(&self, subject: Entity, profile: &AiProfile) -> Candidates {
+        let mut table = Candidates::new();
+        table.add(0.0, AiMove::Teller(TellerMove::Idle));
+        // 一次访问只办一件：办过了，这一格剩下的就只有「办完」那一句
+        if self.errands.banked == Some((subject, self.books.session.turn_count)) {
+            return table;
+        }
+        let cash = self.books.balance(subject);
+        let target = self.target(subject, profile);
+        let gap = (target - cash).max(0);
+        let surplus = (cash - target).max(0);
+        let bank = self.books.bank_of(subject);
+
+        if gap > 0 && profile.debt >= AiProfile::LIQUIDIZE {
+            let room = self.books.max_loan(subject);
+            let headroom = (room - bank.loan).max(0);
+            let want = gap.min((headroom as f32 * profile.debt).floor() as i64);
+            if want > 0
+                && bank_op_allowed(BankOp::Borrow, false, true, self.lending_open())
+                && economy::loan_plan(want, bank.loan, room).is_some()
+            {
+                table.add(want as f32, AiMove::Teller(TellerMove::Borrow(want)));
+            }
+            if let Some((land, raised)) = self.pick_pawn(subject, gap) {
+                table.add(raised as f32, AiMove::Teller(TellerMove::Mortgage(land)));
+            }
+        }
+        // 花钱的两档只在有余钱时上桌：拿缺口的钱去还债或修产，是拿今天的救命钱换明天的账
+        if surplus > 0 {
+            let want = surplus.min(bank.loan);
+            if want > 0
+                && bank_op_allowed(BankOp::Repay, false, true, self.lending_open())
+                && economy::repay_plan(want, cash, bank.loan).is_some()
+            {
+                let saved = economy::loan_interest(want, &self.books.rules);
+                if saved > 0 {
+                    table.add(saved as f32, AiMove::Teller(TellerMove::Repay(want)));
+                }
+            }
+            for (land, _) in counter_plots(&self.books, subject)
+                .into_iter()
+                .filter(|(_, view)| view.mortgaged)
+            {
+                let facts = read_facts(&self.books, subject, land, true);
+                if mortgage_op_allowed(MortgageOp::Redeem, &facts).is_err() {
+                    continue;
+                }
+                let back = self.rent_if_free(subject, land);
+                if back > 0 {
+                    table.add(back as f32, AiMove::Teller(TellerMove::Redeem(land)));
+                }
+            }
+        }
+        table
+    }
+
     /// 这一问的答案（会算账的那一份）。
     ///
     /// 只显式列出**已经会打分**的格子，其余一律落到 [`greedy`] 那份表上 —— 穷尽匹配留在
@@ -521,6 +712,7 @@ impl AiHand<'_, '_> {
         let table = match about {
             Pending::Buy(land) => self.buy_table(subject, &profile, land),
             Pending::Upgrade(land) => self.upgrade_table(subject, &profile, land),
+            Pending::BankTeller => self.teller_table(subject, &profile),
             _ => return greedy(about, &self.books.rules),
         };
         table
@@ -577,6 +769,54 @@ impl AiHand<'_, '_> {
                     player: subject,
                     what: moved,
                 });
+                true
+            }
+            AiMove::Teller(what) => {
+                // 业务与「办完」**不同帧**：办一件、下一帧再收摊。这两条 system 与
+                // `decision_system` 之间没排过序（坑 36），而柜台那两条认的就是
+                // 「窗口还开着吗」—— 同一帧发两样，业务会被自己的「办完」挡在门外。
+                // P8 用 `chain` 解过同一道题（`lottery_op_system` 排在前），这里分成两帧，
+                // 于是先后根本不出现在判据里。理由与那条循环防线一起写在 [`AiErrands`] 上。
+                match what {
+                    TellerMove::Idle => {
+                        self.answers.write(DecisionChosen {
+                            player: subject,
+                            action: Decision::Acknowledge,
+                        });
+                    }
+                    TellerMove::Borrow(amount) => {
+                        self.bank_ops.write(BankOpRequested {
+                            player: subject,
+                            op: BankOp::Borrow,
+                            amount,
+                        });
+                        self.errands.banked = Some((subject, self.books.session.turn_count));
+                    }
+                    TellerMove::Repay(amount) => {
+                        self.bank_ops.write(BankOpRequested {
+                            player: subject,
+                            op: BankOp::Repay,
+                            amount,
+                        });
+                        self.errands.banked = Some((subject, self.books.session.turn_count));
+                    }
+                    TellerMove::Mortgage(land) => {
+                        self.mortgages.write(MortgageRequested {
+                            player: subject,
+                            op: MortgageOp::Take,
+                            land,
+                        });
+                        self.errands.banked = Some((subject, self.books.session.turn_count));
+                    }
+                    TellerMove::Redeem(land) => {
+                        self.mortgages.write(MortgageRequested {
+                            player: subject,
+                            op: MortgageOp::Redeem,
+                            land,
+                        });
+                        self.errands.banked = Some((subject, self.books.session.turn_count));
+                    }
+                }
                 true
             }
             AiMove::Bid => {

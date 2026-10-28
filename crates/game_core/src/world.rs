@@ -196,6 +196,10 @@ pub fn begin_game_system(
     // `Local` 跟着 schedule 活，回主菜单再开一局时它带着上一局的 `ready_at`，症状是
     // 「新局头几个 AI 座位迟迟不动」—— 与 §6.1 坑 22/25 那一族同形，只是藏在没人看的地方
     commands.insert_resource(crate::ai::AiClock::default());
+    // 「这一回合在柜台办过一笔」那格记录同款（P14b②）。不清也不会立刻出事 —— 新一局的
+    // `Entity` 换了 generation，那句比较恰好会否 —— 但那是**巧合而不是一条规则**：
+    // 拿 generation 当清理机制，等于让「跨局残留」这一族靠句柄复用运气守着（§6.1 坑 22/25）。
+    commands.insert_resource(crate::ai::AiErrands::default());
     commands.insert_resource(rng);
     // 节假日是这一局的静态日历事实：克隆成资源，规则层与 UI 都直接读，
     // 免得每处再解一遍 `Assets`。装配失败前它不存在，于是所有读者都躲在状态门禁后面。

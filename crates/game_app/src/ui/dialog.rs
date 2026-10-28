@@ -928,12 +928,10 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
     }
 }
 
-/// 名下未抵押地块的可贷上限（缺陷 #1 修的就是这个数在 Godot 里恒为 0）。
+/// 名下未抵押地块撑出来的可贷上限。式子本身在 `Books::max_loan`（P14b② 收成一处：
+/// 柜台面板、dump 与 AI 的档位三处原来各自手拼 `calc_max_loan`，那是同一句话写三遍）。
 fn loan_room(books: &Books, player: Entity) -> i64 {
-    let Some(pid) = books.id_of(player) else {
-        return 0;
-    };
-    game_core::economy::calc_max_loan(&books.active.def, &books.views(), pid, &books.rules)
+    books.max_loan(player)
 }
 
 /// 遮罩 + 居中面板的外壳。遮罩节点是整棵子树的根，`despawn` 它即收走全部内容；
