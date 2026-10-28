@@ -60,7 +60,7 @@ pub mod prelude {
     pub use crate::afflict::{Afflict, Affliction};
     pub use crate::ai::{
         AiCadence, AiClock, AiErrands, AiHand, AiMove, AiProfile, Candidates, Controller,
-        TellerMove, TradeMove, ai_answer_system, ai_roll_system, greedy, leverage,
+        PlaceMove, TellerMove, TradeMove, ai_answer_system, ai_roll_system, greedy, leverage,
     };
     pub use crate::auction::{
         Auction, AuctionDesk, BidDeny, BidFacts, Gavel, LiquidationPlan, Listing, Lot, OpenDeny,

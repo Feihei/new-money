@@ -65,11 +65,24 @@
 //! ③ **取款那一档不写**：AI 的存款恒为 0（存钱只有柜台存现金与女巫的「存现金」两条路，
 //!    AI 两条都不走），写进来就是一条永远不响的候选 —— 与 P14b② 那条赎回空档同一类坑。
 //!    真要有存款了，这里加一档的判据是 `market_halt_now` 之外什么都不用问。
+//!
+//! ## 埋东西（P14c②）：两把尺，都是钱
+//!
+//! 放置物与卡走同一条窗口（`WaitRoll`、掷骰之前），而 [`AiHand::plant_table`] 给它们的价钱
+//! 是两条**都能落成钱**的读数：地雷让对手躺医院 `MINE_HOSPITAL_DAYS` 天（那几天他名下的地
+//! 一条租都收不到，P4② 的收租权剥夺），路障把他**拦在哪一格**、那一格的过路费他就躲不掉
+//! （`Trigger::Pass` ＋ ADR-002 §5 的截断）。
+//!
+//! 后一条是本阶段最容易写歪的地方：路障**不是**「耽误他一会儿」，它是「把他赶到一条收费的
+//! 街上」—— 前者没有尺（进度的尺归 P14d 的「谁领先」），后者有。于是同一次动作在三档性格
+//! 手里读得出差别（`harm` 门槛之下乖宝宝根本不往路上放东西），而一回合只放一件
+//! （[`AiErrands::planted`]）。
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::bank::bank_op_allowed;
+use crate::board::TileIndex;
 use crate::calendar::HolidaySet;
 use crate::card::{CardDef, CardEffect, CardKind};
 use crate::charge::ChargeKind;
@@ -77,6 +90,7 @@ use crate::deck::{CardId, Shelf};
 use crate::economy;
 use crate::hand::{CardAim, Hand, is_passive};
 use crate::institution::Institution;
+use crate::items::{Inventory, ItemKind};
 use crate::land::LandId;
 use crate::landing::{Pending, PendingDecision};
 use crate::lottery::Jackpot;
@@ -85,11 +99,12 @@ use crate::minigame::GameKind;
 use crate::mortgage::{counter_plots, mortgage_op_allowed, read_facts};
 use crate::msg::{
     AuctionMove, BankOp, BankOpRequested, BidMove, BuyTicketRequested, Decision, DecisionChosen,
-    MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, PlayCardRequested,
-    RequestRoll, RequestStay, StockTradeRequested, TradeSide,
+    MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, PlaceItemRequested,
+    PlayCardRequested, RequestRoll, RequestStay, StockTradeRequested, TradeSide,
 };
-use crate::player::{PlayerId, StaySentence};
-use crate::rng::Rng;
+use crate::occupancy::{MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt, place_denied};
+use crate::player::{Heading, Mount, PlayerId, StaySentence, TokenPosition};
+use crate::rng::{DIE_FACES, Rng};
 use crate::rules::GameRules;
 use crate::settle::Books;
 use crate::status::LandStatus;
@@ -322,6 +337,12 @@ pub struct AiErrands {
     /// 之间隔着伪延迟，放开就等于「他一回合把整副手牌倒出来」；而这个阶段的画面证据要的
     /// 是「他打了一张什么」，不是「他清空了手牌」。与 `rebalanced` 同一条生命周期。
     pub played_card: Option<(Entity, u32)>,
+    /// `(谁, 第几回合)`：这位这一回合已经**在路上埋过一件**了（P14c②）。
+    ///
+    /// 与 `played_card` 同一条：不放开的话，手里三颗雷就是一回合把整条街埋满 —— 而那一帧
+    /// 之后他还没掷骰，画面上的「他放了一件什么」会被自己挤掉。放开它没有规则上的理由，
+    /// 只有「一次动作只做一件」这条给 AI 的节流。
+    pub planted: Option<(Entity, u32)>,
 }
 
 /// 回合前理财那一笔（P14b③）：**一只股**，买或卖，不给第二只。
@@ -346,6 +367,52 @@ pub enum TradeMove {
 pub enum PlayMove {
     Pass,
     Card { card: CardId, aim: Option<CardAim> },
+}
+
+/// 放在路上的一件（P14c②）。`Pass` 与 [`PlayMove::Pass`] 同一手：候选表上那条 0 分基准，
+/// [`AiHand::emit`] 对它说 `false`，于是「放了一件」与「什么都没放」在世界上分得开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceMove {
+    Pass,
+    Plant { item: ItemKind, tile: TileIndex },
+}
+
+/// 一件道具在 AI 眼里是哪一类（P14c②）。**穷尽表**：新增一种道具必须当场表态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemUse {
+    /// 拦路的那一件：把他截在某一格上，那一格的过路费他就得付（路障）。
+    /// 价钱不是「耽误」而是**那一格的租**，见 [`AiHand::plant_table`]。
+    Block,
+    /// 踩中就不能动的那一件：躺医院 `days` 天，那几天他名下的地一块租都收不到（地雷）。
+    /// 天数与 [`MINE_HOSPITAL_DAYS`] 同一个常数 —— 将来改住院天数只改 `occupancy` 那一格。
+    Mine(u32),
+    /// 今天不算账的（理由逐条写在下面）
+    NotYet,
+}
+
+/// 一件道具归哪一格。**穷尽表**：新加一种 `ItemKind` 必须在这里表态。
+const fn item_use(item: ItemKind) -> ItemUse {
+    match item {
+        ItemKind::Roadblock => ItemUse::Block,
+        ItemKind::Mine => ItemUse::Mine(MINE_HOSPITAL_DAYS),
+        // 定时炸弹放得下去，但它要人**捡起来**再走 38 步才炸，而捡的人是谁不由放的人挑
+        // （可能是我自己）—— 价钱里那个「谁挨」的变量在 AI 手里没有值。等哪天给得出
+        // 「炸弹会落到谁头上」的期望值，这一格才有资格进表
+        ItemKind::TimeBomb => ItemUse::NotYet,
+        // 遥控骰子是「这一回合走几步」，压根不是放置物（`occupancy()` 就是 `None`）。
+        // 它属于自己那一步棋，而「怎么走最划算」要的正是 P14d 那个「谁领先」的读数
+        ItemKind::RemoteDice => ItemUse::NotYet,
+    }
+}
+
+/// 他走到第 `d` 格的机会。一颗六面骰是「掷出的数 ≥ d」，多一颗骰子只更大 ——
+/// 这里用 `(reach + 1 − d) / reach` 这个一阶近似：多骰的真实分布是钟形，而这把尺只用来
+/// 在几格之间排队，不需要是精确概率（陷阱是 `Trigger::Pass`，走过去就触发）。
+fn hit_chance(reach: u32, d: u32) -> f32 {
+    if reach == 0 {
+        return 0.0;
+    }
+    (reach + 1).saturating_sub(d) as f32 / reach as f32
 }
 
 /// 打出去的这张牌，AI 眼里值多少 —— 也就是**哪些效果它今天已经会算账**。
@@ -392,7 +459,9 @@ fn card_use(effect: &CardEffect) -> CardUse {
     }
 }
 
-/// AI 对一问的回答。**六种答案形状，与真人点按钮时点的那六类东西一模一样**。
+/// AI 对一问的回答。**六种答案形状，与真人点按钮时点的那六类东西一模一样**，
+/// 加上三种**不等有人问就自己发起**的动作（回合前理财、出牌、放道具 —— 它们都发生在
+/// `WaitRoll` 里、掷骰之前，而真人也是在那条窗口里点按钮）。
 ///
 /// 单开一个类型而不是直接返回 [`Decision`]：游乐场那一格要回的是一份**成绩**、彩票柜台那
 /// 一格要的是一笔**买券请求**、拍卖台那一个要的是**喊价**、被动门那一个要的是
@@ -420,6 +489,8 @@ pub enum AiMove {
     Trade(TradeMove),
     /// 打出一张主动卡（每回合最多一张；被动卡走 [`AiMove::Gate`]）
     Play(PlayMove),
+    /// 往路上埋一件（P14c②；每回合最多一件，与出牌同一条窗口）
+    Place(PlaceMove),
 }
 
 /// 这一问的答案里**不打分**的那一份：P14a 的全部，也是 AI 还没学会算账时那些格子的默认值。
@@ -570,8 +641,22 @@ pub struct AiHand<'w, 's> {
     pub mortgages: MessageWriter<'w, MortgageRequested>,
     pub trades: MessageWriter<'w, StockTradeRequested>,
     pub plays: MessageWriter<'w, PlayCardRequested>,
+    /// 放置物那条入口（P14c②）。与真人点道具浮层发的是同一条消息 —— 判据全在
+    /// [`place_item_system`](crate::occupancy::place_item_system) 里，AI 这边只管选。
+    pub places: MessageWriter<'w, PlaceItemRequested>,
     /// 手牌（出牌那一步读它）。`Books` 里没有这一格 —— 账本管钱与地，手牌是玩家自己的东西。
     pub hands: Query<'w, 's, &'static Hand>,
+    /// 道具栏（放东西那一步读它）。与手牌同一条：玩家自己的东西，账本里没有。
+    pub inventories: Query<'w, 's, &'static Inventory>,
+    /// 谁站在哪、朝哪边走、开什么车：放陷阱要回答的是「他下一步会踩到哪」。
+    /// 三样都是**只读**，与 `Books` 里那堆可写查询组件不相交（坑 33 那一族：
+    /// `Books` 没有位置、朝向与载具）。
+    pub positions: Query<'w, 's, &'static TokenPosition>,
+    pub headings: Query<'w, 's, &'static Heading>,
+    pub mounts: Query<'w, 's, &'static Mount>,
+    /// 路上已经有什么。读它只是**不让注定被拒的候选进表**（与 `buy_price`／`reserve`
+    /// 那两道闸门同一个理由）；真正的闸门仍只有 `place` 一处。
+    pub occupancies: Query<'w, 's, &'static Occupancy>,
     /// 卡面（静态定义）。与 `play_card_system` 读的是同一份资产，所以「这张卡是什么」
     /// 在规则层只有一处答案。
     pub shelf: Shelf<'w>,
@@ -1197,6 +1282,154 @@ impl AiHand<'_, '_> {
             .sum()
     }
 
+    /// 这一回合该不该在路上埋一件、埋在哪（P14c②）。
+    ///
+    /// **两把尺，都是钱**：
+    /// - 地雷让他躺医院 [`MINE_HOSPITAL_DAYS`] 天 —— 那几天他名下一条街都收不到租
+    ///   （P4② 的收租权剥夺），所以价钱是「他挡在我前面多少钱 × 害意 × 天数」，
+    ///   与陷害卡同一个乘数；
+    /// - 路障**不是**「耽误他一会儿」而是**把他拦在哪一格**（ADR-002 §5：截断发生在入队时，
+    ///   落脚照常结算）—— 于是它的价钱是那一格的过路费：把他赶到一条收费的街上，
+    ///   这一脚他躲不掉。踩到他自己的地不收钱，那一格就没有价钱。
+    ///
+    /// 两把尺都乘 [`hit_chance`]：他离得越远越可能够不着。地雷的价钱与格子无关，所以
+    /// 一阶近似下**最近的那一格**自然胜出；路障的价钱随格子变，于是它可能在几格之间挑。
+    ///
+    /// 三道闸门都排在打分**之前**（与 `buy_price`／`reserve` 同一条「被拒的候选不进表」）：
+    /// `harm` 过不过门槛、这一格放不放得下（[`place_denied`]，与灰按钮同源）、以及
+    /// **我这一掷走不走得到它** —— 陷阱 `Trigger::Pass` 不认主人，埋在自己前头就是给自己留一脚。
+    /// 于是整条规则读起来像常识：埋在他身后的路上，别埋在自己前头。
+    fn plant_table(&self, subject: Entity, profile: &AiProfile) -> Candidates {
+        let mut table = Candidates::new();
+        table.add(0.0, AiMove::Place(PlaceMove::Pass));
+        if profile.harm < AiProfile::HARM_START {
+            return table;
+        }
+        let Ok(inventory) = self.inventories.get(subject) else {
+            return table;
+        };
+        let def = &self.books.active.def;
+        if def.loop_len() == 0 {
+            return table;
+        }
+        for foe in self.foes(subject) {
+            // 关着的人不动：埋在他前面只是埋了个摆设
+            if self.books.detained.get(foe).is_ok() {
+                continue;
+            }
+            let Some(foe_tile) = self.positions.get(foe).ok().map(|p| p.tile) else {
+                continue;
+            };
+            let heading = self.heading_of(foe);
+            let reach = self.reach_of(foe);
+            // 地雷那一把尺的底：他挡在我前面多少钱（与陷害卡同一个读数）
+            let income = self.rent_sum(subject, foe) as f32 * profile.harm;
+            for item in ItemKind::ALL {
+                let held = inventory.count(item);
+                if held == 0 {
+                    continue;
+                }
+                let use_ = item_use(item);
+                if use_ == ItemUse::NotYet {
+                    continue;
+                }
+                // 每一格都算一遍，只把这一件道具最好的一格放进表里：表上的第二名该是
+                // 「另一件东西」或「什么都不做」，而不是同一件东西的次近一格
+                let mut best: Option<(f32, TileIndex)> = None;
+                for d in 1..=reach {
+                    let tile = def.wrapped(foe_tile.0 as i64 + d as i64 * heading.sign());
+                    if !self.plantable(subject, item, held, tile) {
+                        continue;
+                    }
+                    let value = match use_ {
+                        ItemUse::Mine(days) => income * days as f32,
+                        ItemUse::Block => match self.toll_at(foe, tile) {
+                            Some(toll) => toll as f32 * profile.harm,
+                            None => continue,
+                        },
+                        ItemUse::NotYet => continue,
+                    };
+                    if value <= 0.0 {
+                        continue;
+                    }
+                    let score = value * hit_chance(reach, d);
+                    if best.is_none_or(|(top, _)| score > top) {
+                        best = Some((score, tile));
+                    }
+                }
+                if let Some((score, tile)) = best {
+                    table.add(score, AiMove::Place(PlaceMove::Plant { item, tile }));
+                }
+            }
+        }
+        table
+    }
+
+    /// 这一格放得下吗。判据分两段，两段都**不是分数**：
+    /// ① [`place_denied`]（与道具浮层的灰按钮同源）—— 身上有没有、格子在不在、有没有东西、
+    ///    有没有人；
+    /// ② 我这一掷走不走得到它（[`Self::in_my_way`]）。
+    fn plantable(&self, subject: Entity, item: ItemKind, held: u32, tile: TileIndex) -> bool {
+        let exists = (tile.0 as usize) < self.books.active.def.loop_len() as usize;
+        let occupied = self
+            .occupancies
+            .iter()
+            .any(|occ| occ.at == OccupancyAt::OnTile(tile));
+        // 含我自己、含目标：谁都站不住的那一格才放得下
+        let somebody = self.positions.iter().any(|p| p.tile == tile);
+        place_denied(item, held, exists, occupied, somebody).is_ok()
+            && !self.in_my_way(subject, tile)
+    }
+
+    /// 这一格在我这一掷走得到的地方吗。陷阱 `Trigger::Pass` 不认主人 ——
+    /// 埋在自己前头就是给自己留一脚。读不到自己的位置时按「挡在我前面」处理（宁可不放）。
+    fn in_my_way(&self, subject: Entity, tile: TileIndex) -> bool {
+        let Some(from) = self.positions.get(subject).ok().map(|p| p.tile) else {
+            return true;
+        };
+        self.ahead(from, self.heading_of(subject), self.reach_of(subject), tile)
+    }
+
+    /// 从 `from` 沿 `heading` 走 `1..=reach` 步会不会经过 `to`（起点本身不算）。
+    fn ahead(&self, from: TileIndex, heading: Heading, reach: u32, to: TileIndex) -> bool {
+        let len = self.books.active.def.loop_len() as i64;
+        if len == 0 || reach == 0 {
+            return false;
+        }
+        let steps = (to.0 as i64 - from.0 as i64) * heading.sign();
+        let steps = steps.rem_euclid(len);
+        steps >= 1 && steps <= reach as i64
+    }
+
+    /// 这个座位一掷最远走几格（载具颗数 × 六面）。与 `turn::dice_count` 的默认同一条：
+    /// 读不到载具按步行。
+    fn reach_of(&self, who: Entity) -> u32 {
+        let mount = self.mounts.get(who).copied().unwrap_or(Mount::Foot);
+        mount.dice() * DIE_FACES
+    }
+
+    /// 查不到朝向按正向（与 `Heading::default` 同一条；`Option` 只会把漏挂变成静默降级）。
+    fn heading_of(&self, who: Entity) -> Heading {
+        self.headings.get(who).copied().unwrap_or_default()
+    }
+
+    /// 他踩上这一格要付多少钱（按他自己的修正折过）。`None` = 这一格不是别人的收费地 ——
+    /// 无主、他自己的、抵押中或查封中（租金 0）、以及商业地（收的是设施服务费而不是租金）。
+    fn toll_at(&self, foe: Entity, tile: TileIndex) -> Option<i64> {
+        let land = self.books.active.def.land_for_tile(tile.0 as i64)?;
+        let id = LandId(land.id);
+        let owner = self.books.owner_of(id)?;
+        if owner == foe {
+            return None;
+        }
+        let rent = self.books.rent_of(id);
+        if rent <= 0 {
+            return None;
+        }
+        let told = self.books.quoted(ChargeKind::Rent { land: id }, foe, rent);
+        (told > 0).then_some(told)
+    }
+
     /// 这一问的答案（会算账的那一份）。
     ///
     /// 只显式列出**已经会打分**的格子，其余一律落到 [`greedy`] 那份表上 —— 穷尽匹配留在
@@ -1347,6 +1580,19 @@ impl AiHand<'_, '_> {
                 self.errands.played_card = Some((subject, self.books.session.turn_count));
                 true
             }
+            AiMove::Place(what) => {
+                let PlaceMove::Plant { item, tile } = what else {
+                    // `Pass` 与出牌那一格同理：不发消息、不写标记，让下一帧照常重算
+                    return false;
+                };
+                self.places.write(PlaceItemRequested {
+                    player: subject,
+                    item,
+                    tile,
+                });
+                self.errands.planted = Some((subject, self.books.session.turn_count));
+                true
+            }
             AiMove::Bid => {
                 // **主语取机器而不是取窗口**：轮转指针与窗口由两条 system 写
                 // （`auction_move_system` 改机器、`auction_hold_system` 挂窗口），而这两条之间
@@ -1426,13 +1672,13 @@ pub struct AiTurn<'w, 's> {
     stays: MessageWriter<'w, RequestStay>,
 }
 
-/// AI 座位在 `WaitRoll` 里的那几下：**先出牌、再理财、最后掷骰**，一步一帧。
+/// AI 座位在 `WaitRoll` 里的那几下：**先出牌、再埋东西、再理财、最后掷骰**，一步一帧。
 ///
-/// 与真人点那颗按钮同一条意图：真人也是先能出牌、买卖证券，再按掷骰（`play_card_system`
-/// 与 `trade_request_system` 都只在 `WaitRoll` 受理）。两步各自只在真有得办时发生，
-/// 并且各写一格 [`AiErrands`] —— 于是「每回合最多一张牌」「最多动一只股」都是结构而不是约定。
-/// 次序是有内容的：牌会挪动现金与租金（购地卡花钱、查封改租金），而水位是**按世界此刻的样子**
-/// 算的 —— 先理财后出牌就会按一个下一帧就不成立的世界补水。
+/// 与真人点那颗按钮同一条意图：真人也是先能出牌、放道具、买卖证券，再按掷骰（`play_card_system`、
+/// `place_item_system` 与 `trade_request_system` 都只在 `WaitRoll` 受理）。每一步各自只在真有得办
+/// 时发生，并且各写一格 [`AiErrands`] —— 于是「每回合最多一张牌」「最多一件道具」「最多动一只股」
+/// 都是结构而不是约定。次序是有内容的：牌会挪动现金与租金（购地卡花钱、查封改租金），
+/// 而水位是**按世界此刻的样子**算的 —— 先理财后出牌就会按一个下一帧就不成立的世界补水。
 ///
 /// 身上挂着 [`StaySentence`] 的人**发「停留」而不是掷骰** —— 少这一支是**死锁**而不是「少走一步」：
 /// `roll_dice_system` 对被按住的人直接 `return`（那条判据在规则层，不认 UI），于是 `RequestRoll`
@@ -1475,6 +1721,27 @@ pub fn ai_roll_system(mut pace: AiPace<'_>, mut turn: AiTurn<'_, '_>, mut hand: 
         }
         hand.errands.played_card = Some((current, turn_no));
         if played {
+            return;
+        }
+    }
+    // P14c② 放道具：牌之后、理财之前。牌能改世界（购地、查封），而陷阱的价签字面读
+    // 「他现在走得过的格子」—— 埋在那条街上就该读到查封之后的租金。**这一帧只办这一件**，
+    // 与上面两步同一条：`PlaceItemRequested` 的落地与掷骰谁先被读没有保证（坑 36 那一族）。
+    if hand.errands.planted != Some((current, turn_no))
+        && let Some(profile) = hand.profile_of(current)
+    {
+        let table = hand.plant_table(current, &profile);
+        let mut planted = false;
+        if table.has_move() {
+            let fumbled = pace.fumble(profile);
+            if let Some(AiMove::Place(PlaceMove::Plant { item, tile })) = table.take(fumbled) {
+                pace.charge();
+                hand.emit(current, AiMove::Place(PlaceMove::Plant { item, tile }));
+                planted = true;
+            }
+        }
+        hand.errands.planted = Some((current, turn_no));
+        if planted {
             return;
         }
     }

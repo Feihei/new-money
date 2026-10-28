@@ -32,9 +32,9 @@ use bevy::prelude::{MessageReader, NextState, ResMut, Resource, Update};
 use common::*;
 use game_core::prelude::{
     ActiveBoard, AiCadence, AiClock, AiProfile, CardAim, Controller, Detention, GameRules,
-    GameSeed, GameSession, GameSetup, Gender, Institution, LandId, LandStatus, PLAYER_COLORS,
-    Paused, Pending, PendingDecision, PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice,
-    StockTradeRequested, Timed, TurnPhase,
+    GameSeed, GameSession, GameSetup, Gender, Institution, ItemKind, LandId, LandStatus, Mount,
+    OccupancyKind, PLAYER_COLORS, Paused, Pending, PendingDecision, PlayerSetup, PriceHistory,
+    StaySentence, StockId, StockPrice, StockTradeRequested, Timed, TurnPhase,
 };
 use game_core::rng::Rng;
 
@@ -1305,5 +1305,199 @@ fn the_grab_card_skips_a_plot_it_could_not_keep() {
         owner_of(&mut app, 3),
         Some(1),
         "该退而买买得起又守得住的那块（徐家汇 3800，剩 700）"
+    );
+}
+
+// ============================ P14c②：放置物 ============================
+//
+// 这一节钉「AI 会埋东西」这句话里可测的四件事：
+//
+// - **地雷埋在挡路那位的前面** → [`an_ai_seat_mines_the_road_ahead_of_the_richest_opponent`]、
+//   [`the_mine_goes_ahead_of_the_opponent_who_owns_the_street`]；
+// - **路障不是「耽误他一会儿」而是「把他拦在哪一格」** →
+//   [`a_roadblock_is_planted_where_the_foe_cannot_dodge_the_toll`] 与它那一半
+//   [`a_roadblock_without_a_toll_under_it_stays_in_the_bag`]：没有收费的那一格，路障就没有价钱；
+// - **不给自己留一脚**（陷阱 `Trigger::Pass` 不认主人）→
+//   [`a_trap_is_never_planted_on_the_tiles_i_must_walk_over`]；
+// - **门槛与节流** → [`the_goody_never_plants_anything`]、[`one_trap_per_turn`]。
+
+/// 一局「电脑在起点、真人站在 `foe_tile`、路上清空」的夹具。
+///
+/// 清空是必需的：开局会随机撒两个宝箱，它们落在哪一格会随种子变 —— 而这一节断言的正是
+/// 「哪一格上多了一件东西」，撞上一个宝箱就红在夹具上。`field_with` 已经清过神，这里连
+/// 宝箱一起清。
+fn trap_field(profile: AiProfile, foe_tile: u32) -> (App, Entity, Entity) {
+    let (mut app, seat) = solo_ai(profile);
+    let human = roster(&mut app)[0].0;
+    clear_occupancies(&mut app);
+    place(&mut app, seat, 0);
+    place(&mut app, human, foe_tile);
+    (app, seat, human)
+}
+
+fn held_count(app: &App, seat: Entity, item: ItemKind) -> u32 {
+    inventory_of(app, seat)
+        .into_iter()
+        .find(|(kind, _)| *kind == item)
+        .map(|(_, n)| n)
+        .unwrap_or(0)
+}
+
+#[test]
+fn an_ai_seat_mines_the_road_ahead_of_the_richest_opponent() {
+    // 真人拿着南京路（Lv0 一次收 60）站在 9 号魔法屋；电脑（大佬奸）在 0 号起点。
+    // 他前面第一格是 10 号徐家汇 —— 离电脑 10 步，不在电脑自己这一掷走得到的地方，
+    // 于是那一格就是「他过得去、我过不去」的那一格。
+    let (mut app, seat, _human) = trap_field(AiProfile::SHARK, 9);
+    own(&mut app, 0, Some(0), 0, false);
+    grant_item(&mut app, seat, ItemKind::Mine, 1);
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    assert_eq!(
+        tiles_holding(&mut app, OccupancyKind::Mine),
+        vec![10],
+        "地雷该埋在他前面第一格（徐家汇 10）"
+    );
+    assert_eq!(
+        held_count(&app, seat, ItemKind::Mine),
+        0,
+        "埋下去的那一件该从道具栏消失"
+    );
+}
+
+#[test]
+fn the_mine_goes_ahead_of_the_opponent_who_owns_the_street() {
+    // 两位对手：真人站在 15 号格、名下没有地；普通人站在 9 号格、名下有南京路。
+    // 两处都在电脑（0 号起点、步行）这一掷够不着的地方，所以「埋谁前面」只剩一个判据：
+    // 地雷的价钱读「他挡在我前面多少钱」（`foes` + `rent_sum`，与陷害卡挑人同一份读数）。
+    // 把那个乘数换成常数，先遇到的那位（真人的座位号更小）就会把雷骗过去。
+    let (mut app, players) = quiet_field(2);
+    let shark = players[1];
+    let plain = players[2];
+    let human = players[0];
+    make_current(&mut app, shark);
+    clear_occupancies(&mut app);
+    own(&mut app, 0, Some(2), 0, false);
+    place(&mut app, shark, 0);
+    place(&mut app, plain, 9);
+    place(&mut app, human, 15);
+    grant_item(&mut app, shark, ItemKind::Mine, 1);
+    hold_the_roll(&mut app, shark);
+
+    step_ai(&mut app);
+    assert_eq!(
+        tiles_holding(&mut app, OccupancyKind::Mine),
+        vec![10],
+        "地雷埋到了没地的那位前面 —— 它该埋在最挡路的那一位脚下"
+    );
+}
+
+#[test]
+fn a_trap_is_never_planted_on_the_tiles_i_must_walk_over() {
+    // 电脑开着汽车（三颗骰、最多 18 格），真人站在 9 号格：他前面 10..15 全在电脑
+    // 这一掷够得着的路上。陷阱 `Trigger::Pass` 触发不认主人 —— 于是这一回合路上
+    // 什么都不会多出来，而道具还在手里。
+    let (mut app, seat, _human) = trap_field(AiProfile::SHARK, 9);
+    own(&mut app, 0, Some(0), 0, false);
+    set_mount(&mut app, seat, Mount::Car);
+    grant_item(&mut app, seat, ItemKind::Mine, 1);
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    assert!(
+        tiles_holding(&mut app, OccupancyKind::Mine).is_empty(),
+        "埋在自己一掷走得到的地方 —— 那是给自己留一脚"
+    );
+    assert_eq!(
+        held_count(&app, seat, ItemKind::Mine),
+        1,
+        "没放就没花：道具该还在手里"
+    );
+}
+
+#[test]
+fn a_roadblock_is_planted_where_the_foe_cannot_dodge_the_toll() {
+    // 电脑名下西单（17 号格，Lv1 一次 180）；真人站在 16 号格，往前一步就是它。
+    // 路障把他截在 17 上（ADR-002 §5：截断发生在入队时，落脚照常结算）—— 这一脚
+    // 他躲不掉，所以那一格的租就是这一件的价钱。
+    let (mut app, seat, _human) = trap_field(AiProfile::SHARK, 16);
+    own(&mut app, 5, Some(1), 1, false);
+    place(&mut app, seat, 5); // 电脑在 5 号格：离 17 有 12 步，不在自己这一掷里
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    assert_eq!(
+        tiles_holding(&mut app, OccupancyKind::Roadblock),
+        vec![17],
+        "路障该落在收费的那一格上"
+    );
+    assert_eq!(
+        held_count(&app, seat, ItemKind::Roadblock),
+        0,
+        "开局那一个路障该被用掉"
+    );
+}
+
+#[test]
+fn a_roadblock_without_a_toll_under_it_stays_in_the_bag() {
+    // 同一条规则的另一半：真人站在 0 号格（他前面 1..6 没有收费的地），电脑身上只有
+    // 开局那个路障 —— 拦在哪一格都不收一分钱，于是不拦。这一条挡的是「把路障当成
+    // 一颗只会拖慢别人的东西」那种写法：那样的 AI 会随手把它丢在最近的一格上。
+    let (mut app, seat, _human) = trap_field(AiProfile::SHARK, 0);
+    place(&mut app, seat, 9);
+    own(&mut app, 5, Some(1), 1, false); // 西单在 17，够不着他这一掷
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    assert!(
+        tiles_holding(&mut app, OccupancyKind::Roadblock).is_empty(),
+        "路上多了一件没有价钱的东西：{:?}",
+        occupancies_on(&mut app)
+    );
+    assert_eq!(held_count(&app, seat, ItemKind::Roadblock), 1, "没放就没花");
+}
+
+#[test]
+fn the_goody_never_plants_anything() {
+    // 乖宝宝的 `harm = 0.05` 在门槛（0.20）之下 —— 手里有地雷也不往路上放。
+    // 与「乖宝宝不查封别人的街」同一条门槛，同一格先验。
+    let (mut app, seat, _human) = trap_field(AiProfile::GOODY, 9);
+    own(&mut app, 0, Some(0), 0, false);
+    grant_item(&mut app, seat, ItemKind::Mine, 1);
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    assert!(
+        tiles_holding(&mut app, OccupancyKind::Mine).is_empty(),
+        "乖宝宝往路上埋了东西：{:?}",
+        occupancies_on(&mut app)
+    );
+    assert_eq!(held_count(&app, seat, ItemKind::Mine), 1, "没放就没花");
+}
+
+#[test]
+fn one_trap_per_turn() {
+    // 两颗地雷、同一回合：第一动埋一颗，第二动**不许**接着埋 ——
+    // 标记（`AiErrands::planted`）是那道闸门。放开它，他会把整条街埋满，
+    // 而画面上「他放了一件什么」会被自己挤掉。
+    let (mut app, seat, _human) = trap_field(AiProfile::SHARK, 9);
+    own(&mut app, 0, Some(0), 0, false);
+    grant_item(&mut app, seat, ItemKind::Mine, 2);
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    assert_eq!(tiles_holding(&mut app, OccupancyKind::Mine), vec![10]);
+
+    step_ai(&mut app);
+    assert_eq!(
+        tiles_holding(&mut app, OccupancyKind::Mine),
+        vec![10],
+        "同一回合里第二颗雷也被埋了 —— 「一次只放一件」那道闸门没关上"
+    );
+    assert_eq!(
+        held_count(&app, seat, ItemKind::Mine),
+        1,
+        "第二颗该还在道具栏里"
     );
 }
