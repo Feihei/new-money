@@ -5,8 +5,9 @@
 //! 假种子函数（缺陷 #6）。这里整局共用一个种子，于是「同种子 → 同对局」变成一条
 //! 可以断言的性质 —— 回放与失败复现都从这里长出来。
 //!
-//! **同一个种子分成十四条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
-//! 宝箱位置 / 宝箱掉落 / 神明 / 小游戏 / 乐透 / 拍卖 / 服务收费）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
+//! **同一个种子分成二十条互不相干的子流**（骰子 / 牌堆 / 行情 / 百货 / 历法 / 礼物 / 红包 /
+//! 宝箱位置 / 宝箱掉落 / 神明 / 小游戏 / 乐透 / 拍卖 / 服务收费 / 董事长白拿 / 新闻 / 恶人 /
+//! 魔法屋 / 开局落位 / AI）：抽一张卡不该让下一手骰点变样。若共用一条流，经济系统每多一次
 //! 取随机数就会把 `turn_flow` 里「对局骰点 == 独立掷出的骰点」那批回归网整片打翻，
 //! 回放也对不齐；分流之后每域的随机性各自稳定，加内容不互相扰动。
 //!
@@ -103,6 +104,13 @@ const MAGIC_TAG: u64 = 0x9A61_C000_0000_0012;
 /// 「这一局有几个人」都会挪动第一张机会牌、第一手骰点与宝箱位置。那三样都是截图核对与
 /// 回放的对齐点，而「谁坐在哪」是这一串里最不该牵动别人的一个读数。
 const START_TAG: u64 = 0x57A3_0000_0000_0013;
+/// P14：AI 的读数（这一次想了多久，以及 P14b 起「这一次算没算错」）。
+///
+/// 单独一条的理由与前面每一条同形，而这里多一层**别的流都没有的性质**：这一条抽的是
+/// **墙钟上的长度**，它随帧率与 `NM_AUTOGAP` 变。若让它与任何影响决策的读数同流，
+/// 「这台机器想了 0.3 秒还是 1.4 秒」就会挪动下一张机会牌是谁 —— 那等于把整局的可复现性
+/// 押在帧率上，而同一颗种子的两次跑法本来必须走出同一条轨迹。
+const AI_TAG: u64 = 0xA1A1_0000_0000_0014;
 
 /// 对局种子。测试与回放里显式给定；真实客户端从时钟取。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +147,7 @@ pub struct Rng {
     villain: ChaCha8Rng,
     magic: ChaCha8Rng,
     start: ChaCha8Rng,
+    ai: ChaCha8Rng,
 }
 
 impl Rng {
@@ -165,6 +174,7 @@ impl Rng {
             villain: ChaCha8Rng::seed_from_u64(seed ^ VILLAIN_TAG),
             magic: ChaCha8Rng::seed_from_u64(seed ^ MAGIC_TAG),
             start: ChaCha8Rng::seed_from_u64(seed ^ START_TAG),
+            ai: ChaCha8Rng::seed_from_u64(seed ^ AI_TAG),
         }
     }
 
@@ -261,9 +271,22 @@ impl Rng {
         self.dice.random_range(1..=DIE_FACES)
     }
 
-    /// 闭区间取随机整数（牌堆流）：洗牌用的 `0..=i`、将来 AI 的随机化都走这条。
+    /// 闭区间取随机整数（牌堆流）：洗牌用的 `0..=i`。
+    ///
+    /// ⚠️ P14 的 AI **不走这条**（它有 [`Self::pick_ai`]）。这条原话写的是「将来 AI 的随机化
+    /// 都走这条」，而那句话在 P14a 被推翻了：把「这台电脑想了多久」接到牌堆流上，等于让帧率
+    /// 去挪动下一张机会牌是谁。
     pub fn pick(&mut self, span: RangeInclusive<u32>) -> u32 {
         self.cards.random_range(span)
+    }
+
+    /// AI 那一条流（P14）：这一次想了多久（`0..=1`，调用侧按区间放大）。
+    ///
+    /// 只有 `AiCadence` 的区间**真的是一个区间**时才抽它：core 的默认与无头测试都是 0，
+    /// 那时一次数都不消耗 —— 否则每回合白抽一次，等于给这条流加了一个随回合增长的取数节奏
+    /// （与神明那条流单独拆出去的理由同形）。
+    pub fn pick_ai(&mut self) -> f32 {
+        self.ai.random_range(0.0..=1.0)
     }
 
     /// 闭区间取随机整数（百货流）：每次进店的货架抽签（`shop::restock`）。
@@ -625,5 +648,47 @@ mod tests {
         assert_eq!(series(5), series(5), "同种子必须复现同一条摇数序列");
         assert_ne!(series(5), series(6));
         assert!(series(5).iter().all(|v| (1..=4).contains(v)));
+    }
+
+    /// AI 那条流（P14）：这台电脑想了多久、算错了几次，都不该挪动骰点、牌序、百货与神明。
+    /// 这里要防的比别条更硬一层 —— 这一条的**取数次数本来就由墙钟决定**（`NM_AUTOGAP` 拧一下，
+    /// 一局里 AI 动手的次数就变了），所以它一旦被并进任何一条别的流，帧率与延迟旋钮会直接
+    /// 重排整局的骰点与抽卡，而症状是「同一颗种子在我的机器上与你的机器上走得不一样」。
+    #[test]
+    fn the_ai_stream_shifts_nothing_else() {
+        let draws = |busy: bool| {
+            let mut r = Rng::new(31);
+            if busy {
+                for _ in 0..80 {
+                    r.pick_ai();
+                }
+            }
+            (
+                (0..8).map(|_| r.roll_die()).collect::<Vec<_>>(),
+                (0..8).map(|_| r.pick(0..=9)).collect::<Vec<_>>(),
+                (0..8).map(|_| r.pick_shop(0..=9)).collect::<Vec<_>>(),
+                (0..8).map(|_| r.pick_god(1..=12)).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            draws(true),
+            draws(false),
+            "AI 流污染了骰子/牌堆/百货/神明流"
+        );
+        let series = |seed: u64| {
+            let mut r = Rng::new(seed);
+            (0..12).map(|_| r.pick_ai()).collect::<Vec<f32>>()
+        };
+        assert_eq!(series(5), series(5), "同种子必须复现同一条 AI 序列");
+        assert!(series(5).iter().all(|v| (0.0..=1.0).contains(v)));
+        assert_ne!(series(5), series(6), "AI 流与另一个域取了同一条密钥流");
+        assert_ne!(
+            series(5),
+            {
+                let mut r = Rng::new(5);
+                (0..12).map(|_| r.range_f32(0.0..=1.0)).collect::<Vec<_>>()
+            },
+            "AI 流与行情流取了同一条密钥流"
+        );
     }
 }

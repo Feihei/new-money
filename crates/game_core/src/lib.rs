@@ -10,6 +10,7 @@ use bevy::state::app::StatesPlugin;
 use bevy::time::TimePlugin;
 
 pub mod afflict;
+pub mod ai;
 pub mod auction;
 pub mod bail;
 pub mod bank;
@@ -57,6 +58,10 @@ pub mod world;
 
 pub mod prelude {
     pub use crate::afflict::{Afflict, Affliction};
+    pub use crate::ai::{
+        AiCadence, AiClock, AiHand, AiMove, AiProfile, Controller, ai_answer_system,
+        ai_roll_system, decide,
+    };
     pub use crate::auction::{
         Auction, AuctionDesk, BidDeny, BidFacts, Gavel, LiquidationPlan, Listing, Lot, OpenDeny,
         auction_hold_system, auction_move_system, bid_allowed, bidders, can_open, close_if_done,
@@ -284,6 +289,12 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<crate::magic::MagicRitual>()
             .init_resource::<WalkClock>()
             .init_resource::<MarketClock>()
+            // AI 的那两条钟（P14）。`AiCadence` 是**配置**：core 的默认是两个 0，真实客户端
+            // 在启动时换成 0.5..=1.5（无头测试里 `Time::elapsed_secs()` 不前进，任何正数都会
+            // 把 AI 钉死在第一帧不动，而那个症状与「AI 没装配」一模一样）。
+            // `AiClock` 是**这一局的状态**，所以装配时归零而不是只 init（见 `world.rs`）。
+            .init_resource::<crate::ai::AiCadence>()
+            .init_resource::<crate::ai::AiClock>()
             .init_resource::<Landing>()
             .init_resource::<PendingDecision>()
             .init_resource::<AtmAccess>()
@@ -787,6 +798,26 @@ impl Plugin for CoreGamePlugin {
                 )
                     .chain(),
             )
-            .add_systems(OnEnter(TurnPhase::Over), game_over_system);
+            .add_systems(OnEnter(TurnPhase::Over), game_over_system)
+            // ===== AI 玩家（P14a）=====
+            // 两条都挂在 **PreUpdate**，而且不是「排在 `decision_system` 之前」那种隐式顺序：
+            // 与测试夹具那份 `auto_answer_system` 同一条理由（§6.1 坑 36）—— 并行元组里
+            // 谁先跑没人保证，于是「这一帧发的回答当帧读不读得到」变成帧相关的。写在
+            // `PreUpdate` 之后，任何 `Update` 里的读者都在**同一帧**读得到，而拍卖与门那
+            // 两台机器每帧只吃一个动作，这条纪律不是可选的。
+            //
+            // `not_paused` 那道门是给 AI 的：少了它，暂停菜单开着的时候电脑照样掷骰、
+            // 照样答门，人类那一侧全停而 AI 那一侧全走 —— 玩家会以为游戏自己动起来了。
+            .add_systems(
+                PreUpdate,
+                (
+                    ai::ai_roll_system
+                        .run_if(in_state(TurnPhase::WaitRoll))
+                        .run_if(not_paused),
+                    ai::ai_answer_system
+                        .run_if(in_state(TurnPhase::WaitDecision))
+                        .run_if(not_paused),
+                ),
+            );
     }
 }

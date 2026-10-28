@@ -67,6 +67,8 @@ fn table(n: usize) -> (App, Vec<Entity>) {
                 name: name.into(),
                 color: PLAYER_COLORS[seat],
                 gender: game_core::player::Gender::Male,
+                // 测试夹具摆的是「等人点」的座位，电脑开的座位归 tests/ai.rs
+                controller: game_core::ai::Controller::Human,
             });
         }
     }

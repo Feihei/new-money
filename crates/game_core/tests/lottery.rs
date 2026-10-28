@@ -135,6 +135,8 @@ fn three_at_counter() -> (App, Entity, Entity) {
         name: "王小二".into(),
         color: PLAYER_COLORS[2],
         gender: game_core::player::Gender::Male,
+        // 测试夹具摆的是「等人点」的座位，电脑开的座位归 tests/ai.rs
+        controller: game_core::ai::Controller::Human,
     });
     at_the_setup(GameSeed::default(), rules(), setup)
 }

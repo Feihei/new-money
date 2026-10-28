@@ -173,6 +173,8 @@ fn setup_and_rules_are_the_only_sources() {
                 name: ["甲", "乙", "丙"][i].to_string(),
                 color: PLAYER_COLORS[i],
                 gender: game_core::player::Gender::Male,
+                // 测试夹具摆的是「等人点」的座位，电脑开的座位归 tests/ai.rs
+                controller: game_core::ai::Controller::Human,
             })
             .collect(),
     };

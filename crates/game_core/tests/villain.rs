@@ -25,6 +25,8 @@ fn four_players() -> GameSetup {
                 name: format!("P{i}"),
                 color: PLAYER_COLORS[i % PLAYER_COLORS.len()],
                 gender: game_core::player::Gender::Male,
+                // 测试夹具摆的是「等人点」的座位，电脑开的座位归 tests/ai.rs
+                controller: game_core::ai::Controller::Human,
             })
             .collect(),
     }

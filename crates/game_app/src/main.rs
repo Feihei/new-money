@@ -11,7 +11,9 @@ use bevy::{
     window::{PresentMode, Window},
 };
 use game_core::CoreGamePlugin;
-use game_core::prelude::{DataHandles, Date, EpochOverride, GameSeed, TurnPhase};
+use game_core::prelude::{
+    AiCadence, DataHandles, Date, EpochOverride, GameSeed, GameSetup, TurnPhase,
+};
 
 mod art;
 mod autopilot;
@@ -83,8 +85,70 @@ fn insert_boot_resources(world: &mut World) {
     let server = world.resource::<AssetServer>().clone();
     world.insert_resource(GameSeed(boot_seed()));
     world.insert_resource(boot_epoch());
+    // 阵容（P14a）：玩家看到的默认是**一位真人 + 三档性格各一位电脑**。规则层的
+    // `GameSetup::default()` 那两位全人类是**测试夹具**，不动它（理由见 `ai_field` 的文档），
+    // 换阵容是这一句 insert 的事
+    world.insert_resource(boot_roster());
+    // AI 的伪延迟：默认 0.5..=1.5 秒（PLAN §四 P14 那句），`NM_AUTOGAP=<秒>` 压成常数
+    world.insert_resource(boot_cadence());
     world.insert_resource(DataHandles::load(&server));
     world.insert_resource(render::DevFont(server.load(DEV_FONT)));
+}
+
+/// `NM_AI=<人数>` 改电脑座位数（0…3）。不设＝3，即一位真人加三档性格。
+///
+/// 为什么 `0` 这条路要留着：现有那批截图与真鼠标冒烟拍的是「这个座位由人点」的形状，
+/// 而 `NM_AUTODECISION=0` 那种「停在第一个窗口给你拍」的用法在全 AI 局里根本不会停。
+/// **`0` 走的是规则层那份两人人类夹具而不是「一位真人」** —— 单人局一开局就终局
+/// （`turn.rs` 那句「可行动的人只剩一个」），拿它当「纯人类局」会拍到一张写着「胜」的
+/// 第一帧（这条是实测翻出来的，不是推理）。
+/// 上限是 3 而不是想要多少给多少 —— **没有第四档性格可领**，硬凑一位重复的电脑只会让
+/// 「按性格选」那条对照失真。
+fn boot_roster() -> GameSetup {
+    let ai = std::env::var("NM_AI")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok());
+    match ai {
+        Some(0) => {
+            info!("阵容（NM_AI=0）：两位人类座位，AI 全部不上场");
+            GameSetup::default()
+        }
+        Some(n) if n > 3 => {
+            warn!("NM_AI={n} 超过三档性格的上限，按 3 摆");
+            GameSetup::seats(3)
+        }
+        Some(n) => {
+            let setup = GameSetup::seats(n);
+            info!(
+                "阵容（NM_AI）：{} 位座位，其中电脑 {n} 位",
+                setup.players.len()
+            );
+            setup
+        }
+        // 显式写了但读不出数：摆默认局而喊一句，别静默按 3 走
+        None if std::env::var_os("NM_AI").is_some() => {
+            warn!("NM_AI 不是整数，改用默认阵容（1 人类 + 3 AI）");
+            GameSetup::ai_field()
+        }
+        None => GameSetup::ai_field(),
+    }
+}
+
+/// AI 每次动手之间隔多久。`NM_AIGAP` 优先，其次 `NM_AUTOGAP`（把两边压成同一个常数），
+/// 都没有就是 `0.5..=1.5` 的随机间隔。
+///
+/// 与表现层那份脚手架共用 `NM_AUTOGAP` 是有意的：两个旋钮分别在决定「这台机器多久动一次手」，
+/// 分开拧会拍出「AI 秒答而人类那一格还在想」那种怪画面（`NM_AUTOROLL` 的截图核对全废）。
+fn boot_cadence() -> AiCadence {
+    let fixed = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+    };
+    if let Some(gap) = fixed("NM_AIGAP").or_else(|| fixed("NM_AUTOGAP")) {
+        return AiCadence { min: gap, max: gap };
+    }
+    AiCadence { min: 0.5, max: 1.5 }
 }
 
 /// 种子默认取墙钟纳秒；`NM_SEED=<十进制>` 钉死它，让一局能原样重跑。

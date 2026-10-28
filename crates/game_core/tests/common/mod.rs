@@ -167,17 +167,33 @@ pub enum DecisionPolicy {
     Hold,
 }
 
+/// 那份脚手架要写得出去的五种消息。打包成参数包而不是摊在函数签名上：
+/// 加上 P14a 的 `Controller` 之后这条 system 就有八个参数，而 clippy 的
+/// `too_many_arguments` 给的「抽出来」正是这仓库的房规（§6.1 坑 8）——
+/// `#[allow]` 会把「一道 system 要动这么多」这个信号吃掉。
+#[derive(SystemParam)]
+struct StandinOut<'w, 's> {
+    answers: MessageWriter<'w, DecisionChosen>,
+    scores: MessageWriter<'w, MinigameResult>,
+    moves: MessageWriter<'w, AuctionMove>,
+    passives: MessageWriter<'w, PassiveAnswer>,
+    controllers: Query<'w, 's, &'static game_core::ai::Controller>,
+}
+
 /// 代替 B5 的对话框：挂着待决事项就按策略答一次。
 ///
 /// 只在 `WaitDecision` 里跑，且只答 `PendingDecision` 里那位 —— 与真实 UI 的权限一样。
+///
+/// ⚠️ **电脑开的座位它不答**（P14a）。这一份夹具替的是**不在键盘前的那位人类**，
+/// 而 AI 座位由 core 自己的 `ai_answer_system` 答。少了这道分界，同一个窗口会收到
+/// **两份回答** —— 症状不是崩溃而是「买地买了两次」，或者 AI 想加的价被这里的
+/// `Withdraw` 抢了先，那比崩难查得多。判据只看 `Controller`，不看策略
+/// （`tests/ai.rs::an_ai_seat_answers_a_window_it_was_hung_without_a_click` 是它的牙）。
 fn auto_answer_system(
     policy: Res<DecisionPolicy>,
     rules: Res<GameRules>,
     pending: Res<PendingDecision>,
-    mut answers: MessageWriter<DecisionChosen>,
-    mut scores: MessageWriter<MinigameResult>,
-    mut moves: MessageWriter<AuctionMove>,
-    mut answers_passive: MessageWriter<PassiveAnswer>,
+    mut out: StandinOut<'_, '_>,
 ) {
     if *policy == DecisionPolicy::Hold {
         return;
@@ -185,6 +201,13 @@ fn auto_answer_system(
     let Some((player, about)) = pending.active() else {
         return;
     };
+    if out
+        .controllers
+        .get(player)
+        .is_ok_and(game_core::ai::Controller::is_ai)
+    {
+        return;
+    }
     let action = match (about, *policy) {
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::DeclineAll) => Decision::Decline,
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::AcceptAll) => Decision::Accept,
@@ -221,7 +244,7 @@ fn auto_answer_system(
         // 报 0 分也能过关口，但那样一来长跑就永远走不到「成绩换点券」那条路上，
         // 而这一格是点券的第二个来源（第一个是路上的箱子）
         (Pending::Minigame(game), _) => {
-            scores.write(MinigameResult {
+            out.scores.write(MinigameResult {
                 player,
                 game,
                 score: rules.minigames.of(game).perfect / 2,
@@ -236,7 +259,7 @@ fn auto_answer_system(
         // 否则任一处破产触发的清算会把整片长跑停在「等着问下一个人」的地方。
         // 真拍地那条路由 `tests/auction.rs` 自己走（它把策略换成 `Hold`）。
         (Pending::Auction, _) => {
-            moves.write(AuctionMove {
+            out.moves.write(AuctionMove {
                 player,
                 what: BidMove::Withdraw,
             });
@@ -248,7 +271,7 @@ fn auto_answer_system(
         // 一整片「他进了监狱」的断言改成「他没进」。真正问那一句的路由 `tests/passive.rs` 自己走。
         // **必须**答这一句：不答就等于把门永久挂在 `WaitDecision`，所有长跑整片停死。
         (Pending::Passive, _) => {
-            answers_passive.write(PassiveAnswer {
+            out.passives.write(PassiveAnswer {
                 player,
                 what: PassiveMove::Decline,
             });
@@ -257,7 +280,7 @@ fn auto_answer_system(
         // `Hold` 在函数开头就返回了，这一支只为穷尽存在
         (Pending::Buy(_) | Pending::Upgrade(_), DecisionPolicy::Hold) => return,
     };
-    answers.write(DecisionChosen { player, action });
+    out.answers.write(DecisionChosen { player, action });
 }
 
 /// 按到达顺序记录的消息流水。跨类型的相对顺序只在「同一帧内多条消息」时有歧义

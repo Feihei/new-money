@@ -61,7 +61,12 @@ pub(crate) fn spawn_player_hud(
                 bottom: Val::Px(layout::HUD_BOTTOM[1]),
                 left: Val::Px(layout::HUD_BOTTOM[2]),
                 right: Val::Px(layout::HUD_BOTTOM[3]),
-                height: Val::Px(layout::HUD_BOTTOM[0]),
+                // 高度**跟着人数长**。原来钉的是 `HUD_BOTTOM[0]`（112 = 两张卡的高度），
+                // P14a 之后默认局有四个座位，钉死的高度装不下四行 —— 而 bevy_ui 不裁子节点
+                // （§6.1 坑 34），第四行不是被裁掉而是**画到窗口下沿之外**，症状是
+                // 「有一个玩家整个 HUD 看不见」，看着像 HUD 坏了。`bottom` 锚住 + `Auto` 高度
+                // 就是往上长，一位与八位都刚好贴着底边
+                height: Val::Auto,
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(layout::HUD_CARD_GAP),
                 ..default()

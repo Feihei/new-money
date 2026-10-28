@@ -192,6 +192,10 @@ pub fn begin_game_system(
 
     commands.insert_resource(ActiveBoard { def, lands });
     commands.insert_resource(TurnOrder::new(players));
+    // AI 那一条钟每局归零（P14a）。它是**资源**而不是 system 的 `Local`，正是为了这一刻：
+    // `Local` 跟着 schedule 活，回主菜单再开一局时它带着上一局的 `ready_at`，症状是
+    // 「新局头几个 AI 座位迟迟不动」—— 与 §6.1 坑 22/25 那一族同形，只是藏在没人看的地方
+    commands.insert_resource(crate::ai::AiClock::default());
     commands.insert_resource(rng);
     // 节假日是这一局的静态日历事实：克隆成资源，规则层与 UI 都直接读，
     // 免得每处再解一遍 `Assets`。装配失败前它不存在，于是所有读者都躲在状态门禁后面。

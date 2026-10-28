@@ -224,6 +224,10 @@ pub struct DumpView<'w, 's> {
     /// 的 15 元上限（见它的注释），第 16 格会在编译期炸 —— 与乐透票、持股同一条处理：
     /// 另开一条查询，按实体对回去
     insured: Query<'w, 's, (Entity, &'static Insured)>,
+    /// 谁在开这个座位（P14a）。同样**不并进 `PlayerRow`**，理由与上面 `insured` 那条一字不差
+    /// （15 元上限）。它值得占一格是因为 AI 上线之后「这一行为什么动了」有了两种答案，
+    /// 而查「他为什么替我买了这块地」时，第一个要看的读数就是这个座位由谁开车。
+    drivers: Query<'w, 's, (Entity, &'static game_core::prelude::Controller)>,
     /// 四大恶人（P12）。同样**不并进 `PlayerRow`**，而且理由还前面一层：他们不是玩家，
     /// 进不了那张按 `PlayerId` 收的表。这一栏要说的是「谁在笼里等保释、谁在环上替谁走路、
     /// 走到第几格、被什么按住」—— 查「恶人为什么一动不动」与「保释窗口为什么没他」时，
@@ -829,6 +833,20 @@ fn format_players(view: &DumpView) -> Vec<String> {
             )
         })
         .collect();
+    // 谁在开这个座位（P14a）。查「这一行为什么自己动了」的第一眼读数
+    let drivers: std::collections::HashMap<Entity, String> = view
+        .drivers
+        .iter()
+        .map(|(e, controller)| {
+            (
+                e,
+                match controller {
+                    game_core::prelude::Controller::Human => "人".to_string(),
+                    game_core::prelude::Controller::Ai(profile) => format!("机·{}", profile.who),
+                },
+            )
+        })
+        .collect();
     let mut rows: Vec<(u32, String)> = view
         .players
         .iter()
@@ -951,7 +969,7 @@ fn format_players(view: &DumpView) -> Vec<String> {
                 (
                     id.0,
                     format!(
-                        "P{:<2} {:<6} 现金 {:>7} 点券 {:>4} 存 {:>6} 贷 {:>6} {:<18} 牌 {:<12} 护 {:<4} 具 {:<12} 别 {:<2} 载 {:<4} {:?}",
+                        "P{:<2} {:<6} 现金 {:>7} 点券 {:>4} 存 {:>6} 贷 {:>6} {:<18} 牌 {:<12} 护 {:<4} 具 {:<12} 别 {:<2} 载 {:<4} 开 {:<7} {:?}",
                         id.0,
                         name.0,
                         wallet.cash,
@@ -964,6 +982,7 @@ fn format_players(view: &DumpView) -> Vec<String> {
                         items,
                         genders.get(&entity).copied().unwrap_or("？"),
                         mount.label(),
+                        drivers.get(&entity).map(String::as_str).unwrap_or("？"),
                         entity
                     ),
                 )

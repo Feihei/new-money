@@ -427,12 +427,66 @@ pub struct PlayerSetup {
     pub name: String,
     pub color: PlayerColor,
     pub gender: Gender,
+    /// 这个座位由谁开车（P14）。默认 [`Controller::Human`] —— **漏配等于「等人点」**，
+    /// 而不是「替他决定」，理由见 [`crate::ai::Controller`] 那条注。
+    pub controller: crate::ai::Controller,
 }
 
 /// 对局配置：玩家名单。表现层/测试在开局前插入即可覆盖默认阵容。
 #[derive(Resource, Debug, Clone, PartialEq)]
 pub struct GameSetup {
     pub players: Vec<PlayerSetup>,
+}
+
+impl GameSetup {
+    /// **玩家看到的那一局**：一位真人 + 三档性格各一位电脑（P14）。
+    ///
+    /// 为什么不改 [`Default`]：规则层的默认是**测试夹具**，几百条既有集成测试的语义按两人盘写
+    /// （回合流水逐字比对、`play_turns` 的掐帧、物价中性那条 A/B），换默认等于把它们重算一遍，
+    /// 而 P14 一条都没要它们改。表现层在 `insert_boot_resources` 里插这一份，
+    /// `NM_AI=<n>` 拿 [`GameSetup::seats`] 改人数。
+    ///
+    /// 四个座位从 `PLAYER_COLORS` 那四格取色，名字沿用 CHARACTERS.md 首发十二人里的那四位：
+    /// **姬百年**（人类，红）、**莱息**（养老金组合经理，档案里 `stock = 0.9` —— 那一档的
+    /// 爱买股，蓝）、**范一文**（素人修车匠，普通人，绿）、**多吉**（四维全低的背夫，乖宝宝，黄）。
+    /// ⚠️ 这里领的是**三档预设向量**，不是角色档案那一行完整的五格数 —— 后者等
+    /// `characters.json` 被真读进来的那一次（P2c/角色装配），那时填的正是同一个
+    /// [`crate::ai::AiProfile`] 形状。
+    ///
+    /// 性别两位两位（姬百年/莱息女，范一文/多吉男）是有意的副产品：魔法屋那两条按性别的
+    /// 筛选条件在默认局里筛得出人，而 AI 会不会按性格点人（P14d）需要一个非空名单。
+    pub fn ai_field() -> Self {
+        Self::seats(3)
+    }
+
+    /// 一位真人 + `ai` 位电脑。上限是三位（**没有第四档性格可领**），`0` 退回纯人类局 ——
+    /// 那是现有截图与真鼠标冒烟走的那条路。
+    ///
+    /// 三个 AI 各领一档而不是摆两个普通人：验收那句「进魔法屋按性格选」要有对照才拍得出来，
+    /// 而一局里见得到全部三档才是这一阶段的产物。
+    pub fn seats(ai: usize) -> Self {
+        // 名字与性别取自 CHARACTERS.md 首发十二人，档位取档案里最像的那一格读数
+        const FIELD: [(&str, Gender, crate::ai::AiProfile); 3] = [
+            ("莱息", Gender::Female, crate::ai::AiProfile::SHARK),
+            ("范一文", Gender::Male, crate::ai::AiProfile::PLAIN),
+            ("多吉", Gender::Male, crate::ai::AiProfile::GOODY),
+        ];
+        let mut players = vec![PlayerSetup {
+            name: "姬百年".into(),
+            color: PLAYER_COLORS[0],
+            gender: Gender::Female,
+            controller: crate::ai::Controller::Human,
+        }];
+        for (i, (name, gender, profile)) in FIELD.iter().take(ai.min(FIELD.len())).enumerate() {
+            players.push(PlayerSetup {
+                name: (*name).into(),
+                color: PLAYER_COLORS[(i + 1) % PLAYER_COLORS.len()],
+                gender: *gender,
+                controller: crate::ai::Controller::Ai(*profile),
+            });
+        }
+        Self { players }
+    }
 }
 
 impl Default for GameSetup {
@@ -450,11 +504,13 @@ impl Default for GameSetup {
                     name: "姬百年".into(),
                     color: PLAYER_COLORS[0],
                     gender: Gender::Female,
+                    controller: crate::ai::Controller::Human,
                 },
                 PlayerSetup {
                     name: "范一文".into(),
                     color: PLAYER_COLORS[1],
                     gender: Gender::Male,
+                    controller: crate::ai::Controller::Human,
                 },
             ],
         }
@@ -497,6 +553,9 @@ pub fn spawn_players(
                         p.color,
                         // 性别（P13 魔法屋那两条筛选条件的读数）：与名字同属「他是谁」那一组
                         p.gender,
+                        // 这个座位由谁开车（P14）：人类等按钮，电脑发同一条意图。
+                        // 它是**必挂**组件，`spawn_players` 是唯一的上身出口
+                        p.controller,
                     ),
                     (
                         Wallet {
