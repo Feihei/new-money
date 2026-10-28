@@ -31,9 +31,10 @@ use bevy::ecs::entity::Entity;
 use bevy::prelude::{MessageReader, NextState, ResMut, Resource, Update};
 use common::*;
 use game_core::prelude::{
-    AiCadence, AiClock, AiProfile, CardAim, Controller, GameRules, GameSeed, GameSession,
-    GameSetup, Gender, Institution, LandId, PLAYER_COLORS, Paused, Pending, PendingDecision,
-    PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice, StockTradeRequested, TurnPhase,
+    ActiveBoard, AiCadence, AiClock, AiProfile, CardAim, Controller, Detention, GameRules,
+    GameSeed, GameSession, GameSetup, Gender, Institution, LandId, LandStatus, PLAYER_COLORS,
+    Paused, Pending, PendingDecision, PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice,
+    StockTradeRequested, Timed, TurnPhase,
 };
 use game_core::rng::Rng;
 
@@ -1112,4 +1113,197 @@ fn a_closed_market_keeps_the_ai_out() {
         "停牌时不许下单"
     );
     assert_eq!(cash_of(&mut app, seat), 0, "没成交就不许动钱");
+}
+
+// ============================ P14c①：出牌 ============================
+//
+// 这一节钉「AI 会用卡」这句话里可测的四件事：
+//
+// - **购地卡买最值的那块** → [`an_ai_seat_plays_its_grab_card_on_the_best_plot`]（与买地那一问
+//   同一个式子，所以「卡说买得起而账本说买不起」在结构上写不出来）；
+// - **伤害那一路的分按 `harm` 打折** → [`the_harm_axis_decides_which_card_gets_played`]：
+//   同一个世界、同一副手牌，大佬奸先查封、普通人先涨价 —— 「性格是数不是枚举」在这一刀上的证据；
+// - **门槛之下根本不上桌** → [`the_goody_never_uses_a_harmful_card`]；
+// - **一次只出一张** → [`one_card_per_turn`]，以及被动卡不走进这条路 →
+//   [`a_passive_card_is_never_played`]。
+
+/// 一块地上盖着的限时状态（`None` = 没挂着）。
+fn status_of(app: &App, land: u32) -> Option<LandStatus> {
+    let entity = *app
+        .world()
+        .resource::<ActiveBoard>()
+        .lands
+        .get(&LandId(land))
+        .expect("prototype 里有这块地");
+    app.world()
+        .entity(entity)
+        .get::<Timed<LandStatus>>()
+        .map(|held| held.kind)
+}
+
+#[test]
+fn an_ai_seat_plays_its_grab_card_on_the_best_plot() {
+    // 演示盘六块空地，大佬奸（25.6 倍回本）算下来最值的是外滩商业区：
+    // 单地块那一族一买下就是垄断（租金 280 → 560），560 × 25.6 − 4400 = 9936，全场最高。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    set_cash(&mut app, seat, 20_000);
+    let grab = item_index(&app, "item_grab").0;
+    deal(&mut app, seat, grab);
+
+    step_ai(&mut app);
+    assert_eq!(
+        owner_of(&mut app, 2),
+        Some(1),
+        "购地卡该买下算下来最值的那块（外滩商业区 L2）"
+    );
+    assert!(
+        hand_of(&app, seat).is_empty(),
+        "打出去的卡该从手里消失（卡没了事没成是缺陷，事成了卡还在也是）"
+    );
+    assert_eq!(
+        cash_of(&mut app, seat),
+        15_600,
+        "买地走的是 Books::buy 正路：地价 4400 从现金里扣"
+    );
+}
+
+#[test]
+fn the_harm_axis_decides_which_card_gets_played() {
+    // 同一个世界、同一副手牌（涨价卡 + 查封卡）：
+    // 自己那块西单一次收 180（yellow），对手那块南京路一次收 180（brown，Lv1）。
+    // · 大佬奸：查封 180 × 0.90 = 162 > 涨价 180 × 0.80 = 144 → 先害人；
+    // · 普通人：查封 180 × 0.30 = 54  < 涨价 180 × 0.50 = 90  → 先置业。
+    // 这就是 `harm` 不只是门槛、还是**损害那一路的乘数**的直接后果。
+    //
+    // ⚠️ 两条街必须选**不同族**：限时状态盖的是整条街（`area: street`），
+    // 所以在同一族的两块地上比对「哪块被盖了」是分不出「他打的是哪一块」的 ——
+    // 第一版正是这么写的，把方向判据拆掉也照样绿（`status_aims` 那条 `mine` 检查
+    // 被这次 red-check 抓出来是空跑的）。
+    for (profile, sealed, hiked) in [
+        (AiProfile::SHARK, true, false),
+        (AiProfile::PLAIN, false, true),
+    ] {
+        let (mut app, seat) = solo_ai(profile);
+        own(&mut app, 5, Some(1), 0, false); // 他自己：西单（yellow），一次收 180
+        own(&mut app, 0, Some(0), 1, false); // 对手：南京路（brown Lv1），一次收 180
+        let hike = item_index(&app, "item_hike").0;
+        let seal = item_index(&app, "item_seal").0;
+        deal(&mut app, seat, hike);
+        deal(&mut app, seat, seal);
+        hold_the_roll(&mut app, seat);
+
+        step_ai(&mut app);
+        assert_eq!(
+            status_of(&app, 0) == Some(LandStatus::Sealed),
+            sealed,
+            "{} 该不该查封对手那条街？",
+            profile.who
+        );
+        assert_eq!(
+            status_of(&app, 5) == Some(LandStatus::PriceHike),
+            hiked,
+            "{} 该不该给自家的街涨价？",
+            profile.who
+        );
+        assert_eq!(
+            hand_of(&app, seat).len(),
+            1,
+            "{} 只该打出一张（另一张还在手里）",
+            profile.who
+        );
+    }
+}
+
+#[test]
+fn the_goody_never_uses_a_harmful_card() {
+    // 乖宝宝的 `harm = 0.05` 在门槛（0.20）之下 —— 手里有一张查封卡也不打。
+    // 这一格钉的是**门槛**而不是乘数：只乘不拦的话，一块够肥的地会让乖宝宝也伸手。
+    let (mut app, seat) = solo_ai(AiProfile::GOODY);
+    own(&mut app, 5, Some(0), 0, false);
+    let seal = item_index(&app, "item_seal").0;
+    deal(&mut app, seat, seal);
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    assert_eq!(status_of(&app, 5), None, "乖宝宝查封了别人的地");
+    assert_eq!(hand_of(&app, seat).len(), 1, "卡该还在手里");
+}
+
+#[test]
+fn an_ai_seat_jails_the_richest_opponent() {
+    // 陷害卡：目标按「他名下那一轮租金之和 × 害意」排，已经在里面的跳过。
+    // 两张牌打在两个人身上会在世界状态上留下同一句话，所以这里只摆一个人 ——
+    // 「挑谁」那一半由 `detain_aims` 的排序决定，与 `the_harm_axis...` 同一条纪律。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    let human = roster(&mut app)[0].0;
+    own(&mut app, 5, Some(0), 0, false); // 真人的西单：他挡在我前面 180 块
+    let frame = item_index(&app, "item_frame").0;
+    deal(&mut app, seat, frame);
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    let held = app
+        .world()
+        .entity(human)
+        .get::<Detention>()
+        .expect("真人该被关起来");
+    assert_eq!(held.term.turns(), Some(5), "陷害卡写的是 5 天（卡面）");
+    assert!(
+        hand_of(&app, seat).is_empty(),
+        "卡该被花掉 —— 一直在手里说明门或出牌那条路没接上"
+    );
+}
+
+#[test]
+fn one_card_per_turn() {
+    // 两张购地卡、六块空地：第一动买下最值的那块，第二动**不许**接着买 ——
+    // 标记（`AiErrands::played_card`）是那道闸门，不是「一张卡只能用一次」。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    set_cash(&mut app, seat, 20_000);
+    let grab = item_index(&app, "item_grab").0;
+    deal(&mut app, seat, grab);
+    deal(&mut app, seat, grab);
+    hold_the_roll(&mut app, seat);
+
+    step_ai(&mut app);
+    assert_eq!(hand_of(&app, seat).len(), 1, "第一张该被打出去");
+    step_ai(&mut app);
+    assert_eq!(
+        hand_of(&app, seat).len(),
+        1,
+        "同一回合里第二张也被打出去了 —— 「一次只出一张」那道闸门没关上"
+    );
+    // 而且第二张没买成第二块地：名下只有外滩那一块
+    assert_eq!(owner_of(&mut app, 3), None, "第二张把徐家汇也买了");
+}
+
+/// 一条**故意不写**的用例，理由记在这里：「被动卡不会被主动打出去」今天测不出来。
+///
+/// `item_cards.json` 里三张被动卡的 `effects` 都是空的，所以就算 `card_table` 不跳过它们，
+/// `card_aims` 也会因为「一条效果都没有」返回空 —— 两种世界在**画面与账上**一模一样。
+/// 真正守这条的是 `play_card_system` 里那句 `is_passive`（它在目标与落空两道门之前），
+/// 而 AI 这一侧那句只是让这件事在类型/判据上说得通。等哪天出现一张**带效果的被动卡**
+/// （`CardSet::validate` 今天不拦这种形状），这条用例才有牙 —— 那时补它，现在不写一条
+/// 怎么改都绿的断言（「空跑的断言等于没断言」第六次的教训就在上一节）。
+#[test]
+fn the_grab_card_skips_a_plot_it_could_not_keep() {
+    // 现金 4500：外滩 4400 买得起，但买完只剩 100 —— 连对手西单那笔 180 的租都盖不住。
+    // 于是这一块不进候选表（「被拒的候选不进表」），退而买守得住的徐家汇（3800，剩 700）。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    own(&mut app, 5, Some(0), 0, false);
+    set_cash(&mut app, seat, 4_500);
+    let grab = item_index(&app, "item_grab").0;
+    deal(&mut app, seat, grab);
+
+    step_ai(&mut app);
+    assert_eq!(
+        owner_of(&mut app, 2),
+        None,
+        "买完守不住留底的那块不该买（钱少了而地没拿到是这一族最坏的形状）"
+    );
+    assert_eq!(
+        owner_of(&mut app, 3),
+        Some(1),
+        "该退而买买得起又守得住的那块（徐家汇 3800，剩 700）"
+    );
 }

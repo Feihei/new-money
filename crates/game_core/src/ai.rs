@@ -48,6 +48,14 @@
 //! 跑）。于是 [`ai_roll_system`] 从「一发掷骰」变成两步：先问一句「活钱够不够水位」，
 //! 不够就卖股，**每回合最多理一次、最多动一只股**，第二帧才掷骰。
 //!
+//! ## 出牌（P14c①）：同一条窗口里的另一件事，排在理财前面
+//!
+//! AI 手里有什么卡由 [`AiHand::card_table`] 打分：购地卡与买地那一问同一个式子；涨价与查封
+//! 往街上涨/查封，**涨价只盖自己的街、查封只盖别人的**；陷害挑人，价钱是「他挡在我前面
+//! 多少钱 × 害意」。损害那两路的分**按 `harm` 打折**，所以同一张表在大佬奸手里是
+//! 「先查封」、在普通人手里是「先置业」、在乖宝宝手里根本不上桌（[`AiProfile::HARM_START`]）。
+//! 一次只出一张，理由与容量无关（见 [`AiErrands::played_card`]）。
+//!
 //! 三个约束是刻意的：
 //! ① **每回合只一次、只一只**（[`AiErrands::rebalanced`] 带回合号）：「AI 炒股要尽量少」
 //!    不是一句口味，它得在结构上成立。一次动作只动一只股，而一次动作之后这条 system 才掷骰。
@@ -63,8 +71,11 @@ use bevy::prelude::*;
 
 use crate::bank::bank_op_allowed;
 use crate::calendar::HolidaySet;
+use crate::card::{CardDef, CardEffect, CardKind};
 use crate::charge::ChargeKind;
+use crate::deck::{CardId, Shelf};
 use crate::economy;
+use crate::hand::{CardAim, Hand, is_passive};
 use crate::institution::Institution;
 use crate::land::LandId;
 use crate::landing::{Pending, PendingDecision};
@@ -74,13 +85,14 @@ use crate::minigame::GameKind;
 use crate::mortgage::{counter_plots, mortgage_op_allowed, read_facts};
 use crate::msg::{
     AuctionMove, BankOp, BankOpRequested, BidMove, BuyTicketRequested, Decision, DecisionChosen,
-    MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, RequestRoll,
-    RequestStay, StockTradeRequested, TradeSide,
+    MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, PlayCardRequested,
+    RequestRoll, RequestStay, StockTradeRequested, TradeSide,
 };
-use crate::player::StaySentence;
+use crate::player::{PlayerId, StaySentence};
 use crate::rng::Rng;
 use crate::rules::GameRules;
 use crate::settle::Books;
+use crate::status::LandStatus;
 use crate::stock::{PriceHistory, StockId, StockPrice};
 use crate::turn::TurnOrder;
 
@@ -206,6 +218,19 @@ impl AiProfile {
     /// 现价还在均价之上时不买，只有真跌下去才接。`0.90` 是一个设计值（跌幅 10%），
     /// 与演示盘五只股 5–15% 的日波动同量级：跌得出来，但不会天天发生。
     pub const STOCK_DIP: f32 = 0.90;
+
+    /// **肯不肯用一张卡往别人头上落事的那道门槛**（P14c①）。
+    ///
+    /// 与 [`Self::LIQUIDIZE`]、[`Self::STOCK_APPETITE`] 同一手，但这一格不只当开关：
+    /// 过了门槛之后它还是**损害那一路的乘数**（`害意 × 对方损失`），于是三档在候选表上
+    /// 排不到同一个位置 —— 大佬奸（0.90）常把查封排在置业前面，普通人（0.30）先置业、
+    /// 闲下来才害人，乖宝宝（0.05）在门槛之下**根本不上桌**。
+    ///
+    /// 为什么乘数之外还要门槛：只乘不拦的话，一块够肥的地会让乖宝宝也伸手 ——
+    /// 而「乖宝宝很少害人」是 §七 那条实测的归宿，不能靠「收益刚好不够大」来成立。
+    /// 三档离门槛是 +0.70 / +0.10 / −0.15，中间那一档最近，改预设值时要先看这条用例
+    /// （`tests/ai.rs` 的 `the_harm_axis_decides_which_card_gets_played`）。
+    pub const HARM_START: f32 = 0.20;
 }
 
 /// 两次按按钮之间的人味：`NM_AUTOROLL` 那种长跑要 0，看人下棋要半秒到一秒半。
@@ -291,6 +316,12 @@ pub struct AiErrands {
     /// 与 `banked` 同一条生命周期：资源、每局清空（`Local` 会带着上一局的回合号），
     /// 且带回合号 —— 「谁在第几回合」这句话少一半就会跨人、跨回合误挡。
     pub rebalanced: Option<(Entity, u32)>,
+    /// `(谁, 第几回合)`：这位这一回合已经**出过一张牌**了。
+    ///
+    /// 一次只出一张是政策而不是规则（真人在同一回合里能连打）。理由有两条：AI 的每一次动作
+    /// 之间隔着伪延迟，放开就等于「他一回合把整副手牌倒出来」；而这个阶段的画面证据要的
+    /// 是「他打了一张什么」，不是「他清空了手牌」。与 `rebalanced` 同一条生命周期。
+    pub played_card: Option<(Entity, u32)>,
 }
 
 /// 回合前理财那一笔（P14b③）：**一只股**，买或卖，不给第二只。
@@ -304,6 +335,61 @@ pub struct AiErrands {
 pub enum TradeMove {
     Buy { stock: StockId, shares: u32 },
     Sell { stock: StockId, shares: u32 },
+}
+
+/// 打出的一张卡（P14c①）。被动卡不在这里 —— 它只能等门来问（P14c③）。
+///
+/// `Pass` 是候选表上那条 0 分基准：与 [`Candidates::take`] 同一手，失误落在它身上就是
+/// 「这一回合想不起出牌」。它**不发任何消息**（[`AiHand::emit`] 对它会说 `false`），
+/// 所以「出了一张牌」与「什么都没出」在世界上分得开。
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlayMove {
+    Pass,
+    Card { card: CardId, aim: Option<CardAim> },
+}
+
+/// 打出去的这张牌，AI 眼里值多少 —— 也就是**哪些效果它今天已经会算账**。
+///
+/// 穷尽表，不许出现 `_`：新增一条卡面动词必须当场决定「AI 会不会算它、按什么价钱算」。
+/// 今天不算的几张各有各的理由，写在这一格上而不是散进 `card_aims` 的分支里：
+/// - 请神符／送神符：请来哪位神由 [`crate::gods::nearest_god`] 决定，好坏不由出牌人挑 ——
+///   五格里没有一格是「我愿意赌一把」；
+/// - 拍卖卡：它开的是另一台机器（P9 的轮转出价），那台机器的判据在 P14d；
+/// - 转向卡／乌龟卡／停留卡：价值是「挡别人的进度」，而五格里没有一格度量进度。
+///   尤其停留：被停留的人**照收租**（P4④ 口径），它拦的是走位不是钱 —— 拿租金给它定价
+///   会高估十倍。这三张与魔法屋「选人害」同批（P14d 要先有「谁领先」那个读数）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardUse {
+    /// 购地卡：按 `buy` 那格买下无主地
+    Grab,
+    /// 涨价／查封：往一条街盖限时状态
+    Status(LandStatus),
+    /// 陷害卡：把人关起来
+    Detain,
+    /// 今天不算账的（见上面那条注释）
+    NotYet,
+}
+
+/// 一张卡面动词归哪一格。**穷尽表**：新加一条 `CardEffect` 必须在这里表态。
+fn card_use(effect: &CardEffect) -> CardUse {
+    match effect {
+        CardEffect::BuyLand => CardUse::Grab,
+        CardEffect::LandStatus { status, .. } => CardUse::Status(*status),
+        CardEffect::Detain { .. } => CardUse::Detain,
+        CardEffect::AddCash { .. }
+        | CardEffect::DeductCash { .. }
+        | CardEffect::Levy { .. }
+        | CardEffect::MoveTo { .. }
+        | CardEffect::Damage { .. }
+        | CardEffect::Release { .. }
+        | CardEffect::Reverse
+        | CardEffect::Stay { .. }
+        | CardEffect::MoveCap { .. }
+        | CardEffect::Suspend { .. }
+        | CardEffect::SummonGod
+        | CardEffect::BanishGod
+        | CardEffect::Auction { .. } => CardUse::NotYet,
+    }
 }
 
 /// AI 对一问的回答。**六种答案形状，与真人点按钮时点的那六类东西一模一样**。
@@ -332,6 +418,8 @@ pub enum AiMove {
     Teller(TellerMove),
     /// 回合前理财：卖一只股补水位／买一只跌下去的股（在 `WaitRoll` 里、掷骰之前）
     Trade(TradeMove),
+    /// 打出一张主动卡（每回合最多一张；被动卡走 [`AiMove::Gate`]）
+    Play(PlayMove),
 }
 
 /// 这一问的答案里**不打分**的那一份：P14a 的全部，也是 AI 还没学会算账时那些格子的默认值。
@@ -432,6 +520,13 @@ impl Candidates {
         let pick = if fumble && self.items.len() > 1 { 1 } else { 0 };
         Some(self.items.swap_remove(pick).1)
     }
+
+    /// 表里有没有一条**真动作**（分数 > 0）。基准那条「什么都不做」永远是 0 分，所以这一句
+    /// 就是「值不值得动手」—— 没得办时连失误都不该掷（与 P14b③ 那条「没得办就不抽流」
+    /// 同一条纪律：白抽一次会把 `pick_ai` 与真正的决策错开）。
+    pub fn has_move(&self) -> bool {
+        self.items.iter().any(|(score, _)| *score > 0.0)
+    }
 }
 
 /// AI 的「一只手」：它读得着的**世界**与写得出去的那几种消息。
@@ -474,6 +569,12 @@ pub struct AiHand<'w, 's> {
     pub bank_ops: MessageWriter<'w, BankOpRequested>,
     pub mortgages: MessageWriter<'w, MortgageRequested>,
     pub trades: MessageWriter<'w, StockTradeRequested>,
+    pub plays: MessageWriter<'w, PlayCardRequested>,
+    /// 手牌（出牌那一步读它）。`Books` 里没有这一格 —— 账本管钱与地，手牌是玩家自己的东西。
+    pub hands: Query<'w, 's, &'static Hand>,
+    /// 卡面（静态定义）。与 `play_card_system` 读的是同一份资产，所以「这张卡是什么」
+    /// 在规则层只有一处答案。
+    pub shelf: Shelf<'w>,
     /// 行情表（只读）。**不借 `Market`**：那一条参数包里握着 `ResMut<Rng>`，与本模块
     /// 的 [`AiPace`] 是同一个资源的第二个主人（同种子同轨迹靠的正是「只有一处抽」）。
     pub stocks: Query<'w, 's, (&'static StockId, &'static StockPrice, &'static PriceHistory)>,
@@ -905,6 +1006,197 @@ impl AiHand<'_, '_> {
         None
     }
 
+    /// 这一回合该打哪一张牌、打给谁。表空着（或最高分就是 `Pass`）＝不打。
+    ///
+    /// **一次只出一张**：卡片的候选表与柜台那张同一手 —— 0 分的 `Pass` 先 `add` 进来当基准，
+    /// 任何平局都归「不打」，而 `add` 的次序（手牌顺序 → 格号 → 座位号）就是 tie-break。
+    ///
+    /// 四张卡的价钱用的是**同一把尺**：「这一张替我多收／少付多少钱」——
+    /// 购地卡是 [`plot_value`]（与买地那一问同一个式子），涨价卡是我这条街多收的那一次租，
+    /// 查封是我少付的那一次租，陷害是对方（ detain 期间收不到租）名下一整轮租金之和。
+    /// 后两张再乘 `harm`：损害那一路的分**按害意打折**，所以同一个世界里大佬奸把查封排在
+    /// 置业前面、普通人反过来 —— 这就是「同一格被两处读」在这一刀上的样子。
+    ///
+    /// 今天不算账的几张见 [`CardUse::NotYet`]：它们各自缺的不是判据而是**一把尺**
+    /// （进度的尺、赌一把的尺），硬塞进这张表只会让它们与「多少钱」混量纲。
+    pub fn card_table(&self, subject: Entity, profile: &AiProfile) -> Candidates {
+        let mut table = Candidates::new();
+        table.add(0.0, AiMove::Play(PlayMove::Pass));
+        let Ok(hand) = self.hands.get(subject) else {
+            return table;
+        };
+        // 手牌是先进先出的有序表，所以「同分时先拿到的那张先打」是确定的
+        for card in hand.cards.iter().copied() {
+            let Some(def) = self.shelf.get(CardKind::Item, card) else {
+                continue;
+            };
+            // 被动卡打不出去：它只有「被问到时能答什么」（P13b），不是一条动作
+            if is_passive(def) {
+                continue;
+            }
+            for (score, aim) in self.card_aims(subject, profile, def) {
+                table.add(score, AiMove::Play(PlayMove::Card { card, aim }));
+            }
+        }
+        table
+    }
+
+    /// 一张卡所有打得出去的目标与各自的价钱。
+    ///
+    /// **只认第一条效果**：今天每一张主动卡都只有一条（`item_cards.json` 逐张核对过）。
+    /// 一张多效果的卡要有「合起来值多少」的答案，那是它自己进来那天的事 —— 写成
+    /// `[effect]` 而不是 `first()` 是让那天当场编译失败，而不是让它只按第一条算价钱。
+    fn card_aims(
+        &self,
+        subject: Entity,
+        profile: &AiProfile,
+        def: &CardDef,
+    ) -> Vec<(f32, Option<CardAim>)> {
+        let [effect] = def.effects.as_slice() else {
+            return Vec::new();
+        };
+        match card_use(effect) {
+            CardUse::Grab => self.grab_aims(subject, profile),
+            CardUse::Status(status) => self.status_aims(subject, profile, status),
+            CardUse::Detain => self.detain_aims(subject, profile),
+            CardUse::NotYet => Vec::new(),
+        }
+    }
+
+    /// 购地卡：每一块**买得下、且买完还剩得住留底**的无主地各是一条候选。
+    ///
+    /// 判据与「踩到无主地买不买」那一问完全同源（[`Books::buy_price`] + 留底），
+    /// 所以「卡说能买而账本说买不起」在结构上写不出来。
+    fn grab_aims(&self, subject: Entity, profile: &AiProfile) -> Vec<(f32, Option<CardAim>)> {
+        let mut views = self.books.views();
+        views.sort_by_key(|view| view.id.0);
+        let cash = self.books.balance(subject);
+        let mut aims = Vec::new();
+        for view in views {
+            let Some(price) = self.books.buy_price(subject, view.id) else {
+                continue;
+            };
+            if cash - price < self.reserve(subject) {
+                continue;
+            }
+            let rent = self.rent_if_mine(subject, view.id);
+            aims.push((
+                plot_value(rent, price, leverage(profile.buy)),
+                Some(CardAim::Land(view.id)),
+            ));
+        }
+        aims
+    }
+
+    /// 涨价／查封：**涨价只盖自己的街，查封只盖别人的**。
+    ///
+    /// 这一格正是「对自己用还是对别人用」那道分岔在规则层的样子：同一条 `LandStatus` 效果、
+    /// 同一张十五格表，而方向反了就是坑自己（给对手的街涨价＝替他加租；查封自己的地＝自断租）。
+    /// 已经盖着同一种状态的跳过（再盖一次是白花一张卡），盖着**另一种**状态的不跳 ——
+    /// 单槽位是后盖前，那正是这张卡要做的事。
+    ///
+    /// ⚠️ 盖的是**整条街**（`LandStatus` 的 `area` 来自数据，两张卡都是 `street`）：
+    /// 于是「打对面的街」与「打自己那条街」在世界状态上会盖住同一批格子。想验证方向判据
+    /// （上面那两个 `mine`），用例得让两块地分属**不同街道** —— `tests/ai.rs` 那条
+    /// `the_harm_axis_decides_which_card_gets_played` 第一版就栽在这上面。
+    fn status_aims(
+        &self,
+        subject: Entity,
+        profile: &AiProfile,
+        status: LandStatus,
+    ) -> Vec<(f32, Option<CardAim>)> {
+        let Some(me) = self.books.id_of(subject) else {
+            return Vec::new();
+        };
+        let mut views = self.books.views();
+        views.sort_by_key(|view| view.id.0);
+        let mut aims = Vec::new();
+        for view in views {
+            if view.status == Some(status) {
+                continue;
+            }
+            // 押着的地租金是 0（查封它没有意义），而涨价盖上去也收不到 —— 跳过
+            let rent = self.books.rent_of(view.id);
+            if rent <= 0 {
+                continue;
+            }
+            let mine = view.owner == Some(me);
+            match status {
+                LandStatus::PriceHike => {
+                    if mine {
+                        aims.push((rent as f32 * profile.build, Some(CardAim::Land(view.id))));
+                    }
+                }
+                LandStatus::Sealed => {
+                    if profile.harm < AiProfile::HARM_START {
+                        return Vec::new();
+                    }
+                    if view.owner.is_some() && !mine {
+                        aims.push((rent as f32 * profile.harm, Some(CardAim::Land(view.id))));
+                    }
+                }
+                // 调跌是新闻那一族的：卡池里没有它。走到了也不打（它帮的是对手）
+                LandStatus::PriceDrop => return Vec::new(),
+            }
+        }
+        aims
+    }
+
+    /// 陷害：目标是一个**人**，按「他名下那一轮租金之和 × 害意」排。
+    ///
+    /// 先过门槛再算分：乖宝宝根本不上桌（见 [`AiProfile::HARM_START`]）。
+    /// 已经关着的跳过 —— 拘留是「更久的那一张赢」，再关一次是白花一张卡。
+    /// 目标按座位号排，于是同分时先遇到的那位胜出 —— 同种子同轨迹靠这一句。
+    fn detain_aims(&self, subject: Entity, profile: &AiProfile) -> Vec<(f32, Option<CardAim>)> {
+        if profile.harm < AiProfile::HARM_START {
+            return Vec::new();
+        }
+        let mut aims = Vec::new();
+        for foe in self.foes(subject) {
+            if self.books.detained.get(foe).is_ok() {
+                continue;
+            }
+            let value = self.rent_sum(subject, foe) as f32 * profile.harm;
+            if value > 0.0 {
+                aims.push((value, Some(CardAim::Player(foe))));
+            }
+        }
+        aims
+    }
+
+    /// 其余在场玩家，按座位号排。`Books::solvent` 只数玩家（恶人不在名单里），
+    /// 与门的 `shift_candidates` 同一条口径 —— 两处各写一份名单就会有一边把恶人算进来。
+    fn foes(&self, subject: Entity) -> Vec<Entity> {
+        let mut foes: Vec<(Entity, PlayerId)> = self
+            .books
+            .solvent()
+            .into_iter()
+            .filter(|(who, _)| *who != subject)
+            .collect();
+        foes.sort_by_key(|(_, pid)| pid.0);
+        foes.into_iter().map(|(who, _)| who).collect()
+    }
+
+    /// 某人名下一轮收得到的租金之和。**用「我付」那一侧折算**（与 [`Self::reserve`] 同一个
+    /// `quoted(Rent)` 读数）：这一格要说的是「他挡在我前面多少钱」，不是「他账上有多少」。
+    fn rent_sum(&self, payer: Entity, owner: Entity) -> i64 {
+        let Some(pid) = self.books.id_of(owner) else {
+            return 0;
+        };
+        self.books
+            .views()
+            .iter()
+            .filter(|view| view.owner == Some(pid))
+            .map(|view| {
+                self.books.quoted(
+                    ChargeKind::Rent { land: view.id },
+                    payer,
+                    self.books.rent_of(view.id),
+                )
+            })
+            .sum()
+    }
+
     /// 这一问的答案（会算账的那一份）。
     ///
     /// 只显式列出**已经会打分**的格子，其余一律落到 [`greedy`] 那份表上 —— 穷尽匹配留在
@@ -1040,6 +1332,21 @@ impl AiHand<'_, '_> {
                 self.errands.rebalanced = Some((subject, self.books.session.turn_count));
                 true
             }
+            AiMove::Play(what) => {
+                let PlayMove::Card { card, aim } = what else {
+                    // `Pass` 是候选表上的基准，不是一条动作：落到这里说明上游漏了一次判断。
+                    // 不发消息、也不写标记 —— 让下一帧照常重算，比静默吞掉一回合好查
+                    return false;
+                };
+                self.plays.write(PlayCardRequested {
+                    player: subject,
+                    card,
+                    aim,
+                });
+                // 与柜台、理财那两格同一条：这一回合的「出牌」到此用完
+                self.errands.played_card = Some((subject, self.books.session.turn_count));
+                true
+            }
             AiMove::Bid => {
                 // **主语取机器而不是取窗口**：轮转指针与窗口由两条 system 写
                 // （`auction_move_system` 改机器、`auction_hold_system` 挂窗口），而这两条之间
@@ -1119,18 +1426,20 @@ pub struct AiTurn<'w, 's> {
     stays: MessageWriter<'w, RequestStay>,
 }
 
-/// AI 座位在 `WaitRoll` 里的那一下：**先理财、再掷骰**，两步不同帧。
+/// AI 座位在 `WaitRoll` 里的那几下：**先出牌、再理财、最后掷骰**，一步一帧。
 ///
-/// 与真人点那颗按钮同一条意图：真人也是先能买卖证券、再按掷骰（`trade_request_system`
-/// 只在 `WaitRoll` 受理）。第一步只在真有得办时发生（[`AiHand::treasury`] 返 `Some`），
-/// 并且写一格 [`AiErrands::rebalanced`] —— 于是「每回合最多买卖一只股」是结构而不是约定。
+/// 与真人点那颗按钮同一条意图：真人也是先能出牌、买卖证券，再按掷骰（`play_card_system`
+/// 与 `trade_request_system` 都只在 `WaitRoll` 受理）。两步各自只在真有得办时发生，
+/// 并且各写一格 [`AiErrands`] —— 于是「每回合最多一张牌」「最多动一只股」都是结构而不是约定。
+/// 次序是有内容的：牌会挪动现金与租金（购地卡花钱、查封改租金），而水位是**按世界此刻的样子**
+/// 算的 —— 先理财后出牌就会按一个下一帧就不成立的世界补水。
 ///
 /// 身上挂着 [`StaySentence`] 的人**发「停留」而不是掷骰** —— 少这一支是**死锁**而不是「少走一步」：
 /// `roll_dice_system` 对被按住的人直接 `return`（那条判据在规则层，不认 UI），于是 `RequestRoll`
 /// 每帧被写、每帧被吞，回合机停在 `WaitRoll` 不动也不报错。P4④ 当时把这一条写成「P14 的前置」，
 /// 就是等这一刻。
 ///
-/// 理财排在停留之前：被按住的人还在牌桌上（P4④ 的新口径），这一回合照样可以买卖证券，
+/// 三步都排在停留之前：被按住的人还在牌桌上（P4④ 的新口径），这一回合照样可以出牌、买卖证券，
 /// 而「停留」只是他这一回合迈不开步。
 pub fn ai_roll_system(mut pace: AiPace<'_>, mut turn: AiTurn<'_, '_>, mut hand: AiHand<'_, '_>) {
     let Some(current) = turn.order.current() else {
@@ -1145,6 +1454,29 @@ pub fn ai_roll_system(mut pace: AiPace<'_>, mut turn: AiTurn<'_, '_>, mut hand: 
     }
     if pace.held() {
         return;
+    }
+    let turn_no = hand.books.session.turn_count;
+    // P14c① 出牌：每回合最多一张，同样只办「这一帧」。牌的效果可能与理财互相影响
+    // （购地卡花掉的现金、查封改掉的租金都会挪动水位），所以**先出牌再理财**：
+    // 反过来写的话，水位会按一个下一帧就不成立的世界算出来。
+    if hand.errands.played_card != Some((current, turn_no))
+        && let Some(profile) = hand.profile_of(current)
+    {
+        let table = hand.card_table(current, &profile);
+        let mut played = false;
+        // 只有真有一条动作时才掷失误 —— 没得办就不抽流（与理财那条同一条）
+        if table.has_move() {
+            let fumbled = pace.fumble(profile);
+            if let Some(AiMove::Play(PlayMove::Card { card, aim })) = table.take(fumbled) {
+                pace.charge();
+                hand.emit(current, AiMove::Play(PlayMove::Card { card, aim }));
+                played = true;
+            }
+        }
+        hand.errands.played_card = Some((current, turn_no));
+        if played {
+            return;
+        }
     }
     // P14b③ 回合前理财：掷骰之前先看一眼活钱。**这一帧只办这一件**，掷骰在下一帧 ——
     // 卖股的消息要与下单那条 system 同帧生效，而它和掷骰谁先被读没有保证（坑 36 那一族）；
