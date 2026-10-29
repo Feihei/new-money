@@ -5,6 +5,8 @@
 //! - 礼物：一屏列出谁收到哪张卡，5 秒后自动收走；任意点击也能提前收走。
 //! - 红包：按玩家序一段一段播老虎机，四位数字逐位停，不做「点停」——
 //!   AI 点不了，同一条规则不该只有人类有技巧。播完自动换下一位。
+//!   **电脑座位不播**（P14e）：金额在规则层已经落账，老虎机是给人看的；
+//!   一桌三个 AI 时人类不该坐着等三段不属于他的动画。
 //!
 //! **`NM_AUTOROLL` 下整块不装**：长跑验收不能被过节动画挡住。这不是「测试特例」，
 //! 而是与「动画可跳过」同一条纪律 —— 自动玩家本来就是「跳过所有表现」的那个模式。
@@ -13,7 +15,7 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 use bevy::time::Timer;
-use game_core::prelude::{GiftsGiven, PlayerName, RedEnvelope};
+use game_core::prelude::{Controller, GiftsGiven, PlayerName, RedEnvelope};
 
 use super::theme::{col, size};
 use super::{BoardUi, border_color, label};
@@ -187,8 +189,21 @@ fn tick_gift_timer(
     }
 }
 
-fn collect_envelopes(mut shown: ResMut<EnvelopeQueue>, mut envelopes: MessageReader<RedEnvelope>) {
+/// 这个座位的红包要不要播老虎机。**没挂 `Controller` 的按真人算** —— 与
+/// `Controller::is_ai` 同一条默认：漏挂的后果该是「多播一段」而不是「真人的红包没动画」。
+pub(crate) fn shows_slot(controller: Option<&Controller>) -> bool {
+    !controller.is_some_and(Controller::is_ai)
+}
+
+fn collect_envelopes(
+    mut shown: ResMut<EnvelopeQueue>,
+    mut envelopes: MessageReader<RedEnvelope>,
+    controllers: Query<&Controller>,
+) {
     for envelope in envelopes.read() {
+        if !shows_slot(controllers.get(envelope.player).ok()) {
+            continue;
+        }
         shown.waiting.push_back(EnvelopeShow {
             player: envelope.player,
             name: String::new(),
@@ -304,5 +319,43 @@ mod tests {
         let (text, done) = rolling_digits(4271, 1.5);
         assert_eq!(text, "4271");
         assert!(done, "四位都停稳了");
+    }
+
+    #[test]
+    fn the_slot_is_for_human_seats_only() {
+        use game_core::prelude::AiProfile;
+        assert!(shows_slot(None), "没挂组件按真人算");
+        assert!(shows_slot(Some(&Controller::Human)));
+        assert!(!shows_slot(Some(&Controller::Ai(AiProfile::PLAIN))));
+    }
+
+    /// 接线：上面那条纯函数测不到 `collect_envelopes` 有没有读它。把 `continue` 删掉，
+    /// 这条会红 —— 一桌三个 AI 时人类就得坐着看完三段不属于他的老虎机。
+    #[test]
+    fn a_computer_seat_never_enters_the_envelope_queue() {
+        let mut app = App::new();
+        app.add_message::<RedEnvelope>()
+            .init_resource::<EnvelopeQueue>()
+            .add_systems(Update, collect_envelopes);
+        let human = app.world_mut().spawn(Controller::Human).id();
+        let ai = app
+            .world_mut()
+            .spawn(Controller::Ai(game_core::prelude::AiProfile::PLAIN))
+            .id();
+        let send = |app: &mut App, player, amount| {
+            app.world_mut()
+                .resource_mut::<Messages<RedEnvelope>>()
+                .write(RedEnvelope { player, amount });
+        };
+        send(&mut app, human, 42);
+        send(&mut app, ai, 7);
+        app.update();
+        let queue = app.world().resource::<EnvelopeQueue>();
+        let queued: Vec<(Entity, i64)> = queue
+            .waiting
+            .iter()
+            .map(|show| (show.player, show.amount))
+            .collect();
+        assert_eq!(queued, vec![(human, 42)], "电脑那一段不排队，真人那段照排");
     }
 }
