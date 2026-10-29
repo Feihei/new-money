@@ -121,7 +121,7 @@ use bevy::prelude::*;
 
 use crate::afflict::Afflict;
 use crate::bank::bank_op_allowed;
-use crate::board::{BuildingKind, FeeDef, TileIndex};
+use crate::board::{BuildingKind, FeeDef, LandType, TileIndex};
 use crate::calendar::HolidaySet;
 use crate::card::{CardDef, CardEffect, CardKind, PassiveCard};
 use crate::charge::ChargeKind;
@@ -470,10 +470,11 @@ fn hit_chance(reach: u32, d: u32) -> f32 {
 /// - 请神符／送神符：请来哪位神由 [`crate::gods::nearest_god`] 决定，好坏不由出牌人挑 ——
 ///   五格里没有一格是「我愿意赌一把」；
 /// - 拍卖卡：它开的是另一台机器（P9 的轮转出价），那台机器的判据在 P14d；
-/// - 转向卡／乌龟卡：对别人用的价值是「挡他的路」，而那要一把**落格值**的尺（他下一次
-///   会踩到谁的地、被收多少）——和魔法屋「按条件选人」同批，P14d③ 与遥控骰子一起做。
-///   停留卡已经先落地（[`CardUse::Stay`]）：它不打别人，只用来**停在自家地上建设** ——
-///   被停留的人照收租（P4④），所以「关他几天值多少租金」那一条本来就是错的尺。
+/// - **「谁领先」那根轴不存在**（10-29 否掉）：棋盘是环、没有终点，名次没有兑付出口。
+///   转向与乌龟读的是同一把**落格值**（[`AiHand::landing_value`]：下一格是谁的地、被收多少、
+///   无主地买下之后多收多少），于是「对自己用」与「对别人用」共用一句判据。
+/// - 停留卡只打给自己（[`CardUse::Stay`]）：被停留的人照收租（P4④），让他少掷一次
+///   多半是帮他 —— 这一点也归到「落格值」上：少走一格省下的正是那一格的账。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CardUse {
     /// 购地卡：按 `buy` 那格买下无主地
@@ -484,6 +485,10 @@ enum CardUse {
     Detain,
     /// 停留打给自己（P14d②）：停在自家空商业地上当场建设
     Stay,
+    /// 乌龟打给自己（P14d③）：三回合只走一格 ＝ 连续几格空地必踩
+    Slow(u32),
+    /// 转向（P14d③）：调头去走另一条路 —— 自用是改道，对人用是把他送回他不想走的那条
+    Turn,
     /// 今天不算账的（见上面那条注释）
     NotYet,
 }
@@ -495,14 +500,14 @@ fn card_use(effect: &CardEffect) -> CardUse {
         CardEffect::LandStatus { status, .. } => CardUse::Status(*status),
         CardEffect::Detain { .. } => CardUse::Detain,
         CardEffect::Stay { .. } => CardUse::Stay,
+        CardEffect::MoveCap { turns } => CardUse::Slow(*turns),
+        CardEffect::Reverse => CardUse::Turn,
         CardEffect::AddCash { .. }
         | CardEffect::DeductCash { .. }
         | CardEffect::Levy { .. }
         | CardEffect::MoveTo { .. }
         | CardEffect::Damage { .. }
         | CardEffect::Release { .. }
-        | CardEffect::Reverse
-        | CardEffect::MoveCap { .. }
         | CardEffect::Suspend { .. }
         | CardEffect::SummonGod
         | CardEffect::BanishGod
@@ -1248,6 +1253,8 @@ impl AiHand<'_, '_> {
             CardUse::Status(status) => self.status_aims(subject, profile, status),
             CardUse::Detain => self.detain_aims(subject, profile),
             CardUse::Stay => self.stay_aims(subject, profile),
+            CardUse::Slow(turns) => self.slow_aims(subject, turns),
+            CardUse::Turn => self.turn_aims(subject),
             CardUse::NotYet => Vec::new(),
         }
     }
@@ -1310,6 +1317,132 @@ impl AiHand<'_, '_> {
             return Vec::new();
         }
         vec![(best * profile.harm, Some(CardAim::Player(subject)))]
+    }
+
+    /// 踩到这一格，对 `subject` 的钱包意味着什么（P14d③ 的统一尺）。
+    ///
+    /// 四格各一笔，**都是钱**：
+    /// - 无主地（买得起）＝买下之后它一次收多少（[`Self::rent_if_mine`]，含补全街道的翻倍）；
+    /// - 别人的住宅＝我要付的那笔租（折过的），别人的带设施商业地＝那一笔服务费 —— 都是负数；
+    /// - 自家的空商业地＝一次建设机会（五类里收费最高的期望值），自家的可加盖住宅＝那一级的涨幅；
+    /// - 其余（自家已有设施的地、抵押/查封中的地、非地产格）＝0 —— 点券不通兑，不进这张表。
+    ///
+    /// 它存在的理由就是「谁领先」那根轴被否掉：三张卡要的不是名次，而是**下一脚踩在哪**。
+    fn landing_value(&self, subject: Entity, tile: TileIndex) -> f32 {
+        let Some(id) = self
+            .books
+            .active
+            .def
+            .land_for_tile(tile.0 as i64)
+            .map(|def| def.id)
+        else {
+            return 0.0;
+        };
+        let land = LandId(id);
+        let Some(view) = self.books.view(land) else {
+            return 0.0;
+        };
+        let me = self.books.id_of(subject);
+        if view.owner.is_none() {
+            return if self.books.buy_price(subject, land).is_some() {
+                self.rent_if_mine(subject, land) as f32
+            } else {
+                0.0
+            };
+        }
+        if view.owner == me {
+            if view.mortgaged || view.status == Some(LandStatus::Sealed) {
+                return 0.0;
+            }
+            if self
+                .books
+                .active
+                .def
+                .land(id)
+                .is_some_and(|def| def.land_type == LandType::Commercial)
+            {
+                if self.books.facility_of(land).is_some() {
+                    return 0.0;
+                }
+                return BuildingKind::ALL
+                    .iter()
+                    .map(|kind| self.visit_fee(land, *kind))
+                    .fold(0.0, f32::max);
+            }
+            return self
+                .upgrade_uplift(subject, land, false)
+                .map(|(_, uplift)| uplift as f32)
+                .unwrap_or(0.0);
+        }
+        if let Some(kind) = self.books.facility_of(land) {
+            return -self.visit_fee(land, kind);
+        }
+        if view.mortgaged || view.status == Some(LandStatus::Sealed) {
+            return 0.0;
+        }
+        -(self
+            .books
+            .quoted(ChargeKind::Rent { land }, subject, self.books.rent_of(land)) as f32)
+    }
+
+    /// 从 `tile` 沿 `heading` 走 `steps` 格到哪（主环回绕，与掷骰同一条 `rem_euclid`）。
+    fn step_to(&self, tile: TileIndex, heading: Heading, steps: u32) -> TileIndex {
+        let steps = heading.sign() * i64::from(steps);
+        self.books.active.def.wrapped(tile.0 as i64 + steps)
+    }
+
+    /// 乌龟打给自己（P14d③）：**三回合只走一格 ＝ 把连续几格空地变成必踩**。
+    ///
+    /// 价钱是这条直线上的 `turns` 格 [`Self::landing_value`] 之和 —— 买下的租金、要付的账、
+    /// 能加盖的那一级，全在同一个数里。**不算随机走位本来也会撞上的好事**：这是一条保守的
+    /// 下界（贴着「不打」那条 0 分），宁可不打也不乱打。
+    fn slow_aims(&self, subject: Entity, turns: u32) -> Vec<(f32, Option<CardAim>)> {
+        let Ok(pos) = self.positions.get(subject) else {
+            return Vec::new();
+        };
+        let heading = self.heading_of(subject);
+        let value: f32 = (1..=turns)
+            .map(|d| self.landing_value(subject, self.step_to(pos.tile, heading, d)))
+            .sum();
+        if value <= 0.0 {
+            return Vec::new();
+        }
+        vec![(value, Some(CardAim::Player(subject)))]
+    }
+
+    /// 调头之后这几格的落格值之差（正数＝调头对这个人更好）。
+    ///
+    /// 方向是持久且公开的状态（[`Heading`]，被转向卡翻一次就一直反着走），所以这条差价
+    /// 不是猜的。⚠️ 翻盘是永久的、而这里只量下一圈骰子够得着的那几格 —— 那是一个
+    /// **保守的局部读数**，不比「谁领先」那样的全局名次更假。
+    fn turn_gain(&self, who: Entity) -> f32 {
+        let Ok(pos) = self.positions.get(who) else {
+            return 0.0;
+        };
+        let now = self.heading_of(who);
+        let flipped = now.flipped();
+        let reach = self.reach_of(who);
+        (1..=reach)
+            .map(|d| {
+                let ahead = self.landing_value(who, self.step_to(pos.tile, now, d));
+                let back = self.landing_value(who, self.step_to(pos.tile, flipped, d));
+                back - ahead
+            })
+            .sum()
+    }
+
+    /// 转向（P14d③）：**改道**——把自己掉头去走另一条路。
+    ///
+    /// 只对自己用，与停留、乌龟同一侧。对别人用要算「调头让他多付多少」，而那不是我的钱：
+    /// 他多付的租进了另一位业主的口袋，我拿到的只有二阶好处（他少买一块以后会收我租的地）。
+    /// 那张账今天没有一条用例能把它和「反正闲着」分开 —— **没有用例的分支不写**，
+    /// 等它有了真的读者再加（与「被动卡不主动打」同一条纪律）。
+    fn turn_aims(&self, subject: Entity) -> Vec<(f32, Option<CardAim>)> {
+        let mine = self.turn_gain(subject);
+        if mine <= 0.0 {
+            return Vec::new();
+        }
+        vec![(mine, Some(CardAim::Player(subject)))]
     }
 
     /// 购地卡：每一块**买得下、且买完还剩得住留底**的无主地各是一条候选。

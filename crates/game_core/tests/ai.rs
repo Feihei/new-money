@@ -33,9 +33,10 @@ use common::*;
 use game_core::prelude::{
     ActiveBoard, Affair, Affliction, AiCadence, AiClock, AiProfile, Ask, BuildingKind, CardAim,
     Charge, ChargeKind, Controller, Detention, DetentionPlace, Facility, GameRules, GameSeed,
-    GameSession, GameSetup, Gate, Gavel, Gender, Institution, ItemKind, Job, LandId, LandStatus,
-    Mount, OccupancyKind, PLAYER_COLORS, Paused, Pending, PendingDecision, PlayerSetup,
-    PriceHistory, StaySentence, StockId, StockPrice, StockTradeRequested, Tail, Timed, TurnPhase,
+    GameSession, GameSetup, Gate, Gavel, Gender, Heading, Institution, ItemKind, Job, LandId,
+    LandStatus, Mount, MoveCap, OccupancyKind, PLAYER_COLORS, Paused, Pending, PendingDecision,
+    PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice, StockTradeRequested, Tail, Timed,
+    TurnPhase,
 };
 use game_core::rng::Rng;
 
@@ -1778,4 +1779,76 @@ fn the_goody_does_not_stay_home_to_build() {
     }
     assert_eq!(facility_of(&mut app, 2), None, "乖宝宝往自家地上架了收银台");
     assert!(hand_ids(&app, seat).contains(&card), "那张停留卡该还在手里");
+}
+
+// ============================ P14d③：乌龟与转向 ============================
+//
+// 「谁领先」那根轴被否掉之后，这两张卡读的是同一把**落格值**：下一格是谁的地、
+// 被收多少、无主地买下之后多收多少。于是「对自己用」与「对别人用」共用一句判据。
+
+/// 这位此刻朝哪边走（与 `tests/stay.rs` 的 `heading_of` 同一句）。
+fn heading_of(app: &App, player: Entity) -> Heading {
+    *app.world()
+        .entity(player)
+        .get::<Heading>()
+        .expect("每个玩家都该挂着 Heading")
+}
+
+#[test]
+fn the_turtle_crawls_the_empties_one_by_one() {
+    // 站在 0 号格、正向：下一步是南京路、再下一步是汉口水（两块都无主、都买得起）。
+    // 一回合只走一格 ＝ 这两块地必踩，于是乌龟的价钱就是这两份租金。
+    let (mut app, seat) = solo_ai(AiProfile::PLAIN);
+    place(&mut app, seat, 0);
+    own(&mut app, 0, None, 0, false);
+    own(&mut app, 1, None, 0, false);
+    let turtle = item_index(&app, "item_turtle").0;
+    deal(&mut app, seat, turtle);
+
+    step_ai(&mut app);
+    assert_eq!(
+        app.world().entity(seat).get::<MoveCap>().copied(),
+        Some(MoveCap { turns_left: 3 }),
+        "前两步都是无主地，该给自己套上乌龟一格一格买过去"
+    );
+}
+
+#[test]
+fn the_turtle_stays_in_the_bag_when_the_road_ahead_is_expensive() {
+    // 同一条路，但两块地都归对手、都盖到 Lv5：一回合走一格 ＝ 自己把这两笔账各踩一遍。
+    // 落格值是负的 —— 这张卡没有正分可报，留在手里。
+    let (mut app, seat) = solo_ai(AiProfile::PLAIN);
+    place(&mut app, seat, 0);
+    own(&mut app, 0, Some(0), 5, false);
+    own(&mut app, 1, Some(0), 5, false);
+    let turtle = item_index(&app, "item_turtle").0;
+    deal(&mut app, seat, turtle);
+
+    step_ai(&mut app);
+    assert!(
+        app.world().entity(seat).get::<MoveCap>().is_none(),
+        "前路全是别人的收费地，乌龟只会让自己多付两遍"
+    );
+    assert!(
+        hand_ids(&app, seat).contains(&turtle),
+        "这一格不该出牌，卡要还在手里"
+    );
+}
+
+#[test]
+fn the_turn_card_flips_him_away_from_an_expensive_street() {
+    // 0 号格的下一步是别人的南京路（Lv5，一次 2,500），而倒着走会碰到的西单/王府井
+    // 都还是无主的便宜地 —— 调头的差价是正的，方向该翻过来。
+    let (mut app, seat) = solo_ai(AiProfile::PLAIN);
+    place(&mut app, seat, 0);
+    own(&mut app, 0, Some(0), 5, false);
+    let turn = item_index(&app, "item_turn").0;
+    deal(&mut app, seat, turn);
+
+    step_ai(&mut app);
+    assert_eq!(
+        heading_of(&app, seat),
+        Heading::Backward,
+        "前方是贵街、身后是无主地，该调头"
+    );
 }
