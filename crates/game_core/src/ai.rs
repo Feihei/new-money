@@ -535,8 +535,8 @@ pub enum AiMove {
     Score { game: GameKind, score: u32 },
     /// 彩票柜台：买一注，然后还得有人关窗口
     Ticket,
-    /// 拍卖台：加一档或放手
-    Bid,
+    /// 拍卖台：加一档或放手（P14d④a 起带的是**哪一句**，而不再只是「加」）
+    Bid(BidMove),
     /// 被动卡那道门：用／不用／嫁祸给谁
     Gate(PassiveMove),
     /// 银行柜台：办一件业务（**不带**「办完」，那一句在下一帧 —— 见 [`AiErrands`]）
@@ -577,7 +577,7 @@ pub fn greedy(about: Pending, rules: &GameRules) -> AiMove {
             score: rules.minigames.of(game).perfect / 2,
         },
         Pending::Lottery => AiMove::Ticket,
-        Pending::Auction => AiMove::Bid,
+        Pending::Auction => AiMove::Bid(BidMove::Raise),
         Pending::RentNotice(_)
         | Pending::Card
         | Pending::BankTeller
@@ -1445,6 +1445,37 @@ impl AiHand<'_, '_> {
         vec![(mine, Some(CardAim::Player(subject)))]
     }
 
+    /// 拍卖那一问（P14d④a）：**跟着喊，直到价钱超过它值多少，或者钱包见底**。
+    ///
+    /// 两个数夹住这一声：
+    /// - 上限＝`Books::market_value` × `(1 + debt)`。起拍价就是账面价，所以付到账面只是不亏；
+    ///   而竞拍买的是**别人的地** —— 补全街道把租翻倍、绕开「回合一格」的那条路，账面里都没有。
+    ///   那份溢价由 `debt`（敢把身家压进房子）给：大佬奸肯付到 1.8 倍、乖宝宝只肯到 1.1 倍。
+    /// - 留底（`can_afford`）：付完这一档，活钱还得在保命线之上 —— 卖身家换来的地，
+    ///   不能反过来把明天要付的租一起押进去。
+    ///
+    /// 与 `greedy` 那条「有钱就加」不是同一条判据：那条是给人类座位的脚手架留的退路
+    /// （保证长跑里有拍卖成交），而这一条是本阶段真正在答的那一句。
+    fn bid_table(&self, subject: Entity, profile: &AiProfile) -> Candidates {
+        let mut table = Candidates::new();
+        table.add(0.0, AiMove::Bid(BidMove::Withdraw));
+        let Some(lot) = self.books.auction.lot.as_ref() else {
+            return table;
+        };
+        if lot.bidder() != Some(subject) {
+            return table;
+        }
+        let Some(worth) = self.books.market_value(lot.land) else {
+            return table;
+        };
+        let ceiling = (worth as f32 * (1.0 + profile.debt)).round() as i64;
+        let needed = lot.next_amount();
+        if needed <= ceiling && self.can_afford(subject, profile, needed) {
+            table.add((ceiling - needed) as f32, AiMove::Bid(BidMove::Raise));
+        }
+        table
+    }
+
     /// 购地卡：每一块**买得下、且买完还剩得住留底**的无主地各是一条候选。
     ///
     /// 判据与「踩到无主地买不买」那一问完全同源（[`Books::buy_price`] + 留底），
@@ -1969,6 +2000,8 @@ impl AiHand<'_, '_> {
             // 两个建设窗口（P14c④）：本地选设施、远程选地
             Pending::Build(land) => self.build_table(subject, &profile, land),
             Pending::RemoteBuild => self.remote_build_table(subject, &profile),
+            // 拍卖那一问（P14d④a）：不是报价，是「加一档还是放手」
+            Pending::Auction => self.bid_table(subject, &profile),
             // 被动门那一问（P14c③）：问哪一句、问到谁头上，由门说；AI 只管答那一句。
             // 门没挂到这一问上（或已经换了人）时落到那份「不用」—— 而调用侧还有一道
             // 同一条判据的早退，所以那一句只在判据分叉的帧里才会被写出去。
@@ -2149,7 +2182,7 @@ impl AiHand<'_, '_> {
                 self.errands.planted = Some((subject, self.books.session.turn_count));
                 true
             }
-            AiMove::Bid => {
+            AiMove::Bid(what) => {
                 // **主语取机器而不是取窗口**：轮转指针与窗口由两条 system 写
                 // （`auction_move_system` 改机器、`auction_hold_system` 挂窗口），而这两条之间
                 // 没排过序 —— 读到「新机器 + 旧窗口」那一帧是可能的。不一致时这一帧什么都不发，
@@ -2162,13 +2195,15 @@ impl AiHand<'_, '_> {
                 if lot.bidder() != Some(subject) {
                     return false;
                 }
-                let needed = lot.next_amount();
-                // 加得起就一直加：这样长跑里**一定**会有拍卖成交。反过来一律放弃也能让机器转完，
-                // 但那一局里 P9 的过户与所得两条路径一次都没被走过
-                let what = if self.books.balance(subject) >= needed {
-                    BidMove::Raise
-                } else {
-                    BidMove::Withdraw
+                // 加不起就改口成放弃：这条退路是给 `greedy` 那份**读不到留底**的答案留的
+                // （人类座位那份脚手架只会说「加」）。AI 自己的答案在 [`Self::bid_table`] 里
+                // 已经算过现金，走到这里时不会触发；反过来让一条注定被拒的「加」发出去，
+                // 拍卖机就会在这一档空转（请求被拒、轮转不动），长跑停在第一个有钱人身上
+                let what = match what {
+                    BidMove::Raise if self.books.balance(subject) < lot.next_amount() => {
+                        BidMove::Withdraw
+                    }
+                    other => other,
                 };
                 self.bids.write(AuctionMove {
                     player: subject,
@@ -2389,7 +2424,11 @@ mod tests {
                 "游乐场被答成了别的 —— 长跑会停在那一格"
             );
         }
-        assert!(matches!(greedy(Pending::Auction, &rules), AiMove::Bid));
+        // 拍卖那一格：脚手架只会说「加」（现金不够时由 `emit` 改口成放弃）
+        assert!(matches!(
+            greedy(Pending::Auction, &rules),
+            AiMove::Bid(BidMove::Raise)
+        ));
         assert!(matches!(
             greedy(Pending::Passive, &rules),
             AiMove::Gate(PassiveMove::Decline)

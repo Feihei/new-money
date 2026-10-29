@@ -31,12 +31,12 @@ use bevy::ecs::entity::Entity;
 use bevy::prelude::{MessageReader, NextState, ResMut, Resource, Update};
 use common::*;
 use game_core::prelude::{
-    ActiveBoard, Affair, Affliction, AiCadence, AiClock, AiProfile, Ask, BuildingKind, CardAim,
-    Charge, ChargeKind, Controller, Detention, DetentionPlace, Facility, GameRules, GameSeed,
-    GameSession, GameSetup, Gate, Gavel, Gender, Heading, Institution, ItemKind, Job, LandId,
-    LandStatus, Mount, MoveCap, OccupancyKind, PLAYER_COLORS, Paused, Pending, PendingDecision,
-    PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice, StockTradeRequested, Tail, Timed,
-    TurnPhase,
+    ActiveBoard, Affair, Affliction, AiCadence, AiClock, AiProfile, Ask, Auction, BuildingKind,
+    CardAim, Charge, ChargeKind, Controller, Detention, DetentionPlace, Facility, GameRules,
+    GameSeed, GameSession, GameSetup, Gate, Gavel, Gender, Heading, Institution, ItemKind, Job,
+    LandId, LandStatus, Mount, MoveCap, OccupancyKind, PLAYER_COLORS, Paused, Pending,
+    PendingDecision, PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice,
+    StockTradeRequested, Tail, Timed, TurnPhase,
 };
 use game_core::rng::Rng;
 
@@ -311,9 +311,13 @@ fn an_ai_seat_bids_its_way_through_an_auction() {
         "前置：除第三位之外都该是等人点的座位 —— 少了这一句，「谁替他答的」就说不清"
     );
 
-    // 开一槌：拍卖卡由 P0 打在 P1 的地上 —— 开槌的人不进名单，所以名单是 P1、AI、P3
+    // 开一槌：拍卖卡由 P0 打在 P1 的地上 —— 开槌的人不进名单，所以名单是 P1、AI、P3。
+    // 另外两位的钱包**压在起拍价之下**：P14d④ 起 AI 的加价上限是账面价的 `1 + debt` 倍，
+    // 若让人类座位一路跟到两万，最后成交的会是他们而不是电脑 —— 这一条验的是「电脑
+    // 自己答完并拍走」，不是「他的钱包比谁都厚」
     own(&mut app, LAND, Some(1), 2, false);
     set_cash(&mut app, ai, 1_000_000);
+    set_cash(&mut app, victim, 1_000);
     set_cash(&mut app, bystander, 1_000);
     let card = item_index(&app, "item_auction");
     deal(&mut app, founder, card.0);
@@ -1850,5 +1854,119 @@ fn the_turn_card_flips_him_away_from_an_expensive_street() {
         heading_of(&app, seat),
         Heading::Backward,
         "前方是贵街、身后是无主地，该调头"
+    );
+}
+
+// ============================ P14d④a：拍卖 ============================
+//
+// 拍卖那一问的原话是「出价与退出」：跟到价钱超过它值多少就放手。两个数夹住这一声 ——
+// 账面价 × `(1 + debt)` 与留底 —— 这一节只验前者：现金给得足够厚，于是钱包那条闸门
+// 不可能是他放手的理由（那条归 P14d① 的用例）。
+
+/// 三个座位：P0 开槌（拿拍卖卡）、P1 是业主、P2 是电脑；演到「价格已推到起拍 + 两档、
+/// 轮到电脑喊」为止。
+///
+/// 推价是**注入**（与 `set_cash` 同一类）：这一节要验的是电脑在那一声上的判据，拍卖机
+/// 自己怎么一圈圈推价归 `tests/auction.rs`。业主必须是领先者 —— 否则电脑一放手，
+/// 名单空了、拍卖直接流标，「散场」这件事就分不出「他放手了」与「别人先散了」。
+fn auction_at_the_ai(profile: AiProfile) -> (App, Entity) {
+    // 失误率拧成 0（与 `quiet_field` 同一条）：这一节量的是上限那一条式子，
+    // 不是「手滑一次会挑哪个次优答案」—— 那件事归 `a_fumble_trades_the_best_answer_for_the_next_one`
+    let mut profile = profile;
+    profile.fumble = 0.0;
+    // 恰好三个人：`Default` 是两人盘（几百条既有用例按它写），这里只留第一位当开槌的人
+    let mut setup = GameSetup::default();
+    setup.players.truncate(1);
+    setup.players.push(PlayerSetup {
+        name: "王小二".into(),
+        color: PLAYER_COLORS[3],
+        gender: Gender::Female,
+        controller: Controller::Human,
+    });
+    setup.players.push(PlayerSetup {
+        name: "电脑".into(),
+        color: PLAYER_COLORS[2],
+        gender: Gender::Male,
+        controller: Controller::Ai(profile),
+    });
+    let mut app = boot(setup, GameRules::instant(), GameSeed::default());
+    app.insert_resource(DecisionPolicy::Hold);
+    assert!(run_until_world(&mut app));
+    freeze(&mut app);
+    boot_to_wait_roll(&mut app);
+    clear_gods(&mut app);
+    let rows = roster(&mut app);
+    let (founder, victim, ai) = (rows[0].0, rows[1].0, rows[2].0);
+
+    own(&mut app, LAND, Some(1), 2, false);
+    // 现金够厚：要夹住他的是价钱而不是钱包
+    set_cash(&mut app, ai, 80_000);
+    let card = item_index(&app, "item_auction");
+    deal(&mut app, founder, card.0);
+    play_card(&mut app, founder, card.0, Some(CardAim::Land(LandId(LAND))));
+    settle(&mut app, 3);
+    {
+        let world = app.world_mut();
+        let mut auction = world.resource_mut::<Auction>();
+        let lot = auction.lot.as_mut().expect("前置：拍卖已开场");
+        lot.high = lot.opening + lot.step * 2;
+        lot.leader = Some(victim);
+        lot.turn = lot
+            .pool
+            .iter()
+            .position(|p| *p == ai)
+            .expect("前置：电脑在名单上");
+    }
+    thaw(&mut app);
+    (app, ai)
+}
+
+#[test]
+fn the_shark_keeps_bidding_above_the_book_price_for_a_street_he_wants() {
+    let (mut app, ai) = auction_at_the_ai(AiProfile::SHARK);
+    let lot = lot_of(&app).expect("前置：拍卖还在");
+    let (opening, step) = (lot.opening, lot.step);
+    settle(&mut app, 8);
+    let lot = lot_of(&app).expect("大佬奸该跟这一档：1.3 倍账面还不到他肯付的 1.8 倍");
+    assert_eq!(lot.leader, Some(ai), "这一档该记在他头上");
+    assert_eq!(
+        lot.high,
+        opening + step * 3,
+        "他该只加一档，而不是自己抬自己"
+    );
+}
+
+#[test]
+fn the_shark_walks_away_when_the_bid_would_eat_his_buffer() {
+    // 价在账面之内（大佬奸肯付 1.8 倍）、现金也够，但付完只剩一块钱 —— 留底那条闸门
+    // 与「买地/加盖/建设」是同一句（`can_afford`）。少了它，拍卖就是唯一一条能把
+    // 现金打空的置产路径。
+    let (mut app, ai) = auction_at_the_ai(AiProfile::SHARK);
+    let lot = lot_of(&app).expect("前置：拍卖还在");
+    let needed = lot.opening + lot.step * 3;
+    set_cash(&mut app, ai, needed + 1);
+    let before = cash_of(&mut app, ai);
+    settle(&mut app, 8);
+    assert!(
+        lot_of(&app).is_none(),
+        "付完只剩一块钱过不了留底，大佬奸也不该跟这一档"
+    );
+    assert_eq!(cash_of(&mut app, ai), before, "放手之后他一分钱都不该付");
+}
+
+#[test]
+fn the_goody_walks_away_when_the_price_passes_what_the_land_is_worth() {
+    let (mut app, ai) = auction_at_the_ai(AiProfile::GOODY);
+    let before = cash_of(&mut app, ai);
+    settle(&mut app, 8);
+    assert!(
+        lot_of(&app).is_none(),
+        "乖宝宝该放手，业主领先到最后一位、这一场当场落槌"
+    );
+    assert_eq!(cash_of(&mut app, ai), before, "放手之后他一分钱都不该付");
+    assert_eq!(
+        owner_of(&mut app, LAND),
+        Some(1),
+        "地该还留在原主手里（他只是没把它抬走）"
     );
 }
