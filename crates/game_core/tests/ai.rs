@@ -2071,3 +2071,64 @@ fn the_ai_does_not_spend_its_buffer_on_a_ticket() {
     );
     assert_eq!(cash_of(&mut app, seat), 3_000, "不买就一分不花");
 }
+
+// ============================ P14d④d：百货 ============================
+//
+// 「买什么」借的是出牌那张表的分数：同一条式子决定他会不会打出去，于是
+// 「买了却永远不打」在结构上不会发生。价钱只当闸门 —— 点券除了百货与小游戏之外没有出口。
+
+#[test]
+fn the_ai_buys_the_card_it_would_play_today() {
+    let (mut app, seat) = solo_ai(AiProfile::PLAIN);
+    let grab = item_index(&app, "item_grab").0;
+    set_shelf(&mut app, &[grab]);
+    set_points(&mut app, seat, 100);
+    let before = hand_of(&app, seat).len();
+
+    ask(&mut app, seat, Pending::Shop);
+    settle(&mut app, 6);
+
+    assert_eq!(
+        hand_of(&app, seat).len(),
+        before + 1,
+        "街上还有空地：购地卡今天就用得上，该买"
+    );
+    assert_eq!(points_of(&app, seat), 70, "卡面 30 点券");
+    assert!(window(&app).is_none(), "买完这一趟该收摊");
+}
+
+#[test]
+fn the_ai_walks_out_after_one_purchase() {
+    // 同一张卡摆两格：一次逛店只买一件。窗口买完照开（与建设、柜台同形），
+    // 少了 `shopped` 那一格，它会一帧一张把货架搬空。
+    let (mut app, seat) = solo_ai(AiProfile::PLAIN);
+    let grab = item_index(&app, "item_grab").0;
+    set_shelf(&mut app, &[grab, grab]);
+    set_points(&mut app, seat, 500);
+    let before = hand_of(&app, seat).len();
+
+    ask(&mut app, seat, Pending::Shop);
+    settle(&mut app, 8);
+
+    assert_eq!(hand_of(&app, seat).len(), before + 1, "这一趟只该买一件");
+    assert_eq!(points_of(&app, seat), 470, "另 470 点券该留在身上");
+    assert!(window(&app).is_none(), "买完该按「离开」收摊");
+}
+
+#[test]
+fn the_ai_leaves_a_card_with_no_use_today_on_the_shelf() {
+    // 街上还没有任何人有地：陷害卡落不到谁头上。点券再多也不买一张今天打不出去的卡 ——
+    // 这条是「价钱不是分数」那一半的牙。
+    let (mut app, seat) = solo_ai(AiProfile::PLAIN);
+    let frame = item_index(&app, "item_frame").0;
+    set_shelf(&mut app, &[frame]);
+    set_points(&mut app, seat, 500);
+    let before = hand_of(&app, seat).len();
+
+    ask(&mut app, seat, Pending::Shop);
+    settle(&mut app, 6);
+
+    assert_eq!(hand_of(&app, seat).len(), before, "没有可落的头，不买");
+    assert_eq!(points_of(&app, seat), 500, "一分点券都不该动");
+    assert!(window(&app).is_none(), "按「离开」收摊");
+}

@@ -141,7 +141,8 @@ use crate::msg::{
     AuctionMove, BankOp, BankOpRequested, BidMove, BuildRequested, BuyTicketRequested, Decision,
     DecisionChosen, MagicFilterPicked, MagicSpellPicked, MinigameResult, MortgageOp,
     MortgageRequested, PassiveAnswer, PassiveMove, PlaceItemRequested, PlayCardRequested,
-    RemoteUpgradeRequested, RequestRoll, RequestStay, StockTradeRequested, TradeSide,
+    RemoteUpgradeRequested, RequestRoll, RequestStay, ShopOpRequested, StockTradeRequested,
+    TradeSide,
 };
 use crate::occupancy::{MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt, place_denied};
 use crate::passive::{Affair, Ask, Gate};
@@ -149,6 +150,7 @@ use crate::player::{Heading, Mount, PlayerId, StaySentence, TokenPosition};
 use crate::rng::{DIE_FACES, Rng};
 use crate::rules::GameRules;
 use crate::settle::Books;
+use crate::shop::ShopStock;
 use crate::status::LandStatus;
 use crate::stock::{PriceHistory, StockId, StockPrice};
 use crate::turn::TurnOrder;
@@ -392,6 +394,11 @@ pub struct AiErrands {
     /// （`Acknowledge` 才关），远程柜台每笔请求升一级 —— 没有这一格，AI 一回合能把现金
     /// 全灌进同一块地。与上面两格同一条生命周期。
     pub built: Option<(Entity, u32)>,
+    /// `(谁, 第几回合)`：这位这一趟**已经买过一件**了（P14d④d）。
+    ///
+    /// 百货窗口买完照开（与建设、柜台同形），没有这一格 AI 会一帧一张把货架搬空 ——
+    /// 而每一次动作之间本该隔着一次「想一想」。与上面几格同一条生命周期。
+    pub shopped: Option<(Entity, u32)>,
 }
 
 /// 回合前理财那一笔（P14b③）：**一只股**，买或卖，不给第二只。
@@ -556,6 +563,8 @@ pub enum AiMove {
     Filter(MagicFilter),
     /// 魔法屋第二步：在筛出的名单上挑一道法术（P14d④b）
     Cast(MagicSpell),
+    /// 百货柜台：买下货架上的这一张（P14d④d）
+    Buy(CardId),
 }
 
 /// 这一问的答案里**不打分**的那一份：P14a 的全部，也是 AI 还没学会算账时那些格子的默认值。
@@ -766,6 +775,10 @@ pub struct AiHand<'w, 's> {
     /// （`Pending::MagicSpell` 那一段的注）。读这一份而不是自己按条件再筛一遍：
     /// 「窗口里显示的人」与「法术落到的头」在规则层只能有一处答案。
     pub ritual: Res<'w, MagicRitual>,
+    /// 百货的货架与买入那条入口（P14d④d）。货架是资源（全盘一份），判据全在
+    /// `shop_op_system` —— 这边只挑「买哪一张」。
+    pub shop: Res<'w, ShopStock>,
+    pub shops: MessageWriter<'w, ShopOpRequested>,
     /// 卡面（静态定义）。与 `play_card_system` 读的是同一份资产，所以「这张卡是什么」
     /// 在规则层只有一处答案。
     pub shelf: Shelf<'w>,
@@ -1620,6 +1633,49 @@ impl AiHand<'_, '_> {
         table
     }
 
+    /// 百货（P14d④d）：买一张**今天就用得上**的卡。
+    ///
+    /// 判据借的是出牌那张表（`card_aims`）——「这张卡现在值多少分」比任何标价都准：
+    /// 同一条式子决定他会不会打出去，于是「买了却永远不打」在结构上不会发生。
+    /// 点券除了百货与小游戏之外没有别的出口，所以价钱只当闸门（买得起），不当分数。
+    ///
+    /// ⚠️ **被动卡买不了**：它们的价值是「被问到时省下多少」，而那张表要门上有事时才填得
+    /// 出来 —— 买一张躺着的免罪卡，今天没有一条尺说它值几许。等那条尺有了（把
+    /// [`Self::gate_table`] 反过来读），这一格会自己长出候选。
+    fn shop_table(&self, subject: Entity, profile: &AiProfile) -> Candidates {
+        let mut table = Candidates::new();
+        table.add(0.0, AiMove::Decide(Decision::Acknowledge));
+        if self.errands.shopped == Some((subject, self.books.session.turn_count)) {
+            return table;
+        }
+        let points = self.books.points_of(subject);
+        let mut shelf: Vec<(CardId, u32)> = self
+            .shop
+            .slots
+            .iter()
+            .filter_map(|card| {
+                let price = self.shelf.get(CardKind::Item, *card)?.cost_points?;
+                (price <= points).then_some((*card, price))
+            })
+            .collect();
+        // 同分时便宜的那张先摆上桌：候选表的并列由加入次序裁决（见 `Candidates` 那一段）
+        shelf.sort_by_key(|(card, price)| (*price, card.0));
+        for (card, _price) in shelf {
+            let Some(def) = self.shelf.get(CardKind::Item, card) else {
+                continue;
+            };
+            let best = self
+                .card_aims(subject, profile, def)
+                .into_iter()
+                .map(|(score, _aim)| score)
+                .fold(0.0, f32::max);
+            if best > 0.0 {
+                table.add(best, AiMove::Buy(card));
+            }
+        }
+        table
+    }
+
     /// 购地卡：每一块**买得下、且买完还剩得住留底**的无主地各是一条候选。
     ///
     /// 判据与「踩到无主地买不买」那一问完全同源（[`Books::buy_price`] + 留底），
@@ -2148,6 +2204,8 @@ impl AiHand<'_, '_> {
             Pending::Auction => self.bid_table(subject, &profile),
             // 乐透（P14d④c）：买不买只看留底，买哪个号要问「谁占着」
             Pending::Lottery => self.lottery_table(subject, &profile),
+            // 百货（P14d④d）：买一张**今天就用得上**的卡
+            Pending::Shop => self.shop_table(subject, &profile),
             // 女巫的两步（P14d④b）：先挑条件，再在筛出的名单上挑法术
             Pending::Magic => self.filter_table(&profile),
             Pending::MagicSpell(_) => self.spell_table(subject, &profile),
@@ -2372,6 +2430,17 @@ impl AiHand<'_, '_> {
                     player: subject,
                     spell,
                 });
+                true
+            }
+            // 百货（P14d④d）：与面板上那颗「买」发同一条消息。一次逛店只买一张 ——
+            // 买完这一帧窗口还开着，下一帧 `shopped` 让候选表只剩「离开」
+            AiMove::Buy(card) => {
+                self.shops.write(ShopOpRequested {
+                    player: subject,
+                    side: TradeSide::Buy,
+                    card,
+                });
+                self.errands.shopped = Some((subject, self.books.session.turn_count));
                 true
             }
         }
