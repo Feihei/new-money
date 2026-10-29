@@ -138,15 +138,15 @@ use crate::market::{MarketClock, market_halt_now};
 use crate::minigame::GameKind;
 use crate::mortgage::{counter_plots, mortgage_op_allowed, read_facts};
 use crate::msg::{
-    AuctionMove, BankOp, BankOpRequested, BidMove, BuildRequested, BuyTicketRequested, Decision,
-    DecisionChosen, MagicFilterPicked, MagicSpellPicked, MinigameResult, MortgageOp,
-    MortgageRequested, PassiveAnswer, PassiveMove, PlaceItemRequested, PlayCardRequested,
-    RemoteUpgradeRequested, RequestRoll, RequestStay, ShopOpRequested, StockTradeRequested,
-    TradeSide,
+    AuctionMove, BailRequested, BankOp, BankOpRequested, BidMove, BuildRequested,
+    BuyTicketRequested, Decision, DecisionChosen, MagicFilterPicked, MagicSpellPicked,
+    MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, PlaceItemRequested,
+    PlayCardRequested, RemoteUpgradeRequested, RequestRoll, RequestStay, ShopOpRequested,
+    StockTradeRequested, TradeSide,
 };
 use crate::occupancy::{MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt, place_denied};
 use crate::passive::{Affair, Ask, Gate};
-use crate::player::{Heading, Mount, PlayerId, StaySentence, TokenPosition};
+use crate::player::{DetentionPlace, Heading, Mount, PlayerId, StaySentence, TokenPosition};
 use crate::rng::{DIE_FACES, Rng};
 use crate::rules::GameRules;
 use crate::settle::Books;
@@ -565,6 +565,8 @@ pub enum AiMove {
     Cast(MagicSpell),
     /// 百货柜台：买下货架上的这一张（P14d④d）
     Buy(CardId),
+    /// 保释窗口：把这一位从拘留处放出来（P14d④e）
+    Bail(Entity),
 }
 
 /// 这一问的答案里**不打分**的那一份：P14a 的全部，也是 AI 还没学会算账时那些格子的默认值。
@@ -779,6 +781,8 @@ pub struct AiHand<'w, 's> {
     /// `shop_op_system` —— 这边只挑「买哪一张」。
     pub shop: Res<'w, ShopStock>,
     pub shops: MessageWriter<'w, ShopOpRequested>,
+    /// 保释那条入口（P14d④e）。与面板上那颗按钮同一条消息，判据全在 `bail_op_system`。
+    pub bails: MessageWriter<'w, BailRequested>,
     /// 卡面（静态定义）。与 `play_card_system` 读的是同一份资产，所以「这张卡是什么」
     /// 在规则层只有一处答案。
     pub shelf: Shelf<'w>,
@@ -1676,6 +1680,41 @@ impl AiHand<'_, '_> {
         table
     }
 
+    /// 保释（P14d④e）：**只有害意低的座位会放人**。
+    ///
+    /// 这笔账在纸上是亏的：放一个对手出来，他从此又能收租。所以它读的只能是性格 ——
+    /// `harm` 过门槛的座位一个都不保（大佬奸、普通人），乖宝宝才做这件事。
+    ///
+    /// 四道闸门与规则层同一条：窗口开在这一处、人在这一处、还关着、点券够；而
+    /// **恶人根本不在名单里** —— `solvent()` 只数玩家（P12 那条口径），于是
+    /// 「会保玩家、不保恶人」不是这里的一条 `if`，是名单本身。
+    fn bail_table(
+        &self,
+        subject: Entity,
+        profile: &AiProfile,
+        place: DetentionPlace,
+    ) -> Candidates {
+        let mut table = Candidates::new();
+        table.add(0.0, AiMove::Decide(Decision::Acknowledge));
+        if profile.harm >= AiProfile::HARM_START {
+            return table;
+        }
+        let points = self.books.points_of(subject);
+        for (target, _) in self.books.solvent() {
+            if target == subject {
+                continue;
+            }
+            let Ok(detention) = self.books.detained.get(target) else {
+                continue;
+            };
+            if detention.place != place || self.books.bail_price(target) > points {
+                continue;
+            }
+            table.add(1.0, AiMove::Bail(target));
+        }
+        table
+    }
+
     /// 购地卡：每一块**买得下、且买完还剩得住留底**的无主地各是一条候选。
     ///
     /// 判据与「踩到无主地买不买」那一问完全同源（[`Books::buy_price`] + 留底），
@@ -2206,6 +2245,8 @@ impl AiHand<'_, '_> {
             Pending::Lottery => self.lottery_table(subject, &profile),
             // 百货（P14d④d）：买一张**今天就用得上**的卡
             Pending::Shop => self.shop_table(subject, &profile),
+            // 保释（P14d④e）：只有害意低的座位会放人
+            Pending::Bail(place) => self.bail_table(subject, &profile, place),
             // 女巫的两步（P14d④b）：先挑条件，再在筛出的名单上挑法术
             Pending::Magic => self.filter_table(&profile),
             Pending::MagicSpell(_) => self.spell_table(subject, &profile),
@@ -2441,6 +2482,15 @@ impl AiHand<'_, '_> {
                     card,
                 });
                 self.errands.shopped = Some((subject, self.books.session.turn_count));
+                true
+            }
+            // 保释（P14d④e）：与面板上那颗「保释」发同一条消息。窗口留着 ——
+            // 下一帧再问：第二个人还关着就接着放，没人了就按「离开」收摊
+            AiMove::Bail(target) => {
+                self.bails.write(BailRequested {
+                    player: subject,
+                    target,
+                });
                 true
             }
         }

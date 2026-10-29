@@ -36,7 +36,7 @@ use game_core::prelude::{
     GameSeed, GameSession, GameSetup, Gate, Gavel, Gender, Heading, Institution, ItemKind, Jackpot,
     Job, LandId, LandStatus, LotteryTickets, Mount, MoveCap, OccupancyKind, PLAYER_COLORS, Paused,
     Pending, PendingDecision, PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice,
-    StockTradeRequested, Tail, Timed, TurnPhase,
+    StockTradeRequested, Tail, Term, Timed, TurnPhase, Villain,
 };
 use game_core::rng::Rng;
 
@@ -2131,4 +2131,83 @@ fn the_ai_leaves_a_card_with_no_use_today_on_the_shelf() {
     assert_eq!(hand_of(&app, seat).len(), before, "没有可落的头，不买");
     assert_eq!(points_of(&app, seat), 500, "一分点券都不该动");
     assert!(window(&app).is_none(), "按「离开」收摊");
+}
+
+// ============================ P14d④e：保释 ============================
+//
+// 放一个对手出来在纸上是亏的（他从此又能收租），所以这一句只能由性格解释：
+// `harm` 过门槛的座位一个都不保，乖宝宝才做。恶人根本不在 `solvent()` 名单里 ——
+// 「会保玩家、不保恶人」是名单本身，不是一条 `if`。
+
+/// 把某人关进 `place`（与 `tests/bail.rs` 同一手）。
+fn jail(app: &mut App, player: Entity, place: DetentionPlace) {
+    insert(
+        app,
+        player,
+        Detention {
+            place,
+            term: Term::Turns(3),
+        },
+    );
+}
+
+#[test]
+fn the_goody_bails_a_player_out() {
+    let (mut app, seat) = solo_ai(AiProfile::GOODY);
+    let human = roster(&mut app)[0].0;
+    jail(&mut app, human, DetentionPlace::Jail);
+    set_points(&mut app, seat, 100);
+
+    ask(&mut app, seat, Pending::Bail(DetentionPlace::Jail));
+    settle(&mut app, 6);
+
+    assert_eq!(points_of(&app, seat), 70, "30 点券从保释者身上扣");
+    assert!(
+        app.world().entity(human).get::<Detention>().is_none(),
+        "乖宝宝该把人放出来"
+    );
+}
+
+#[test]
+fn the_shark_leaves_the_man_in_the_cell() {
+    // 同一个人、同一笔点券，只换性格：大佬奸不放 —— 出来的对手是他自己将来的账单。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    let human = roster(&mut app)[0].0;
+    jail(&mut app, human, DetentionPlace::Jail);
+    set_points(&mut app, seat, 100);
+
+    ask(&mut app, seat, Pending::Bail(DetentionPlace::Jail));
+    settle(&mut app, 6);
+
+    assert_eq!(points_of(&app, seat), 100, "一分点券都不该动");
+    assert!(
+        app.world().entity(human).get::<Detention>().is_some(),
+        "大佬奸不该把对手放出来"
+    );
+}
+
+#[test]
+fn nobody_bails_a_villain() {
+    // 恶人也关在笼里、也开得出保释窗口，但名字不在 `solvent()` 里 —— 连乖宝宝都不碰
+    let (mut app, seat) = solo_ai(AiProfile::GOODY);
+    let (villain, place) = {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &Villain, &Detention)>();
+        let (entity, place) = q
+            .iter(world)
+            .next()
+            .map(|(entity, _, detention)| (entity, detention.place))
+            .expect("开局四位恶人都在笼里");
+        (entity, place)
+    };
+    set_points(&mut app, seat, 1_000);
+
+    ask(&mut app, seat, Pending::Bail(place));
+    settle(&mut app, 6);
+
+    assert_eq!(points_of(&app, seat), 1_000, "恶人不保：放出来是来干活的");
+    assert!(
+        app.world().entity(villain).get::<Detention>().is_some(),
+        "笼子该还关着"
+    );
 }
