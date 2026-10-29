@@ -1970,3 +1970,51 @@ fn the_goody_walks_away_when_the_price_passes_what_the_land_is_worth() {
         "地该还留在原主手里（他只是没把它抬走）"
     );
 }
+
+// ============================ P14d④b：魔法屋 ============================
+//
+// 两步各问一句话：先挑条件、再挑法术。害意那一个权重同时决定两件事 ——
+// 过半就筛最有钱的（害人），不过半就筛自己（自赠）；而在第二步的表上，
+// 自己按 `1 − harm` 计、别人按 `−harm` 计，于是同一张表在两档性格手里挑出相反的两道。
+
+#[test]
+fn the_shark_points_the_witch_at_the_richest_one() {
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    let human = roster(&mut app)[0].0;
+    // 真人比他有钱：`TopWealth` 该筛出真人，而不是他自己
+    set_cash(&mut app, human, 30_000);
+    set_cash(&mut app, seat, 20_000);
+    let hand_before = hand_of(&app, seat).len();
+    ask(&mut app, seat, Pending::Magic);
+    settle(&mut app, 8);
+
+    assert!(
+        app.world().entity(human).get::<Detention>().is_some(),
+        "大佬奸该把「关起来」落到最有钱的那位头上"
+    );
+    assert_eq!(
+        hand_of(&app, seat).len(),
+        hand_before,
+        "他挑的是落到别人头上的那道，不是给自己摸一张卡"
+    );
+}
+
+#[test]
+fn the_goody_asks_the_witch_for_a_card_for_himself() {
+    let (mut app, seat) = solo_ai(AiProfile::GOODY);
+    let human = roster(&mut app)[0].0;
+    set_cash(&mut app, human, 30_000);
+    let hand_before = hand_of(&app, seat).len();
+    ask(&mut app, seat, Pending::Magic);
+    settle(&mut app, 8);
+
+    assert_eq!(
+        hand_of(&app, seat).len(),
+        hand_before + 1,
+        "乖宝宝该把条件筛到自己身上，再挑一道给自己的"
+    );
+    assert!(
+        app.world().entity(human).get::<Detention>().is_none(),
+        "他不该把任何坏事落到别人头上"
+    );
+}
