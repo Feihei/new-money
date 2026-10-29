@@ -451,22 +451,20 @@ fn the_ai_leaves_the_dice_and_the_deck_alone() {
 
 // ============================ P14b：钱 ============================
 //
-// 上面那一节钉的是「AI 是一个座位」，这一节钉的是「这个座位会算账」。三条判据各自有名：
+// 上面那一节钉的是「AI 是一个座位」，这一节钉的是「这个座位会算账」。四条判据各自有名：
 //
-// - **同一块地在三档先验上分出两个结果** → [`three_personalities_divide_on_the_same_plot`]；
-// - **「值不值」读的是以后的收益而不是钱包** → [`the_monopoly_jump_is_what_makes_goody_reach_for_his_wallet`]。
-//   同一档先验、同样两万块：差一块才成那一族时不买，补全得了就买 —— 这一条才是
-//   「打分」与「有钱就买」的分界线（P14a 那份一律 `Accept` 的脚手架在这里必须被推翻）；
-// - **留底那条闸门读的是下一笔要付的账**，不是「买不买得起」 → [`the_reserve_gate_is_the_next_bill`]；
+// - **买了就比不买强，差别只在保命线**（P14d 第一刀把「愿付几倍租金」推翻了）→
+//   [`three_personalities_divide_on_the_same_plot`]：同一块地、三个现金水位、三种举手人；
+// - **买的是资产不是现金流** → [`a_commercial_lot_is_bought_before_it_earns_anything`]；
+// - **留底取「下一笔账」与「保命线」里大的那个** → [`the_keep_is_the_larger_of_the_next_bill_and_the_line`]；
 // - **`fumble` 在世界里真的换动作** → [`a_fumble_trades_the_best_answer_for_the_next_one`]。
 //
 // 这一节的用例几乎都先把 `fumble` 拧成 0（[`quiet_field`]）：测式子的时候按住噪声，
 // 否则红下来分不清是判据变了还是骰子变了。噪声本身另有那一条专项用例。
 
-/// 西单（地块 5）与王府井（地块 4）：yellow 那一族的**两块**，一次租金 180／160，
-/// 地价 3000／2800。用它们而不是用 `LAND` 做「值不值」那两条用例，是因为
-/// **单地块的那一族（red 的徐家汇、orange 的外滩）一买下就是垄断**，租金当场翻倍，
-/// 「差一块才成一组」那个跳变在它们身上根本写不出来。
+/// 西单（地块 5）与王府井（地块 4）：yellow 那一族的**两块**，地价 3000／2800。
+/// 保命线那几条用例用西单，是因为它贵到能把三档的垫子拉出差别；王府井那份留作
+/// 「别人名下的下一笔账」（`the_keep_is_the_larger_of_the_next_bill_and_the_line`）。
 const WEST: u32 = 5;
 const PALACE: u32 = 4;
 
@@ -492,99 +490,87 @@ fn seat_with_fumble(fumble: f32) -> (App, Entity) {
 
 #[test]
 fn three_personalities_divide_on_the_same_plot() {
-    // 西单（yellow 那一族的一块）：一次租金 180、地价 3000 —— **16.7 倍回本**。
-    // 三档的倍数是 25.6 / 17.2 / 11.2，于是两端各差出一截：大佬奸余 1608、乖宝宝差 984。
-    // 中间那一档（普通人 3096 对 3000）只余 3%，所以**不断他** —— 一条靠 3% 余量站住的
-    // 断言会在任何人挪一次地价时红，而那不是它想守的东西。
-    // 断的是**谁把手举起来**，不是谁付了多少钱：那是这一刀唯一的可见产物。
+    // **买地不比价**（P14d 第一刀）：同一块地、同样几个数，三档的差别只剩**保命线**。
+    // 西单 3000，买完要留下 2,200 / 6,050 / 11,800，于是三个世界各读出一个答案：
+    // 手上 6,000 只有大佬奸买、10,000 加上普通人、20,000 三档都买。
     let (mut app, players) = quiet_field(3);
-    let (shark, goody) = (players[1], players[3]);
-    let mut took = Vec::new();
-    for (index, seat) in players[1..].iter().enumerate() {
-        own(&mut app, WEST, None, 0, false);
-        own(&mut app, PALACE, None, 0, false);
-        set_cash(&mut app, *seat, 20_000);
-        ask(&mut app, *seat, Pending::Buy(LandId(WEST)));
-        if owner_of(&mut app, WEST) == Some(index as u32 + 1) {
-            took.push(*seat);
+    for (cash, want) in [
+        (6_000, vec![players[1]]),
+        (10_000, vec![players[1], players[2]]),
+        (20_000, players[1..].to_vec()),
+    ] {
+        let mut took = Vec::new();
+        for (index, seat) in players[1..].iter().enumerate() {
+            own(&mut app, WEST, None, 0, false);
+            own(&mut app, PALACE, None, 0, false);
+            set_cash(&mut app, *seat, cash);
+            // 物价指数会被回合末按总资产重算，而 `set_cash` 与买房都会挪它 ——
+            // 这一条与价格、保命线都同乘指数，只有**现金**不乘，所以必须钉住
+            set_price_index(&mut app, 1.0);
+            ask(&mut app, *seat, Pending::Buy(LandId(WEST)));
+            if owner_of(&mut app, WEST) == Some(index as u32 + 1) {
+                took.push(*seat);
+            }
         }
+        assert_eq!(took, want, "手上 {cash} 时举手的该是这几档");
     }
-    assert!(
-        took.contains(&shark),
-        "大佬奸（25.6 倍）该吃下这块 16.7 倍回本的地，实际举手的：{took:?}"
-    );
-    assert!(
-        !took.contains(&goody),
-        "乖宝宝（11.2 倍）不该买这块 16.7 倍回本的地 —— 三档在同一块地上读不出差别就是白建"
-    );
     assert_cash_audit(&mut app, GameRules::default().start_cash);
 }
 
 #[test]
-fn the_monopoly_jump_is_what_makes_goody_reach_for_his_wallet() {
-    // **这一条是「打分」与「有钱就买」的分界线，也是「值不值」读的是以后的收益的证据**：
-    // 同一块地、同一档先验、同样的两万块 —— 手上没有那一族时他不买（180 × 11.2 = 2016
-    // 盖不住 3000），先把同族的另一块给他，再买这一块就补全该族、租金翻倍
-    // （360 × 11.2 = 4032 > 3000）→ 买。
-    //
-    // 它顺带钉住一件更隐蔽的事：`rent_if_mine` 必须把**假想我名下**那份视图喂给
-    // `calculate_rent`。若图省事改读此刻的 `rent_of`（无主地收 0），两种情况都是 0 分，
-    // 于是「不买 / 买」这一对断言同时红 —— 而 P14a 那份一律 `Accept` 的脚手架反倒全绿，
-    // 所以这条红的不只是实现，还替「打分比不打分强」这句话立了据。
+fn a_commercial_lot_is_bought_before_it_earns_anything() {
+    // 商业空地一块钱都不收（设施还没立起来），把它的租金表压成 0 就是这一格此刻的真账。
+    // 按 P14b 那版「愿付价」它一分收益都没有，谁都不买；P14d 第一刀之后买地不比价：
+    // 乖宝宝手上 20,000 也买下 4,400 的外滩 —— 买的是资产，不是这一格此刻的现金流。
     let (mut app, players) = quiet_field(3);
     let goody = players[3];
 
-    own(&mut app, PALACE, None, 0, false);
-    own(&mut app, WEST, None, 0, false);
+    flat_rent(&mut app, 2, 0);
+    own(&mut app, 2, None, 0, false);
     set_cash(&mut app, goody, 20_000);
-    ask(&mut app, goody, Pending::Buy(LandId(WEST)));
+    set_price_index(&mut app, 1.0);
+    ask(&mut app, goody, Pending::Buy(LandId(2)));
     assert_eq!(
-        owner_of(&mut app, WEST),
-        None,
-        "差一块才成那一族时，乖宝宝不该为一块 16.7 倍回本的地掏钱"
-    );
-
-    own(&mut app, PALACE, Some(3), 0, false);
-    own(&mut app, WEST, None, 0, false);
-    ask(&mut app, goody, Pending::Buy(LandId(WEST)));
-    assert_eq!(
-        owner_of(&mut app, WEST),
+        owner_of(&mut app, 2),
         Some(3),
-        "同一块地，只因为买下它就补全了 yellow 那一族（租金翻倍），乖宝宝就该伸手"
+        "空地商业地也是资产：保命线之上就该买下"
     );
+    assert_eq!(cash_of(&mut app, goody), 15_600, "付的是地价 4,400");
 }
 
 #[test]
-fn the_reserve_gate_is_the_next_bill() {
-    // 留底 ＝ 下一笔要付的账，而这一格里它是**别人名下最贵的那一笔租金**：
-    // 让真人拿着王府井（yellow 那一族只有一块在他手上 → 不成垄断，租金就是表上那个 160）。
-    // 于是「买完只剩 60」与「买完还剩 400」是两个世界，而两块地的价格完全一样。
+fn the_keep_is_the_larger_of_the_next_bill_and_the_line() {
+    // 留底取的是两个数里**大的那个**。让真人拿着王府井 Lv4（租金 3,700；yellow 那一族
+    // 没凑齐所以不翻倍），而大佬奸的保命线只有 2,200 —— 于是 3,700 才是这一格的闸门：
+    // 买完只剩 2,200 时不买（保命线放行、下一笔账不放行），只剩 4,200 时才买。
     let (mut app, players) = quiet_field(1);
     let seat = players[1];
-    own(&mut app, 4, Some(0), 0, false);
+    own(&mut app, 4, Some(0), 4, false);
 
-    // 买价 3800：60 的余量低于那笔 160 的账 → 不举手续
+    // 买价 3800：2,200 的余量过得了保命线，过不了那笔 3,700 的账
     own(&mut app, LAND, None, 0, false);
-    set_cash(&mut app, seat, 3_860);
+    set_cash(&mut app, seat, 6_000);
+    set_price_index(&mut app, 1.0);
     ask(&mut app, seat, Pending::Buy(LandId(LAND)));
     assert_eq!(
         owner_of(&mut app, LAND),
         None,
-        "付完之后连下一笔租金都盖不住，这一格该放弃"
+        "付完之后盖不住下一笔租金，这一格该放弃"
     );
     assert_eq!(
         cash_of(&mut app, seat),
-        3_860,
+        6_000,
         "该放弃的那一笔不许动钱（「钱少了而地没拿到」是这一族最坏的形状）"
     );
 
     // 同一块地、同一份先验，只是余量越过那道账 → 举手续
-    set_cash(&mut app, seat, 4_200);
+    set_cash(&mut app, seat, 8_000);
+    set_price_index(&mut app, 1.0);
     ask(&mut app, seat, Pending::Buy(LandId(LAND)));
     assert_eq!(
         owner_of(&mut app, LAND),
         Some(1),
-        "400 的余量盖得住那笔 160 的账，该买 —— 这一半是防「留底被写成一条永远不放的闸门」"
+        "4,200 盖得住那笔 3,700 的账，该买 —— 这一半是防「留底被写成一条永远不放的闸门」"
     );
 }
 
@@ -605,8 +591,9 @@ fn a_fumble_trades_the_best_answer_for_the_next_one() {
         );
     }
 
-    // 而**只有一条候选时不许越界**：乖宝宝在 100% 失误下仍然「不买」，
-    // 既不 panic 也不改成买 —— 表上第二名不存在，那一次手滑就没有代价可言
+    // 而**只有一条候选时不许越界**：乖宝宝手上 5,000（保命线之下，表上只剩 `Decline`），
+    // 就算失误率 100% 也仍然「不买」，既不 panic 也不改成买 —— 第二名不存在，
+    // 那一次手滑就没有代价可言
     let mut setup = GameSetup::seats(1);
     let Controller::Ai(_profile) = &mut setup.players[1].controller else {
         panic!("`seats(1)` 的第二位必须是电脑座位");
@@ -618,7 +605,7 @@ fn a_fumble_trades_the_best_answer_for_the_next_one() {
     let (mut app, players) = field_with(setup);
     let seat = players[1];
     own(&mut app, LAND, None, 0, false);
-    set_cash(&mut app, seat, 20_000);
+    set_cash(&mut app, seat, 5_000);
     ask(&mut app, seat, Pending::Buy(LandId(LAND)));
     assert_eq!(
         owner_of(&mut app, LAND),
@@ -1288,11 +1275,13 @@ fn one_card_per_turn() {
 /// 怎么改都绿的断言（「空跑的断言等于没断言」第六次的教训就在上一节）。
 #[test]
 fn the_grab_card_skips_a_plot_it_could_not_keep() {
-    // 现金 4500：外滩 4400 买得起，但买完只剩 100 —— 连对手西单那笔 180 的租都盖不住。
-    // 于是这一块不进候选表（「被拒的候选不进表」），退而买守得住的徐家汇（3800，剩 700）。
+    // 现金 6200：外滩 4400 买得起，但买完只剩 1800 —— 连大佬奸那条 2200 的保命线都盖不住
+    // （P14d 第一刀起留底取的是它）。于是这一块不进候选表（「被拒的候选不进表」），
+    // 退而买守得住的徐家汇（3800，剩 2400）。
     let (mut app, seat) = solo_ai(AiProfile::SHARK);
     own(&mut app, 5, Some(0), 0, false);
-    set_cash(&mut app, seat, 4_500);
+    set_cash(&mut app, seat, 6_200);
+    set_price_index(&mut app, 1.0);
     let grab = item_index(&app, "item_grab").0;
     deal(&mut app, seat, grab);
 
@@ -1305,7 +1294,7 @@ fn the_grab_card_skips_a_plot_it_could_not_keep() {
     assert_eq!(
         owner_of(&mut app, 3),
         Some(1),
-        "该退而买买得起又守得住的那块（徐家汇 3800，剩 700）"
+        "该退而买买得起又守得住的那块（徐家汇 3800，剩 2400）"
     );
 }
 

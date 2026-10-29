@@ -101,6 +101,20 @@
 //! 同一把尺（`plot_value(uplift, cost, leverage(build))`）。董事长那一格单独一条：他的
 //! 远程升级**不花钱、一次升两层**，所以留底那道闸门对他不成立 —— 免费的东西没有
 //! 「留着钱干别的」这回事。
+//!
+//! ## 买地（P14d 第一刀）：留够活钱，其余都买
+//!
+//! P14b① 原来按「愿付多少倍租金」给地定价（`plot_value` × `leverage(buy)`），于是租金薄的
+//! 地在保守的座位上算成负分 —— 一块 16.7 倍回本的地，乖宝宝都不肯买。这条判据在 10-29
+//! 被推翻：地是唯一的租金来源、买下就是资产，真正会打死人的只有「现金被打空」。所以现在是
+//! **先留够活钱，剩下的都拿来买地**：
+//!
+//! - 留底 ＝ `max(下一笔要付的账, 保命线)`，保命线随物价折；
+//! - 保命线由 `buy` 那一格给：越高越敢把现金压进房子（2,200 / 6,050 / 11,800）；
+//! - 「现金够付」与「活钱过线」是两件事 —— 买地只扣现金，存款得路过银行才取得出来。
+//!
+//! 这条闸门与买地一样管着加盖、本地建设、远程建设与购地卡：它们是同一句话「花完这一笔，
+//! 明天还活得下去吗」。
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -183,7 +197,7 @@ impl Controller {
 /// 这条约束唯一允许的字符串，将来 `characters.json` 一人一行时填的是角色名。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AiProfile {
-    /// 买地时敢把现金压到多低（0 ＝ 只肯花零头）
+    /// 置业倾向：越高越敢把现金压进房子 —— 它决定买完要留下的**保命线**有多薄
     pub buy: f32,
     /// 敢不敢动身家换现金：贷款、押地、卖股是同一句话的两个方向
     pub debt: f32,
@@ -765,6 +779,41 @@ impl AiHand<'_, '_> {
         worst_rent + interest + redeem
     }
 
+    /// 买完以后**至少要留下的活钱**（现金 + 存款），按物价折。
+    ///
+    /// 判据从「愿付多少倍租金」换成这条线（P14d 第一刀）：地是唯一的租金来源、买下就是资产，
+    /// 真正会打死人的只有「现金被打空」。于是三档的差别不再是「买不买」，而是**留多厚的垫子**
+    /// —— `buy` 越高越敢压：大佬奸 2,200、普通人 6,050、乖宝宝 11,800（对开局 20,000 是
+    /// 一成 / 三成 / 近六成）。
+    ///
+    /// 取平方而不是一条直线：越保守的人垫子加得越快，而中间那一档要落在 6,000 附近 ——
+    /// 一条直线穿过 2,200 与 11,800 两点时中间是 7,000，三档就挤成两档。随物价折的理由与
+    /// `passive::big_money_line` 同一句：不折的话通胀会把它稀释成零。
+    fn safety_line(&self, profile: &AiProfile) -> i64 {
+        let slack = 1.0 - profile.buy;
+        let base = (2_000.0 + 20_000.0 * slack * slack).round() as i64;
+        crate::charge::scale(base, f64::from(self.books.session.price_index))
+    }
+
+    /// 这一笔花完，活钱至少要剩这么多 ＝ **下一笔要付的账**与**保命线**里大的那个。
+    ///
+    /// 两个都不许省：只有保命线时，一条租金九千的街会让 AI 在只剩两千时还敢掏钱；
+    /// 只有下一笔账时，开局（谁都没地、账是 0）等于没有闸门。
+    fn keep(&self, subject: Entity, profile: &AiProfile) -> i64 {
+        self.reserve(subject).max(self.safety_line(profile))
+    }
+
+    /// 这一笔花不花得起：现金要够付，付完之后活钱还要在留底之上。
+    ///
+    /// 两条分开写而不是把存款并进「付得起」：买地扣的是现金，而存款得路过银行才取得出来
+    /// —— 今天 AI 几乎不存钱，但这一句挡住的是以后接上存款时的「存款很厚、现金不够、
+    /// 站着不动」。
+    fn can_afford(&self, subject: Entity, profile: &AiProfile, cost: i64) -> bool {
+        let cash = self.books.balance(subject);
+        cash >= cost
+            && cash + self.books.bank_of(subject).deposit - cost >= self.keep(subject, profile)
+    }
+
     /// **买下这块地之后**它一次收多少钱（假想我名下的那份视图喂给同一条租金式子）。
     ///
     /// 不另写一条租金函数：`economy::calculate_rent` 就是成交之后真会读的那一条，这里只是
@@ -797,19 +846,19 @@ impl AiHand<'_, '_> {
 
     /// 这一问值不值：`Accept` 与 `Decline` 两条候选，闸门在打分之前。
     ///
+    /// **买地不比价**（P14d 第一刀）：过得了 [`Self::can_afford`] 就买。所以表上只有两个
+    /// 答案、`Accept` 那个分只用来给 `fumble` 一个「第二名」；三档的差别在保命线的高度里
+    /// （[`Self::safety_line`]），不在这张表上。
+    ///
     /// 两条闸门都不许写成「扣分」：`buy_price` 是 `None`（无主地没了、付不起、身上有衰神）
-    /// 与「过了留底」都是**这一格不许做**，而不是「做了但分低」。把它们混进分数里，
+    /// 与「留底不够」都是**这一格不许做**，而不是「做了但分低」。把它们混进分数里，
     /// `fumble` 就会把一条注定被规则层拒掉的请求挑成第一名 —— 那正是 ③ 要挡的形状。
     fn buy_table(&self, subject: Entity, profile: &AiProfile, land: LandId) -> Candidates {
         let mut table = Candidates::new();
         if let Some(price) = self.books.buy_price(subject, land)
-            && self.books.balance(subject) - price >= self.reserve(subject)
+            && self.can_afford(subject, profile, price)
         {
-            let rent = self.rent_if_mine(subject, land);
-            table.add(
-                plot_value(rent, price, leverage(profile.buy)),
-                AiMove::Decide(Decision::Accept),
-            );
+            table.add(1.0, AiMove::Decide(Decision::Accept));
         }
         table.add(0.0, AiMove::Decide(Decision::Decline));
         table
@@ -820,7 +869,7 @@ impl AiHand<'_, '_> {
     fn upgrade_table(&self, subject: Entity, profile: &AiProfile, land: LandId) -> Candidates {
         let mut table = Candidates::new();
         if let Some((cost, uplift)) = self.upgrade_uplift(subject, land, false)
-            && self.books.balance(subject) - cost >= self.reserve(subject)
+            && self.can_afford(subject, profile, cost)
         {
             table.add(
                 plot_value(uplift, cost, leverage(profile.build)),
@@ -1206,13 +1255,12 @@ impl AiHand<'_, '_> {
     fn grab_aims(&self, subject: Entity, profile: &AiProfile) -> Vec<(f32, Option<CardAim>)> {
         let mut views = self.books.views();
         views.sort_by_key(|view| view.id.0);
-        let cash = self.books.balance(subject);
         let mut aims = Vec::new();
         for view in views {
             let Some(price) = self.books.buy_price(subject, view.id) else {
                 continue;
             };
-            if cash - price < self.reserve(subject) {
+            if !self.can_afford(subject, profile, price) {
                 continue;
             }
             let rent = self.rent_if_mine(subject, view.id);
@@ -1602,12 +1650,11 @@ impl AiHand<'_, '_> {
         {
             return table;
         }
-        let cash = self.books.balance(subject);
         for kind in BuildingKind::ALL {
             let Ok(cost) = self.books.build_probe(subject, land, kind) else {
                 continue;
             };
-            if cash - cost < self.reserve(subject) {
+            if !self.can_afford(subject, profile, cost) {
                 continue;
             }
             let fee = self.visit_fee(land, kind);
@@ -1690,7 +1737,6 @@ impl AiHand<'_, '_> {
         };
         let free =
             crate::company::chairman_of(&self.books, crate::company::BUILD_STOCK) == Some(subject);
-        let cash = self.books.balance(subject);
         let mut views = self.books.views();
         views.sort_by_key(|view| view.id.0);
         for view in views.iter().filter(|view| view.owner == Some(me)) {
@@ -1698,7 +1744,7 @@ impl AiHand<'_, '_> {
             let Some((cost, uplift)) = self.upgrade_uplift(subject, land, free) else {
                 continue;
             };
-            if !free && cash - cost < self.reserve(subject) {
+            if !free && !self.can_afford(subject, profile, cost) {
                 continue;
             }
             table.add(
