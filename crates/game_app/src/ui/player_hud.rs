@@ -11,8 +11,8 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    Bankrupt, Detention, Heading, Inventory, LandId, Mount, MoveCap, Owner, PlayerColor, PlayerId,
-    PlayerName, Points, Possession, StaySentence, TurnOrder, Wallet,
+    Bankrupt, Controller, Detention, Heading, Inventory, LandId, Mount, MoveCap, Owner,
+    PlayerColor, PlayerId, PlayerName, Points, Possession, StaySentence, TurnOrder, Wallet,
 };
 
 use super::theme::{col, layout, size};
@@ -215,6 +215,10 @@ type HudPlayer<'w> = (
     // 天数是**天**不是回合 —— 拘留期间照算，所以这一格读的是 core 那个 `days_left`，
     // 面板不许自己数回合
     Option<&'w Possession>,
+    // P14e：这一位是电脑还是等人点，以及它是哪一档性格 —— `AiProfile.who` 的第二个
+    // 上屏处（第一处是 dump）。HUD 上那行 `电脑·大佬奸` 是「现在轮到谁在想」的一半，
+    // 另一半在顶栏那句旁白里（`top_bar::phase_hint`）
+    &'w Controller,
 );
 
 /// 每帧从世界状态重算五段文案，只在真的变了才写文本（反复赋同一个字符串会让排版重来）。
@@ -258,6 +262,7 @@ pub(crate) fn refresh_player_hud(
             cap,
             inventory,
             held,
+            controller,
         )) = players.get(card.player)
         else {
             continue;
@@ -293,6 +298,11 @@ pub(crate) fn refresh_player_hud(
         }
         if *mount != Mount::Foot {
             flags.push(mount.label().to_string());
+        }
+        // 电脑座位照着自己那份先验动手：`who` 是角色卡上那一档性格的名字。
+        // 人类座位什么都不写 —— 一个永远亮着的标记等于没有标记（同上面「逆向」那条）
+        if let Controller::Ai(profile) = controller {
+            flags.push(format!("电脑·{}", profile.who));
         }
         let status = flags
             .into_iter()

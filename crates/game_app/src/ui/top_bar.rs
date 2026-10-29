@@ -14,15 +14,15 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionFailed, AuctionStarted, AuctionWon, BankOpDone, BankVisited,
     BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, CardSnatched, ChairmanTook,
-    ChestOpened, CompanyCharged, DepositsRobbed, DetentionLifted, DetentionSkipped, FacilityBuilt,
-    FinancingDrawn, FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed, GodExit,
-    GodLeft, GodPossessed, IndemnityPaid, Institution, ItemPlaced, ItemThieved, LandId, LandTaken,
-    LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicSpell, MarketClock,
-    MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience, NewsFired,
-    NewsScope, PassiveUsed, Paused, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerName,
-    PointsChanged, PointsStolen, PolicyBought, RemoteDiceUsed, RentRerouted, ServiceCharged,
-    ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex,
-    TollExtorted, TradeSide, TurnOrder, TurnPhase, VillainHired, WalkHalted,
+    ChestOpened, CompanyCharged, Controller, DepositsRobbed, DetentionLifted, DetentionSkipped,
+    FacilityBuilt, FinancingDrawn, FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed,
+    GodExit, GodLeft, GodPossessed, IndemnityPaid, Institution, ItemPlaced, ItemThieved, LandId,
+    LandTaken, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicSpell,
+    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience,
+    NewsFired, NewsScope, PassiveUsed, Paused, PendingDecision, PlayerBailed, PlayerBankrupt,
+    PlayerName, PointsChanged, PointsStolen, PolicyBought, RemoteDiceUsed, RentRerouted,
+    ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited,
+    TileIndex, TollExtorted, TradeSide, TurnOrder, TurnPhase, VillainHired, WalkHalted,
 };
 
 use super::dialog::describe;
@@ -191,6 +191,10 @@ pub(crate) struct TurnView<'w, 's> {
     /// 「请掷骰」对一位自己会掷骰的 NPC 是一句假指令，而玩家那侧真正想知道的是
     /// 「这是谁雇来的、替谁办事」——那半句话只存在于 `Hired` 里。
     hired: Query<'w, 's, &'static game_core::prelude::Hired>,
+    /// 这一位是电脑还是等人点（P14e）。旁白要说清「请掷骰」是对人说的：
+    /// 电脑座位自己会掷，玩家真正想知道的是「现在轮到谁在想」—— 而
+    /// `AiProfile.who` 的第二处上屏也在这里（第一处是 HUD 那张玩家卡）
+    controllers: Query<'w, 's, &'static Controller>,
 }
 
 /// 一颗按钮此刻该不该亮。三颗按钮三种判据，都从这里出，
@@ -331,10 +335,20 @@ pub(crate) fn refresh_top_bar(
         return;
     }
     let hint = phase_hint(now, &turn);
+    // 阶段标签要比旁白多两个读数：轮到的是谁、是不是电脑（P14e）。旁白会被事件流水
+    // 盖掉，这一段不会 —— 「现在轮到谁在想」整个阶段都成立
+    let who = turn.order.current();
+    let who_name = who
+        .and_then(|player| turn.names.get(player).ok())
+        .map(|name| name.0.as_str());
+    let who_ai = match who.and_then(|player| turn.controllers.get(player).ok()) {
+        Some(Controller::Ai(profile)) => Some(profile.who),
+        _ => None,
+    };
     let mut wrote = false;
     for (mut text, is_hint, is_phase) in texts.iter_mut() {
         if is_phase.is_some() {
-            *text = Text::new(phase_name(now));
+            *text = Text::new(phase_label_word(now, who_name, who_ai));
             wrote = true;
         } else if is_hint.is_some() {
             if let Some(line) = hint.as_deref() {
@@ -370,18 +384,23 @@ fn phase_hint(phase: TurnPhase, turn: &TurnView) -> Option<String> {
             // 主语那一格分三种读数：玩家（请按骰）、受雇的恶人（他自己掷，替他报一声）、
             // 查不到名字（菜单态与装配前）
             let head = match turn.order.current() {
-                Some(who) => match (turn.names.get(who).ok(), turn.hired.get(who).ok()) {
-                    (Some(name), Some(hired)) => {
-                        let boss = turn
-                            .names
+                Some(who) => {
+                    let boss = turn.hired.get(who).ok().map(|hired| {
+                        turn.names
                             .get(hired.employer)
                             .map(|n| n.0.clone())
-                            .unwrap_or_else(|_| "?".into());
-                        format!("{} 替 {boss} 办事 — 他自己掷骰", name.0)
-                    }
-                    (Some(name), None) => format!("{} 的回合 — 请掷骰", name.0),
-                    (None, _) => "请掷骰".to_string(),
-                },
+                            .unwrap_or_else(|_| "?".into())
+                    });
+                    let ai = match turn.controllers.get(who).ok() {
+                        Some(Controller::Ai(profile)) => Some(profile.who),
+                        _ => None,
+                    };
+                    head_word(
+                        turn.names.get(who).ok().map(|n| n.0.as_str()),
+                        boss.as_deref(),
+                        ai,
+                    )
+                }
                 None => "请掷骰".to_string(),
             };
             format!(
@@ -393,6 +412,33 @@ fn phase_hint(phase: TurnPhase, turn: &TurnView) -> Option<String> {
         _ => return None,
     };
     Some(text)
+}
+
+/// 旁白里「谁的回合」那一句。
+///
+/// 抽成纯函数是为了能在没有世界的场合钉住它（P14e）：**电脑座位那句「正在想…」与
+/// 人类那句「请掷骰」是两句话** —— 对一位自己会掷骰的电脑说「请掷骰」是一句假指令，
+/// 而玩家真正想知道的是「现在轮到谁在想」。旁白的优先级：受雇的恶人先说自己替谁办事，
+/// 然后才轮到「电脑／人」。
+fn head_word(name: Option<&str>, boss: Option<&str>, ai: Option<&str>) -> String {
+    match (name, boss, ai) {
+        (Some(name), Some(boss), _) => format!("{name} 替 {boss} 办事 — 他自己掷骰"),
+        (Some(name), None, Some(who)) => format!("{name} 的回合 — 电脑（{who}）正在想…"),
+        (Some(name), None, None) => format!("{name} 的回合 — 请掷骰"),
+        (None, ..) => "请掷骰".to_string(),
+    }
+}
+
+/// 阶段标签那一段字：轮到电脑时**把是谁、哪一档性格**也写上去（P14e）。
+///
+/// 为什么不上旁白那一行：旁白在同一个阶段里会被事件流水盖掉（「莱息 来到银行」），
+/// 而「现在轮到谁在想」是**整个阶段都成立**的事实 —— 它该待在每帧都看得见的那一段字里。
+/// 人类座位的回合不写名字：玩家自己的名字就在 HUD 上，重复一遍只是噪音。
+fn phase_label_word(phase: TurnPhase, name: Option<&str>, ai: Option<&str>) -> String {
+    match (name, ai) {
+        (Some(name), Some(who)) => format!("{} · {name}（电脑·{who}）", phase_name(phase)),
+        _ => phase_name(phase),
+    }
 }
 
 /// 阶段名。Godot 直接把内部枚举名 `WAIT_ROLL` 打在屏幕上，这里换成中文（§5.1 差异表）。
@@ -1503,6 +1549,43 @@ mod tests {
         LandId, NewsFired, NewsHit, NewsNotice, NewsScope, PassiveEvent, PlayerId, PlayerPick,
         StockId, TradeSide, TurnOrder,
     };
+
+    /// P14e：阶段标签在电脑的回合里要多写「是谁、哪档性格」。
+    ///
+    /// 它比旁白重要：旁白在同一阶段里会被事件流水盖掉，而阶段标签每帧都在。
+    #[test]
+    fn the_phase_label_names_the_computer_on_its_turn() {
+        assert_eq!(
+            phase_label_word(TurnPhase::WaitDecision, Some("莱息"), Some("大佬奸")),
+            "等待决策 · 莱息（电脑·大佬奸）"
+        );
+        assert_eq!(
+            phase_label_word(TurnPhase::WaitRoll, Some("姬百年"), None),
+            "等待掷骰"
+        );
+        assert_eq!(phase_label_word(TurnPhase::Walking, None, None), "行走中");
+    }
+
+    /// P14e：旁白要分得清「电脑正在想」与「请掷骰」。
+    ///
+    /// 两句话是给两种读者的：人类座位那句是一条指令，电脑座位那句是状态。
+    /// 受雇的恶人仍然先说「替谁办事」—— 那不是电脑，是 NPC 的第三种身份。
+    #[test]
+    fn the_head_word_says_who_is_thinking() {
+        assert_eq!(
+            head_word(Some("莱息"), None, Some("大佬奸")),
+            "莱息 的回合 — 电脑（大佬奸）正在想…"
+        );
+        assert_eq!(
+            head_word(Some("姬百年"), None, None),
+            "姬百年 的回合 — 请掷骰"
+        );
+        assert_eq!(
+            head_word(Some("强盗"), Some("姬百年"), None),
+            "强盗 替 姬百年 办事 — 他自己掷骰"
+        );
+        assert_eq!(head_word(None, None, None), "请掷骰");
+    }
 
     /// 顶栏刷新只许动顶栏名下的按钮（§6.1 坑 31）。
     ///
