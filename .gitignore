@@ -4,6 +4,10 @@
 # 会话工具自己落的附件目录（截图/贴图的工作副本），与 `.tmp/` 同一类：不是项目内容
 .loomy-attachments/
 .atomcode/
+# agent 运行器的产物（任务登记、附件元数据、scratch 工作区），同理不入库；
+# `.box-agent/` 原先只写在 .git/info/exclude 里，只对本机克隆有效
+.box-agent/
+.box-agent-scratch/
 # 整个 assets/ 不入库：贴图、模型、sprite、字体全是二进制，git 没法 diff，每重导一次就在
 # 历史里永久多存一份完整拷贝（10-19 把这条从逐目录点名改成整目录，`assets/textures/` 那
 # 14 张 PNG 就是这么冒出来的）。**唯一反过来的是 `data/`** —— 棋盘与三副牌 JSON 是运行时代码
