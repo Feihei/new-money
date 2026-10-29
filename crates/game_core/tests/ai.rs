@@ -33,9 +33,9 @@ use common::*;
 use game_core::prelude::{
     ActiveBoard, Affair, Affliction, AiCadence, AiClock, AiProfile, Ask, Auction, BuildingKind,
     CardAim, Charge, ChargeKind, Controller, Detention, DetentionPlace, Facility, GameRules,
-    GameSeed, GameSession, GameSetup, Gate, Gavel, Gender, Heading, Institution, ItemKind, Job,
-    LandId, LandStatus, Mount, MoveCap, OccupancyKind, PLAYER_COLORS, Paused, Pending,
-    PendingDecision, PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice,
+    GameSeed, GameSession, GameSetup, Gate, Gavel, Gender, Heading, Institution, ItemKind, Jackpot,
+    Job, LandId, LandStatus, LotteryTickets, Mount, MoveCap, OccupancyKind, PLAYER_COLORS, Paused,
+    Pending, PendingDecision, PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice,
     StockTradeRequested, Tail, Timed, TurnPhase,
 };
 use game_core::rng::Rng;
@@ -2017,4 +2017,57 @@ fn the_goody_asks_the_witch_for_a_card_for_himself() {
         app.world().entity(human).get::<Detention>().is_none(),
         "他不该把任何坏事落到别人头上"
     );
+}
+
+// ============================ P14d④c：乐透 ============================
+//
+// 号码是独占的（P8 实报），所以「买哪个号」不是口味而是判据：旧代码照抄上期开奖号，
+// 而那个号往往还在别人手里 —— 请求被 `Taken` 拒掉，AI 一次都没真的买成过。
+
+/// 某人手里现在有哪些号。
+fn tickets_of(app: &App, player: Entity) -> Vec<u8> {
+    app.world()
+        .entity(player)
+        .get::<LotteryTickets>()
+        .map(|tickets| tickets.numbers.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_ai_picks_a_number_nobody_holds() {
+    let (mut app, seat) = solo_ai(AiProfile::PLAIN);
+    let human = roster(&mut app)[0].0;
+    // 上期开出的正是 1 号，而且它还在别人手里
+    app.world_mut().resource_mut::<Jackpot>().last_draw = Some(1);
+    app.world_mut()
+        .entity_mut(human)
+        .insert(LotteryTickets { numbers: vec![1] });
+    set_cash(&mut app, seat, 20_000);
+
+    ask(&mut app, seat, Pending::Lottery);
+    settle(&mut app, 4);
+
+    assert_eq!(
+        tickets_of(&app, seat),
+        vec![2],
+        "1 号被占着，该顺到下一个空号 —— 照抄上期那个号只会被 `Taken` 拒掉"
+    );
+    assert_eq!(cash_of(&mut app, seat), 19_000, "一注 1,000 现金");
+}
+
+#[test]
+fn the_ai_does_not_spend_its_buffer_on_a_ticket() {
+    // 3,000 买得起一注（1,000），但买完只剩 2,000 —— 不够普通人的保命线（6,050）。
+    // 同一道闸门管买地、加盖、建设与拍卖，乐透不该是它漏掉的那一格。
+    let (mut app, seat) = solo_ai(AiProfile::PLAIN);
+    set_cash(&mut app, seat, 3_000);
+
+    ask(&mut app, seat, Pending::Lottery);
+    settle(&mut app, 4);
+
+    assert!(
+        tickets_of(&app, seat).is_empty(),
+        "买完活钱就跌破保命线了，这一注不该买"
+    );
+    assert_eq!(cash_of(&mut app, seat), 3_000, "不买就一分不花");
 }

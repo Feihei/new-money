@@ -132,7 +132,7 @@ use crate::institution::Institution;
 use crate::items::{Inventory, ItemKind};
 use crate::land::LandId;
 use crate::landing::{Pending, PendingDecision};
-use crate::lottery::Jackpot;
+use crate::lottery::{Jackpot, LotteryTickets};
 use crate::magic::{MagicFilter, MagicRitual, MagicSpell};
 use crate::market::{MarketClock, market_halt_now};
 use crate::minigame::GameKind;
@@ -720,6 +720,10 @@ pub struct AiHand<'w, 's> {
     pub pending: Res<'w, PendingDecision>,
     /// 上期开出的号：跟着上期买是真玩家会做的事，而这个选择不需要世界状态之外的东西
     pub jackpot: Res<'w, Jackpot>,
+    /// 各人手里的乐透券（P14d④c）：号码是**独占**的，所以「买哪个号」要先问一句
+    /// 「谁占着」—— 「谁」是句柄，所以这一格带 `Entity`（与彩票柜台的 `TicketDesk` 同形）。
+    /// `Books` 里没有这一格 —— 券是玩家的东西，与手牌、道具栏同一条。
+    pub tickets_of: Query<'w, 's, (Entity, &'static LotteryTickets)>,
     pub controllers: Query<'w, 's, &'static Controller>,
     /// 这一回合办过的差事（柜台「一次访问只办一件」记在这儿）
     pub errands: ResMut<'w, AiErrands>,
@@ -1514,6 +1518,51 @@ impl AiHand<'_, '_> {
         table
     }
 
+    /// 乐透（P14d④c）：**买一个没人占着的号**。
+    ///
+    /// 「买不买」这一半与从前一样：现金够、留底过线就买一注 —— 它是全场唯一一笔
+    /// 「负期望但图一乐」的支出，而 P8 那条「每笔进池的钱都能从流水追溯」要的是长跑里
+    /// 真有人买。换掉的是「买哪个号」：旧代码照抄上期开奖号，而号码是独占的 ——
+    /// 那个号十有八九还在别人手里，请求被 `Taken` 拒掉，于是 AI **一次都没真的买成过**。
+    fn lottery_table(&self, subject: Entity, profile: &AiProfile) -> Candidates {
+        let mut table = Candidates::new();
+        table.add(0.0, AiMove::Decide(Decision::Acknowledge));
+        if self.lottery_number(subject).is_some()
+            && self.can_afford(subject, profile, self.books.rules.ticket_price)
+        {
+            table.add(1.0, AiMove::Ticket);
+        }
+        table
+    }
+
+    /// 第一个**空号**（从上期开奖号起、转一圈找）。
+    ///
+    /// 从 `last_draw` 起转而不是从 1 起：那个号被拒的概率最高（它刚开出来，往往还有人
+    /// 攥着），从它后面接着找，长跑里每个号被买的次序才是分散的。占号的人只算**活着的人**
+    /// —— `buy_allowed` 的 `taken` 读的是同一句（破产者手里的号随他一起离场）。
+    fn lottery_number(&self, subject: Entity) -> Option<u8> {
+        let numbers = self.books.rules.lottery_numbers;
+        if numbers == 0 {
+            return None;
+        }
+        let span = numbers.min(u32::from(u8::MAX)) as u8;
+        let start = self.jackpot.last_draw.unwrap_or(1).clamp(1, span);
+        let mine = self
+            .tickets_of
+            .get(subject)
+            .ok()
+            .map(|(_, tickets)| tickets);
+        (0..span)
+            .map(|step| (start - 1 + step) % span + 1)
+            .find(|number| {
+                let my_own = mine.is_some_and(|tickets| tickets.holds(*number));
+                let taken = self.tickets_of.iter().any(|(holder, tickets)| {
+                    holder != subject && tickets.holds(*number) && !self.books.is_bankrupt(holder)
+                });
+                !my_own && !taken
+            })
+    }
+
     /// 女巫的第一步（P14d④b）：挑一个**筛选条件**。
     ///
     /// 两个候选各自的最好一面都是满分 —— 「筛出最有钱的那个去害」与「筛出自己拿好处」，
@@ -2097,6 +2146,8 @@ impl AiHand<'_, '_> {
             Pending::RemoteBuild => self.remote_build_table(subject, &profile),
             // 拍卖那一问（P14d④a）：不是报价，是「加一档还是放手」
             Pending::Auction => self.bid_table(subject, &profile),
+            // 乐透（P14d④c）：买不买只看留底，买哪个号要问「谁占着」
+            Pending::Lottery => self.lottery_table(subject, &profile),
             // 女巫的两步（P14d④b）：先挑条件，再在筛出的名单上挑法术
             Pending::Magic => self.filter_table(&profile),
             Pending::MagicSpell(_) => self.spell_table(subject, &profile),
@@ -2142,18 +2193,16 @@ impl AiHand<'_, '_> {
                 true
             }
             AiMove::Ticket => {
-                let numbers = self.books.rules.lottery_numbers;
-                // 夹进号码池：上期那个号在「改过号码池的设置」之后可能已经不存在了
-                let number = self
-                    .jackpot
-                    .last_draw
-                    .unwrap_or(1)
-                    .clamp(1, numbers.max(1) as u8);
-                self.tickets.write(BuyTicketRequested {
-                    player: subject,
-                    number,
-                });
-                // 买完还得有人关窗口：柜台不会因为一笔成交自己收摊（那是它与报价的区别）
+                // 买哪个号在这里定（P14d④c）：表那一侧只知道「有没有空号」，而
+                // `greedy` 那份脚手架连世界都读不到 —— 把选择放在这里，两条路才有同一份答案
+                if let Some(number) = self.lottery_number(subject) {
+                    self.tickets.write(BuyTicketRequested {
+                        player: subject,
+                        number,
+                    });
+                }
+                // 买完还得有人关窗口：柜台不会因为一笔成交自己收摊（那是它与报价的区别）。
+                // 一个号都空不出来时这一句就是全部回答 —— 不收摊，长跑就停在柜台前
                 self.answers.write(DecisionChosen {
                     player: subject,
                     action: Decision::Acknowledge,
