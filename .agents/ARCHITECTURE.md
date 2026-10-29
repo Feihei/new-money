@@ -1,7 +1,7 @@
-# 《暴富》架构与技术事实（原《Godot → Bevy 移植方案》）
+# 《暴富》(new-money) 架构与技术事实（原《Godot → Bevy 移植方案》）
 
-> 源项目：`E:\play\Godot\new-money`（Godot 4.7 + GDScript，进度到 Phase 1.5 / Phase 2 之间）
-> 目标：`E:\play\coding\new-money-bevy`（Bevy 0.20，**彻底 ECS 化**）
+> 项目：《暴富》（new-money），Bevy 0.20 + **彻底 ECS 化**。仓库目录 `E:\play\coding\new-money-bevy` 的 `-bevy` 只为与早期的 Godot 版区分，不带定位含义。
+> 前身：`E:\play\Godot\new-money`（Godot 4.7 + GDScript，进度到 Phase 1.5 / Phase 2 之间）
 > 文档版本：v1.1 ｜ 2026-10-13 起，2026-10-16 改名并瘦身
 >
 > **改名原因**：移植那条线收口之后，这份文档装的东西已经换了一批。它现在是**唯一被源码注释引用的技术事实文档** ——

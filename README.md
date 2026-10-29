@@ -1,8 +1,8 @@
-# 暴富 (new-money-bevy)
+# 暴富 (new-money)
 
-用 [Bevy](https://bevyengine.org) 0.20 重写的《暴富》—— 大富翁4 风格的模拟经营棋类游戏：在环形棋盘上掷骰移动，靠买地升级、股票买卖和随机事件积累财富，直到对手破产。
+《暴富》（new-money）—— 大富翁4 风格的模拟经营棋类游戏：在环形棋盘上掷骰移动，靠买地升级、股票买卖和随机事件积累财富，直到对手破产。用 [Bevy](https://bevyengine.org) 0.20 开发。
 
-源项目是 Godot 版 `E:\play\Godot\new-money`（GDScript，做到 Phase 1.5/2）。换引擎的动因是测试：原来 2400 行测试要起一个 headless Godot 进程，现在是 `cargo test`。移植已完成（B0–B5b），分层红线、Bevy 0.20 的 API 事实与坑位记录、缺陷清单在 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)（原名《MIGRATION.md》），逐阶段的移植历史已归档；**下一步做什么排在 [`.agents/PLAN.md`](./.agents/PLAN.md)**（以大宇《大富翁4》为基线的玩法补齐计划）。
+仓库目录叫 `new-money-bevy`，那个 `-bevy` 只是为了和早期的 Godot 版 `E:\play\Godot\new-money`（GDScript，进度停在 Phase 1.5/2）区分开 —— **Bevy 这个就是主项目**，Godot 版已不是参照主线。当初换引擎的动因是测试：原来 2400 行测试要起一个 headless Godot 进程，现在是 `cargo test`。分层红线、Bevy 0.20 的 API 事实与坑位记录、缺陷清单在 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)（原名《MIGRATION.md》），移植阶段的历史已归档；**下一步做什么排在 [`.agents/PLAN.md`](./.agents/PLAN.md)**（以大宇《大富翁4》为基线的玩法补齐计划）。
 
 ## 快速开始
 

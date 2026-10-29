@@ -1,6 +1,6 @@
 # AGENTS.md — 本仓库的工作约定
 
-《暴富》Godot → Bevy 0.20 重写。**动手前先读 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)**：分层红线、Bevy 0.20 的 API 事实与 37 个坑位、待修缺陷清单全在那里（它原名《MIGRATION.md》，移植线收口后按实际内容改名）。**排期只看 [`.agents/PLAN.md`](./.agents/PLAN.md)**。本文只写约定与指路，不重复那些内容。
+《暴富》（new-money）是 Bevy 0.20 的大富翁4 风格棋类游戏，本项目即主线作品；仓库目录名 `new-money-bevy` 的 `-bevy` 只为与早期的 Godot 版区分，不要把它当成项目定位。**动手前先读 [`.agents/ARCHITECTURE.md`](./.agents/ARCHITECTURE.md)**：分层红线、Bevy 0.20 的 API 事实与 37 个坑位、待修缺陷清单全在那里（它原名《MIGRATION.md》，移植线收口后按实际内容改名）。**排期只看 [`.agents/PLAN.md`](./.agents/PLAN.md)**。本文只写约定与指路，不重复那些内容。
 
 ## 文档地图
 
