@@ -98,55 +98,19 @@ pub fn settle_property_landing(
         }
         // 自己的地：住宅走升级报价，商业地走建设窗口（P10c）。
         // 两条判据互相独立 —— 升级看「楼还有几层可盖」，建设看「这块地上还什么都没有」
-        // —— 所以各占一格，而不是一条 if 链。
+        // —— 所以各占一格，而不是一条 if 链。两个分支收进 `offer_own_land`，
+        // 因为「停在自家地上」也要问同一句话（P14d② 的停留）
         Some(owner) if owner == self_id => {
-            let Some(def_land) = gate.sink.books.active.def.land(land.0) else {
-                return;
-            };
-            if def_land.land_type == LandType::Commercial {
-                // 已有设施的商业地踩回自己家：无事。设施不可升级，4 代也没有
-                // 「逛自己的店」这一出 —— 这一条刻意是空支，不是漏了升级报价。
-                let occupied = gate.sink.books.facility_of(land).is_some();
-                if occupied {
-                    return;
-                }
-                // 必败不给弹（与无主地那一条同一句理由）：押着／查封／衰神在场时
-                // 弹一张每颗按钮都按不动的模态，比不弹更糟。现金不够**照样弹** ——
-                // 与买地报价同一条口径，按钮灰着、理由写在按钮上
-                if !view.mortgaged
-                    && view.status != Some(crate::status::LandStatus::Sealed)
-                    && !gate.sink.books.acquire_denied(player)
-                {
-                    let base =
-                        economy::upgrade_cost(&gate.sink.books.active.def, &view).unwrap_or(0);
-                    let cost = gate
-                        .sink
-                        .books
-                        .quoted(ChargeKind::Build { land }, player, base);
-                    gate.pending.offer(player, Pending::Build(land));
-                    sink.builds.write(BuildOffered { player, land, cost });
-                }
-                return;
-            }
-            let base = economy::upgrade_cost(&gate.sink.books.active.def, &view).unwrap_or(0);
-            let cost = gate
-                .sink
-                .books
-                .quoted(ChargeKind::Upgrade { land }, player, base);
-            let views = gate.sink.books.views();
-            if !gate.sink.books.acquire_denied(player)
-                && economy::can_upgrade(
-                    &view,
-                    owner,
-                    &views,
-                    cost,
-                    gate.sink.books.balance(player),
-                    &gate.sink.books.rules,
-                )
-            {
-                gate.pending.offer(player, Pending::Upgrade(land));
-                sink.upgrades.write(UpgradeOffered { player, land, cost });
-            }
+            let books = &gate.sink.books;
+            offer_own_land(
+                books,
+                player,
+                land,
+                &view,
+                &mut gate.pending,
+                &mut sink,
+                true,
+            );
         }
         // 别人的地：带设施 → 服务费（原型库当场结）；空商业地 → 一文不收
         // （设施还没立起来，不产生任何账 —— 连收据都不该有）；住宅 → 照旧收租。
@@ -204,6 +168,75 @@ pub fn settle_property_landing(
                 ),
             );
         }
+    }
+}
+
+/// 站在自己的地上能做的那两件事：**商业空地 → 建设窗口、住宅 → 升级报价**。
+///
+/// 落脚（[`settle_property_landing`]）与「停留停在原地」（`turn::take_stay_system`，P14d②）
+/// 共用这一份判据 —— 两处各写一遍就会出现「一边的按钮灰着、另一边的账本能办」。
+/// 返回是否真的摆了窗口：停留那一侧拿它决定「把回合交给窗口」还是「照常结束回合」。
+///
+/// 商业地已有设施时是空支（设施不可升级，4 代也没有「逛自己的店」）；四个「必败」条件
+/// （押着／查封／衰神在场／现金不够升级）里，前三条连窗口都不弹，现金不够**照样弹**
+/// —— 与买地报价同一条口径，按钮灰着、理由写在按钮上。
+pub fn offer_own_land(
+    books: &Books,
+    player: Entity,
+    land: LandId,
+    view: &economy::LandView,
+    pending: &mut PendingDecision,
+    sink: &mut PropertySink<'_>,
+    from_landing: bool,
+) -> bool {
+    let Some(def_land) = books.active.def.land(land.0) else {
+        return false;
+    };
+    if def_land.land_type == LandType::Commercial {
+        if books.facility_of(land).is_some()
+            || view.mortgaged
+            || view.status == Some(crate::status::LandStatus::Sealed)
+            || books.acquire_denied(player)
+        {
+            return false;
+        }
+        let base = economy::upgrade_cost(&books.active.def, view).unwrap_or(0);
+        let cost = books.quoted(ChargeKind::Build { land }, player, base);
+        offer(pending, player, Pending::Build(land), from_landing);
+        sink.builds.write(BuildOffered { player, land, cost });
+        return true;
+    }
+    let Some(owner) = books.id_of(player) else {
+        return false;
+    };
+    let base = economy::upgrade_cost(&books.active.def, view).unwrap_or(0);
+    let cost = books.quoted(ChargeKind::Upgrade { land }, player, base);
+    if books.acquire_denied(player) {
+        return false;
+    }
+    let views = books.views();
+    if !economy::can_upgrade(
+        view,
+        owner,
+        &views,
+        cost,
+        books.balance(player),
+        &books.rules,
+    ) {
+        return false;
+    }
+    offer(pending, player, Pending::Upgrade(land), from_landing);
+    sink.upgrades.write(UpgradeOffered { player, land, cost });
+    true
+}
+
+/// 摆窗口的那一句：落脚来的走 `offer`（它带着保释后置问），停留来的走
+/// `offer_within_turn`（那时 `Landing` 是上一回合的旧值）。
+fn offer(pending: &mut PendingDecision, player: Entity, about: Pending, from_landing: bool) {
+    if from_landing {
+        pending.offer(player, about);
+    } else {
+        pending.offer_within_turn(player, about);
     }
 }
 

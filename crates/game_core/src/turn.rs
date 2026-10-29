@@ -11,6 +11,8 @@ use bevy::prelude::*;
 use crate::bank::AtmAccess;
 use crate::economy;
 use crate::items::{Inventory, ItemKind};
+use crate::land::LandId;
+use crate::landing::PendingDecision;
 use crate::market::Market;
 use crate::msg::{
     DetentionLifted, DetentionSkipped, DiceRolled, GameOver, MoveCapped, RemoteDiceUsed,
@@ -379,13 +381,73 @@ pub fn begin_turn_system(
 /// 计数是**字面**的：卡面写 1 就停 1 个回合，扣到 0 那一格把组件摘掉并发
 /// [`StayLifted`]；还剩几格则发 [`StaySkipped`]。不再有「判 3 = 跳 2」那半条 ——
 /// 那是拘留的口径（拘留数的是天），两者单位不同，不该共用一把尺。
+/// 停留这一格子要借的几样东西（P14d②）：账本、挂窗口的那一格、被动卡那道门
+/// （它押着回合时不许插队）、棋子位置，以及地产那三支报价 writer。
+///
+/// 打成一个包是房规（§六 坑 8），而它们说的本来就是同一件事：「他停在哪、那块地归谁、
+/// 能不能建」。⚠️ `pending`/`positions` 与 `books` 必须并排放 —— 参数建立期会撞的
+/// 只有「同一份可变借用出现两次」，这几样互不相交。
+#[derive(SystemParam)]
+pub struct StayDesk<'w, 's> {
+    books: Books<'w, 's>,
+    pending: ResMut<'w, PendingDecision>,
+    gate: Res<'w, crate::passive::Gate>,
+    positions: Query<'w, 's, &'static TokenPosition, With<Walker>>,
+    offers: crate::property::PropertySink<'w>,
+    skipped: MessageWriter<'w, StaySkipped>,
+    lifted: MessageWriter<'w, StayLifted>,
+}
+
+impl StayDesk<'_, '_> {
+    /// 停在自家地上时，把与落脚同一个窗口摆出来；摆成了答 `true`。
+    ///
+    /// 商业空地 → 建设窗口、住宅 → 升级报价，判据全在
+    /// [`crate::property::offer_own_land`] 里 —— 「停留能建」与「落脚能建」不是两句话。
+    /// 门押着回合时（一件灾正问着）不许插队：那个窗口属于那一问。
+    fn offer_here(&mut self, player: Entity) -> bool {
+        if self.gate.holds_turn() || self.pending.active().is_some() {
+            return false;
+        }
+        let Some(tile) = self.positions.get(player).ok().map(|pos| pos.tile) else {
+            return false;
+        };
+        let Some(id) = self
+            .books
+            .active
+            .def
+            .land_for_tile(tile.0 as i64)
+            .map(|def| def.id)
+        else {
+            return false;
+        };
+        let land = LandId(id);
+        let Some(view) = self.books.view(land) else {
+            return false;
+        };
+        let Some(me) = self.books.id_of(player) else {
+            return false;
+        };
+        if view.owner != Some(me) {
+            return false;
+        }
+        crate::property::offer_own_land(
+            &self.books,
+            player,
+            land,
+            &view,
+            &mut self.pending,
+            &mut self.offers,
+            false,
+        )
+    }
+}
+
 pub fn take_stay_system(
     mut commands: Commands,
+    mut desk: StayDesk<'_, '_>,
     order: Res<TurnOrder>,
     mut requests: MessageReader<RequestStay>,
     mut staying: Query<&mut StaySentence, With<Walker>>,
-    mut skipped: MessageWriter<StaySkipped>,
-    mut lifted: MessageWriter<StayLifted>,
     mut next: ResMut<NextState<TurnPhase>>,
 ) {
     let Some(current) = order.current() else {
@@ -404,15 +466,22 @@ pub fn take_stay_system(
     };
     if sentence.turns_left > 1 {
         sentence.turns_left -= 1;
-        skipped.write(StaySkipped {
+        desk.skipped.write(StaySkipped {
             player: current,
             turns_left: sentence.turns_left,
         });
     } else {
         commands.entity(current).remove::<StaySentence>();
-        lifted.write(StayLifted { player: current });
+        desk.lifted.write(StayLifted { player: current });
     }
-    next.set(TurnPhase::TurnEnd);
+    // 停在自家地上：这一回合的出口不是「结束」而是「先把能建的建掉」（P14d②）。
+    // 建设/升级窗口答完由 `decision_system` 收回合 —— 与落脚那条完全同一条出口，
+    // 所以「停留 1 回合」不会变成 2（句子的递减已经在上面办完了）。
+    next.set(if desk.offer_here(current) {
+        TurnPhase::WaitDecision
+    } else {
+        TurnPhase::TurnEnd
+    });
 }
 
 /// 掷骰并定下本次移动。只在 `WaitRoll` 里跑，且只认「当前回合玩家」的请求 ——

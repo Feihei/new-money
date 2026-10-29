@@ -335,12 +335,27 @@ pub enum Pending {
 pub struct PendingDecision {
     pub player: Option<Entity>,
     pub about: Option<Pending>,
+    /// 这一问是从**落脚**那条流水线上来的吗。
+    ///
+    /// 只有落格才做「接入点保释」那道后置问（见 [`decision_system`] 末尾），而那一条读的是
+    /// [`Landing`] 这份「这一帧踩到了什么」的读数。P14d② 起多了第一种**不属于落脚**的窗口
+    /// （停留停在自家地上），而那时的 `Landing` 是上一回合留下的旧值 —— 照着它问保释
+    /// 会指着一个早就走过的格子。默认 `true` 是为了让既有的每一个 `offer` 一个字都不用改。
+    pub from_landing: bool,
 }
 
 impl PendingDecision {
     pub fn offer(&mut self, player: Entity, about: Pending) {
         self.player = Some(player);
         self.about = Some(about);
+        self.from_landing = true;
+    }
+
+    /// 摆一个**不来自落脚**的窗口（P14d② 的「停留停在自家地上」）。
+    pub fn offer_within_turn(&mut self, player: Entity, about: Pending) {
+        self.player = Some(player);
+        self.about = Some(about);
+        self.from_landing = false;
     }
 
     pub fn active(&self) -> Option<(Entity, Pending)> {
@@ -415,6 +430,8 @@ pub fn decision_system(
     let Some(action) = answer else {
         return;
     };
+    // 先读再动：下面那条保释后置问只属于落脚，而这个标记会被 `clear` 抹掉
+    let from_landing = pending.from_landing;
 
     match (about, action) {
         (Pending::Buy(land), Decision::Accept) => {
@@ -505,7 +522,8 @@ pub fn decision_system(
     // 就把保释窗口摆出来（P4③）。演示盘的接入点是地产格（汉口路／徐家汇），所以「走到
     // 监狱门口」表现为先买地/付租，再决定要不要放人 —— 与 4 代在图上走到那格是同一件事。
     // 保释窗口自己关掉时（`about` 已是 `Bail`）不再回头再问一次，否则会绕成死循环。
-    if !matches!(about, Pending::Bail(_))
+    if from_landing
+        && !matches!(about, Pending::Bail(_))
         && let Some(place) = view
             .landing
             .0

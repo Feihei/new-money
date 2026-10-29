@@ -18,9 +18,12 @@ mod common;
 
 use bevy::app::App;
 use bevy::ecs::entity::Entity;
+use bevy::ecs::message::Messages;
 use common::*;
 use game_core::prelude::{
-    CardAim, Detention, DetentionPlace, Heading, StaySentence, Term, TurnPhase,
+    ActiveBoard, BuildingKind, CardAim, Decision, DecisionChosen, Detention, DetentionPlace,
+    Facility, Heading, LandId, Landed, Landing, LandingDomain, Mover, Pending, StaySentence, Term,
+    TileIndex, TileKind, TurnPhase,
 };
 
 /// 这位此刻朝哪边走。缺组件就 panic：`Heading` 是必挂的那一格（`spawn_players`）。
@@ -342,4 +345,118 @@ fn a_stay_aimed_at_himself_uses_up_this_very_turn() {
     settle(&mut app, 2);
     assert_eq!(stay_of(&app, p0), None, "用在这一回合上了");
     assert_eq!(tile_of(&app, p0), 4, "他从 4 号格一步没走");
+}
+
+/// 把某块地上的预建设施摘掉（演示盘外滩开局就立着购物中心，而建设窗口只在空地上开）。
+fn strip_facility(app: &mut App, land: u32) {
+    let entity = app.world().resource::<ActiveBoard>().lands[&LandId(land)];
+    app.world_mut().entity_mut(entity).remove::<Facility>();
+}
+
+#[test]
+fn a_stay_on_your_own_empty_commercial_lot_opens_the_build_window() {
+    // P14d②：停在自家空商业地上，这一回合的出口不是「结束」而是「先把设施立起来」。
+    // 外滩的 6/7 两格同属 land 2 —— 掷 1 点本来会走到 7 号格（同一块地的另一格），
+    // 而停留把这一掷吃掉，换成建设窗口。
+    let (mut app, p0) = ready_on(6, 1, DecisionPolicy::Hold);
+    strip_facility(&mut app, 2);
+    own(&mut app, 2, Some(0), 0, false);
+
+    let card = item_index(&app, "item_stay");
+    deal(&mut app, p0, card.0);
+    play_card(&mut app, p0, card.0, Some(CardAim::Player(p0)));
+    settle(&mut app, 2);
+    stay(&mut app, p0);
+    settle(&mut app, 2);
+
+    assert!(
+        matches!(pending_of(&app), Some((who, Pending::Build(land))) if who == p0 && land == LandId(2)),
+        "停在自家空商业地上该开建设窗口，实际是 {:?}",
+        pending_of(&app)
+    );
+    assert_eq!(tile_of(&app, p0), 6, "停留吃掉这一掷：一步都没走");
+
+    build_ask(&mut app, p0, LandId(2), BuildingKind::Mall);
+    assert_eq!(
+        facility_of(&mut app, 2),
+        Some(BuildingKind::Mall),
+        "窗口开着的时候就能建 —— 判据与落脚那条同源"
+    );
+    assert_eq!(cash_of(&mut app, p0), 20_000 - 2_200, "付的是这一格的造价");
+}
+
+#[test]
+fn a_stay_on_a_plot_that_cannot_be_developed_ends_the_turn_without_a_window() {
+    // 同一条出口的另一半：脚下是我的地、但这一格没有报价可开 —— 住宅加盖要凑齐同色组
+    // （`can_upgrade`），王府井只有一块在 P0 手上，所以停留就只是「结束这一回合」。
+    let (mut app, p0) = ready_on(4, 3, DecisionPolicy::Hold);
+    own(&mut app, 4, Some(0), 0, false);
+
+    let card = item_index(&app, "item_stay");
+    deal(&mut app, p0, card.0);
+    play_card(&mut app, p0, card.0, Some(CardAim::Player(p0)));
+    settle(&mut app, 2);
+    stay(&mut app, p0);
+    settle(&mut app, 4);
+
+    assert_eq!(
+        pending_of(&app),
+        None,
+        "凑不齐同色组，住宅加盖的窗口不该冒出来"
+    );
+    assert_eq!(stay_of(&app, p0), None, "这一回合用掉了那张停留");
+    assert_eq!(tile_of(&app, p0), 4, "他还站在原地");
+}
+
+#[test]
+fn a_stay_window_does_not_re_run_last_turns_bail_offer() {
+    // P14d②：停留那条窗口**不来自落脚**，所以答完之后不许照着上一回合留下的 `Landing`
+    // 再问一次「要不要保释」。汉口水（2 号格）正是监狱的接入点 —— 少了 `from_landing`
+    // 那道门，这一格会凭空冒出一张保释模态，而它指的那次落脚早就过去了。
+    let (mut app, p0) = ready_on(2, 1, DecisionPolicy::Hold);
+    let p1 = roster(&mut app)
+        .iter()
+        .find(|(e, ..)| *e != p0)
+        .map(|(e, ..)| *e)
+        .expect("默认阵容有两名玩家");
+    own(&mut app, 0, Some(0), 0, false);
+    own(&mut app, 1, Some(0), 0, false);
+    app.world_mut().entity_mut(p1).insert(Detention {
+        place: DetentionPlace::Jail,
+        term: Term::Turns(3),
+    });
+    // 上一回合留下的落格读数：P0 在 2 号格（监狱接入点）
+    app.insert_resource(Landing(Some(Landed {
+        player: p0,
+        mover: Mover::Player,
+        tile: TileIndex(2),
+        kind: TileKind::Property,
+        domain: LandingDomain::Property,
+        land: Some(LandId(1)),
+    })));
+
+    let card = item_index(&app, "item_stay");
+    deal(&mut app, p0, card.0);
+    play_card(&mut app, p0, card.0, Some(CardAim::Player(p0)));
+    settle(&mut app, 2);
+    stay(&mut app, p0);
+    settle(&mut app, 2);
+    assert!(
+        matches!(pending_of(&app), Some((_, Pending::Upgrade(_)))),
+        "先在自家住宅上升级，实际是 {:?}",
+        pending_of(&app)
+    );
+
+    app.world_mut()
+        .resource_mut::<Messages<DecisionChosen>>()
+        .write(DecisionChosen {
+            player: p0,
+            action: Decision::Decline,
+        });
+    settle(&mut app, 3);
+    assert_eq!(
+        pending_of(&app),
+        None,
+        "停留那条窗口不该把上一回合的保释再问一遍"
+    );
 }

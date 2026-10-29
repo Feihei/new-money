@@ -470,9 +470,10 @@ fn hit_chance(reach: u32, d: u32) -> f32 {
 /// - 请神符／送神符：请来哪位神由 [`crate::gods::nearest_god`] 决定，好坏不由出牌人挑 ——
 ///   五格里没有一格是「我愿意赌一把」；
 /// - 拍卖卡：它开的是另一台机器（P9 的轮转出价），那台机器的判据在 P14d；
-/// - 转向卡／乌龟卡／停留卡：价值是「挡别人的进度」，而五格里没有一格度量进度。
-///   尤其停留：被停留的人**照收租**（P4④ 口径），它拦的是走位不是钱 —— 拿租金给它定价
-///   会高估十倍。这三张与魔法屋「选人害」同批（P14d 要先有「谁领先」那个读数）。
+/// - 转向卡／乌龟卡：对别人用的价值是「挡他的路」，而那要一把**落格值**的尺（他下一次
+///   会踩到谁的地、被收多少）——和魔法屋「按条件选人」同批，P14d③ 与遥控骰子一起做。
+///   停留卡已经先落地（[`CardUse::Stay`]）：它不打别人，只用来**停在自家地上建设** ——
+///   被停留的人照收租（P4④），所以「关他几天值多少租金」那一条本来就是错的尺。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CardUse {
     /// 购地卡：按 `buy` 那格买下无主地
@@ -481,6 +482,8 @@ enum CardUse {
     Status(LandStatus),
     /// 陷害卡：把人关起来
     Detain,
+    /// 停留打给自己（P14d②）：停在自家空商业地上当场建设
+    Stay,
     /// 今天不算账的（见上面那条注释）
     NotYet,
 }
@@ -491,6 +494,7 @@ fn card_use(effect: &CardEffect) -> CardUse {
         CardEffect::BuyLand => CardUse::Grab,
         CardEffect::LandStatus { status, .. } => CardUse::Status(*status),
         CardEffect::Detain { .. } => CardUse::Detain,
+        CardEffect::Stay { .. } => CardUse::Stay,
         CardEffect::AddCash { .. }
         | CardEffect::DeductCash { .. }
         | CardEffect::Levy { .. }
@@ -498,7 +502,6 @@ fn card_use(effect: &CardEffect) -> CardUse {
         | CardEffect::Damage { .. }
         | CardEffect::Release { .. }
         | CardEffect::Reverse
-        | CardEffect::Stay { .. }
         | CardEffect::MoveCap { .. }
         | CardEffect::Suspend { .. }
         | CardEffect::SummonGod
@@ -1244,8 +1247,69 @@ impl AiHand<'_, '_> {
             CardUse::Grab => self.grab_aims(subject, profile),
             CardUse::Status(status) => self.status_aims(subject, profile, status),
             CardUse::Detain => self.detain_aims(subject, profile),
+            CardUse::Stay => self.stay_aims(subject, profile),
             CardUse::NotYet => Vec::new(),
         }
+    }
+
+    /// 停留打给自己（P14d②）：**停在自家空商业地上，当场把设施立起来**。
+    ///
+    /// 「踩到自家空地」那条报价与它同源（`property::offer_own_land`），所以「这件事能不能
+    /// 办成」不在这里重判 —— 这里只算它值多少钱：**那一类设施一次访问的期望收费 × 害意**。
+    /// 早建成一回合最保守的收益就是这个数（真实收益还要乘上提前那几回合里的经过人数）。
+    ///
+    /// 这张卡**不对别人用**：被停留的人照收租（P4④），让他少掷一次多半是帮他 ——
+    /// 「拦住他这一掷会踩到什么」那半条归 P14d③ 与转向/乌龟一起定价。
+    ///
+    /// 四道闸门与「建不建」那一问完全同一条：地是我的、商业、还没设施、建得起且留得住
+    /// （`build_probe` + `can_afford`）。没有闸门的那一半是「窗口开了却按不动」。
+    fn stay_aims(&self, subject: Entity, profile: &AiProfile) -> Vec<(f32, Option<CardAim>)> {
+        if profile.harm < AiProfile::HARM_START {
+            return Vec::new();
+        }
+        let Some(tile) = self.positions.get(subject).ok().map(|pos| pos.tile) else {
+            return Vec::new();
+        };
+        let Some(id) = self
+            .books
+            .active
+            .def
+            .land_for_tile(tile.0 as i64)
+            .map(|def| def.id)
+        else {
+            return Vec::new();
+        };
+        let land = LandId(id);
+        let Some(me) = self.books.id_of(subject) else {
+            return Vec::new();
+        };
+        let Some(view) = self.books.view(land) else {
+            return Vec::new();
+        };
+        if view.owner != Some(me)
+            || self
+                .books
+                .active
+                .def
+                .land(id)
+                .is_none_or(|def| def.land_type != crate::board::LandType::Commercial)
+        {
+            return Vec::new();
+        }
+        let mut best = 0.0f32;
+        for kind in BuildingKind::ALL {
+            let Ok(cost) = self.books.build_probe(subject, land, kind) else {
+                continue;
+            };
+            if !self.can_afford(subject, profile, cost) {
+                continue;
+            }
+            best = best.max(self.visit_fee(land, kind));
+        }
+        if best <= 0.0 {
+            return Vec::new();
+        }
+        vec![(best * profile.harm, Some(CardAim::Player(subject)))]
     }
 
     /// 购地卡：每一块**买得下、且买完还剩得住留底**的无主地各是一条候选。

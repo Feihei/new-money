@@ -1733,3 +1733,49 @@ fn the_building_chairman_upgrades_for_free() {
     assert_eq!(level_of(&mut app, 3), 3, "董事长一次升两层（Lv1 → Lv3）");
     assert_eq!(cash_of(&mut app, seat), 0, "他的升级不花钱");
 }
+
+// ============================ P14d②：停留的自我用法 ============================
+//
+// 这一节钉「停留不是只能按住别人」：停在自家空商业地上，它换来的是一次建设机会。
+// 判据读取 `property::offer_own_land`（与落脚同源），AI 这一侧只决定「值不值得搭一个回合」。
+
+#[test]
+fn the_shark_stays_home_to_put_up_a_hotel() {
+    // 外滩 6/7 两格同属 land 2：摘掉预建的购物中心之后就是一块空地。
+    // 大佬奸手里有停留卡、站在上面 —— 这一回合不掷骰，先把设施立起来。
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    strip_facility(&mut app, 2);
+    own(&mut app, 2, Some(1), 0, false);
+    place(&mut app, seat, 6);
+    let card = item_index(&app, "item_stay").0;
+    deal(&mut app, seat, card);
+
+    for _ in 0..5 {
+        step_ai(&mut app);
+    }
+    assert_eq!(
+        facility_of(&mut app, 2),
+        Some(BuildingKind::Hotel),
+        "该把收得最多的那一类立起来（旅馆 1250 > 购物中心 800）"
+    );
+    assert_eq!(cash_of(&mut app, seat), 17_800, "造价 2200 从现金里走");
+    assert_eq!(stay_of(&app, seat), None, "停留这一回合就用掉了");
+}
+
+#[test]
+fn the_goody_does_not_stay_home_to_build() {
+    // 同一块地、同一张卡：设施收的是**别人**的钱，乖宝宝的害意过不了那道门槛 ——
+    // 他不为这个搭上一个回合。卡所以还在手里。
+    let (mut app, seat) = solo_ai(AiProfile::GOODY);
+    strip_facility(&mut app, 2);
+    own(&mut app, 2, Some(1), 0, false);
+    place(&mut app, seat, 6);
+    let card = item_index(&app, "item_stay").0;
+    deal(&mut app, seat, card);
+
+    for _ in 0..5 {
+        step_ai(&mut app);
+    }
+    assert_eq!(facility_of(&mut app, 2), None, "乖宝宝往自家地上架了收银台");
+    assert!(hand_ids(&app, seat).contains(&card), "那张停留卡该还在手里");
+}
