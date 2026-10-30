@@ -63,7 +63,7 @@
 | 8 | `player_data.gd:15,30,35,85,96` `turn_manager.gd:158,249-265` | 状态是裸字符串 `"active"/"jailed"/"bankrupt"`，格子类型是裸字符串 `"property"/"stock"/...`，比较散落各处（`board_tile.gd:72` 还有一份硬编码类型列表和 `tile_type.gd:31-35` 重复） | `JailSentence`/`Bankrupt` 是组件存在性（**已修**，见下方 B2b）；格子类型那半 **P1 已修**（见下面的收口记录） |
 | 9 | `board_data.gd:258-304` `_compute_legacy_positions`（47 行 Curve3D 烘焙）+ `board_data.gd:6-9` 双格式分支 | 兼容"旧格式 `tiles[]`+`position:float`"，但 `data/boards/` 下**只剩 `prototype.json`**（新格式），旧格式棋盘文件不存在 | **不移植旧格式**，连带删除 `BoardData.has_coords`、`_legacy_positions`、`property_registry` 的 `set_owner/get_owner` 兼容层（`:73-106`，54 行）。这是移植带来的净删减 |
 | 10 | `board_data.gd:63-67` `passes_start`、`game_state.gd:20` `inflation_index`、`scripts/entities/color_circle.gd`、`card_notice` 的 `HSeparator` 主题 | 死代码：`passes_start` 全项目无调用；`inflation_index` 只在 `test_game_state.gd:23-28` 被赋值和断言，不进任何公式；`color_circle.gd` 未被任何场景/脚本引用 | 不搬 |
-| 11 | `game_state.gd:45` | 新开对局却 `EventBus.game_saved.emit(game_id)` | 消息语义对齐后自然消失 |
+| 11 | `game_state.gd:45` | 新开对局却 `EventBus.game_saved.emit(game_id)` | **P15b 已修（10-30）**：回执只在**真落盘成功**之后由 `game_app::paths::persist_snapshot` 写（`SaveNotice`），新开对局没有任何代码路径能说出「已保存」；规则层根本不认识文件 |
 | 12 | `player_data.gd:98` + `game_state.gd:41` + `turn_manager.gd:39` | 起始资金 20000 硬编码三处（`START_CASH` 常量存在但 `reset()` 不走它） | 唯一来源 `GameRules` resource（可从 JSON 覆盖） |
 | 13 | `player_data.gd:84-91` + `property_registry.gd` | 破产只清玩家自己的 `properties` 列表，registry 里的业主仍写着死者 → 租金永远打给破产者、同色组永远卡住别人 | 归属是 Land 实体上的 `Owner` 组件，`Books::bankrupt` 一次遍历把名下地块放回市场 |
 | 14 | `property_system.gd:151-161` | `_owns_full_group` 用空串匹配得到「无格子能匹配 → 全都满足」的隐式 `true`，坏数据上白送垄断与升级权 | `group: Option<String>` 是类型而不是字符串，`None` 显式返回 `false` |
@@ -80,7 +80,7 @@
 > - **#4** 股价事件 —— 拆成 `StockPriceChanged{stock,old,new}`（tick 真的动了才发）与 `StockTraded{player,stock,shares,price,side}`；回归 `stock_visit_ticks_every_price_once`。
 > - **#5** 买入递归 —— `economy::buy_plan` 一次算清可买股数；另有扫表性质 `buy_plan_never_asks_for_more_than_the_wallet_has`（39 个价格 × 6 档现金，花费绝不超过余额）。
 >
-> **#9/#10/#11 属后续**：旧格式本来就没搬；`passes_start`/`inflation_index`/`color_circle.gd` 未搬（`inflation_index` 那条 **10-17 由 PLAN P2③ 真正实现**：`GameSession::price_index` + `charge::stage`，Godot 那个死字段现在在 Rust 侧有公式、有豁免表、有回归 `tests/price_index.rs`）。#11 的 `game_saved` 误发随存档一起处理 —— 原 B7，**现 PLAN P15**，仍开着。
+> **#9/#10/#11 属后续**：旧格式本来就没搬；`passes_start`/`inflation_index`/`color_circle.gd` 未搬（`inflation_index` 那条 **10-17 由 PLAN P2③ 真正实现**：`GameSession::price_index` + `charge::stage`，Godot 那个死字段现在在 Rust 侧有公式、有豁免表、有回归 `tests/price_index.rs`）。#11 的 `game_saved` 误发随存档一起处理 —— 原 B7，**现 PLAN P15**，已由 **P15b（10-30）**收口（回执只在真落盘之后写）。
 
 > **B3 过程里新发现、一并修掉的 Godot 错误（编号续在 12 之后）**：
 > - **#13** `player_data.gd:84-91` 破产时只清玩家自己的 `properties` 列表，`PropertyRegistry` 里的业主仍写着死者 → 租金永远打给破产者、同色组永远卡住别人的垄断与升级。`Books::bankrupt` 把名下地块一并放回市场（回归 `cant_pay_rent_bankrupts_the_payer_and_frees_their_lands`）。
@@ -522,8 +522,8 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 > [`docs/archive/migration-b0-b5b.md`](../docs/archive/migration-b0-b5b.md)。移植线到此结束，「粗估 N 天」那一列随归档一起停更。
 >
 > **排期此后只有一份**：[`PLAN.md`](./PLAN.md)。移植线留下的 B6/B7/B8 三行已并成 PLAN 的 P14–P17（见 PLAN §六）。
-> 本文档里仍然活着的只有：§三 缺陷清单的未结项（#8 后半条 → PLAN P1、#11 → P15）、§六 的依赖矩阵与 32 个坑（唯一那条「待修」的 #31 已在 P3b 修掉，10-19）、
-> §七 的表现层待做（字体子集化、glb 处置）、§九 的存档方案（→ P15）。
+> 本文档里仍然活着的只有：§三 缺陷清单的未结项（#8 后半条 → PLAN P1，**P1 已收口**；#11 → P15，**P15b 已收口**）、§六 的依赖矩阵与 32 个坑（唯一那条「待修」的 #31 已在 P3b 修掉，10-19）、
+> §七 的表现层待做（字体子集化、glb 处置）、§九 的存档方案（→ P15，P15a 快照 + P15b 读写已落地）。
 
 ---
 
@@ -555,6 +555,6 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 
 **下一步：[`PLAN.md`](./PLAN.md) 的 P3** —— 卡片：持有与主动出牌 + 命运定序 + 百货公司。P1（点券与穷尽分派表）、T1（egui 只读 dump 面板）、P2（结算修正管线 + 建筑损害阶梯 + 物价指数 + 日历收口）已在 10-16/10-17 完成；P2 留下的两个"第一批用户"就是 P3：`Corrections` 登记处（免罪/免费/嫁祸卡）与 `LandDamage`（怪兽/恶魔卡，顺带补上 prototype 里踩不到的那个缺口）。其后 P4……到 P13（魔法屋），玩法之后是 P14 AI、P15 存档与设置、P16 音频、P17 发行。
 
-> **长期资产只剩两份**：§三 缺陷清单（未结项：#8 后半条 → PLAN P1、#11 → P15）与 §6.1 的 Bevy 0.20 坑清单。
+> **长期资产只剩两份**：§三 缺陷清单（未结项：#8 后半条 → PLAN P1、#11 → P15 —— 两条都已收口，见各自行内标注）与 §6.1 的 Bevy 0.20 坑清单。
 > ~~§五 映射表~~ 与 ~~§十 进度表~~ 已于 10-16 归档到 [`docs/archive/migration-b0-b5b.md`](../docs/archive/migration-b0-b5b.md)，不再维护。
 > **移植线收口**：B0–B5b 全部完成，逐阶段验收记录在归档文件里；此后的排期与待办只在 [`PLAN.md`](./PLAN.md)。
