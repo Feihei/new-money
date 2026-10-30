@@ -12,7 +12,7 @@ use bevy::{
 };
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
-    AiCadence, DataHandles, Date, EpochOverride, GameSeed, GameSetup, TurnPhase,
+    AiCadence, DataHandles, Date, EpochOverride, GameSeed, GameSetup, StartCashChoice, TurnPhase,
 };
 
 mod art;
@@ -104,6 +104,8 @@ fn insert_boot_resources(world: &mut World) {
     // `GameSetup::default()` 那两位全人类是**测试夹具**，不动它（理由见 `ai_field` 的文档），
     // 换阵容是这一句 insert 的事
     world.insert_resource(boot_roster());
+    // 起始资金档（P2c）：不设用棋盘默认档（台湾盘 20 万、演示盘 2 万）
+    world.insert_resource(boot_cash());
     // AI 的伪延迟：默认 0.5..=1.5 秒（PLAN §四 P14 那句），`NM_AUTOGAP=<秒>` 压成常数
     world.insert_resource(boot_cadence());
     world.insert_resource(DataHandles::load(&server));
@@ -146,6 +148,30 @@ fn boot_roster() -> GameSetup {
             GameSetup::ai_field()
         }
         None => GameSetup::ai_field(),
+    }
+}
+
+/// 起始资金档（P2c）。`NM_CASH=<50000|100000|200000|300000>` 钉住一档；
+/// 不设＝用棋盘数据的默认档。四档之外的值不静默夹，喊一句然后回默认 ——
+/// 截图核对时「我要的是 5 万」比「随便跑一个数」重要。
+fn boot_cash() -> StartCashChoice {
+    const TIERS: [i64; 4] = [50_000, 100_000, 200_000, 300_000];
+    let Ok(raw) = std::env::var("NM_CASH") else {
+        return StartCashChoice(None);
+    };
+    match raw.trim().parse::<i64>() {
+        Ok(n) if TIERS.contains(&n) => {
+            info!("起始资金档（NM_CASH）：{n}");
+            StartCashChoice(Some(n))
+        }
+        Ok(n) => {
+            warn!("NM_CASH={n} 不是四档之一（50000/100000/200000/300000），改用棋盘默认档");
+            StartCashChoice(None)
+        }
+        Err(_) => {
+            warn!("NM_CASH={raw} 不是整数，改用棋盘默认档");
+            StartCashChoice(None)
+        }
     }
 }
 

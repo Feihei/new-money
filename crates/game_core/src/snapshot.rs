@@ -50,8 +50,12 @@ use crate::turn::{GameSession, LastRoll, TurnOrder, TurnPhase};
 use crate::villain::{Hired, Villain, VillainKind};
 use crate::world::{ActiveBoard, Gameplay};
 
-/// 存档格式版本。加字段＋给 `#[serde(default)]` 时递增；`migrate` 负责把旧版本搬上来。
-pub const SAVE_VERSION: u32 = 1;
+/// 存档格式版本。加字段时递增；读档侧只认当前版本（`paths::check_version`），
+/// 今天没有迁移函数 —— 旧档会被明确拒掉，而不是静默读成半份。
+///
+/// **2（P2c）**：加了 `board`。旧档是演示盘的，换默认盘之后读进台湾盘会把 0..=5 号地的
+/// 归属套到基隆/台北头上 —— 版本号直接拒掉整份档，比「读进去之后名字全错」干净。
+pub const SAVE_VERSION: u32 = 2;
 
 /// 一个行动者在快照里的**稳定身份**。
 ///
@@ -67,6 +71,13 @@ pub enum SeatRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GameSnapshot {
     pub version: u32,
+    /// 这张档属于哪张棋盘（P2c）。读档时与当前 `ActiveBoard` 对不上就拒绝 ——
+    /// 同一个 `LandId` 在两块盘上是两块不同的地。
+    ///
+    /// `#[serde(default)]` 只为让老版本的档先解析出来、再由 `check_version` 说出
+    /// 「版本不兼容」那句人话；不填时它绝不会被当成一块合法棋盘读进去。
+    #[serde(default)]
+    pub board: String,
     /// 整份规则。规则是这一局的一部分：利率、物价门槛、抵押成数换一份，同一局的账就对不上。
     pub rules: GameRules,
     pub session: GameSession,
@@ -552,6 +563,7 @@ pub fn capture_match(world: &mut World) -> Result<GameSnapshot, SaveDeny> {
 
     Ok(GameSnapshot {
         version: SAVE_VERSION,
+        board: world.resource::<ActiveBoard>().def.board_name.clone(),
         rules: *world.resource::<GameRules>(),
         session: world.resource::<GameSession>().clone(),
         market: *world.resource::<MarketClock>(),

@@ -69,6 +69,12 @@ fn the_capture_matches_what_the_world_says() {
     request_save(&mut app);
     let snapshot = taken(&app).expect("可存点应存得下");
     assert_eq!(denied(&app), None);
+    // P2c：档里记着棋盘名，读档时对不上就拒绝（`LandId` 只在同一张盘上有意义）
+    assert_eq!(
+        snapshot.board,
+        app.world().resource::<ActiveBoard>().def.board_name,
+        "快照必须记下它属于哪张棋盘"
+    );
 
     // 回合数与日历：读快照自己的字段没有意义，对着世界那两份资源比
     let session = app.world().resource::<GameSession>().clone();
@@ -357,6 +363,39 @@ fn every_state_block_reaches_the_snapshot() {
     assert_eq!(after.session.bank_vault, 123);
     assert!(!after.ledgers.is_empty(), "公司当月账页");
     assert_ne!(after.rng, before.rng, "随机流水位");
+}
+
+/// P2c：档里记着棋盘名。把一张原型盘的档改成「台湾盘」去读，`begin_game_system`
+/// 必须**按新局开**而不是把 `LandId` 套到另一张盘的前六块地上 —— 后者不会崩，
+/// 只会把业主与地名全装错，是最难在画面上认出来的那一种错。
+#[test]
+fn a_save_from_another_board_starts_a_fresh_match_instead_of_mixing_land_ids() {
+    let mut living = boot_default();
+    boot_to_wait_roll(&mut living);
+    play_turns(&mut living, 5);
+    assert!(run_until_phase(&mut living, TurnPhase::WaitRoll, 60));
+    request_save(&mut living);
+    let mut snapshot = taken(&living).expect("可存点应存得下");
+    snapshot.board = "taiwan".into();
+    snapshot.session.turn_count = 99;
+
+    let mut other = boot_default();
+    other
+        .world_mut()
+        .insert_resource(StartMode::Resume(Box::new(snapshot)));
+    assert!(
+        run_until_world(&mut other),
+        "对不上盘之后仍应铺出一局新世界"
+    );
+    assert_eq!(
+        other.world().resource::<ActiveBoard>().def.board_name,
+        "prototype"
+    );
+    assert_eq!(
+        other.world().resource::<GameSession>().turn_count,
+        0,
+        "盘对不上就不能按存档续跑，必须从新局开始"
+    );
 }
 
 /// P15b 的核心验收：**读档继续 == 没读档继续**。

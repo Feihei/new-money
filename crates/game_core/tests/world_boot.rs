@@ -8,8 +8,8 @@ use common::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
     ActiveBoard, Bankrupt, DataHandles, Detention, GameRules, GameSeed, GameSetup, LandId, Owner,
-    PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, TokenPosition, TurnPhase,
-    Wallet,
+    PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, StartCashChoice, TokenPosition,
+    TurnPhase, Wallet,
 };
 
 fn snapshot(app: &mut App) -> Vec<(u32, String, i64, u32)> {
@@ -165,8 +165,8 @@ fn world_boots_exactly_once() {
 }
 
 #[test]
-fn setup_and_rules_are_the_only_sources() {
-    // 阵容与起始现金都由 resource 驱动：换值不必动任何 system（缺陷 #12 的验收）
+fn setup_rules_and_cash_choice_are_the_only_sources() {
+    // 阵容、起始现金都由 resource 驱动：换值不必动任何 system（缺陷 #12 的验收）
     let setup = GameSetup {
         players: (0..3)
             .map(|i| PlayerSetup {
@@ -187,6 +187,9 @@ fn setup_and_rules_are_the_only_sources() {
         },
         Default::default(),
     );
+    // P2c 起真棋盘自带默认档（演示盘 20_000）；这个夹具要的是 8_888，所以显式选档。
+    // `begin_game_system` 会把它写回 `GameRules.start_cash`，物价指数的分母因此同步。
+    app.insert_resource(StartCashChoice(Some(8_888)));
     assert!(run_until_world(&mut app));
 
     // 阵容与起始现金都由 resource 驱动：换值不必动任何 system（缺陷 #12 的验收）。

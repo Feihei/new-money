@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::board::{BoardDef, TileIndex};
 use crate::rng::Rng;
-use crate::rules::GameRules;
 use crate::world::Gameplay;
 
 use std::collections::VecDeque;
@@ -434,6 +433,16 @@ pub struct PlayerSetup {
     pub controller: crate::ai::Controller,
 }
 
+/// 开局现金的选择（P2c）。`None` ＝ 用棋盘数据里的 `start_cash` 默认档。
+///
+/// 它单独成一个资源而不是 `GameSetup` 的第五个字段：`GameSetup` 是**阵容**，
+/// 而档位是难度旋钮；两者在面板上不同屏、也不同生命周期（P2c-c 的面板只改这一格）。
+/// 写入口只有面板与 `NM_CASH` 两处，`begin_game_system` 在开局时把它（或棋盘默认）
+/// 写回 `GameRules.start_cash` —— 物价指数的分母 `Books::initial_assets` 读的是后者，
+/// 两处若各留一份，指数从第一帧就不中性。
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StartCashChoice(pub Option<i64>);
+
 /// 对局配置：玩家名单。表现层/测试在开局前插入即可覆盖默认阵容。
 #[derive(Resource, Debug, Clone, PartialEq)]
 pub struct GameSetup {
@@ -532,7 +541,7 @@ impl Default for GameSetup {
 pub fn spawn_players(
     commands: &mut Commands,
     setup: &GameSetup,
-    rules: &GameRules,
+    start_cash: i64,
     def: &BoardDef,
     rng: &mut Rng,
 ) -> Vec<Entity> {
@@ -554,9 +563,7 @@ pub fn spawn_players(
             // 开局的三样「与新局有关、与这个人无关」的读数在这里落；
             // 身份与组件清单在 [`spawn_body`] 里，开局与读档共用那一份
             let mut spawned = commands.entity(entity);
-            spawned.insert(Wallet {
-                cash: rules.start_cash,
-            });
+            spawned.insert(Wallet { cash: start_cash });
             // 道具栏开局送一个路障（PLAN §三：路障/机器娃娃/机器工人开局即送）
             spawned.insert(crate::items::Inventory::starting());
             // 开局坐哪一格：见函数头

@@ -1295,7 +1295,7 @@ impl ForceAuction {
         match raw.trim().parse::<u32>() {
             Ok(land) => Self(Some(land)),
             Err(_) => {
-                warn!("NM_AUCTION={raw} 不认识，应为地块编号（prototype 是 0..=5）");
+                warn!("NM_AUCTION={raw} 不认识，应为地块编号（台湾盘是 0..=62）");
                 Self(None)
             }
         }

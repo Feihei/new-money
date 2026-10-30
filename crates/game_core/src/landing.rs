@@ -164,9 +164,12 @@ pub const fn domain_of(kind: TileKind) -> LandingDomain {
         // 普通路格什么都不发生。原来与它同格的 `Start` 已经在 10-26 整格删掉（4 代没有
         // 起点，开局改随机落位），所以这一行不再需要「拍板过不发薪水」那条豁免
         TileKind::Road => D::Nothing,
-        // ↓ 待办清单。中立与交通根本没有对应玩法（PLAN §三），神明那条 P6 已经改走
-        //   路上刷出来的实体而不是踩格（ADR-002）。踩上去不再静默。
-        TileKind::GodDeity | TileKind::Neutral | TileKind::Transport => D::Unimplemented(kind),
+        // 中立格（P2c 的「公园」）：真正的「什么都不发生」 —— 不是待办。4 代公园就是
+        // 一块可以歇脚的空地；把它留在 `Unimplemented` 里会让玩家每踩一次都吃一条警告
+        TileKind::Neutral => D::Nothing,
+        // ↓ 待办清单。交通没有对应玩法；神明那条 P6 已经改走路上刷出来的实体而不是踩格
+        //   （ADR-002）。踩上去不再静默。
+        TileKind::GodDeity | TileKind::Transport => D::Unimplemented(kind),
     }
 }
 
@@ -618,7 +621,7 @@ mod tests {
     /// 分派表的全部条目。这张清单与 `domain_of` 一一对着写：新增 `TileKind` 时
     /// `domain_of` 会先编译失败，所以这里唯一可能过期的是「加了格类型没加进清单」——
     /// 下面那条 `每格都有归宿` 的用例把两种过期分开钉住了。
-    const ALL_KINDS: [TileKind; 17] = [
+    const ALL_KINDS: [TileKind; 18] = [
         TileKind::Property,
         TileKind::Bank,
         TileKind::Stock,
@@ -636,6 +639,7 @@ mod tests {
         TileKind::Arcade,
         TileKind::Company,
         TileKind::News,
+        TileKind::Magic,
     ];
 
     #[test]
@@ -653,8 +657,9 @@ mod tests {
             // P4③：拘留场所的接入点 = 保释入口（没人可保时安静收摊）
             (TileKind::Jail, D::Bail(DetentionPlace::Jail)),
             (TileKind::Hospital, D::Bail(DetentionPlace::Hospital)),
-            // 拍板过「什么都不发生」的那一格：不是待办
+            // 拍板过「什么都不发生」的那两格：不是待办
             (TileKind::Road, D::Nothing),
+            (TileKind::Neutral, D::Nothing),
             // P8：彩票中心 = 买券窗口（它从下面那组待办里挪出来，正是这条注释说的那件事）
             (TileKind::Lottery, D::Lottery),
             // P10d①：公司门面 = 服务费收据
@@ -664,8 +669,9 @@ mod tests {
             // 待办三格各自点名；将来某格实现了就从这一组挪走，
             // 于是「悄悄少了一个待办」也会在这里显形
             (TileKind::GodDeity, D::Unimplemented(TileKind::GodDeity)),
-            (TileKind::Neutral, D::Unimplemented(TileKind::Neutral)),
             (TileKind::Transport, D::Unimplemented(TileKind::Transport)),
+            // P13 的魔法屋：两步窗口，不是「没实现」
+            (TileKind::Magic, D::Magic),
         ];
         assert_eq!(
             routes.len(),
@@ -692,11 +698,7 @@ mod tests {
             .collect();
         assert_eq!(
             todos,
-            vec![
-                &TileKind::GodDeity,
-                &TileKind::Neutral,
-                &TileKind::Transport,
-            ],
+            vec![&TileKind::GodDeity, &TileKind::Transport],
             "待办清单变了：那是 PLAN §三 的缺口对照表也跟着变的意思"
         );
     }

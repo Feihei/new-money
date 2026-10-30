@@ -183,7 +183,7 @@ pub mod prelude {
     pub use crate::player::{
         BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Gender, Heading, Insured,
         Mount, MoveCap, PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, Points,
-        StaySentence, Term, TokenPosition, WalkQueue, Walker, Wallet,
+        StartCashChoice, StaySentence, Term, TokenPosition, WalkQueue, Walker, Wallet,
     };
     pub use crate::plot::{PlotArea, area_of, is_in_area};
     pub use crate::property::{
@@ -233,8 +233,8 @@ use prelude::{
     PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, PointsStolen,
     PolicyBought, RedEnvelope, RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue,
     RentRerouted, RequestRemoteDice, RequestRoll, RequestStay, ServiceCharged, ShopOpDone,
-    ShopOpRequested, ShopStock, StayLifted, StaySkipped, StockPriceChanged, StockSet,
-    StockTradeRequested, StockTraded, StockVisited, TileStepped, TollExtorted, TurnEnded,
+    ShopOpRequested, ShopStock, StartCashChoice, StayLifted, StaySkipped, StockPriceChanged,
+    StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped, TollExtorted, TurnEnded,
     TurnPhase, TurnStarted, UpgradeOffered, VillainHired, WalkClock, WalkHalt, WalkHalted,
     WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system, age_suspensions_system,
     auction_hold_system, auction_move_system, bail_op_system, bank_op_system, begin_game_system,
@@ -287,6 +287,7 @@ impl Plugin for CoreGamePlugin {
             // 表现层要换阵容/换种子就在 Startup 前 insert_resource 覆盖
             .init_resource::<GameRules>()
             .init_resource::<GameSetup>()
+            .init_resource::<StartCashChoice>()
             .init_resource::<GameSeed>()
             .init_resource::<EpochOverride>()
             .init_resource::<HolidaySet>()

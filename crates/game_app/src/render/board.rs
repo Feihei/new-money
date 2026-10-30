@@ -25,9 +25,10 @@ pub(crate) fn spawn_board_geometry(
     let b = &active.def;
     let roads = spawn_roads(&mut commands, &mut meshes, &mut mats, b);
     let floors = spawn_tile_floors(&mut commands, &mut meshes, &mut mats, b);
+    let odd = spawn_branch_buildings(&mut commands, &mut meshes, &mut mats, b);
     let filler = spawn_ground(&mut commands, &mut meshes, &mut mats, b);
     info!(
-        "棋盘几何：路面 {roads} 段 / 道路格地板 {floors} 块 / 地面密铺 {filler} 块（土地视觉挂在 Land 实体上）"
+        "棋盘几何：路面 {roads} 段 / 道路格地板 {floors} 块 / 支线尽端建筑 {odd} 座 / 地面密铺 {filler} 块（土地视觉挂在 Land 实体上）"
     );
 }
 
@@ -173,6 +174,35 @@ fn group_strip(
         Transform::from_xyz(at.x, dim::STRIP_Y, at.z).with_rotation(Quat::from_rotation_y(yaw)),
         Rendered,
     ));
+}
+
+/// 死胡同尽端的建筑（P2c）：监狱与医院在支线尽头各有一座楼，棋子被关进去时停在这里。
+///
+/// 它不挂 `TilePick`：点格详情卡认的是主环接入点，死胡同的楼只是「人停在这里」的视觉。
+/// 高度比路面高一截，等轴测下才读得出「这条路尽头有栋房子」，否则与一格地板没区别。
+fn spawn_branch_buildings(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &mut Assets<StandardMaterial>,
+    b: &BoardDef,
+) -> usize {
+    let mut built = 0;
+    for t in &b.tiles {
+        let Some(branch) = &t.branch else { continue };
+        let Some(end) = branch.tiles.last() else {
+            continue;
+        };
+        let pos = b.world_pos(end.col, end.row);
+        let h = b.cell_size * 1.6;
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(b.cell_size * 0.78, h, b.cell_size * 0.78))),
+            MeshMaterial3d(flat(mats, darkened(palette::tile(end.kind), 0.15))),
+            Transform::from_xyz(pos.x, h * 0.5, pos.z),
+            Rendered,
+        ));
+        built += 1;
+    }
+    built
 }
 
 /// 网格里既不是道路格、也不是分支格、也不在土地足迹内的空格，用双色地面补齐

@@ -14,7 +14,7 @@ use crate::data::DataHandles;
 use crate::deck::Deck;
 use crate::land::{self, LandId};
 use crate::market::MarketClock;
-use crate::player::{self, GameSetup};
+use crate::player::{self, GameSetup, StartCashChoice};
 use crate::rng::{GameSeed, Rng};
 use crate::rules::GameRules;
 use crate::shop::ShopStock;
@@ -76,6 +76,8 @@ pub struct BeginCfg<'w> {
     setup: Res<'w, GameSetup>,
     seed: Res<'w, GameSeed>,
     epoch: Res<'w, EpochOverride>,
+    /// 起始资金档（P2c）：`None` ＝ 用棋盘数据的默认值
+    cash: Res<'w, StartCashChoice>,
 }
 
 /// 四类数据资产全部就位后一次性装配世界：校验 → spawn 土地/玩家/股票/牌堆实体 →
@@ -136,10 +138,25 @@ pub fn begin_game_system(
     // 读档（P15b）：资产校验照跑（数据错了同样当场 panic），然后换一个入口走同一条铺局链。
     // 取走之后 `StartMode` 回到 `Fresh` —— 否则下一局「新游戏」会把这份档再读一遍。
     if let StartMode::Resume(snapshot) = std::mem::take(&mut *start) {
-        snapshot::resume_match(&mut commands, def, &stocks, holidays, news, *snapshot);
-        next.set(TurnPhase::WaitRoll);
-        return;
+        // P2c：`LandId` 只在同一张盘上有意义。档里的盘与当前盘对不上就不读 ——
+        // 读进去会把 0..=5 号地的归属套到另一张盘的前六块地上，名字与业主全错
+        if snapshot.board == def.board_name {
+            snapshot::resume_match(&mut commands, def, &stocks, holidays, news, *snapshot);
+            next.set(TurnPhase::WaitRoll);
+            return;
+        }
+        warn!(
+            "存档属于棋盘「{}」，当前棋盘是「{}」：这份档不读，按新局开",
+            snapshot.board, def.board_name
+        );
     }
+
+    // 这一局的钱从哪来：面板/旋钮选的档 > 棋盘数据的默认档。写回 `GameRules` 是必须的
+    // ——`Books::initial_assets`（物价指数的分母）读的是它，只改钱包会让指数从第一帧就偏。
+    let start_cash = cfg.cash.0.unwrap_or(def.start_cash);
+    let mut rules = *cfg.rules;
+    rules.start_cash = start_cash;
+    commands.insert_resource(rules);
 
     // 洗牌消耗的是**牌堆子流**，骰子流一位没动 —— 所以「对局第一手点数 ==
     // `Rng::new(seed).roll_die()`」这条 B2 的断言在 B3 之后依然成立（见 rng.rs）。
@@ -152,7 +169,7 @@ pub fn begin_game_system(
     let lands = land::spawn_lands(&mut commands, &def);
     // 开局落位在 `spawn_players` 里抽（4 代没有起点格），走 `pick_start` 那条子流 ——
     // 所以「这一局有几个人、各坐在哪」不挪动牌序、骰点、行情与宝箱
-    let players = player::spawn_players(&mut commands, &cfg.setup, &cfg.rules, &def, &mut rng);
+    let players = player::spawn_players(&mut commands, &cfg.setup, start_cash, &def, &mut rng);
     spawn_stocks(&mut commands, &stocks);
     for deck in [
         Deck::dealt(CardKind::Chance, chance, &mut rng),
@@ -191,7 +208,7 @@ pub fn begin_game_system(
         chests.len(),
         gods.len(),
         villains.len(),
-        cfg.rules.start_cash
+        start_cash
     );
     match holidays.coverage() {
         Some((first, last)) => {

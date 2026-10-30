@@ -916,8 +916,9 @@ impl AiHand<'_, '_> {
     /// 把「这块地的 `owner` 换成我」这件事在**快照**上做一遍（`LandView` 本来就是为「判定
     /// 不去查世界」设计的，所以假想不需要同步任何状态，也不可能与成交分叉）。
     ///
-    /// 补全同色组那一跳就在这一个数里：`owns_full_group` 读的是同一份假想视图，所以「差一块
-    /// 就垄断」的地天然比别的地贵出 `monopoly_rent_multiplier` 倍 —— 不是一条特例，是式子本身。
+    /// 补全同色组那一跳就在这一个数里：`calculate_rent` 读的是同一份假想视图，
+    /// 而街租是「同街同业主各块相加」—— 所以买下最后一块时，那个数里既有它自己那一份，
+    /// 也把这条街其余几块的租金一起念了出来。
     fn rent_if_mine(&self, subject: Entity, land: LandId) -> i64 {
         let Some(me) = self.books.id_of(subject) else {
             return 0;
@@ -2833,9 +2834,10 @@ mod tests {
         assert!(plot_value(rent, price, leverage(0.5)).abs() < 1.0);
         // 同一次租金、贵一倍的价：分是负的，于是 Decline 赢
         assert!(plot_value(rent, price * 2, leverage(0.5)) < 0.0);
-        // 补全同色组那一跳（垄断翻倍）能把同一块地从「不买」翻成「买」
-        let doubled = rent * GameRules::default().monopoly_rent_multiplier;
-        assert!(plot_value(doubled, price, leverage(0.5)) > 0.0);
+        // 补全同色组那一跳（街租叠加）能把同一块地从「不买」翻成「买」：
+        // 三块 500 的街，买下最后一块之后踩任何一块都收 1500
+        let street = rent * 3;
+        assert!(plot_value(street, price, leverage(0.5)) > 0.0);
     }
 
     /// 三档先验必须是**能读出差别**的三行读数：`harm` 单调、`fumble` 单调，

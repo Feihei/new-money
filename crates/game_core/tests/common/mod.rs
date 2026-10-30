@@ -1395,7 +1395,12 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .add_systems(
             Startup,
             |mut commands: Commands, server: Res<AssetServer>| {
-                commands.insert_resource(DataHandles::load(&server));
+                // P2c：默认盘换成了台湾真棋盘；规则层这批集成测试的格号/地号/地名
+                // 是按演示盘写的，所以这里**显式钉住** prototype，而不是跟着默认盘漂。
+                commands.insert_resource(DataHandles::load_with_board(
+                    &server,
+                    "data/boards/prototype.json",
+                ));
             },
         )
         .add_systems(PreUpdate, pump_inputs)

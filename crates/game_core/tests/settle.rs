@@ -148,16 +148,16 @@ fn rent_moves_cash_from_payer_to_owner() {
 }
 
 #[test]
-fn monopoly_doubles_the_rent_in_play() {
+fn a_street_sums_its_plots_in_play() {
     let (mut app, _) = ready_on(0, 1, DecisionPolicy::DeclineAll);
-    // brown 组两块都在 P1 手里 → land 0 的 60 翻成 120
+    // brown 组两块都在 P1 手里 → 60 + 60
     own(&mut app, 0, Some(1), 0, false);
     own(&mut app, 1, Some(1), 0, false);
     land(&mut app);
 
     assert!(
         ledger(&app).contains(&"Rent(P0->P1@L0$120)".to_string()),
-        "垄断应翻倍：{:?}",
+        "街租应两块相加：{:?}",
         ledger(&app)
     );
 }
@@ -190,14 +190,14 @@ fn cant_pay_rent_bankrupts_the_payer_and_frees_their_lands() {
     stand_to_land(&mut app, p0, 4, 6);
     own(&mut app, 3, Some(0), 2, false); // P0 自己有块徐家汇
     own(&mut app, 4, Some(1), 0, false); // yellow 组
-    own(&mut app, 5, Some(1), 0, false); // 整组在手 → 空地租 160×2 = 320
+    own(&mut app, 5, Some(1), 0, false); // 整组在手 → 空地租 160 + 180 = 340
     set_cash(&mut app, p0, 50);
     land(&mut app);
 
     let led = ledger(&app);
     assert!(
-        led.contains(&"Bankrupt(P0欠320)".to_string()),
-        "付不出 320 → 当场破产：{led:?}"
+        led.contains(&"Bankrupt(P0欠340)".to_string()),
+        "付不出 340 → 当场破产：{led:?}"
     );
     assert!(
         app.world().entity(p0).get::<Bankrupt>().is_some(),

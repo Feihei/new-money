@@ -325,6 +325,10 @@ pub struct LandDef {
 #[derive(Debug, Clone, PartialEq, Asset, TypePath, Deserialize)]
 pub struct BoardDef {
     pub board_name: String,
+    /// 这张盘的默认起始现金（P2c）。四档面板与 `NM_CASH` 选的值会压过它，
+    /// 没选时它就是 `GameRules.start_cash` 的来源 —— 真棋盘按 20 万标价，演示盘仍 2 万。
+    #[serde(default = "default_start_cash")]
+    pub start_cash: i64,
     #[serde(default = "default_cell_size")]
     pub cell_size: f32,
     pub grid_cols: u32,
@@ -347,6 +351,12 @@ pub struct BoardDef {
 
 const fn default_cell_size() -> f32 {
     2.0
+}
+
+/// 棋盘没写 `start_cash` 时的默认档：与 `GameRules::default().start_cash` 同一个数，
+/// 于是老棋盘/老存档的行为一字不变。
+const fn default_start_cash() -> i64 {
+    20_000
 }
 
 pub type BoardError = String;
@@ -708,6 +718,14 @@ impl BoardDef {
         }
 
         let mut land_cells = std::collections::HashSet::new();
+        // 死胡同格也是实心占位：土地压上去会让「人停在楼里」那格被楼盖住，
+        // 而且 `tile_at_grid` 会先找到地、点格详情卡从此点不到那栋楼
+        let branch_cells: std::collections::HashSet<(u32, u32)> = self
+            .tiles
+            .iter()
+            .filter_map(|t| t.branch.as_ref())
+            .flat_map(|b| b.tiles.iter().map(|t| (t.col, t.row)))
+            .collect();
         for l in &self.lands {
             if !(1..=2).contains(&l.size) {
                 errs.push(format!(
@@ -750,10 +768,35 @@ impl BoardDef {
                                 l.id, cell.0, cell.1
                             ));
                         }
+                        if branch_cells.contains(&cell) {
+                            errs.push(format!(
+                                "土地 {} 压在死胡同格 ({},{}) 上",
+                                l.id, cell.0, cell.1
+                            ));
+                        }
                     } else {
                         errs.push(format!("土地足迹重叠于 ({},{})", cell.0, cell.1));
                     }
                 }
+            }
+
+            // 地必须紧贴它绑定的道路格：`land_world_pos` 与同色条都按「格→地」的方向摆，
+            // 中间隔一格的话建筑会飘在离路一格远的地方，而渲染不会报错
+            let touches = bound.iter().any(|id| {
+                let Some(t) = self.tiles.iter().find(|t| t.id == *id) else {
+                    return false;
+                };
+                (0..l.size as u32).any(|dc| {
+                    (0..l.size as u32).any(|dr| {
+                        let (c, r) = (l.col + dc, l.row + dr);
+                        (t.col as i64 - c as i64).abs() <= 1
+                            && (t.row as i64 - r as i64).abs() <= 1
+                            && (t.col, t.row) != (c, r)
+                    })
+                })
+            });
+            if !touches {
+                errs.push(format!("土地 {} 与它绑定的道路格不相邻", l.id));
             }
 
             // 商业设施（P10b）：住宅/保险地不挂设施与收费；商业地必须 2x2；
@@ -786,6 +829,9 @@ impl BoardDef {
                         }
                         (Some(BuildingKind::GasStation), Some(FeeDef::PerStep { .. })) => {}
                         (Some(BuildingKind::Lab | BuildingKind::Park), None) => {}
+                        // 空商业地：买下之后踩上去才选建设项（P10c）。它不是数据错误 ——
+                        // 真棋盘上大量商业地开局就是空地，`offer_own_land` 靠这一格开建设窗口
+                        (None, None) => {}
                         (kind, fee) => errs.push(format!(
                             "土地 {} 的设施 {:?} 与收费 {:?} 不匹配（购物中心=A 档位、旅馆=B 按天、加油站=C 按步数、研究所/公园=无）",
                             l.id, kind, fee
@@ -871,6 +917,7 @@ mod tests {
     fn prototype_parses_and_validates() {
         let b = board();
         assert_eq!(b.board_name, "prototype");
+        assert_eq!(b.start_cash, 20_000, "演示盘仍按 2 万标价");
         assert_eq!(b.loop_len(), 21);
         assert_eq!(b.lands.len(), 6);
         assert!(
@@ -885,6 +932,133 @@ mod tests {
         let airline = b.tile(16).unwrap();
         assert_eq!(airline.kind, TileKind::Company);
         assert_eq!(airline.data.stock.as_deref(), Some("stock_005"));
+    }
+
+    // ===== P2c：台湾真棋盘 =====
+
+    const TAIWAN: &str = include_str!("../../../assets/data/boards/taiwan.json");
+
+    fn taiwan() -> BoardDef {
+        BoardDef::from_json(TAIWAN).expect("taiwan.json 应能解析")
+    }
+
+    /// 真盘的验收地基：16 条街、每条 3–6 块（纯商业街是 2 块）、商业与住宅混排、
+    /// 一圈 100 格、起始现金 20 万。这些数写死在测试里，改盘就必须同时解释为什么。
+    #[test]
+    fn taiwan_is_sixteen_streets_of_three_to_six_plots() {
+        let b = taiwan();
+        assert_eq!(b.board_name, "taiwan");
+        assert_eq!(b.start_cash, 200_000);
+        assert_eq!(b.loop_len(), 100);
+        assert_eq!(b.lands.len(), 63);
+        assert!(
+            b.validate().is_ok(),
+            "校验失败: {:?}",
+            b.validate().unwrap_err()
+        );
+
+        let mut streets: BTreeMap<&str, Vec<&LandDef>> = BTreeMap::new();
+        for l in &b.lands {
+            streets
+                .entry(l.group.as_deref().unwrap())
+                .or_default()
+                .push(l);
+        }
+        assert_eq!(streets.len(), 16, "台湾盘该有 16 条街");
+        for (group, plots) in &streets {
+            let commercial_only = plots.iter().all(|l| l.land_type == LandType::Commercial);
+            let n = plots.len();
+            if commercial_only {
+                assert_eq!(n, 2, "{group} 是纯商业街，该是两块大地");
+            } else {
+                assert!(
+                    (3..=6).contains(&n),
+                    "{group} 有 {n} 块地，街道应在 3–6 块之间"
+                );
+            }
+        }
+        // 商业与住宅混排的街至少三条；纯商业街两条 —— 这是「商业可以单独一条街，
+        // 也可以与住宅同街」那条口径在数据上的两种形状
+        let mixed = streets
+            .values()
+            .filter(|p| {
+                p.iter().any(|l| l.land_type == LandType::Commercial)
+                    && p.iter().any(|l| l.land_type == LandType::Residential)
+            })
+            .count();
+        let pure_comm = streets
+            .values()
+            .filter(|p| p.iter().all(|l| l.land_type == LandType::Commercial))
+            .count();
+        assert!(mixed >= 3, "混合街只有 {mixed} 条");
+        assert_eq!(pure_comm, 2, "纯商业街该是桃园与高雄两条");
+
+        // 商业地都是 2×2，且空商业地（没有 building_kind）真的存在 —— P10c 的建设窗口
+        // 靠它；`validate` 若继续把 (None,None) 当错误，这一条会先红
+        let commercial: Vec<_> = b
+            .lands
+            .iter()
+            .filter(|l| l.land_type == LandType::Commercial)
+            .collect();
+        assert_eq!(commercial.len(), 9, "九块商业地");
+        assert!(commercial.iter().all(|l| l.size == 2));
+        assert!(
+            commercial.iter().any(|l| l.building_kind.is_none()),
+            "真盘上要留空商业地给建设窗口"
+        );
+    }
+
+    /// 两条支线各 5 格、尽端是建筑、支线格不在主环上也没有地。
+    #[test]
+    fn taiwan_branches_end_in_a_building() {
+        let b = taiwan();
+        for (kind, name) in [(BranchKind::Jail, "监狱"), (BranchKind::Hospital, "医院")] {
+            let end = b.branch_end(kind).expect("支线存在");
+            assert_eq!(end.name, name);
+            assert_eq!(
+                end.kind,
+                if kind == BranchKind::Jail {
+                    TileKind::Jail
+                } else {
+                    TileKind::Hospital
+                }
+            );
+            let junction = b.branch_junction(kind).unwrap();
+            assert_eq!(
+                junction.kind,
+                match kind {
+                    BranchKind::Jail => TileKind::Jail,
+                    BranchKind::Hospital => TileKind::Hospital,
+                },
+                "主环接入点本身就是保释格"
+            );
+            assert_eq!(junction.branch.as_ref().unwrap().tiles.len(), 5);
+            assert_eq!(end.land_id, None, "死胡同尽端没有地");
+        }
+    }
+
+    /// 无地段落（P2c 蓝图里的「集中段落」）：真有连续的行车段没有地，
+    /// 且点券/小游戏都落在那里。没有这条断言的话，把 coupon 挪到地旁边也不会有人发现。
+    #[test]
+    fn taiwan_has_a_land_free_stretch_with_coupon_and_arcade() {
+        let b = taiwan();
+        let mut run = 0;
+        let mut best = 0;
+        for t in &b.tiles {
+            if t.land_id.is_none() && t.kind != TileKind::Shop && t.kind != TileKind::Company {
+                run += 1;
+                best = best.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        assert!(best >= 6, "连成一段的无地路段只有 {best} 格");
+        assert!(b.tiles.iter().any(|t| t.kind == TileKind::Coupon));
+        assert!(b.tiles.iter().any(|t| t.kind == TileKind::Arcade));
+        assert!(
+            b.tiles.iter().any(|t| t.kind == TileKind::Neutral),
+            "公园那一格"
+        );
     }
 
     #[test]

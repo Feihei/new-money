@@ -11,7 +11,10 @@ use crate::card::CardSet;
 use crate::news::NewsSet;
 use crate::stock::StockSet;
 
-pub const BOARD_PATH: &str = "data/boards/prototype.json";
+/// 玩家看到的那张盘（P2c）：台湾 16 条街。演示盘 `prototype.json` 仍留在仓库里，
+/// 规则层集成测试把它当**固定夹具**显式加载（`DataHandles::load_with_board`）——
+/// 那些用例的格号/地号/地名是按演示盘写的，换默认盘不等于也要把它们重写一遍。
+pub const BOARD_PATH: &str = "data/boards/taiwan.json";
 pub const CHANCE_PATH: &str = "data/cards/chance_cards.json";
 pub const FATE_PATH: &str = "data/cards/fate_cards.json";
 /// 可持有的道具卡（P3a）。它没有对应的格子，来源是百货公司（P3d），
@@ -38,8 +41,13 @@ pub struct DataHandles {
 
 impl DataHandles {
     pub fn load(server: &AssetServer) -> Self {
+        Self::load_with_board(server, BOARD_PATH)
+    }
+
+    /// 换一张棋盘（测试夹具 / 将来多盘选择）。其余六份资产与默认路径同一套。
+    pub fn load_with_board(server: &AssetServer, board: &'static str) -> Self {
         Self {
-            board: server.load(BOARD_PATH),
+            board: server.load(board),
             chance: server.load(CHANCE_PATH),
             fate: server.load(FATE_PATH),
             items: server.load(ITEMS_PATH),

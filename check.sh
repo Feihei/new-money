@@ -26,6 +26,7 @@ step clippy cargo clippy --workspace --all-targets -- -D warnings
 # `game_app` 是纯二进制 crate（没有 lib target，`--lib` 会直接 error 101），所以整包跑
 step app    cargo test -p game_app
 step board  python tools/validate_board.py assets/data/boards/prototype.json
+step taiwan python tools/validate_board.py assets/data/boards/taiwan.json
 echo "== 结果 =="
 [ "$fail" -eq 0 ] && echo "全部通过" || echo "有步骤失败"
 exit "$fail"

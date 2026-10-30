@@ -18,11 +18,10 @@ pub struct GameRules {
     pub walk_step_interval: f32,
     /// 建筑等级上限（`property_system.gd:113` 的 `level >= 6`）。
     pub max_building_level: u8,
-    /// 垄断同色组后的租金倍数（`property_system.gd:75-77` 的 `base_rent *= 2`）。
-    pub monopoly_rent_multiplier: i64,
     /// 涨价卡期间的租金倍数（PLAN §三「抵消对」那行的「整街 5 天加倍」）。
-    /// 与 [`monopoly_rent_multiplier`] 分开两个数：它们是两个规则，会各自被改
-    /// （将来「涨价不叠加垄断」这种话一说出口，共用一个数就得先拆开）。
+    ///
+    /// 街租本身是**同街各块相加**（P2c，见 [`crate::economy::calculate_rent`]），不再有
+    /// 「垄断倍数」那一格。涨价仍按块乘自己那份，所以整街盖卡时整条街的合计翻倍。
     pub hike_rent_multiplier: i64,
     /// 调跌期间的租金**除数**（新闻「这一带地价调跌」，P11c②）。2 = 租金减半。
     ///
@@ -172,7 +171,6 @@ impl Default for GameRules {
             start_cash: 20_000,
             walk_step_interval: 0.18,
             max_building_level: 5,
-            monopoly_rent_multiplier: 2,
             hike_rent_multiplier: 2,
             drop_rent_divisor: 2,
             deposit_rate: 0.10,

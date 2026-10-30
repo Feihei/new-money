@@ -87,10 +87,34 @@ pub fn upgrade_cost(def: &BoardDef, land: &LandView) -> Option<i64> {
     def.land(land.id.0).map(|d| d.upgrade_cost)
 }
 
-/// 租金：无主/抵押 → 0；等级直接当租金表下标（**0 级空地收 `rent[0]`**，10-23 级数重判
-/// 按四代口径，`property_system.gd:59-61`）；
-/// 等级超出租金表长度 → 0（`property_system.gd:70` 的越界分支）；
-/// 持有同色组全部未抵押地产 → ×`monopoly_rent_multiplier`（`property_system.gd:73-77`）。
+/// 一块地**自己**那一份租金：等级表 + 它自己的涨价/调跌。
+///
+/// 与 [`calculate_rent`] 分开是因为街租是「同街同业主各块相加」：涨价卡/查封卡
+/// 总是整条街一起盖（`area: "street"`），但规则上仍按块持有，所以每一块各算自己那份。
+/// 抵押、查封、业主不在场**不在这里** —— 那是「这一块还算不算」的门，在调用处。
+fn plot_rent(def: &BoardDef, land: &LandView, rules: &GameRules) -> i64 {
+    let Some(defn) = def.land(land.id.0) else {
+        return 0;
+    };
+    let base = defn.rent.get(land.level as usize).copied().unwrap_or(0);
+    match land.status {
+        Some(LandStatus::PriceHike) => base * rules.hike_rent_multiplier,
+        // 调跌是涨价的镜像，但**不是一条「乘 0.5」**：这套账全程整数，除数只有一条
+        // 取整口径（向下），而乘 0.5 再取整在叠加之上会差一块钱
+        Some(LandStatus::PriceDrop) => base / rules.drop_rent_divisor,
+        Some(LandStatus::Sealed) | None => base,
+    }
+}
+
+/// 这一块地自己踩上去要收的钱（4 代口径：**整条街叠加**）。
+///
+/// 无主/抵押/业主不在/查封 → 0（短路的都是「这一块今天收不收」，不是从某个数乘出来）；
+/// 真有街（`group`）时把**同街、同业主、还收得动**的住宅地各算一份加起来 ——
+/// 三块各 500 的街，踩到任意一块就是 1500；只买下一半的街只加他名下那几块。
+///
+/// **商业地不进来**：它踩上去的过路费是设施服务费（`service` 四原型），不是租金表；
+/// 空商业地按 P10c 口径一文不收。把商业租金表也加进来会造出「踩住宅替商业收费」的假账。
+/// 它仍是「整条街」的一员：加盖判据（[`owns_full_group`]）照样要它。
 pub fn calculate_rent(def: &BoardDef, land: &LandView, all: &[LandView], rules: &GameRules) -> i64 {
     let Some(owner) = land.owner else {
         return 0;
@@ -103,36 +127,34 @@ pub fn calculate_rent(def: &BoardDef, land: &LandView, all: &[LandView], rules: 
     if land.owner_detained {
         return 0;
     }
-    // 查封：法院贴着条子，这一趟谁都不收钱。放在租金表之前短路，是因为「零」不是
-    // 从某个数乘出来的 —— 涨价与查封同时挂在一块地上这件事，单槽位已经让它不可能发生
+    // 查封：法院贴着条子，这一块谁都不收钱。单槽位让「查封 × 涨价」不可能同时挂着
     if land.status == Some(LandStatus::Sealed) {
         return 0;
     }
-    let Some(defn) = def.land(land.id.0) else {
-        return 0;
+    let Some(group) = land.group.as_deref() else {
+        return plot_rent(def, land, rules);
     };
-    let base = defn.rent.get(land.level as usize).copied().unwrap_or(0);
-    // 垄断只对「真有个组」的地块生效：无组地块 Godot 也不翻倍（`property_system.gd:74` 的 `group != ""`）
-    let monopoly = land
-        .group
-        .as_deref()
-        .is_some_and(|g| owns_full_group(all, owner, g));
-    let rent = if monopoly {
-        base * rules.monopoly_rent_multiplier
-    } else {
-        base
-    };
-    // 涨价乘在垄断之后：4 代读出来是「这条街的过路费翻倍」，而街价本身已经含垄断加成。
-    // 反过来先加倍再垄断是同一个数（都是乘），但顺序写清楚，将来加「涨价不叠加垄断」
-    // 这种规则时只有一处要改
-    match land.status {
-        Some(LandStatus::PriceHike) => rent * rules.hike_rent_multiplier,
-        // 调跌是涨价的镜像，但**不是一条「乘 0.5」**：这套账全程整数，除数只有一条
-        // 取整口径（向下），而乘 0.5 再取整在垄断加成之上会差一块钱。两者谁也不叠加谁 ——
-        // 单槽位让「先涨后跌」读成「后盖前」，这里永远只有一种状态在场
-        Some(LandStatus::PriceDrop) => rent / rules.drop_rent_divisor,
-        Some(LandStatus::Sealed) | None => rent,
+    // 无组地块不叠加；有组时按「同街同业主」加总。商业地只看自己那一份：
+    // 它不进住宅街租，但 AI/估值读它时仍拿得到自己的租金表
+    if def
+        .land(land.id.0)
+        .is_none_or(|d| d.land_type == crate::board::LandType::Commercial)
+    {
+        return plot_rent(def, land, rules);
     }
+    all.iter()
+        .filter(|o| {
+            o.group.as_deref() == Some(group)
+                && o.owner == Some(owner)
+                && !o.mortgaged
+                && !o.owner_detained
+                && o.status != Some(LandStatus::Sealed)
+                && def
+                    .land(o.id.0)
+                    .is_some_and(|d| d.land_type != crate::board::LandType::Commercial)
+        })
+        .map(|o| plot_rent(def, o, rules))
+        .sum()
 }
 
 /// 垄断判定：同色组内所有地块都被 `player` 持有且未抵押。
@@ -544,48 +566,66 @@ mod tests {
     }
 
     #[test]
-    fn monopoly_doubles_rent_and_needs_the_whole_group() {
+    fn a_street_sums_every_plot_the_same_owner_holds() {
         let def = board();
         let r = rules();
-        // brown 组 = land 0 + land 1
+        // brown 组 = land 0 + land 1，两块空地各 60
         let all = world(&def, &[(0, p(0), 0, false)]);
         let land = at(&all, 0);
         assert_eq!(
             calculate_rent(&def, &land, &all, &r),
             60,
-            "只持有一半 → 不翻倍"
+            "只持有一半 → 只收自己那块的 60"
         );
 
         let all = world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]);
         let land = at(&all, 0);
         assert_eq!(
             calculate_rent(&def, &land, &all, &r),
-            60 * r.monopoly_rent_multiplier,
-            "整组在手 → ×{}（`property_system.gd:75-77`）",
-            r.monopoly_rent_multiplier
+            120,
+            "整条街在手 → 两块相加（60+60），不是「×2」这条倍数"
         );
 
-        // 组里另一块被抵押 → 垄断失效（`_owns_full_group` 的 `is_mortgaged_by_key`）
+        // 同街两块租金表不同（yellow：160 与 180）→ 相加而不是取某一块乘倍数
+        let all = world(&def, &[(4, p(0), 0, false), (5, p(0), 0, false)]);
+        assert_eq!(
+            calculate_rent(&def, &at(&all, 4), &all, &r),
+            340,
+            "踩哪一块都读同一条街的合计"
+        );
+        assert_eq!(
+            calculate_rent(&def, &at(&all, 5), &all, &r),
+            340,
+            "同一街两块地的过路费必须相等，否则「踩哪块」成了抽奖"
+        );
+
+        // 组里另一块被抵押 → 它那一份记 0，剩下的照收（旧口径是整组不翻倍）
         let all = world(&def, &[(0, p(0), 0, false), (1, p(0), 1, true)]);
         let land = at(&all, 0);
         assert_eq!(
             calculate_rent(&def, &land, &all, &r),
             60,
-            "组内有抵押 → 不翻倍"
+            "抵押的邻地不加进合计"
+        );
+        assert_eq!(
+            calculate_rent(&def, &at(&all, 1), &all, &r),
+            0,
+            "踩到抵押中的那一块本身仍然是 0"
         );
 
-        // 组里另一块在别人手里 → 同样不翻倍
+        // 组里另一块在别人手里 → 只加自己名下那几块
         let all = world(&def, &[(0, p(0), 0, false), (1, p(1), 1, false)]);
         let land = at(&all, 0);
         assert_eq!(
             calculate_rent(&def, &land, &all, &r),
             60,
-            "组内有他人 → 不翻倍"
+            "组内有他人 → 只收自己的那一份"
         );
     }
 
     /// 调跌（P11c②）是涨价的镜像，但它是**除**不是「乘 0.5」：这套账全程整数，
-    /// 一条取整口径写清楚比两个数各自凑近更重要（垄断 120 ÷ 2 = 60，若写成乘除数会得 240）。
+    /// 一条取整口径写清楚比两个数各自凑近更重要。街租是逐块相加，所以「整街减半」
+    /// 读出来是**每块各除 2 再相加**；卡本来就是 `area: "street"`，两块一起盖。
     ///
     /// 第二问也要答：调跌**不挡业主自己加盖** —— 它动的是「别人付多少」，
     /// 与涨价同一格答案（查封挡，因为那是法院贴条子）。
@@ -593,20 +633,28 @@ mod tests {
     fn a_dropped_street_halves_the_rent_and_still_builds() {
         let def = board();
         let r = rules();
+        let both = || world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]);
         let all = stamped(
-            world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]),
-            0,
+            stamped(both(), 0, Some(LandStatus::PriceDrop)),
+            1,
             Some(LandStatus::PriceDrop),
         );
         assert_eq!(
             calculate_rent(&def, &at(&all, 0), &all, &r),
             120 / r.drop_rent_divisor,
-            "调跌除在垄断加成之后（与涨价乘的位置同一条）"
+            "整街盖调跌 → 两块各除 2（60+60=120 → 30+30=60）"
         );
         assert_eq!(
             calculate_rent(&def, &at(&all, 1), &all, &r),
-            120,
-            "调跌也是按块盖的，没盖到的那块照旧"
+            120 / r.drop_rent_divisor,
+            "同一街两块地的过路费必须相等"
+        );
+        // 只盖到一块（数据/未来单块状态）时，只有那一块减半，另一块照旧
+        let one = stamped(both(), 0, Some(LandStatus::PriceDrop));
+        assert_eq!(
+            calculate_rent(&def, &at(&one, 0), &one, &r),
+            30 + 60,
+            "调跌按块除，邻块那一份不跟着动"
         );
         let me = PlayerId(0);
         assert!(
@@ -619,22 +667,30 @@ mod tests {
     fn a_hiked_street_doubles_and_a_sealed_one_collects_nothing() {
         let def = board();
         let r = rules();
-        // 整组在手（垄断 60×2=120）之上再涨价。乘在垄断之后是 `calculate_rent` 里写死的
-        // 顺序，这条把它钉住：两个倍数若共用一个数，这里先红
+        // 整街盖涨价：两块各乘 2 再相加（60+60 → 240）。卡是 `area: "street"`，
+        // 所以「这条街的过路费翻倍」是每块各自翻倍的合计，不是「合计再乘一个整街倍数」
+        let both = || world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]);
         let all = stamped(
-            world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]),
-            0,
+            stamped(both(), 0, Some(LandStatus::PriceHike)),
+            1,
             Some(LandStatus::PriceHike),
         );
         assert_eq!(
             calculate_rent(&def, &at(&all, 0), &all, &r),
             120 * r.hike_rent_multiplier,
-            "涨价乘在垄断加成之后"
+            "整街涨价 → 两块各乘 2"
         );
         assert_eq!(
             calculate_rent(&def, &at(&all, 1), &all, &r),
-            120,
-            "涨价是按块盖的，没盖到的那块照旧"
+            120 * r.hike_rent_multiplier,
+            "同一街两块地的过路费必须相等"
+        );
+        // 只盖到一块：只有那一块翻倍（60×2 + 60 = 180）
+        let one = stamped(both(), 0, Some(LandStatus::PriceHike));
+        assert_eq!(
+            calculate_rent(&def, &at(&one, 0), &one, &r),
+            180,
+            "涨价按块乘，邻块那一份不跟着动"
         );
 
         // 查封：零，而且是在查租金表之前短路 —— 于是「查封 × 涨价」这种该由单槽位挡掉的
@@ -647,7 +703,12 @@ mod tests {
         assert_eq!(
             calculate_rent(&def, &at(&all, 0), &all, &r),
             0,
-            "法院贴着条子的这一趟谁都不收钱"
+            "法院贴着条子的这一块谁都不收钱"
+        );
+        assert_eq!(
+            calculate_rent(&def, &at(&all, 1), &all, &r),
+            60,
+            "邻块没查封 → 只少查封那一份"
         );
     }
 
@@ -685,15 +746,72 @@ mod tests {
         );
     }
 
+    /// 用户给的验收原话：同一条街三块地、每块租金 500，别人踩到其中任意一块都要付 1500。
+    /// 演示盘只有两块，所以这里临时把 brown 扩成三块（只改租金表，规则层不看坐标）。
     #[test]
-    fn single_land_group_monopolises_once() {
+    fn three_plots_at_five_hundred_make_fifteen_hundred() {
+        let mut def = board();
+        for id in [0, 1] {
+            def.lands[id].rent = vec![500; 6];
+        }
+        let mut extra = def.lands[0].clone();
+        extra.id = 6;
+        extra.col = 99;
+        extra.row = 99;
+        extra.name = "第三条街".into();
+        def.lands.push(extra);
+        let r = rules();
+        let all = world(
+            &def,
+            &[
+                (0, p(0), 0, false),
+                (1, p(0), 0, false),
+                (6, p(0), 0, false),
+            ],
+        );
+        for id in [0, 1, 6] {
+            assert_eq!(
+                calculate_rent(&def, &at(&all, id), &all, &r),
+                1500,
+                "踩 0/1/6 号任意一块都该付整条街的 500×3"
+            );
+        }
+        // 只买下两块时只收两块
+        let all = world(&def, &[(0, p(0), 0, false), (6, p(0), 0, false)]);
+        assert_eq!(calculate_rent(&def, &at(&all, 0), &all, &r), 1000);
+    }
+
+    /// 商业地是「同一条街」的一员（加盖仍要它），但**不参与住宅街租的相加**：
+    /// 它踩上去收的是设施服务费，不是租金表；空商业地按 P10c 一文不收。
+    /// 把商业租金表也加进来会造出「踩住宅替商业收费」的假账。
+    #[test]
+    fn commercial_plots_stay_out_of_the_street_rent_sum() {
+        let mut def = board();
+        // 把 brown 的 land 1 改成商业地（测试只看类型分叉，不要求 2x2 形状）
+        def.lands[1].land_type = crate::board::LandType::Commercial;
+        let r = rules();
+        let all = world(&def, &[(0, p(0), 0, false), (1, p(0), 0, false)]);
+        assert_eq!(
+            calculate_rent(&def, &at(&all, 0), &all, &r),
+            60,
+            "同街的商业地不加进住宅租金"
+        );
+        // 加盖资格仍然读整条街 —— 商业地也是这条街的一员
+        assert!(
+            owns_full_group(&all, PlayerId(0), "brown"),
+            "商业地在不在手，决定这条街算不算齐"
+        );
+    }
+
+    #[test]
+    fn single_land_group_sums_once() {
         let def = board();
         let r = rules();
-        // red 组只有 land 3 一块：整组在手即垄断，翻倍恰好一次（不是 ×2×2）
+        // red 组只有 land 3 一块：街租就是它自己那一份（240），不是再乘一个倍数
         let all = world(&def, &[(3, p(0), 0, false)]);
         let land = at(&all, 3);
         assert!(owns_full_group(&all, PlayerId(0), "red"));
-        assert_eq!(calculate_rent(&def, &land, &all, &r), 240 * 2);
+        assert_eq!(calculate_rent(&def, &land, &all, &r), 240);
     }
 
     #[test]
@@ -807,7 +925,7 @@ mod tests {
         assert_eq!(
             calculate_rent(&def2, &land2, &all2, &r),
             60,
-            "无组地块也不该翻倍的租金"
+            "无组地块也不该叠加出第二份租金"
         );
     }
 

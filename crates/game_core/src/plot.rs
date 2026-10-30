@@ -154,6 +154,7 @@ mod tests {
     fn board(lands: Vec<LandDef>) -> BoardDef {
         BoardDef {
             board_name: "测试盘".into(),
+            start_cash: 20_000,
             cell_size: 2.0,
             grid_cols: 8,
             grid_rows: 8,

@@ -159,7 +159,8 @@ pub mod palette {
             TileKind::Hospital => Color::srgb(0.9, 0.9, 0.95),
             TileKind::Lottery => Color::srgb(0.95, 0.85, 0.4),
             TileKind::GodDeity => Color::srgb(0.7, 0.5, 0.95),
-            TileKind::Neutral => Color::srgb(0.4, 0.4, 0.45),
+            // 中立格（P2c 起是「公园」）：真正的什么都不发生，颜色按绿地取
+            TileKind::Neutral => Color::srgb(0.38, 0.6, 0.42),
             TileKind::Road => Color::srgb(0.5, 0.5, 0.5),
             TileKind::Transport => Color::srgb(0.5, 0.7, 0.7),
             // 点券箱没有 Godot 对照（`TYPE_COLORS` 里没这一格）， mint 是与青绿路面
@@ -189,7 +190,9 @@ pub mod palette {
         }
     }
 
-    /// `land_view.gd:152-163` 的同色组配色（比 Godot 多出的 brown/cyan/purple/orange 也在表里）
+    /// `land_view.gd:152-163` 的同色组配色。前八个是演示盘留下的旧键；
+    /// 后十六个是 P2c 台湾盘的十六条街 —— 相邻街的色相至少隔一档，否则整盘看过去
+    /// 只剩「一大片彩色」，街与街的边界要靠数格子才分得出来。
     pub fn group(group: &str) -> Color {
         match group {
             "red" => Color::srgb(0.9, 0.25, 0.25),
@@ -200,6 +203,22 @@ pub mod palette {
             "cyan" => Color::srgb(0.3, 0.85, 0.9),
             "purple" => Color::srgb(0.65, 0.3, 0.8),
             "orange" => Color::srgb(0.95, 0.6, 0.15),
+            "keelung" => Color::srgb(0.35, 0.45, 0.62),
+            "taipei" => Color::srgb(0.88, 0.28, 0.3),
+            "taoyuan" => Color::srgb(0.9, 0.55, 0.2),
+            "hsinchu" => Color::srgb(0.92, 0.75, 0.2),
+            "miaoli" => Color::srgb(0.62, 0.75, 0.25),
+            "taichung" => Color::srgb(0.35, 0.72, 0.35),
+            "changhua" => Color::srgb(0.25, 0.68, 0.55),
+            "yunlin" => Color::srgb(0.25, 0.62, 0.72),
+            "chiayi" => Color::srgb(0.3, 0.48, 0.88),
+            "tainan" => Color::srgb(0.55, 0.35, 0.85),
+            "kaohsiung" => Color::srgb(0.78, 0.3, 0.72),
+            "pingtung" => Color::srgb(0.9, 0.45, 0.6),
+            "taitung" => Color::srgb(0.72, 0.5, 0.25),
+            "hualien" => Color::srgb(0.45, 0.55, 0.35),
+            "yilan" => Color::srgb(0.4, 0.7, 0.6),
+            "tamsui" => Color::srgb(0.6, 0.6, 0.75),
             _ => Color::srgb(0.6, 0.6, 0.6),
         }
     }
