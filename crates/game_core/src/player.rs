@@ -1,7 +1,7 @@
 //! 玩家实体：运行时状态是组件，开局配置是 `GameSetup`。
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::board::{BoardDef, TileIndex};
 use crate::rng::Rng;
@@ -13,7 +13,9 @@ use std::collections::VecDeque;
 /// 玩家标识。与 `LandId`、`TileIndex` 互不通用 —— 这是缺陷 #1
 /// （拿 `"L"+land_id` 字符串 key 去调 `get_tile(index:int)`，导致贷款上限恒为 0）
 /// 在 Rust 里编译不过的结构性原因。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct PlayerId(pub u32);
 
 /// 这颗棋子的名字。顶栏、HUD、保释窗口、dump 都按实体读它。
@@ -25,12 +27,12 @@ pub struct PlayerId(pub u32);
 /// 「查不到 `PlayerName` 就再查一次 `Villain`」，漏写那一处不报错，只会让屏幕上冒出一个
 /// 「玩家」或「?」—— 名字这一位因此与 `PlayerColor` 分开放：颜色要分玩家与恶人两套
 /// （棋子视觉的构造点只有两处），名字不该。
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerName(pub String);
 
 /// 归属色，sRGB 三分量。规则层刻意不用 bevy 的 `Color`：`default_app` 特性子集里
 /// 根本不包含 `bevy_color`，而且颜色本就只该由表现层解释。
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PlayerColor(pub [f32; 3]);
 
 impl PlayerColor {
@@ -48,7 +50,7 @@ pub const PLAYER_COLORS: [PlayerColor; 4] = [
 ];
 
 /// 现金。加减钱的入口在 B3 的结算 system，那里要同时发 `CashChanged` 与处理不足额（缺陷 #3）。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Wallet {
     pub cash: i64,
 }
@@ -58,7 +60,7 @@ pub struct Wallet {
 /// 单独一个组件而不是 `Wallet` 的第二个字段，是为了让「两套账」在类型上成立：
 /// 点券的变动只走 [`crate::msg::PointsChanged`]，永不进 `CashChanged`，
 /// 于是 B3 那条现金审计（余额 == 起始 + Σ 流水）既抓不到点券、也不该抓到。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Points(pub u32);
 
 /// 银行账户：存款生息、贷款计息（`bank_system.gd` 的 deposit/loan 字段）。
@@ -68,7 +70,7 @@ pub struct Points(pub u32);
 /// 那部分钱。它与 `loan` 分家有三条理由 —— 不计息（挪用不是贷款）、丢掉董事长身份
 /// 的那一刻被立刻收回（`bank.rs` 的回收 system）、赔付「银行付不出的取款」时先于
 /// 贷款挪用（见 `bank_pool` 的口径）。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BankBalance {
     pub deposit: i64,
     pub loan: i64,
@@ -80,7 +82,7 @@ pub struct BankBalance {
 /// 入狱时停在**接入点**而不是死胡同格本身（`player_data.gd:62-68` 的语义），
 /// 死胡同格只是表现层把棋子挪过去的视觉停车位 —— 这条区分是「core 拥有逻辑位置、
 /// render 只做插值」的前提，否则出狱后不知道该从哪格继续走。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenPosition {
     pub tile: TileIndex,
 }
@@ -95,7 +97,7 @@ pub struct TokenPosition {
 ///
 /// 与 [`StaySentence`] 的区别是这条线的边界：**停留的人还在场上**（棋子不动、地照收租），
 /// 被拘留的人不在。所以两张计时各自独立，谁也不许顺手把对方的规则扩过来。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DetentionPlace {
     /// 监狱（`BranchKind::Jail` 那条死胡同）
@@ -165,7 +167,7 @@ impl DetentionPlace {
 /// 自己就走出来了，而 PLAN 拍的那一条恰恰是「踩地雷与恶犬回医院**需再保释**」。
 /// 反过来写成一个很大的数（99）是能跑，但那份数据在说谎：没人打算数到 99。
 /// 类型里写成两个变体，「钟会不会放他走」这件事就不需要任何人去猜。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Term {
     /// 服刑 N 个自己的回合，扣到头由回合机放人（玩家挨的那一族全是这一支）。
     Turns(u32),
@@ -188,7 +190,7 @@ impl Term {
 /// 存在即被拘留中（P4，取代 B2b 起的 `JailSentence`）。递减口径见 `begin_turn_system`：
 /// `Turns` 每次回合开始扣一格，扣到只剩 1 的那一回合**当场可行动**，所以「判 3 天」= 跳过 2 个回合；
 /// `UntilBailed` 不扣（P12 的恶人：他压根不在轮转里，见 `villain::villain_rotation_system`）。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Detention {
     pub place: DetentionPlace,
     pub term: Term,
@@ -245,7 +247,7 @@ pub struct Walker;
 /// 照样收租。这两件事在规则上只差「他在不在牌桌上」这一点，而差别一旦写进同一个组件，
 /// 就要靠 `place` 字段的分支去还原 —— [`Detention`] 收的是
 /// 「被送离场」那一族，停留不属于它（PLAN §四 P4 那行的边界）。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaySentence {
     pub turns_left: u32,
 }
@@ -259,7 +261,7 @@ pub struct StaySentence {
 ///
 /// 计数口径与停留同一条**字面**：写 3 就影响 3 个自己的掷骰回合；被拘留/被停留按掉的
 /// 回合没有掷骰，也就不消耗它。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveCap {
     pub turns_left: u32,
 }
@@ -277,7 +279,7 @@ pub struct MoveCap {
 ///
 /// 再投保 = 买一份新保单、旧的作废（不是 `max` 也不是累加 —— 你付了新保费，
 /// 就该拿到新保单写的那几天）。
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Insured {
     pub days_left: u32,
     pub insurer: String,
@@ -291,7 +293,7 @@ pub struct Insured {
 ///
 /// 它决定的是**摇几颗骰子**（`Rng::roll_die` 摇 `dice()` 次再相加），不是「走几格」：
 /// 骰子颗数由玩家在掷骰前选（`RequestRoll.dice`），遥控骰子与乌龟卡的夹步是另一层。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Mount {
     #[default]
     Foot,
@@ -332,7 +334,7 @@ impl Mount {
 /// 缺省是 `Forward`，而开局每个玩家都挂着它（[`spawn_players`]）—— 查询一律按 `&Heading`
 /// 要它，别用 `Option`：「没有这个组件」与「正向」读出同一个方向，用 `Option` 只会把
 /// 漏挂组件这件事变成一条永远不响的静默降级。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Heading {
     /// 沿 `tiles[]` 的下标递增方向走（正常绕行）。
     #[default]
@@ -401,7 +403,7 @@ impl WalkQueue {
 }
 
 /// 存在即破产。破产玩家退出回合序，钱包与地产由结算 system 清空。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bankrupt;
 
 /// 「还没有走过任何一段」时 [`WalkQueue::from`] 的占位读数。
@@ -415,7 +417,7 @@ const NO_WALK_YET: TileIndex = TileIndex(0);
 ///
 /// 为什么要一个字段而不是从名字猜：那是第二份真相 —— 名字是文案，文案改了
 /// 筛选结果就跟着变。CHARACTERS.md 的角色档案本来就有这一栏，它是开局配置的一部分。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Gender {
     Male,
     Female,

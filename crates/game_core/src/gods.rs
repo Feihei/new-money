@@ -48,6 +48,7 @@ use std::collections::HashSet;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::board::{BoardDef, TileIndex};
 use crate::charge::{
@@ -77,7 +78,7 @@ const SPAWN_TRIES: usize = 8;
 
 /// 一位神。`ALL` 的顺序就是**抽取顺序**，所以调整它等于改每一局的刷出结果 ——
 /// 改完要重新核对那批按种子断言的用例。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum God {
     BigRich,
     SmallRich,
@@ -229,7 +230,7 @@ impl Presence {
 
 /// 存在即被这位神附身。`days_left` 数的是**他自己的剩余回合**，扣到最后一格那一回合离场
 /// （见模块头「天怎么数」）。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Possession {
     pub god: God,
     pub days_left: u32,

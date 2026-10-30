@@ -21,6 +21,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::calendar::{HolidaySet, date_of, is_dividend_day};
 use crate::company::CompanyLedgers;
@@ -38,7 +39,7 @@ use crate::turn::TurnOrder;
 
 /// 行情钟：全市场统一的 tick 计数（`stock_market.gd:21` 的 `tick_count`）。
 /// 一个 tick 就是一天，日历（[`crate::economy::date_of`]）由它推出来，分红按它落的那天。
-#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketClock {
     pub tick: u32,
 }

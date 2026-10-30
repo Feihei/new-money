@@ -19,7 +19,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::card::CardEffect;
 use crate::data::DataHandles;
@@ -31,7 +31,7 @@ use crate::passive::{Job, Step, Tail};
 /// 一条新闻在池子里的位置。**存下标而不是 id 字符串**（与 [`crate::deck::CardId`] 同构）：
 /// `GameSession::last_news` 要进存档，而下标在「策划改了 id 命名」时不会失效——
 /// 失效的是那条记录指向哪一条，那正是 P15「牌堆顺序必须存索引」同一条账。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewsId(pub u32);
 
 /// 「这条新闻点名哪一位」。作用域是**人**的那一档里的第二层选择。

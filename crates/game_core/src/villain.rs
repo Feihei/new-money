@@ -29,6 +29,7 @@
 //! 发送端在 `property.rs` 的租金结算里。集成行为测试在 `tests/villain.rs`。
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::board::{BoardDef, TileIndex, TileKind};
 use crate::landing::PendingDecision;
@@ -43,7 +44,7 @@ use crate::world::Gameplay;
 
 /// 四种恶人。**新增一种必须同时回答三格**：他抢谁的什么（P12b–d 的行为表）、
 /// 他归哪一处笼（[`VillainKind::cell`]）、他上屏叫什么名字。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum VillainKind {
     /// 强盗：抢全场存款 20%（**含雇主自己的**），擦肩抢一张卡（P12b）
     Robber,

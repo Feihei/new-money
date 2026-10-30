@@ -20,7 +20,7 @@
 
 use bevy::asset::Asset;
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// 开局年份。起始月由 [`crate::rng::Rng::pick_epoch_month`] 在 1..=12 里抽。
 ///
@@ -28,7 +28,9 @@ use serde::Deserialize;
 pub const EPOCH_YEAR: i32 = 2048;
 
 /// 一个公历日期。`year` 可以小于 0（算法本身支持），但本局只会在 2048–2052 附近。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct Date {
     pub year: i32,
     pub month: u32,

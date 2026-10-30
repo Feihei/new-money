@@ -19,7 +19,7 @@
 //! 跨局残留那一族缺陷（§6.1 坑 22/25）在这里少一个入口。
 
 use bevy::prelude::ResMut;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// 哪一家机构可以被停摆。两格各自对应一条**能力**，不是两栋楼。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -57,7 +57,7 @@ impl Institution {
 /// 为什么是**两个数**而不是 `Vec<(Institution, u32)>`：这一族只有两格，写成一个表就要
 /// 为「同一家出现两次」定一条优先级，而那条规则今天没有答案（地块那边同理，见
 /// [`crate::status`] 模块头：单槽位的替换就是「后盖前」，不留优先级表）。
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Suspensions {
     stock_market: u32,
     bank: u32,

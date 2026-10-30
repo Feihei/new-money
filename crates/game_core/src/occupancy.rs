@@ -19,6 +19,7 @@ use std::collections::HashSet;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::board::{BoardDef, TileIndex};
 use crate::damage::LandDamage;
@@ -47,7 +48,7 @@ pub const STARTING_CHESTS: usize = 2;
 
 /// 一种道路放置物。**新增一种必须同时回答三件事**（ADR-002 维护提醒）：
 /// 占不占格、经过还是落脚触发、会不会被 P12 小偷搬走。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum OccupancyKind {
     /// 路障：经过即停，不消耗
     Roadblock,

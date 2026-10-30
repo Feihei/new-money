@@ -5,12 +5,12 @@
 
 use bevy::asset::Asset;
 use bevy::reflect::TypePath;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// 三副池。前两副是**踩到格子就抽、当场结算**的事件池（PLAN §三「命运 32 条」），
 /// 第三副 `Item` 是**拿在手里、由玩家主动打出**的卡 —— 它没有对应的格子，
 /// 来源是百货公司（P3d），所以 `domain_of` 里永远不会出现 `Card(Item)`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CardKind {
     Chance,

@@ -54,6 +54,7 @@ use std::collections::BTreeMap;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::auction::Gavel;
 use crate::calendar::Date;
@@ -72,18 +73,19 @@ use crate::turn::LastRoll;
 
 /// 一笔公司账。`amount` **带符号**：服务费是正的进账，P10d② 的保险赔付与
 /// 新闻罚款会写负数 —— 「亏损月是负数」从入账那一刻就是数据事实，不是分红时才补算。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerEntry {
     pub date: Date,
     pub amount: i64,
-    /// 人话标签（dump 与顶栏读它）。`&'static str`：标签的集合是代码里数得清的那几种，
-    /// 不值得为它开一个 enum 再写一遍 Display。
-    pub why: &'static str,
+    /// 人话标签（dump 与顶栏读它）。存 `String` 而不是 `&'static str`：P15 的存档要把这页账
+    /// 原样搬过磁盘，而 `&'static str` 反序列化不出来 —— 为一条标签在每份存档里泄漏一个
+    /// 字符串，比在这里多一次分配贵得多。
+    pub why: String,
 }
 
 /// 某家公司**当月**的那一页账。上一页在上个分红日已经结清（[`CompanyLedgers::close_month`]），
 /// 所以每家公司同时最多只有一页 —— 「查三个月前的账」没有玩法问过这个问题。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MonthLedger {
     pub year: i32,
     pub month: u32,
@@ -105,6 +107,17 @@ pub struct CompanyLedgers {
 }
 
 impl CompanyLedgers {
+    /// P15 存档：当月账页原样（`Vec` 的顺序＝录入顺序，不再排 —— 排一遍会让「同一局两次存」
+    /// 在两家公司同月首次入账的次序上一致，但也会把「谁先入的账」这条事实抹掉）。
+    pub fn months(&self) -> &[(String, MonthLedger)] {
+        &self.months
+    }
+
+    /// P15 读档。`months` 的顺序照存档给的来。
+    pub fn from_months(months: Vec<(String, MonthLedger)>) -> Self {
+        Self { months }
+    }
+
     /// 这一页（没有就开新页，跨月就翻新页）。入账唯一入口。
     pub fn current_mut(&mut self, stock: &str, date: Date) -> &mut MonthLedger {
         if !self.months.iter().any(|(s, _)| s == stock) {
@@ -364,7 +377,7 @@ pub fn insurance_claim_system(
             .push(LedgerEntry {
                 date,
                 amount: -amount,
-                why: "保险赔付",
+                why: "保险赔付".to_string(),
             });
         books.credit(notice.player, amount);
         paid.write(IndemnityPaid {

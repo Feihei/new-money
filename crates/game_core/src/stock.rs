@@ -7,20 +7,20 @@ use std::collections::VecDeque;
 use bevy::asset::Asset;
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// 股票标识 newtype。与 `LandId`/`TileIndex`/`PlayerId` 互不通用 ——
 /// 持仓、价格、交易消息都通过它索引，字符串 id 拼错在查询处就会显形。
-#[derive(Component, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StockId(pub String);
 
 /// 现价。波动由 `stock_tick` 结算推进（`stock_market.gd:68-78` 的公式）。
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StockPrice(pub f32);
 
 /// 收盘价历史（尾部最新）。上限由 `GameRules.max_price_history` 控制，
 /// 超出从头丢弃 —— `stock_market.gd:194-200` 的 `_record_price`。
-#[derive(Component, Debug, Clone, Default)]
+#[derive(Component, Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PriceHistory(pub VecDeque<f32>);
 
 /// 玩家持仓：stock_id → 股数。卖空即移除 key（`stock_market.gd:142-146`）。

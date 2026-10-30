@@ -1387,7 +1387,7 @@ fn finish(desk: &mut GateDesk, job: Job) {
                     .push(LedgerEntry {
                         date,
                         amount: done.amount,
-                        why,
+                        why: why.to_string(),
                     });
             }
             if stay_days > 0 {

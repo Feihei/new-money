@@ -7,6 +7,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::bank::AtmAccess;
 use crate::economy;
@@ -146,7 +147,7 @@ impl TurnOrder {
 ///
 /// 只 `PartialEq` 不 `Eq`：`price_index` 是浮点，`Eq` 在 `NaN` 上不自反。
 /// 存档比较走逐字段 `==`，不需要把整条资源塞进 `HashMap` 的键。
-#[derive(Resource, Debug, Clone, PartialEq)]
+#[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GameSession {
     pub turn_count: u32,
     pub seed: u64,

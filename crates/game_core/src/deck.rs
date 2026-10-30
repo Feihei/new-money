@@ -11,6 +11,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::auction::Gavel;
 use crate::board::TileIndex;
@@ -34,11 +35,11 @@ use crate::settle::Books;
 ///
 /// 用下标而不是 `String` id：卡池是加载后不变的静态数组，下标即身份，
 /// 存盘时随 `GameSeed` 一起足够重建（§九）；而 `CardNotice` 给 UI 的是 id 字符串。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CardId(pub u32);
 
 /// 一副牌怎么发。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeckOrder {
     /// 开局洗一次，抽穿再洗（机会格 —— 4 代那里也是随机的）。
     Shuffled,
@@ -62,7 +63,7 @@ pub const fn order_of(kind: CardKind) -> DeckOrder {
 }
 
 /// 一副可循环抽的牌。存在即「这一堆牌」，机会 / 命运各一个实体。
-#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deck {
     pub kind: CardKind,
     /// 发法。由 [`order_of`] 在装配时定，之后不变。

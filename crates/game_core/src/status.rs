@@ -15,14 +15,14 @@
 //! 那条「没有撤销接口是刻意的」是同一个分工。
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// 一个会自己消失的状态：种类 + 剩余天数。
 ///
 /// 「天」在这套代码里等于**一个回合结束**（与 [`crate::world::Gameplay`] 上的日历同一个
 /// 节拍，见 `market::market_tick_on_turn_end_system`），所以 `days_left` 只在回合末那一批
 /// system 里减一次；一回合里不管发生多少笔结算都不掉天数。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Timed<T> {
     pub kind: T,
     pub days_left: u32,
@@ -48,7 +48,7 @@ impl<T: Copy> Timed<T> {
 
 /// 地块上的限时状态。**每加一种都要当场回答三问**：它怎么改租金、挡不挡加盖、被谁抵消
 /// （这三问各有一张穷尽表在等着它，`_` 一处都不许写）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LandStatus {
     /// 涨价：租金翻倍（4 代的「涨价卡」，路面发红）。

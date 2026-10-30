@@ -22,6 +22,7 @@ use std::ops::RangeInclusive;
 use bevy::prelude::*;
 use rand::{Rng as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
 
 /// 单颗六面骰（`dice.gd:15`）。大富翁4 规则：无双骰、无双数额外回合。
 pub const DIE_FACES: u32 = 6;
@@ -299,6 +300,107 @@ impl Rng {
     pub fn range_f32(&mut self, span: RangeInclusive<f32>) -> f32 {
         self.market.random_range(span)
     }
+
+    /// 20 条子流此刻各自读到哪儿（P15 存档）。
+    ///
+    /// **存水位不存种子**：种子只能把整局退回开局，而「每条流各走了多远」才是这一局的真相 ——
+    /// `dice` 与 `cards` 差着几个数量级的取数节奏，一条流走得快慢不影响另一条，这正是分流
+    /// 要的，也意味着没有任何一个数能代替这 20 个。
+    pub fn positions(&self) -> RngPositions {
+        RngPositions {
+            dice: word_pos(&self.dice),
+            cards: word_pos(&self.cards),
+            market: word_pos(&self.market),
+            shop: word_pos(&self.shop),
+            epoch: word_pos(&self.epoch),
+            gift: word_pos(&self.gift),
+            envelope: word_pos(&self.envelope),
+            spawn: word_pos(&self.spawn),
+            loot: word_pos(&self.loot),
+            god: word_pos(&self.god),
+            minigame: word_pos(&self.minigame),
+            lottery: word_pos(&self.lottery),
+            auction: word_pos(&self.auction),
+            service: word_pos(&self.service),
+            freebie: word_pos(&self.freebie),
+            news: word_pos(&self.news),
+            villain: word_pos(&self.villain),
+            magic: word_pos(&self.magic),
+            start: word_pos(&self.start),
+            ai: word_pos(&self.ai),
+        }
+    }
+
+    /// 把 20 条流各自摆回存档那一刻（P15 读档）。种子与域标签都不动：它们是**装配期**的事实，
+    /// 而水位是**这一局走过的事** —— 只有后者会变。
+    pub fn set_positions(&mut self, at: RngPositions) {
+        seek(&mut self.dice, at.dice);
+        seek(&mut self.cards, at.cards);
+        seek(&mut self.market, at.market);
+        seek(&mut self.shop, at.shop);
+        seek(&mut self.epoch, at.epoch);
+        seek(&mut self.gift, at.gift);
+        seek(&mut self.envelope, at.envelope);
+        seek(&mut self.spawn, at.spawn);
+        seek(&mut self.loot, at.loot);
+        seek(&mut self.god, at.god);
+        seek(&mut self.minigame, at.minigame);
+        seek(&mut self.lottery, at.lottery);
+        seek(&mut self.auction, at.auction);
+        seek(&mut self.service, at.service);
+        seek(&mut self.freebie, at.freebie);
+        seek(&mut self.news, at.news);
+        seek(&mut self.villain, at.villain);
+        seek(&mut self.magic, at.magic);
+        seek(&mut self.start, at.start);
+        seek(&mut self.ai, at.ai);
+    }
+}
+
+/// 一条流的读指针（P15 存档）。
+///
+/// 字段**逐个命名**而不是 `[u64; 20]`：将来加第 21 条流时，数组会让所有旧存档的位次整体
+/// 错一格（读回来不报错、只是轨迹悄悄变了），而具名字段缺一个就反序列化失败 —— 那正是
+/// 我们要的响声（与 `landing::domain_of`、`charge::scales_with_price` 同一条纪律）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RngPositions {
+    dice: u64,
+    cards: u64,
+    market: u64,
+    shop: u64,
+    epoch: u64,
+    gift: u64,
+    envelope: u64,
+    spawn: u64,
+    loot: u64,
+    god: u64,
+    minigame: u64,
+    lottery: u64,
+    auction: u64,
+    service: u64,
+    freebie: u64,
+    news: u64,
+    villain: u64,
+    magic: u64,
+    start: u64,
+    ai: u64,
+}
+
+/// 读一条流的水位。`get_word_pos` 的类型是 `u128`（ChaCha 的 68 位计数器），
+/// 但高 4 位只有走满 2^64 个 word（约 64 EiB 输出）后才可能非零 —— 一局 257 回合连它的
+/// 零头都碰不到。所以存 `u64`，并在捕获处钉一条断言：这条假设一旦破了要当场响，
+/// 而不是让读档悄悄回到某一段更早的随机序列上。
+fn word_pos(stream: &ChaCha8Rng) -> u64 {
+    let pos = stream.get_word_pos();
+    debug_assert!(
+        pos <= u128::from(u64::MAX),
+        "随机流水位 {pos} 超过 u64 —— 存档格式要加一位高位"
+    );
+    pos as u64
+}
+
+fn seek(stream: &mut ChaCha8Rng, pos: u64) {
+    stream.set_word_pos(u128::from(pos));
 }
 
 /// 四个数字拼成一笔钱：千位是 `leading`，后三位各 0–9。
@@ -601,6 +703,79 @@ mod tests {
         uniq.sort();
         uniq.dedup();
         assert_eq!(uniq.len(), seeds.len(), "布局种子撞车了：{seeds:?}");
+    }
+
+    /// 存档那一格（P15）：水位存下来再摆回去，**每条流都从原处接着走**。
+    ///
+    /// 反面钉子写在断言里：`set_positions` 只摆回一条流（或一条都不摆）时，下面每一条
+    /// 「存档前 == 读档后」都会红 —— 它验的不是「有个数被存下来了」，是「20 条全都在」。
+    #[test]
+    fn positions_restore_every_stream_where_it_stopped() {
+        let mut rng = Rng::new(0x5EED);
+        // 先让每条流各走一段**不同长度**的路：同长度的话「串流」也会通过（都归零了）
+        for i in 0..7 {
+            rng.roll_die();
+            rng.pick(0..=i);
+            rng.range_f32(-0.5..=0.5);
+            rng.pick_shop(0..=i);
+            rng.pick_god(1..=12);
+            rng.pick_news(0..=3);
+            rng.pick_villain(0..=i);
+            rng.pick_magic(0..=i);
+            rng.pick_service(1..=6);
+            rng.pick_freebie(0..=i);
+            rng.pick_lottery(1..=36);
+            rng.pick_auction(0..=i);
+            rng.pick_minigame(0..=2);
+            rng.arcade_seed();
+            rng.pick_loot(0..=i);
+            rng.pick_spawn(0..=i);
+            rng.pick_start(0..=i);
+            rng.pick_epoch_month();
+            rng.pick_gift(20);
+            rng.pick_envelope_digit();
+            rng.pick_ai();
+        }
+        let at = rng.positions();
+        let expected = (
+            (0..8).map(|_| rng.roll_die()).collect::<Vec<_>>(),
+            (0..8).map(|_| rng.pick(0..=99)).collect::<Vec<_>>(),
+            (0..8).map(|_| rng.pick_news(0..=9)).collect::<Vec<_>>(),
+            (0..8)
+                .map(|_| (rng.range_f32(-1.0..=1.0) * 1000.0) as i32)
+                .collect::<Vec<_>>(),
+            (0..8).map(|_| rng.pick_ai()).collect::<Vec<_>>(),
+        );
+        let mut loaded = Rng::new(0x5EED);
+        loaded.set_positions(at);
+        let again = (
+            (0..8).map(|_| loaded.roll_die()).collect::<Vec<_>>(),
+            (0..8).map(|_| loaded.pick(0..=99)).collect::<Vec<_>>(),
+            (0..8).map(|_| loaded.pick_news(0..=9)).collect::<Vec<_>>(),
+            (0..8)
+                .map(|_| (loaded.range_f32(-1.0..=1.0) * 1000.0) as i32)
+                .collect::<Vec<_>>(),
+            (0..8).map(|_| loaded.pick_ai()).collect::<Vec<_>>(),
+        );
+        assert_eq!(expected, again, "读档后的随机序列与存档前不一样");
+    }
+
+    /// 存档那一格的另一半：**水位相同 ≠ 什么都没做**。全零水位（开局）与走了一段的水位
+    /// 必须给出不同的下一手，否则「存档里存的其实一直是 0」这种缺陷会被上一条用例放过。
+    #[test]
+    fn a_saved_position_is_not_the_start_of_the_match() {
+        let mut rng = Rng::new(9);
+        for _ in 0..20 {
+            rng.roll_die();
+        }
+        let at = rng.positions();
+        let mut fresh = Rng::new(9);
+        fresh.set_positions(at);
+        assert_ne!(
+            fresh.roll_die(),
+            Rng::new(9).roll_die(),
+            "存档水位与开局水位读出了同一个数"
+        );
     }
 
     /// 财神与红包共用的那一句（PLAN §三 神明行点名的「别各写一套」）。

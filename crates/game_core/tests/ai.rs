@@ -160,7 +160,7 @@ fn each_seat_carries_the_controller_it_was_configured_with() {
         let Controller::Ai(profile) = controller_of(&app, seat) else {
             panic!("第 {} 位该是电脑开的座位", i + 1);
         };
-        assert_eq!(profile.who, *who, "三档预设领错了名字");
+        assert_eq!(profile.who.label(), *who, "三档预设领错了名字");
     }
     // 而 `Default` 那两位**没有被顺手改成 AI**（几百条既有测试按「等人点」写）
     for p in GameSetup::default().players {
@@ -186,7 +186,7 @@ fn the_field_is_one_human_and_three_personalities() {
     // 三档各一位：验收那句「进魔法屋按性格选」要有对照才拍得出来
     let mut names: Vec<&str> = ai
         .iter()
-        .map(|p| p.controller.profile().unwrap().who)
+        .map(|p| p.controller.profile().unwrap().who.label())
         .collect();
     names.sort_unstable();
     assert_eq!(names, ["乖宝宝", "大佬奸", "普通人"]);

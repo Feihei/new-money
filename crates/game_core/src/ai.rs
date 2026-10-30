@@ -118,6 +118,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::afflict::Afflict;
 use crate::bank::bank_op_allowed;
@@ -160,7 +161,7 @@ use crate::turn::TurnOrder;
 /// 「默认等人点」而不是「默认替他决定」是刻意的：漏挂一处装配的后果是「这个座位不动」，
 /// 那看得见、报得出、排查得动；反过来（漏挂＝AI 代打）的后果是「玩家的操作被静默吃掉」，
 /// 而那种症状没人报——他只会以为游戏坏了。与 §6.1 坑 34 那一族同形。
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Controller {
     /// 真人：等 UI 发意图
     Human,
@@ -198,7 +199,35 @@ impl Controller {
 /// `match` 过「哪一档」，「大佬奸」在代码里永远是一行读数而不是十处 `if`。
 /// `who` 只上屏（dump 与 HUD 念它），**没有任何判据读它** —— 那是「性格是数不是枚举」
 /// 这条约束唯一允许的字符串，将来 `characters.json` 一人一行时填的是角色名。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AiStyle {
+    Shark,
+    Plain,
+    Goody,
+}
+
+impl AiStyle {
+    /// 上屏用的名字。**全项目只有这一处把它翻成人话**（dump／HUD／顶栏三处都读它）。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Shark => "大佬奸",
+            Self::Plain => "普通人",
+            Self::Goody => "乖宝宝",
+        }
+    }
+}
+
+impl std::fmt::Display for AiStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// 三档先验向量。**「哪一档」这件事就只在这个枚举里**：`decide` 里没有任何一处
+/// `match` 过性格，`AiStyle` 在代码里永远是一行读数而不是十处 `if`。
+/// P15 起它是枚举而不是 `&'static str`：存档要把它原样搬过磁盘，而 `&'static str`
+/// 反序列化不出来；顺带把「没有第四档性格」写成类型事实（`NM_AI` 上限 3 也是这条）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AiProfile {
     /// 置业倾向：越高越敢把现金压进房子 —— 它决定买完要留下的**保命线**有多薄
     pub buy: f32,
@@ -212,7 +241,7 @@ pub struct AiProfile {
     pub harm: f32,
     /// 失误率：落在这一格之内就改用次优的那个答案（P14b 第一处打分起才有读者）
     pub fumble: f32,
-    pub who: &'static str,
+    pub who: AiStyle,
 }
 
 impl AiProfile {
@@ -224,7 +253,7 @@ impl AiProfile {
         build: 0.80,
         harm: 0.90,
         fumble: 0.05,
-        who: "大佬奸",
+        who: AiStyle::Shark,
     };
     /// 普通人：中间那一档，而场上多数本该是这一档。
     pub const PLAIN: AiProfile = AiProfile {
@@ -234,7 +263,7 @@ impl AiProfile {
         build: 0.50,
         harm: 0.30,
         fumble: 0.15,
-        who: "普通人",
+        who: AiStyle::Plain,
     };
     /// 乖宝宝：基本不买股、很少害人，而且**缺钱也不动自己的资产**（4 代实测那一档的归宿）。
     pub const GOODY: AiProfile = AiProfile {
@@ -244,7 +273,7 @@ impl AiProfile {
         build: 0.25,
         harm: 0.05,
         fumble: 0.35,
-        who: "乖宝宝",
+        who: AiStyle::Goody,
     };
 
     /// 三档预设。座位不够分时按这个次序领。
@@ -2816,7 +2845,7 @@ mod tests {
         let [shark, plain, goody] = AiProfile::THREE;
         assert_eq!(
             (shark.who, plain.who, goody.who),
-            ("大佬奸", "普通人", "乖宝宝")
+            (AiStyle::Shark, AiStyle::Plain, AiStyle::Goody)
         );
         for (name, s, p, g) in [
             ("buy", shark.buy, plain.buy, goody.buy),

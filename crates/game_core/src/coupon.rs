@@ -26,6 +26,27 @@ pub struct CouponBoxes {
 }
 
 impl CouponBoxes {
+    /// P15 存档：按格子号**排序**导出。
+    ///
+    /// `HashMap` 的迭代序不参与「同一局两次存出同一份字节」，而存档的验收正是字节一致 ——
+    /// 所以出口只给排序过的一条，别让调用方自己 `.iter()`。
+    pub fn entries(&self) -> Vec<(TileIndex, u32)> {
+        let mut out: Vec<(TileIndex, u32)> = self
+            .ready_at
+            .iter()
+            .map(|(tile, at)| (*tile, *at))
+            .collect();
+        out.sort_by_key(|(tile, _)| *tile);
+        out
+    }
+
+    /// P15 读档：从排序过的表重建（重复的格子以最后一条为准，与 `HashMap` 的写入口一致）。
+    pub fn from_entries(entries: Vec<(TileIndex, u32)>) -> Self {
+        Self {
+            ready_at: entries.into_iter().collect(),
+        }
+    }
+
     /// 这一格现在能不能捡：没被捡过，或冷却已过。
     ///
     /// `turn` 是 `GameSession::turn_count`，数的是**全场合计**的回合数 —— 与

@@ -14,11 +14,12 @@
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::occupancy::OccupancyKind;
 
 /// 一种可堆叠的实物道具。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ItemKind {
     Roadblock,
     Mine,
@@ -70,7 +71,7 @@ impl ItemKind {
 
 /// 道具栏。存在即「这个人身上带着这些道具」，空栏也照样挂着 ——
 /// 与 `Hand` 同一条理由：没有组件与「有但空」在面板上是两件事，`Option` 会把它们混成一件。
-#[derive(Component, Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inventory {
     counts: BTreeMap<ItemKind, u32>,
 }

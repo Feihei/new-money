@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::card::{CardDef, CardEffect, CardKind, CardTarget};
 use crate::deck::{CardId, CardSink, Shelf};
@@ -36,7 +37,7 @@ use crate::turn::{TurnOrder, TurnPhase};
 ///
 /// 存 `CardId`（item 池的下标）而不是卡名字符串：与牌堆同一条理由 —— 卡定义是加载后
 /// 不变的静态数组，下标即身份。可以重复：买两张一样的陷害卡占两格手牌。
-#[derive(Component, Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hand {
     pub cards: VecDeque<CardId>,
 }

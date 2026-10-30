@@ -342,7 +342,7 @@ pub(crate) fn refresh_top_bar(
         .and_then(|player| turn.names.get(player).ok())
         .map(|name| name.0.as_str());
     let who_ai = match who.and_then(|player| turn.controllers.get(player).ok()) {
-        Some(Controller::Ai(profile)) => Some(profile.who),
+        Some(Controller::Ai(profile)) => Some(profile.who.label()),
         _ => None,
     };
     let mut wrote = false;
@@ -392,7 +392,7 @@ fn phase_hint(phase: TurnPhase, turn: &TurnView) -> Option<String> {
                             .unwrap_or_else(|_| "?".into())
                     });
                     let ai = match turn.controllers.get(who).ok() {
-                        Some(Controller::Ai(profile)) => Some(profile.who),
+                        Some(Controller::Ai(profile)) => Some(profile.who.label()),
                         _ => None,
                     };
                     head_word(

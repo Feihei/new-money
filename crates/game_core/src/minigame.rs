@@ -19,7 +19,7 @@
 //! `CashChanged` 都不产生（PLAN §一「永不通兑」），所以 B3 的现金审计看不见它。
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
 use crate::msg::{MinigameResult, MinigameScore};
@@ -87,7 +87,7 @@ fn snake_of(game: &GameKind) -> String {
 /// **满分是夹子而不是终点**：打出超过满分的成绩仍然只拿满分那笔。写成不夹的话，
 /// 「一个手快的人能刷出多少点券」就成了一个没有上界的数，而点券要拿去保释恶人（300）、
 /// 买乌龟卡（70）—— 那条经济线会被一个限时小游戏定价。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Payout {
     /// 满分成绩。超过它的部分不计。
     pub perfect: u32,
@@ -110,7 +110,7 @@ impl Payout {
 /// 三种游戏的那张表。一个结构体三个字段而不是 `[Payout; 3]`：
 /// 字段名让人在读 `GameRules::default()` 时就知道哪一档是哪种游戏，
 /// 而下标会要求读者去数 `GameKind::ALL` 的顺序 —— 那张顺序本来是给抽签用的。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Payouts {
     pub pop_balloons: Payout,
     pub catch_treasure: Payout,

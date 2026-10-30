@@ -7,16 +7,19 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::board::{BoardDef, BuildingKind};
 use crate::player::PlayerId;
 use crate::world::Gameplay;
 
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct LandId(pub u32);
 
 /// 归属。`Owner(None)` = 无主、可买；`Owner(Some(p))` = p 的地产。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Owner(pub Option<PlayerId>);
 
 /// 建筑等级：**0 = 空地**（无主、刚买下都算；10-23 级数重判，见 PLAN §三），
@@ -27,7 +30,7 @@ pub struct Owner(pub Option<PlayerId>);
 /// 「建筑数 = level」不再差一格，而「无主却带楼」（破产残留、天使白给）与
 /// 「无主的空地」从此是同一个数轴上的两个真状态，没有第三种「0 级其实是一级」
 /// 的翻译。屏幕上的名字见 `game_app::ui::building_label`。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct BuildingLevel(pub u8);
 
 /// 抵押中的本金。`proceeds > 0` 即「这块地押在银行」：租金为 0、不计入垄断判定与贷款
@@ -39,7 +42,7 @@ pub struct BuildingLevel(pub u8);
 /// 明天未必）。既然要存数，就顺手把延迟写的那个洞一起堵上：`Option<&Mortgaged>` + `Commands`
 /// 的写法下，同一帧里两条抵押同一块地的请求都读得到「还没押」，于是钱会付两遍；
 /// `&mut Mortgaged` 就地改，第二条请求当场看见。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Mortgaged {
     /// 当初抵押到手的那笔钱（名义值，不随物价指数走 —— 它是一笔债，不是一份资产）。
     pub proceeds: i64,
@@ -60,7 +63,7 @@ impl Mortgaged {
 /// 查询形状（`Query<&Facility>` / `Option<&Facility>`）比再开一个集合资源诚实——
 /// 而且同一条 system 里 `Books` 的地块查询带 `&mut Owner`，设施查询只读，
 /// 借用在 Bevy 的访问图上天然相容（`game_core` 不经手，编译器也不拦）。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Facility(pub BuildingKind);
 
 /// 这块地**成功收过几回租**（P12d）。间谍的那句「该地从未有人踩过交费则无功而返」
@@ -73,7 +76,7 @@ pub struct Facility(pub BuildingKind);
 ///
 /// 只在 [`crate::settle::Books::settle`] 里累加，判据是「这一笔 `Rent` 真的收到了钱」
 /// （`amount > 0`）—— 被大福神白嫖掉的那笔不是「交费」，免费的东西不留案底。
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RentLedger {
     pub times: u32,
 }

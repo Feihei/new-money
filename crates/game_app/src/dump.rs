@@ -842,7 +842,9 @@ fn format_players(view: &DumpView) -> Vec<String> {
                 e,
                 match controller {
                     game_core::prelude::Controller::Human => "人".to_string(),
-                    game_core::prelude::Controller::Ai(profile) => format!("机·{}", profile.who),
+                    game_core::prelude::Controller::Ai(profile) => {
+                        format!("机·{}", profile.who.label())
+                    }
                 },
             )
         })

@@ -2003,7 +2003,11 @@ pub fn add_company_entry(app: &mut App, stock: &str, amount: i64, why: &'static 
         .resource_mut::<CompanyLedgers>()
         .current_mut(stock, date)
         .entries
-        .push(game_core::prelude::LedgerEntry { date, amount, why });
+        .push(game_core::prelude::LedgerEntry {
+            date,
+            amount,
+            why: why.to_string(),
+        });
 }
 
 /// 把某位玩家的现金调到 `cash`（预置「付不起」这类边界）。

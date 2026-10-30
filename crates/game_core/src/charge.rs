@@ -30,6 +30,7 @@
 //! 手里的一张卡，没有「要不要花」这一问。
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::land::LandId;
 
@@ -80,7 +81,7 @@ pub enum ChargeKind {
 /// **过路费与「取得不动产」是两个域**，虽然它们都是钱与地的关系：4 代里「踩别人地不付钱」
 /// 与「买地免费」是两张不同的卡（免费卡 / 大福神），P10 的董事长特权又只吃前者。
 /// 把它们并成一个 `Property` 的话，第一张想要其中一半的规则就得回来拆这张表。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChargeDomain {
     /// 踩到别人地付的那笔 —— 「过路费」这一族，P10 的设施收费也归这里
     Rent,
@@ -220,7 +221,7 @@ impl Scope {
 /// ⚠️ 这里**没有**「换人付」那一臂了：`Adjustment::TransferTo` 随 P13b③ 删掉 ——
 /// 嫁祸卡从「挂在甲身上、把付款人改成乙的一条修正」变成了「门在钱动之前问乙之外的那一句」
 /// （见 [`crate::passive`]）。所以这条枚举现在全是**不问人**的修正：抵、乘、加减。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Adjustment {
     /// 整笔抵消。只对 `cancellable` 的账生效。
     Cancel,
@@ -232,7 +233,7 @@ pub enum Adjustment {
 
 /// 这条修正是谁给的。唯一的作用是**让调试面板能说出「这 0 元是谁给的」**——
 /// 查「钱为什么是这个数」的时候，少了这一栏就得回去读代码。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Source {
     /// 卡片。⚠️ ③ 之后**没有生产者**：被动卡那一族不再登记修正，而是在事件那一刻被那道门
     /// 问一次。这一位留着是因为 `Corrections` 的档是按来源分的（[`Corrections::release`]
@@ -288,6 +289,17 @@ pub struct Corrections {
 }
 
 impl Corrections {
+    /// P15 存档：全表按登记顺序（顺序是语义 —— 两条 `Cancel` 里谁先生效决定烧哪一张，
+    /// 而今天 `Cancel` 那一族住在门里，这里剩下的都是常开修正，顺序只为字节稳定）。
+    pub fn entries(&self) -> &[Correction] {
+        &self.items
+    }
+
+    /// P15 读档：`bearer` 由调用方翻译成新句柄之后再交进来。
+    pub fn from_items(items: Vec<Correction>) -> Self {
+        Self { items }
+    }
+
     pub fn register(&mut self, correction: Correction) {
         self.items.push(correction);
     }

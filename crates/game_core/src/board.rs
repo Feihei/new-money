@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use bevy::asset::Asset;
 use bevy::math::Vec3;
 use bevy::reflect::TypePath;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::player::Heading;
 
@@ -87,7 +87,7 @@ pub enum LandType {
 /// 五类各自绑定哪个收费原型（A 随机金额 / B 随机停留 / C 按步数 / D 功能）
 /// 是 [`FeeDef`] 的形状决定的，不是这里的分支：换参数就换行为是 P10 的真验收
 /// （见 `game_core::service` 模块头），原型库对「住在哪类设施」一无所知。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildingKind {
     /// 购物中心：踩到摇 1–6，按档位收（A 型）。
@@ -214,7 +214,7 @@ impl CompanyFee {
 
 /// 主环下标。环形拓扑的一切索引都用它，而不是裸 `i64`/`u32`：
 /// 与 `LandId`、`PlayerId` 是不同 newtype，混用直接编译失败（缺陷 #1 的防线）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TileIndex(pub u32);
 
 /// 网格坐标（不含世界坐标换算，那是 `BoardDef::world_pos` 的事）。

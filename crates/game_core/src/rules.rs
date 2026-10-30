@@ -5,9 +5,10 @@
 //! 各写了一遍，而 `START_CASH` 常量虽然存在却没被 `reset()` 使用。这里收成唯一来源。
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 /// 数值规则的单一来源。凡是「改了就影响平衡」的量都放这里，不放进具体 system。
-#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GameRules {
     /// 开局现金，以及任何「重置对局」时的现金值。
     pub start_cash: i64,

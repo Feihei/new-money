@@ -22,6 +22,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::calendar::{date_of, is_dividend_day, is_month_end};
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
@@ -36,7 +37,7 @@ use crate::turn::TurnPhase;
 
 /// 奖池。它**不是**任何人的钱包，所以这里动的每一笔都发 [`JackpotChanged`] 而不是
 /// [`crate::msg::CashChanged`] —— 现金审计据此把池子看成外部对手方（与银行同一条纪律）。
-#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Jackpot {
     pub pot: i64,
     /// 最近一次开出的号。`None` = 本局还没开过奖。
@@ -52,7 +53,7 @@ pub struct Jackpot {
 ///
 /// 独占换来的东西就是这个模块的形状：中奖号**至多一位持有者**，于是「独得奖池」在结构上
 /// 成立，不需要均分、不需要余数留池，而这两个分支也再也写不出来。
-#[derive(Component, Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Component, Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LotteryTickets {
     pub numbers: Vec<u8>,
 }

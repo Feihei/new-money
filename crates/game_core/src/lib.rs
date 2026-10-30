@@ -49,6 +49,7 @@ pub mod rules;
 pub mod service;
 pub mod settle;
 pub mod shop;
+pub mod snapshot;
 pub mod status;
 pub mod stock;
 pub mod turn;
@@ -311,6 +312,10 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<company::CompanyLedgers>()
             .init_resource::<LastRoll>()
             .init_resource::<WalkHalt>()
+            // P15 存档：一次「请存」的愿望、捕获结果、被拒理由
+            .init_resource::<crate::snapshot::SaveRequest>()
+            .init_resource::<crate::snapshot::SnapshotTaken>()
+            .init_resource::<crate::snapshot::SaveDenied>()
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
             .add_message::<RequestRoll>()
@@ -830,6 +835,11 @@ impl Plugin for CoreGamePlugin {
                         .run_if(in_state(TurnPhase::WaitDecision))
                         .run_if(not_paused),
                 ),
-            );
+            )
+            // ===== 存档（P15a）=====
+            // 捕获排在 **Last**：它是只读的一次性快照，必须在**这一帧所有写入之后**拍 ——
+            // 排在 `Update` 里的话，同一个调度里后跑的结算会落到快照之外，而症状是
+            // 「读档后少了最后一笔」，不会报错。独占 system + 资源"许愿"的形状见 `snapshot`。
+            .add_systems(Last, snapshot::capture_system);
     }
 }

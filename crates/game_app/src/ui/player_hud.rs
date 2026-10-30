@@ -302,7 +302,7 @@ pub(crate) fn refresh_player_hud(
         // 电脑座位照着自己那份先验动手：`who` 是角色卡上那一档性格的名字。
         // 人类座位什么都不写 —— 一个永远亮着的标记等于没有标记（同上面「逆向」那条）
         if let Controller::Ai(profile) = controller {
-            flags.push(format!("电脑·{}", profile.who));
+            flags.push(format!("电脑·{}", profile.who.label()));
         }
         let status = flags
             .into_iter()

@@ -15,6 +15,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::card::CardKind;
 use crate::company::chairman_of;
@@ -33,7 +34,7 @@ use crate::turn::TurnPhase;
 /// 是资源而不是道路格上的实体（AGENTS.md 硬约束第 4 条「道路格不建实体」）：同一时刻只有
 /// 一个人站在柜台前（`PendingDecision` 只挂一位），所以全盘一份货架就够 —— 与点券箱的
 /// 冷却账本同一个处理。
-#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Resource, Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShopStock {
     /// 还没卖掉的货位，按抽签顺序（`Vec` 的顺序就是货架的陈列顺序，面板照它排）。
     pub slots: Vec<CardId>,
