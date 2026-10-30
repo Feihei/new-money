@@ -125,7 +125,7 @@ new-money-bevy/
 
 | 实体 | 数量 | 组件 |
 |---|---|---|
-| 主环道路格 | N（prototype 12，正式 40） | **不建实体**（B2a 修正，见下）：`TileIndex`/`TileKind`/`GridPos` 全部经 `BoardDef` 查询取得 |
+| 主环道路格 | N（台湾盘 100，演示盘 21） | **不建实体**（B2a 修正，见下）：`TileIndex`/`TileKind`/`GridPos` 全部经 `BoardDef` 查询取得。默认盘是 `taiwan.json`（P2c），`prototype.json` 只剩集成测试夹具与演示用途 |
 | 分支死胡同格 | 每分支若干 | `BranchTile{junction:TileIndex, order:u8, kind}` `GridPos` —— 对应 `board_branch.gd:11` "从靠近接入点 → 末端"有序链 |
 | 路旁土地 | 若干 | `LandId(u32)` `GridPos` `LandSize(u8=1\|2)` `LandDef`(Arc：group/land_type/price/rent[6]/upgrade_cost) `OwnerAddr(Option<PlayerId>)` `BuildingLevel(u8)` `Mortgaged{proceeds:i64}`（**每块地都挂着，`proceeds>0` 即押着** —— P3d③ 之前它是「存在即抵押」的单位标记；改成带本金的值有两个理由：赎回要按「当初到手那笔 + 手续费」算，而标记存不下那个数；且 `Commands` 的延迟写会让同一帧内两条押同一块地的请求都读到「还没押」，钱付两遍） |
 | 玩家 | 2–4 | `PlayerId(u32)` `PlayerName` `PlayerColor` `Wallet{cash:i64}` `TokenPosition{tile:TileIndex, off_board:Option<GridPos>}` `Detention{place:DetentionPlace,turns_left}`（P4① 拘留统一模型：**监狱／医院／出国三处去处共用一个组件**，`DetentionPlace` 那两条映射 `branch`（棋盘上那条死胡同）与 `label`/`back_verb`（人话）是它们的全部差别；`Away` 没有分支 —— 那个地方不在地图上，所以棋子留在接入点）`StaySentence{turns_left}`（停留卡，**P4④ 起是字面口径**：写 N 停 N 个回合，且不再自动跳回合 —— 轮到他的那颗「掷骰」翻成「停留」，点一下才消耗，`take_stay_system` 收这条意图。它与拘留是两条独立计时：被拘留的人进不了 `WaitRoll`，所以拘留那几回合不消耗停留的计数；不合成一个「处境」组件的理由见 `player.rs` 那段 —— 服刑的人被挪进死胡同格且 P4 起丧失收租权，停留的人还在自己踩到的那一格上、地照收租）`Heading`（`Forward \| Backward`，P3d④b 转向卡翻的就是这一位 —— **环只有一份**，方向是玩家的状态，见 ADR-001 行为规则 3）`StockHoldings(HashMap<StockId,u32>)` `BankBalance{deposit,loan:i64}` `Controller`（`Human \| Ai(AiProfile)`，**P14a 已落地，形状与当初的设想差在两处**：① 它**必挂**而不是 `Option` —— 查不到组件的默认是「等人点」而不是「替他决定」，漏装配的阶段会静默吃掉玩家的操作，那种症状没人报；② `Ai` 里装的不是 `difficulty` 一档枚举而是一个**向量** `AiProfile{buy,debt,stock,build,harm,fumble}`，三档性格（大佬奸／普通人／乖宝宝）是这个向量的三个预设常量，于是「大佬奸」在代码里永远是一行读数而不是十处 `if`。它的全部差别见 `game_core/src/ai.rs`）`Bankrupt`（marker，取代 `status=="bankrupt"` 判断） |
@@ -147,7 +147,7 @@ new-money-bevy/
 | `GameState.players` | 不需要 —— 玩家就是实体，用 `Query<&Wallet, With<PlayerId>>` |
 | `TurnManager._players/_current_player_index/_pending_*` | `TurnOrder{active:Vec<PlayerId>, cursor:usize}` + `PendingDecision{player, kind}` |
 | `TurnManager.property_system/stock_market/bank_system/...`（`:59-69` 7 个实例字段） | 全部消失，变成 system + 组件数据 |
-| `GameRules`（新）：`START_CASH/JAIL_TURNS/MAX_LEVEL=6/DIVIDEND_INTERVAL=5/DIVIDEND_RATE/BASE_DRIFT/DEPOSIT_RATE/LOAN_RATE/MAX_LOAN_RATIO` | 一个 `GameRules` resource，值从 `data/rules.json` 读（现散落在 `player_data.gd:13` `turn_manager.gd:38-39` `stock_market.gd:14-17` `bank_system.gd:8-10`）。**B2a 已落 `start_cash`**，缺陷 #12 就此消除（起始现金只剩这一处）；其余常量 **B3 已全落**（`max_building_level`/`monopoly_rent_multiplier`/`deposit_rate`/`loan_rate`/`max_loan_ratio`/`stock_base_drift`/`dividend_interval`/`dividend_rate`/`max_price_history`）。**`rules.json` 暂不做**（2026-10-14 决定）：单一来源由 resource 本身达成，外部化等真有策划调参需求时再加 |
+| `GameRules`（新）：`START_CASH/JAIL_TURNS/MAX_LEVEL=6/DIVIDEND_INTERVAL=5/DIVIDEND_RATE/BASE_DRIFT/DEPOSIT_RATE/LOAN_RATE/MAX_LOAN_RATIO` | 一个 `GameRules` resource，值从 `data/rules.json` 读（现散落在 `player_data.gd:13` `turn_manager.gd:38-39` `stock_market.gd:14-17` `bank_system.gd:8-10`）。**B2a 已落 `start_cash`**，缺陷 #12 就此消除（起始现金只剩这一处）；其余常量 **B3 已全落**（`max_building_level`/~~`monopoly_rent_multiplier`~~/`deposit_rate`/`loan_rate`/`max_loan_ratio`/`stock_base_drift`/`dividend_interval`/`dividend_rate`/`max_price_history`；⚠️ 划掉那个 **P2c 已删** —— 街租改成同街各块相加，不再有垄断倍数，见 PLAN §四・十七）。**`rules.json` 暂不做**（2026-10-14 决定）：单一来源由 resource 本身达成，外部化等真有策划调参需求时再加 |
 | `DataManager`（`data_manager.gd`，手写 `_cache`） | `AssetServer` + `Assets<BoardDef>`/`Assets<CardDef>`/`Assets<StockDef>`，缓存与热重载免费得到 |
 | `SaveManager`（**未实现**，`save_manager.gd:17-26` 是 TODO） | 见 §九 |
 | `AudioManager`（未实现） | `bevy_audio`，`game_app` 侧 |
@@ -512,7 +512,7 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 
 顺带把 §4.2 的**种子化 RNG + 帧末批量消息**变成回放能力：存档只要保存 `GameSeed + 决策消息序列 + 玩家/回合数`，理论可整局重放（`DEV_PLAN.md` 表格中"存档系统：全局状态序列化、**回放**"的野心从这里开始变得廉价）。
 
-> **10-30 状态：整节已落地**（[PLAN.md](./PLAN.md) 的 P15a／P15b／P15c）。稳定层按上面第 1 条手写：`game_core/src/snapshot.rs` 的 `GameSnapshot` + `SAVE_VERSION`（16 个区块，20 条随机流存**水位**不是种子），落盘在 `game_app/src/paths.rs`（`%APPDATA%\new-money\save.json`，`NM_SAVE_DIR` 覆盖）；读档走「回主菜单 → 再开局」那条既有路径，落点 `WaitRoll`。玩家设置单独一份 `settings.json`（同目录，行走速度／调试面板），**不回放**：快照给的是续跑，回放要的是决策序列，那件事在 P17 之后。实验层（`bevy_world_serialization`）按 10-20 的拍板不做。另：P 序列里每个阶段仍要跑一次「回主菜单再开一局」的冒烟，跨局残留那条纪律（坑 22/25）不因为存档落地而可以松 —— P15b 顺手补了 `Gate`／`CompanyLedgers` 两条旧账。
+> **10-30 状态：整节已落地**（[PLAN.md](./PLAN.md) 的 P15a／P15b／P15c）。稳定层按上面第 1 条手写：`game_core/src/snapshot.rs` 的 `GameSnapshot` + `SAVE_VERSION`（16 个区块，20 条随机流存**水位**不是种子；**P2c 起版本 2，另存 `board`**，读档时与当前盘对不上就拒绝 —— `LandId` 只在同一张盘上有意义），落盘在 `game_app/src/paths.rs`（`%APPDATA%\new-money\save.json`，`NM_SAVE_DIR` 覆盖）；读档走「回主菜单 → 再开局」那条既有路径，落点 `WaitRoll`。玩家设置单独一份 `settings.json`（同目录，行走速度／调试面板），**不回放**：快照给的是续跑，回放要的是决策序列，那件事在 P17 之后。实验层（`bevy_world_serialization`）按 10-20 的拍板不做。另：P 序列里每个阶段仍要跑一次「回主菜单再开一局」的冒烟，跨局残留那条纪律（坑 22/25）不因为存档落地而可以松 —— P15b 顺手补了 `Gate`／`CompanyLedgers` 两条旧账。
 
 ---
 

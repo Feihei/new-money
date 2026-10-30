@@ -6,10 +6,11 @@
 
 ```json
 {
-  "board_name": "prototype",
+  "board_name": "taiwan",
+  "start_cash": 200000,
   "cell_size": 2.0,
-  "grid_cols": 8,
-  "grid_rows": 8,
+  "grid_cols": 28,
+  "grid_rows": 28,
   "loop": [ /* 主环有序道路格，顺序=绕行方向 */ ],
   "lands": [ /* 路旁土地，只记归属/等级，经 land_id 与道路格绑定 */ ],
   "branches": [ /* 可选：也可内联在 loop 元素的 branch 字段里 */ ]
@@ -19,6 +20,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `board_name` | string | 地图名 |
+| `start_cash` | int | 这张盘的默认起始现金（P2c）。缺省 `20000`；四档面板与 `NM_CASH` 选的档会压过它 |
 | `cell_size` | float | 格距（米），默认 2.0 |
 | `grid_cols` / `grid_rows` | int | 网格规模（校验坐标越界） |
 | `loop` | array\<Tile\> | 主环**道路格**，有序；相邻可正交/对角 |
@@ -107,12 +109,13 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | int | 土地唯一索引（被 `land_id` 引用） |
-| `col` / `row` | int | 土地格坐标，固定在环路**外侧**（作者摆放） |
+| `col` / `row` | int | 土地起点坐标，**必须紧贴它绑定的道路格**（相邻，含对角）；可以摆在环路内侧或外侧（作者摆放） |
 | `size` | int | 1 = 住宅 1×1；2 = 商业/保险 2×2 |
 | `name` | string | 地名 |
 | `owner` | int? | 归属玩家 id；`null` = 无主 |
 | `level` | int | 等级（0=空地，1~N=建筑等级） |
-| `group` / `land_type` / `price` / `rent` / `upgrade_cost` | — | 沿用现有地产静态数据 |
+| `group` | string? | **街道键**。同键 = 同一条街：过路费按「同街、同业主」各块相加（P2c）；加盖要求整条街在手 |
+| `land_type` / `price` / `rent` / `upgrade_cost` | — | 沿用现有地产静态数据 |
 | `building_kind` | string? | **商业设施类别**（P10b）。缺省 = 空商业地；写则是预建设施。取值：`mall` 购物中心 / `hotel` 旅馆 / `gas_station` 加油站 / `lab` 研究所 / `park` 公园 |
 | `fee` | object? | 这块地的**收费原型参数**，形状必须与 `building_kind` 匹配（见下） |
 
@@ -124,13 +127,17 @@
   - 加油站（C 型）：`"fee": {"per_step": {"rate": 100, "requires_mount": true}}` —— 单价 × 本回合骰面；`requires_mount: true` 表示步行**不产生账**（油费）。电脑维修（IBM）同形状、`requires_mount: false`。
   - 研究所 / 公园（D 型）：**不带 `fee`**，费用与解锁能力走装配层。
 - 匹配矩阵（对不上＝加载错误）：mall↔random_amount、hotel↔random_stay、gas_station↔per_step、lab/park↔无 `fee`。
+- **空商业地是合法数据**：`land_type: "commercial"` 且不写 `building_kind`/`fee` —— 买下之后踩上去才选建设项（P10c）。
 - 住宅/保险地写 `building_kind` 或 `fee` ＝ 加载错误。
 - 商业设施只能建在 2×2（`size: 2`）的商业地上。
+
+**过路费按街相加（P2c）**：踩到一块有主的地时，把**同一 `group` 里属于同一业主、还收得动的住宅地**各按自己的等级表/涨价状态算一份再相加；三块各 500 的街，踩任意一块都是 1500。抵押的邻地记 0、查封的邻地记 0；踩到的那一块本身若抵押/查封则是 0。**商业地不进来** —— 它的过路费是设施服务费（空商业地一文不收），不是租金表。`group: null` 的地只收自己那一份。
 
 **绑定规则**：
 - 1×1 住宅：**1 个 property 道路格** 的 `land_id` 指向它（1:1）。
 - 2×2 商业：**2 个相邻 property 道路格** 共享同一 `land_id`（对应 2 格道路）。
-- 建筑（含 `level` 高度）渲染在**土地格**，不在道路格。
+- 土地足迹必须**紧贴**它绑定的道路格（相邻）；足迹之间不得重叠，也不得压在主环格或死胡同格上 —— 这四条都由 `BoardDef::validate` 在加载期拦（P2c）。
+- 建筑（含 `level` 高度）渲染在**土地格**，不在道路格；死胡同尽端由表现层画一座楼（不挂 `land_id`）。
 
 ## Branch（死胡同链）
 
