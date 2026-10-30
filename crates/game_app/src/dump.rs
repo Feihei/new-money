@@ -4,8 +4,8 @@
 //! - **只挂 `game_app`**，`game_core` 一条依赖都不加 —— 为了让调试面板去改规则层，方向是错的。
 //! - **手写 `Debug` 打印**，不走 `World::inspect_entity` 反射：core 的类型本来就全
 //!   `derive(Debug)`，而反射要反过来给二十几个组件补 `Reflect` derive。
-//! - **`NM_DUMP=1` 才装载**。egui 与 `bevy_ui` + `bevy_picking` 同场会抢输入，默认装载
-//!   等于给「按钮点不到」那一族坑（ARCHITECTURE §6.1 坑 23/27）新增一个来源。
+//! - **`NM_DUMP=1` 或设置里打开才装载**。egui 与 `bevy_ui` + `bevy_picking` 同场会抢输入，
+//!   默认装载等于给「按钮点不到」那一族坑（ARCHITECTURE §6.1 坑 23/27）新增一个来源。
 //!
 //! 面板从 P2 起有「物价指数」与「修正登记处」两行，因为这两样正是那条管线唯一的输入。
 //! 「`Detention`」还没有（P4），到时候往 [`dump_panel`] 里再加一栏就行。
@@ -91,15 +91,24 @@ fn attach_context(
     egui_ctx.get_mut().set_fonts(fonts);
 }
 
-/// `NM_DUMP=1` 开了才装载。
+/// `NM_DUMP=1`（或设置文件里打开）才装载。
 ///
 /// 判据写在入口而不是插件内部：`add_plugins` 一旦调用，egui 就开始吃输入事件了 ——
 /// 「装了但没画面板」与「没装」在抢输入这件事上不是同一回事。
-pub fn install_if_requested(app: &mut App) {
-    if std::env::var("NM_DUMP").as_deref() == Ok("1") {
-        info!("只读 dump 面板已开启（NM_DUMP=1）");
-        app.add_plugins(DumpPlugin);
+///
+/// P15c 起还有一个文件来源：设置面板那颗「调试面板」。**旋钮优先**（`NM_DUMP=0` 能压过
+/// 文件里的「开」）—— 截图与冒烟必须可控。
+pub fn install_if_requested(app: &mut App, from_file: bool) {
+    let env = std::env::var("NM_DUMP").ok();
+    if !crate::settings::debug_panel_on(env.as_deref(), from_file) {
+        return;
     }
+    if env.as_deref() == Some("1") {
+        info!("只读 dump 面板已开启（NM_DUMP=1）");
+    } else {
+        info!("只读 dump 面板已开启（设置）");
+    }
+    app.add_plugins(DumpPlugin);
 }
 
 /// 面板上每个玩家要摊开的那一栏。命名出来是因为这种十几元素的查询元组会撞

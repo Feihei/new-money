@@ -19,6 +19,7 @@ pub mod menu;
 pub mod minigame;
 pub mod pause;
 pub mod player_hud;
+pub mod settings;
 pub mod theme;
 pub mod tile_info;
 pub mod top_bar;
@@ -68,6 +69,8 @@ impl Plugin for UiPlugin {
             .init_resource::<minigame::Practice>()
             .init_resource::<minigame::PracticeRounds>()
             .init_resource::<minigame::ArcadeChoiceOpen>()
+            // 设置面板的开关（P15c）。设置**值**本身由 `settings::SettingsPlugin` 注册
+            .init_resource::<settings::SettingsOpen>()
             .add_systems(
                 Update,
                 (
@@ -112,6 +115,9 @@ impl Plugin for UiPlugin {
                     // 排在内层派发之后：读档失败那一帧写进 `SaveNotice` 的话，
                     // 当帧就出现在按钮下面（菜单上没有棋盘，所以它不受 Live 门禁）
                     menu::refresh_notice,
+                    // 设置面板也排在派发之后：点「设置」那一帧就建出来。它只活在菜单上
+                    // （挂 `MenuPiece`），进对局随菜单一起收走
+                    settings::sync_settings_panel,
                     hover_feedback,
                 )
                     .chain(),
@@ -235,6 +241,13 @@ pub enum UiAction {
     CloseInfo,
     /// 开合暂停菜单（ESC 键与「继续」「暂停」按钮同一个动作）
     TogglePause,
+    /// 开合设置面板（P15c）。只有主菜单那颗按钮发得出来
+    ToggleSettings,
+    /// 选一档行走速度（下标进 [`crate::settings::SPEED_STEPS`] —— 烤的是档位而不是秒数：
+    /// 秒数是浮点，而 `UiAction` 要能比相等）
+    SetWalkSpeed(usize),
+    /// 调试面板开 / 关（**下次启动生效**，见 [`crate::settings`] 的模块头）
+    ToggleDebugPanel,
     /// 开合 ATM 浮层（B5b：路过银行格解锁）
     ToggleAtm,
     /// 开合证券浮层（B5b：常驻入口，每回合掷骰前可交易）
@@ -561,6 +574,9 @@ pub(crate) fn reset_ui_state(mut commands: Commands, mut kept: UiMemory) {
     kept.practice.0 = None;
     kept.practice_rounds.0 = 0;
     kept.arcade_choice.0 = false;
+    // 设置面板只活在菜单上：面板实体随菜单收走，开关这一格不关的话会「下一局回来
+    // 它自己又开着」。设置**值**不在这里清 —— 那是跨局的东西
+    kept.settings_open.0 = false;
     commands.insert_resource(pause::PauseMenuOpen::from_env());
     commands.insert_resource(Paused::default());
 }
@@ -581,6 +597,8 @@ pub(crate) struct UiMemory<'w> {
     practice: ResMut<'w, minigame::Practice>,
     practice_rounds: ResMut<'w, minigame::PracticeRounds>,
     arcade_choice: ResMut<'w, minigame::ArcadeChoiceOpen>,
+    /// 设置面板开合（P15c）。设置值本身**不在这里**：它跨局，不该被「回菜单」清掉
+    settings_open: ResMut<'w, settings::SettingsOpen>,
 }
 
 /// 一个文本节点需要的三件套。包一层的理由是漏掉 `TextFont` 不会报错，
@@ -879,6 +897,10 @@ struct UiState<'w> {
     stock: ResMut<'w, finance::StockPanelOpen>,
     hand: ResMut<'w, hand::HandPanelOpen>,
     items: ResMut<'w, items::ItemsPanelOpen>,
+    /// 设置面板开合与设置本身（P15c）。设置值住在 `crate::settings::Settings`，
+    /// 落盘由那个模块的单写者负责 —— 这里改了就算数
+    settings_open: ResMut<'w, settings::SettingsOpen>,
+    settings: ResMut<'w, crate::settings::Settings>,
     /// 游乐场那四格（P7）。`arcade` 是「现在开着的那一局」——派发要往里写分数与铲数，
     /// 所以它是 `ResMut` 而不是只有 `sync_arcade` 能碰的私有状态
     arcade: ResMut<'w, minigame::Arcade>,
@@ -1064,6 +1086,17 @@ fn dispatch_ui_actions(
             }
             UiAction::CloseInfo => ui.selected.0 = None,
             UiAction::TogglePause => ui.toggle.flip(),
+            // 设置面板（P15c）：三个动作都只改 `Settings`／它的开合。落盘由
+            // `settings::persist_settings` 单写者做，界面不碰文件
+            UiAction::ToggleSettings => ui.settings_open.0 = !ui.settings_open.0,
+            UiAction::SetWalkSpeed(index) => {
+                if let Some((secs, _)) = crate::settings::SPEED_STEPS.get(*index) {
+                    ui.settings.walk_step_interval = *secs;
+                }
+            }
+            UiAction::ToggleDebugPanel => {
+                ui.settings.debug_panel = !ui.settings.debug_panel;
+            }
             UiAction::ToggleAtm => ui.atm.0 = !ui.atm.0,
             UiAction::ToggleStock => ui.stock.0 = !ui.stock.0,
             UiAction::ToggleHand => ui.hand.0 = !ui.hand.0,
@@ -1652,6 +1685,10 @@ mod tests {
                 .init_resource::<SaveRequest>()
                 .init_resource::<StartMode>()
                 .init_resource::<crate::paths::SaveNotice>()
+                // P15c：派发多了「设置」那三个动作（设置值住在这里，落盘是别的插件的事）
+                .init_resource::<crate::settings::Settings>()
+                .init_resource::<crate::settings::SettingsStatus>()
+                .init_resource::<settings::SettingsOpen>()
                 .insert_resource(Paused(paused))
                 // 休市判据要读日历、锚点与节假日表，三者都由 core 常驻。
                 // 锚点钉 2048-01-06（周一），于是 tick 5 = 1 月 11 日（周六）是休市日
@@ -2016,6 +2053,56 @@ mod tests {
         assert!(
             h.app.world().resource::<SaveRequest>().pending,
             "按了保存却没把愿望写进去"
+        );
+    }
+
+    /// P15c：三颗设置按钮都只改 `Settings`／面板开关 —— 落盘由 `persist_settings`
+    /// 单写者做，界面不碰文件。这样「界面改了但没存」只有一处可错。
+    #[test]
+    fn the_settings_buttons_write_the_settings_and_nothing_else() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let slow = h.app.world_mut().spawn(UiAction::SetWalkSpeed(3)).id();
+        let debug = h.app.world_mut().spawn(UiAction::ToggleDebugPanel).id();
+        let open = h.app.world_mut().spawn(UiAction::ToggleSettings).id();
+
+        // 前置：默认那一档、面板关着 —— 否则下面几句「改了」读不出变化
+        assert_eq!(
+            h.app
+                .world()
+                .resource::<crate::settings::Settings>()
+                .walk_step_interval,
+            0.18
+        );
+        assert!(
+            !h.app
+                .world()
+                .resource::<crate::settings::Settings>()
+                .debug_panel
+        );
+        assert!(!h.app.world().resource::<settings::SettingsOpen>().0);
+
+        h.click(slow);
+        h.click(debug);
+        h.click(open);
+
+        assert_eq!(
+            h.app
+                .world()
+                .resource::<crate::settings::Settings>()
+                .walk_step_interval,
+            0.30,
+            "第 3 档没写进去"
+        );
+        assert!(
+            h.app
+                .world()
+                .resource::<crate::settings::Settings>()
+                .debug_panel,
+            "调试面板开关没翻"
+        );
+        assert!(
+            h.app.world().resource::<settings::SettingsOpen>().0,
+            "设置面板没打开"
         );
     }
 
@@ -2547,6 +2634,11 @@ mod tests {
             .init_resource::<game_core::prelude::SaveRequest>()
             .init_resource::<game_core::prelude::StartMode>()
             .init_resource::<crate::paths::SaveNotice>()
+            // P15c：设置面板与它的两格资源。真实应用里 `Settings`／`SettingsStatus`
+            // 由 `settings::SettingsPlugin` 注册、`SettingsOpen` 由本插件注册 ——
+            // 少一格崩的同样是「所有按钮都死」
+            .init_resource::<crate::settings::Settings>()
+            .init_resource::<crate::settings::SettingsStatus>()
             // P2④ 起派发要读日历判休市。这两条在真实应用里由 `CoreGamePlugin`
             // `init_resource` 常驻，菜单态也在 —— 少了它们崩的是测试，多的那条路径崩的会是玩家
             .init_resource::<MarketClock>()

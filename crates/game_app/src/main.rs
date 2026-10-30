@@ -22,13 +22,13 @@ mod dump;
 mod paths;
 mod render;
 mod scene;
+mod settings;
 mod ui;
 
 const DEV_FONT: &str = "font/dev_SourceHanSansSC-Regular.otf";
 
 fn main() {
     let root = asset_root();
-    info!("资产根：{}", root.display());
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -44,26 +44,37 @@ fn main() {
                 file_path: root.display().to_string(),
                 ..default()
             }),
-    )
-    // 规则层的 Plugin 在表现层注册：验证「无渲染 bevy 子集 + 完整 bevy」能共存于同一 App
-    .add_plugins(CoreGamePlugin)
-    // 网格命中测试：点格详情卡要能点到 3D 地板。默认会 raycast **所有**网格，
-    // 建筑与棋子都会被点中；`require_markers = true` 把它改成显式登记 ——
-    // 只有带 `Pickable` 的地板 + 标了 `MeshPickingCamera` 的相机会参与
-    .add_plugins(MeshPickingPlugin)
-    .insert_resource(MeshPickingSettings {
-        require_markers: true,
-        ..default()
-    })
-    .add_plugins(render::RenderPlugin)
-    // 存档落盘（P15b）：core 拍快照、这里写文件。与 UI 同批注册，但两者互不依赖顺序 ——
-    // 派发只往 `SaveRequest` 里写一个愿望
-    .add_plugins(paths::SavePlugin)
-    .add_plugins(ui::UiPlugin)
-    .add_plugins(scene::ScenePlugin)
-    .add_plugins(autopilot::AutopilotPlugin);
-    // 调试面板排在最后：它只读别人的状态，而且默认不装（见 `dump` 模块头）
-    dump::install_if_requested(&mut app);
+    );
+    info!("资产根：{}", root.display());
+    // P15c：**先读设置再装依赖它的插件** —— 调试面板装不装由它决定，而 `add_plugins`
+    // 一旦调用 egui 就开始吃输入，不能在运行中装卸（所以面板上那句「下次启动生效」是实话）。
+    //
+    // 读在这里而不是 `App::new()` 之前：`LogPlugin` 是 `DefaultPlugins` 的一部分，早于它
+    // 打的 `warn!`（设置文件坏了那一句）会被整个丢掉 —— 而「回落默认并喊一声」正是验收原话。
+    let settings = settings::Settings::load();
+    app.insert_resource(settings)
+        // 规则层的 Plugin 在表现层注册：验证「无渲染 bevy 子集 + 完整 bevy」能共存于同一 App
+        .add_plugins(CoreGamePlugin)
+        // 网格命中测试：点格详情卡要能点到 3D 地板。默认会 raycast **所有**网格，
+        // 建筑与棋子都会被点中；`require_markers = true` 把它改成显式登记 ——
+        // 只有带 `Pickable` 的地板 + 标了 `MeshPickingCamera` 的相机会参与
+        .add_plugins(MeshPickingPlugin)
+        .insert_resource(MeshPickingSettings {
+            require_markers: true,
+            ..default()
+        })
+        .add_plugins(render::RenderPlugin)
+        // 存档落盘（P15b）：core 拍快照、这里写文件。与 UI 同批注册，但两者互不依赖顺序 ——
+        // 派发只往 `SaveRequest` 里写一个愿望
+        .add_plugins(paths::SavePlugin)
+        // 设置（P15c）：行走速度写回 `GameRules`，值一变就落盘
+        .add_plugins(settings::SettingsPlugin)
+        .add_plugins(ui::UiPlugin)
+        .add_plugins(scene::ScenePlugin)
+        .add_plugins(autopilot::AutopilotPlugin);
+    // 调试面板排在最后：它只读别人的状态，而且默认不装（见 `dump` 模块头）。
+    // 开不开看旋钮与设置文件，`debug_panel_on` 里写着谁优先
+    dump::install_if_requested(&mut app, settings.debug_panel);
     // 开发注入排在它之后：截图时要读到的那一栏已经装好了
     dev::install_if_requested(&mut app);
 

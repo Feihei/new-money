@@ -23,6 +23,10 @@ use serde::de::DeserializeOwned;
 /// 唯一的槽位文件名。
 pub const SAVE_FILE: &str = "save.json";
 
+/// 玩家设置的文件名（P15c）。与存档同一个目录：都是「这个用户的东西」，但**跨局**
+/// —— 存档是这一局的，设置是每一局的。
+pub const SETTINGS_FILE: &str = "settings.json";
+
 /// 存档目录。`NM_SAVE_DIR` 优先（截图与冒烟要一个干净目录）。
 pub fn save_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("NM_SAVE_DIR") {
@@ -52,6 +56,10 @@ fn platform_data_dir() -> PathBuf {
 
 pub fn save_path() -> PathBuf {
     save_dir().join(SAVE_FILE)
+}
+
+pub fn settings_path() -> PathBuf {
+    save_dir().join(SETTINGS_FILE)
 }
 
 /// 主菜单那颗「读档」按不按得动，就看这一句。

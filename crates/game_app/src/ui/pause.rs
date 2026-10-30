@@ -206,7 +206,7 @@ fn spawn_pause_panel(
                     ButtonSpec::new("继续", [inner_w, 44.0], PRIMARY, UiAction::TogglePause),
                 );
                 // 设置在 Godot 端也是 print 一句未实现（pause_menu.gd:42-44），照摆但灰掉。
-                // P15b 给它一句人话：空灰盒子读起来像排版坏了，而「暂未开放」是实话
+                // P15c 把它做在了主菜单上，这里就写明「去哪改」—— 空灰盒子读起来像坏了
                 panel
                     .spawn((
                         Node {
@@ -223,7 +223,7 @@ fn spawn_pause_panel(
                     ))
                     .with_child(label(
                         &font.0,
-                        "设置（暂未开放）",
+                        "设置（回主菜单改）",
                         size::BODY,
                         col::BTN_TEXT_DISABLED,
                     ));

@@ -132,9 +132,9 @@ pub fn spawn_menu(
                             notice_color(&notice),
                         ),
                     ));
-                    // 设置在 Godot 端只 print 一句未实现（main_menu.gd:23-30）。这里照摆但灰掉，
-                    // 并把「为什么按不动」写在按钮上（P15c 才做）—— 空灰盒子读起来像坏了
-                    stub_button(stack, &font.0, "设置（暂未开放）");
+                    // 设置（P15c）：真按钮。面板里只有两件真控件（行走速度、调试面板），
+                    // 见 `ui/settings.rs` 模块头
+                    menu_button(stack, &font.0, "设置", UiAction::ToggleSettings);
                     menu_button(stack, &font.0, "退出", UiAction::Quit);
                     stack.spawn(separator());
                     stack.spawn(label(
@@ -163,28 +163,6 @@ fn menu_button(
             action,
         ),
     );
-}
-
-/// 未实现的按钮：一个灰盒子加文字，**不挂 `UiAction`** —— 没有动作可派发，
-/// 比挂一个「被 `Disabled` 挡住的假动作」少一处将来会咬人的谎。
-fn stub_button(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, text: &str) {
-    parent
-        .spawn((
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Px(layout::MENU_BUTTON_H),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                border: UiRect::all(Val::Px(layout::BTN_BORDER)),
-                border_radius: BorderRadius::all(Val::Px(layout::BTN_RADIUS)),
-                ..default()
-            },
-            BackgroundColor(col::BTN_DISABLED),
-            super::border_color(col::BTN_DISABLED),
-        ))
-        .with_children(|b| {
-            b.spawn(label(font, text, size::BODY, col::BTN_TEXT_DISABLED));
-        });
 }
 
 /// 菜单上那一行「存档/读档最后怎么了」。没话说时是空串，不摆占位符。
