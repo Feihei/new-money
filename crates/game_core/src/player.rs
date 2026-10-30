@@ -542,58 +542,89 @@ pub fn spawn_players(
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            // 四层嵌套而不是十六个平摊的元组元素：Bevy 的 `Bundle` 只给到 15 元组，
-            // 而 P12 的 `Walker` 正好把这条线压过界。分组按「他是谁 / 他的钱与货 /
-            // 他在哪怎么走 / 他的账」，读的时候恰好是四句话
-            commands
-                .spawn((
-                    (
-                        PlayerId(i as u32),
-                        // 玩家是第一种环上行动者（P12）：回合机与走步循环认这个标记而不是 `PlayerId`
-                        Walker,
-                        PlayerName(p.name.clone()),
-                        p.color,
-                        // 性别（P13 魔法屋那两条筛选条件的读数）：与名字同属「他是谁」那一组
-                        p.gender,
-                        // 这个座位由谁开车（P14）：人类等按钮，电脑发同一条意图。
-                        // 它是**必挂**组件，`spawn_players` 是唯一的上身出口
-                        p.controller,
-                    ),
-                    (
-                        Wallet {
-                            cash: rules.start_cash,
-                        },
-                        // 点券开局为 0（PLAN §三：来源只有点券格与小游戏格）
-                        Points::default(),
-                        // 手牌开局为空：道具卡只能从百货公司买到（P3d），没有任何格子会发卡
-                        crate::hand::Hand::default(),
-                        // 道具栏开局送一个路障（PLAN §三：路障/机器娃娃/机器工人开局即送）
-                        crate::items::Inventory::starting(),
-                    ),
-                    (
-                        // 开局坐哪一格：见函数头
-                        TokenPosition {
-                            tile: TileIndex(rng.pick_start(0..=ring)),
-                        },
-                        WalkQueue::default(),
-                        // 开局恒正向：转向卡是玩家身上的事，不是棋盘的事（见 [`Heading`]）
-                        Heading::default(),
-                        // 开局步行：载具的来路（车行）还没装配，P5 先让规则层把骰子颗数
-                        // 与「毁载具」两条跑通；表现层的换车入口等车行落地再补
-                        Mount::Foot,
-                    ),
-                    (
-                        BankBalance::default(),
-                        crate::stock::StockHoldings::default(),
-                        // 乐透券开局为空。它是**一期**的凭证：开奖有人猜中就全场清空，
-                        // 没人猜中则留到下月（见 `crate::lottery` 模块头）
-                        crate::lottery::LotteryTickets::default(),
-                        Gameplay,
-                    ),
-                ))
-                .id()
+            let id = PlayerId(i as u32);
+            let entity = spawn_body(
+                commands,
+                id,
+                PlayerName(p.name.clone()),
+                p.color,
+                p.gender,
+                p.controller,
+            );
+            // 开局的三样「与新局有关、与这个人无关」的读数在这里落；
+            // 身份与组件清单在 [`spawn_body`] 里，开局与读档共用那一份
+            let mut spawned = commands.entity(entity);
+            spawned.insert(Wallet {
+                cash: rules.start_cash,
+            });
+            // 道具栏开局送一个路障（PLAN §三：路障/机器娃娃/机器工人开局即送）
+            spawned.insert(crate::items::Inventory::starting());
+            // 开局坐哪一格：见函数头
+            spawned.insert(TokenPosition {
+                tile: TileIndex(rng.pick_start(0..=ring)),
+            });
+            entity
         })
         .collect()
+}
+
+/// 一个玩家实体的**壳**：身份 + 全部必挂组件的默认值。
+///
+/// 开局与读档共用这一份组件清单（P15b）：读档先按存档铺壳、再把每个组件灌进去。
+/// 各写一份的代价是「给玩家加一个必挂组件时只改了一边」—— 而那一半只在读档后才缺，
+/// 症状是「读档玩了一会儿某个数不对」，没有任何一条装配期的断言会响。
+pub fn spawn_body(
+    commands: &mut Commands,
+    id: PlayerId,
+    name: PlayerName,
+    color: PlayerColor,
+    gender: Gender,
+    controller: crate::ai::Controller,
+) -> Entity {
+    // 四层嵌套而不是十六个平摊的元组元素：Bevy 的 `Bundle` 只给到 15 元组，
+    // 而 P12 的 `Walker` 正好把这条线压过界。分组按「他是谁 / 他的钱与货 /
+    // 他在哪怎么走 / 他的账」，读的时候恰好是四句话
+    commands
+        .spawn((
+            (
+                id,
+                // 玩家是第一种环上行动者（P12）：回合机与走步循环认这个标记而不是 `PlayerId`
+                Walker, name, color,
+                // 性别（P13 魔法屋那两条筛选条件的读数）：与名字同属「他是谁」那一组
+                gender,
+                // 这个座位由谁开车（P14）：人类等按钮，电脑发同一条意图。
+                // 它是**必挂**组件，这里是唯一的上身出口
+                controller,
+            ),
+            (
+                // 现金开局为 0：新局由 `spawn_players` 改写、读档由快照改写。
+                // 不给 `start_cash` 是刻意的 —— 这个函数不认识 `GameRules`
+                Wallet { cash: 0 },
+                // 点券开局为 0（PLAN §三：来源只有点券格与小游戏格）
+                Points::default(),
+                // 手牌开局为空：道具卡只能从百货公司买到（P3d），没有任何格子会发卡
+                crate::hand::Hand::default(),
+                crate::items::Inventory::default(),
+            ),
+            (
+                // 位置由调用方改写（开局抽签、读档照抄）
+                TokenPosition { tile: TileIndex(0) },
+                WalkQueue::default(),
+                // 开局恒正向：转向卡是玩家身上的事，不是棋盘的事（见 [`Heading`]）
+                Heading::default(),
+                // 开局步行：载具的来路（车行）还没装配
+                Mount::default(),
+            ),
+            (
+                BankBalance::default(),
+                crate::stock::StockHoldings::default(),
+                // 乐透券开局为空。它是**一期**的凭证：开奖有人猜中就全场清空，
+                // 没人猜中则留到下月（见 `crate::lottery` 模块头）
+                crate::lottery::LotteryTickets::default(),
+                Gameplay,
+            ),
+        ))
+        .id()
 }
 
 #[cfg(test)]

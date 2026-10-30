@@ -197,6 +197,10 @@ pub mod prelude {
         ShopDeny, ShopStock, buyback, chairman_freebie_system, restock, settle_shop_landing,
         shop_op_allowed, shop_op_system,
     };
+    pub use crate::snapshot::{
+        GameSnapshot, SAVE_VERSION, SaveDenied, SaveDeny, SaveFacts, SaveRequest, SnapshotTaken,
+        StartMode, capture_match, judge, judge_system, resume_match,
+    };
     pub use crate::status::{LandStatus, Timed, expire_land_status_system};
     pub use crate::stock::{PriceHistory, StockDef, StockHoldings, StockId, StockPrice, StockSet};
     pub use crate::turn::{GameSession, LastRoll, Paused, TurnOrder, TurnPhase, not_paused};
@@ -316,6 +320,7 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<crate::snapshot::SaveRequest>()
             .init_resource::<crate::snapshot::SnapshotTaken>()
             .init_resource::<crate::snapshot::SaveDenied>()
+            .init_resource::<crate::snapshot::StartMode>()
             // ===== 流程与移动 =====
             .add_message::<TurnStarted>()
             .add_message::<RequestRoll>()
@@ -840,6 +845,11 @@ impl Plugin for CoreGamePlugin {
             // 捕获排在 **Last**：它是只读的一次性快照，必须在**这一帧所有写入之后**拍 ——
             // 排在 `Update` 里的话，同一个调度里后跑的结算会落到快照之外，而症状是
             // 「读档后少了最后一笔」，不会报错。独占 system + 资源"许愿"的形状见 `snapshot`。
-            .add_systems(Last, snapshot::capture_system);
+            // 判定在前、捕获在后：同一帧里请存时，`SaveDenied` 已经是这一帧的读数，
+            // 而捕获成功会把它清成 `None`（那一格本来就是「此刻可以存」）
+            .add_systems(
+                Last,
+                (snapshot::judge_system, snapshot::capture_system).chain(),
+            );
     }
 }

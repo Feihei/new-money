@@ -18,6 +18,7 @@ use crate::player::{self, GameSetup};
 use crate::rng::{GameSeed, Rng};
 use crate::rules::GameRules;
 use crate::shop::ShopStock;
+use crate::snapshot::{self, StartMode};
 use crate::stock::{PriceHistory, StockId, StockPrice, StockSet};
 use crate::turn::{GameSession, TurnOrder, TurnPhase};
 
@@ -92,6 +93,7 @@ pub fn begin_game_system(
     active: Option<Res<ActiveBoard>>,
     assets: BootAssets<'_>,
     cfg: BeginCfg,
+    mut start: ResMut<StartMode>,
     mut next: ResMut<NextState<TurnPhase>>,
 ) {
     if active.is_some() {
@@ -129,6 +131,14 @@ pub fn begin_game_system(
         if let Err(errs) = errs {
             panic!("{what}校验失败:\n  {}", errs.join("\n  "));
         }
+    }
+
+    // 读档（P15b）：资产校验照跑（数据错了同样当场 panic），然后换一个入口走同一条铺局链。
+    // 取走之后 `StartMode` 回到 `Fresh` —— 否则下一局「新游戏」会把这份档再读一遍。
+    if let StartMode::Resume(snapshot) = std::mem::take(&mut *start) {
+        snapshot::resume_match(&mut commands, def, &stocks, holidays, news, *snapshot);
+        next.set(TurnPhase::WaitRoll);
+        return;
     }
 
     // 洗牌消耗的是**牌堆子流**，骰子流一位没动 —— 所以「对局第一手点数 ==

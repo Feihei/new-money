@@ -5,6 +5,7 @@ use bevy::prelude::*;
 use super::theme::{col, layout, size};
 use super::{ButtonSpec, MenuPiece, SECONDARY, UiAction, button, label, separator};
 use crate::art;
+use crate::paths::{SaveNotice, save_exists};
 use crate::render::DevFont;
 
 /// 菜单自带一台相机。
@@ -23,7 +24,12 @@ pub fn spawn_menu_camera(mut commands: Commands) {
     ));
 }
 
-pub fn spawn_menu(mut commands: Commands, font: Res<DevFont>, server: Res<AssetServer>) {
+pub fn spawn_menu(
+    mut commands: Commands,
+    font: Res<DevFont>,
+    server: Res<AssetServer>,
+    notice: Res<SaveNotice>,
+) {
     let bg = art::menu_bg();
     // 整屏底色（`main_menu.tscn:14-21` 的 ColorRect），同时充当居中容器
     commands
@@ -92,10 +98,43 @@ pub fn spawn_menu(mut commands: Commands, font: Res<DevFont>, server: Res<AssetS
                     // 对局里，是为了让「这三个玩法本身好不好玩」能被单独评 —— 而它不给点券
                     // 这件事写在结算屏上，不是「菜单忘了发消息」（见 `ui/minigame.rs` 模块头）
                     menu_button(stack, &font.0, "游乐场练习", UiAction::ToggleArcadeChoice);
-                    // 读档与设置在 Godot 端只 print 一句未实现（main_menu.gd:23-30）。
-                    // 这里照摆但灰掉：能点却什么都不做的按钮比没有按钮更糟。
-                    stub_button(stack, &font.0, "读档");
-                    stub_button(stack, &font.0, "设置");
+                    // 读档（P15b）：不再是灰盒子。有档才亮；没档时灰着并**自带一句为什么**
+                    // —— 「没有存档」不是玩家猜得到的事（他可能刚存过，只是 `NM_SAVE_DIR`
+                    // 指去了另一个目录）
+                    let has_save = save_exists();
+                    button(
+                        stack,
+                        &font.0,
+                        ButtonSpec::new(
+                            "读档",
+                            [layout::MENU_WIDTH, layout::MENU_BUTTON_H],
+                            SECONDARY,
+                            UiAction::LoadGame,
+                        )
+                        .disabled(!has_save),
+                    );
+                    if !has_save {
+                        stack.spawn(label(
+                            &font.0,
+                            "没有存档 —— 对局里暂停后可以保存",
+                            size::SMALL,
+                            col::KEY,
+                        ));
+                    }
+                    // 存档/读档最后那句话（失败时说为什么）。空的时候不占位：
+                    // `refresh_notice` 把它写成空串，行高按空文本算
+                    stack.spawn((
+                        MenuNotice,
+                        label(
+                            &font.0,
+                            notice_text(&notice),
+                            size::SMALL,
+                            notice_color(&notice),
+                        ),
+                    ));
+                    // 设置在 Godot 端只 print 一句未实现（main_menu.gd:23-30）。这里照摆但灰掉，
+                    // 并把「为什么按不动」写在按钮上（P15c 才做）—— 空灰盒子读起来像坏了
+                    stub_button(stack, &font.0, "设置（暂未开放）");
                     menu_button(stack, &font.0, "退出", UiAction::Quit);
                     stack.spawn(separator());
                     stack.spawn(label(
@@ -146,4 +185,40 @@ fn stub_button(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, text: &st
         .with_children(|b| {
             b.spawn(label(font, text, size::BODY, col::BTN_TEXT_DISABLED));
         });
+}
+
+/// 菜单上那一行「存档/读档最后怎么了」。没话说时是空串，不摆占位符。
+#[derive(Component)]
+pub(crate) struct MenuNotice;
+
+fn notice_text(notice: &SaveNotice) -> String {
+    notice.text.clone().unwrap_or_default()
+}
+
+fn notice_color(notice: &SaveNotice) -> Color {
+    if notice.failed {
+        col::BANKRUPT
+    } else {
+        col::TITLE_GOLD
+    }
+}
+
+/// 派发在点击那一帧写 `SaveNotice`（读档失败），这条排在它后面把那一行改掉。
+///
+/// 不做签名记忆：这一行只有一句字，逐帧写一个 `String` 比维护「上次写成什么」
+/// 便宜，而那份记忆正是坑 22 那一族（跨局残留）的常客。
+pub(crate) fn refresh_notice(
+    notice: Res<SaveNotice>,
+    mut lines: Query<(&mut Text, &mut TextColor), With<MenuNotice>>,
+) {
+    for (mut text, mut color) in &mut lines {
+        let want = notice_text(&notice);
+        if text.0 != want {
+            text.0 = want;
+        }
+        let want_color = notice_color(&notice);
+        if color.0 != want_color {
+            color.0 = want_color;
+        }
+    }
 }

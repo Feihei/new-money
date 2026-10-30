@@ -9,8 +9,9 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, ArcadeDeal, CoreSet, Corrections, CouponBoxes, GameSession, Gameplay, Landing,
-    MarketClock, PendingDecision, Rng, TurnOrder, TurnPhase, WalkClock,
+    ActiveBoard, ArcadeDeal, AtmAccess, CompanyLedgers, CoreSet, Corrections, CouponBoxes,
+    GameSession, Gameplay, Gate, Landing, LastRoll, MarketClock, PendingDecision, Rng, TurnOrder,
+    TurnPhase, WalkClock, WalkHalt,
 };
 
 use crate::ui::BoardUi;
@@ -140,6 +141,13 @@ fn stop_turn_machine(mut phase: ResMut<NextState<TurnPhase>>) {
 /// 表现层的实体由 `crate::render` 自己的标记负责清理，这里只动规则层的东西。
 /// `WalkClock`/`Landing`/`PendingDecision`/`MarketClock`/`CouponBoxes`/`Corrections`
 /// 是 `init_resource` 常驻的（结算 system 用 `Res<T>` 拿它们），所以重置成默认值而不是移除。
+///
+/// P15b 起这里是「三份清单的并集」：`begin_game_system` 重置的那十几样、本函数原先清的
+/// 那七样，加上原先**两边都没清**的五样。其中两样是既有缺陷（与存档无关）：
+/// `Gate` 里挂着上一局那封信与旧 `Entity`、`CompanyLedgers` 按股票 id 分页而**跨局同键**
+/// —— 同月开新局会把上一局的损益带进分红。另外三样（`LastRoll`／`WalkHalt`／`AtmAccess`）
+/// 原先靠「`Entity` 带世代，新局一比就否」侥幸活着，那是拿句柄复用当清理机制
+/// （§6.1 坑 22/25 同一族）；现在按事实清。
 fn clear_match(
     mut commands: Commands,
     phase: Res<State<TurnPhase>>,
@@ -172,6 +180,19 @@ fn clear_match(
     // 主菜单上写出「修正登记处：1 条」而那条指向一个已经 despawn 的实体。面板是查账
     // 工具，说这种话就等于把下一次排查带偏（本文件头那句「回菜单必须清场」的完整含义）
     commands.insert_resource(Corrections::default());
+    // 被动卡那道门（P13b②）。`Job` 里挂着上一局那封信、那几个 `Entity` 与金额；
+    // 不清的话新局第一笔被动事件会先答旧账 —— 这与 `Corrections` 是同一族缺陷，
+    // 只是那一条至少肉眼可见，这一条只在恰好抽到被动事件时才咬人（P15b 一并修）
+    commands.insert_resource(Gate::default());
+    // 公司当月账页（P10d②）。键是股票 id，**跨局同键** —— 同一个月开新局，
+    // 上一局的损益会被当成这一局这个月的账页带进 15 号的分红（P15b 一并修）
+    commands.insert_resource(CompanyLedgers::default());
+    // 下面三样原先靠「`Entity` 带世代」侥幸对得上，但那不是一条规则（§6.1 坑 22/25）：
+    // `LastRoll` 带着上一局某个人那颗骰面，`WalkHalt` 带着上一局最后一次中断，
+    // `AtmAccess` 带着上一局的持卡人 —— 新局第一帧若恰好有人读它们，读到的就是死人的数
+    commands.insert_resource(LastRoll::default());
+    commands.insert_resource(WalkHalt::default());
+    commands.insert_resource(AtmAccess::default());
     info!("清场：回收 {count} 个规则层实体，回合机已停在 Boot");
 }
 
@@ -238,5 +259,66 @@ mod tests {
             0,
             "回菜单那一次清场要把上一局那几条一起收走"
         );
+    }
+
+    /// P15b：回菜单那一帧还要收走**上一局的门**与**公司的当月账** —— 这两条都是既有缺陷
+    /// （与存档无关，`clear_match` 原先漏了它们）。门里记着「答完回哪一阶段」，
+    /// 公司账按股票 id 分页而**跨局同键**：同一个月开新局，上一局的损益会被算进 15 号的分红。
+    ///
+    /// 顺带验 `LastRoll`／`WalkHalt`／`AtmAccess` 三样：它们原先靠「`Entity` 带世代，
+    /// 一比就否」侥幸活着 —— 那是拿句柄复用当清理机制（§6.1 坑 22/25）。
+    #[test]
+    fn clear_match_drops_the_previous_match_s_gate_and_company_books() {
+        use game_core::prelude::{
+            AtmAccess, CompanyLedgers, Gate, HaltCause, LastRoll, WalkHalt, WalkHalted,
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(StatesPlugin)
+            .init_state::<TurnPhase>()
+            .insert_resource(TurnOrder::new(vec![]))
+            .init_resource::<Gate>()
+            .init_resource::<CompanyLedgers>()
+            .init_resource::<LastRoll>()
+            .init_resource::<WalkHalt>()
+            .init_resource::<AtmAccess>()
+            .add_systems(Update, clear_match);
+        let ghost = app.world_mut().spawn_empty().id();
+        *app.world_mut().resource_mut::<Gate>() = Gate {
+            queue: Default::default(),
+            resume: Some(TurnPhase::WaitRoll),
+        };
+        app.world_mut()
+            .resource_mut::<CompanyLedgers>()
+            .current_mut("stock_ghost", game_core::prelude::Date::new(2048, 6, 3));
+        *app.world_mut().resource_mut::<LastRoll>() = LastRoll(Some((ghost, 5)));
+        *app.world_mut().resource_mut::<WalkHalt>() = WalkHalt {
+            last: Some(WalkHalted {
+                player: ghost,
+                tile: game_core::prelude::TileIndex(0),
+                cause: HaltCause::Mine,
+            }),
+        };
+        *app.world_mut().resource_mut::<AtmAccess>() = AtmAccess(Some(ghost));
+        // 前置：五样都真挂着东西，否则下面「清零」是五条空跑
+        assert!(app.world().resource::<Gate>().resume.is_some());
+        assert_eq!(app.world().resource::<CompanyLedgers>().months().len(), 1);
+        assert!(app.world().resource::<LastRoll>().0.is_some());
+        assert!(app.world().resource::<WalkHalt>().last.is_some());
+        assert!(app.world().resource::<AtmAccess>().0.is_some());
+
+        app.update();
+
+        assert!(
+            app.world().resource::<Gate>().resume.is_none(),
+            "上一局的门还挂着"
+        );
+        assert!(
+            app.world().resource::<CompanyLedgers>().months().is_empty(),
+            "上一局的公司账会被这一局的分红当成自己的"
+        );
+        assert!(app.world().resource::<LastRoll>().0.is_none());
+        assert!(app.world().resource::<WalkHalt>().last.is_none());
+        assert!(app.world().resource::<AtmAccess>().0.is_none());
     }
 }

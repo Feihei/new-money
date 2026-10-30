@@ -19,6 +19,7 @@ mod art;
 mod autopilot;
 mod dev;
 mod dump;
+mod paths;
 mod render;
 mod scene;
 mod ui;
@@ -55,6 +56,9 @@ fn main() {
         ..default()
     })
     .add_plugins(render::RenderPlugin)
+    // 存档落盘（P15b）：core 拍快照、这里写文件。与 UI 同批注册，但两者互不依赖顺序 ——
+    // 派发只往 `SaveRequest` 里写一个愿望
+    .add_plugins(paths::SavePlugin)
     .add_plugins(ui::UiPlugin)
     .add_plugins(scene::ScenePlugin)
     .add_plugins(autopilot::AutopilotPlugin);

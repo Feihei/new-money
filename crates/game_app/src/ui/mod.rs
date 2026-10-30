@@ -31,8 +31,9 @@ use game_core::prelude::{
     MagicFilter, MagicFilterPicked, MagicSpell, MagicSpellPicked, MarketClock, MinigameResult,
     MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, Paused, Pending, PendingDecision,
     PlaceItemRequested, PlayCardRequested, RemoteUpgradeRequested, RequestRemoteDice, RequestRoll,
-    RequestStay, ShopOpRequested, StaySentence, StockId, StockTradeRequested, TileIndex, TradeSide,
-    TurnOrder, TurnPhase, bank_op_allowed, date_of, market_halt,
+    RequestStay, SaveRequest, ShopOpRequested, StartMode, StaySentence, StockId,
+    StockTradeRequested, TileIndex, TradeSide, TurnOrder, TurnPhase, bank_op_allowed, date_of,
+    market_halt,
 };
 
 use theme::{col, layout, size};
@@ -108,6 +109,9 @@ impl Plugin for UiPlugin {
                     minigame::sync_arcade,
                     minigame::step_arcade,
                     dispatch_ui_actions,
+                    // 排在内层派发之后：读档失败那一帧写进 `SaveNotice` 的话，
+                    // 当帧就出现在按钮下面（菜单上没有棋盘，所以它不受 Live 门禁）
+                    menu::refresh_notice,
                     hover_feedback,
                 )
                     .chain(),
@@ -215,6 +219,12 @@ enum UiSet {
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub enum UiAction {
     NewGame,
+    /// 读唯一的存档槽位（P15b）。**真读出来才进对局** —— 读不出就留在菜单，
+    /// 并把那句话写在按钮下面，而不是进一个空世界
+    LoadGame,
+    /// 存到唯一的槽位（P15b）。能不能存由 core 的可存点判据说（`SaveDenied`），
+    /// 这一支只把愿望写进 `SaveRequest`；落盘与回执在 `paths::persist_snapshot`
+    SaveGame,
     Quit,
     BackToMenu,
     /// 掷骰。只有当前回合玩家、且没有待决事项时才生效（见 dispatch）
@@ -877,6 +887,18 @@ struct UiState<'w> {
     arcade_choice: ResMut<'w, minigame::ArcadeChoiceOpen>,
 }
 
+/// 存档那两个动作要碰的三格：请存的愿望（core 的 `capture_system` 读它）、读档的入口
+/// （`StartMode`）以及最后要念给玩家听的那句话。
+///
+/// 为什么不是消息：`SaveRequest` 在 core 里就是资源（与拍卖那句「许愿」同一种形状），
+/// 而读档是**此刻就要知道成败**的一步 —— 消息要等下一帧，菜单那一行会在中间闪过一帧空档。
+#[derive(SystemParam)]
+struct Saves<'w> {
+    request: ResMut<'w, SaveRequest>,
+    start: ResMut<'w, StartMode>,
+    notice: ResMut<'w, crate::paths::SaveNotice>,
+}
+
 /// 掷骰意图的唯一出口。`dice == 0` = 载具满载，与 [`UiAction::Roll`] 相同；
 /// 被停留按住的人一律改发 [`RequestStay`] —— 规则层也会拒掉他的掷骰，
 /// 但派发侧发对意图，AI 与恶人那条路才有对应的人类入口（P4④）。
@@ -906,6 +928,7 @@ fn dispatch_ui_actions(
     mut next_scene: ResMut<NextState<crate::scene::Scene>>,
     mut sends: Sends,
     mut ui: UiState,
+    mut saves: Saves,
 ) {
     for click in clicks.read() {
         if click.button != PointerButton::Primary {
@@ -931,7 +954,34 @@ fn dispatch_ui_actions(
             .as_ref()
             .is_none_or(|session| !session.suspensions.halted(Institution::Bank));
         match action {
-            UiAction::NewGame => next_scene.set(crate::scene::Scene::Board),
+            UiAction::NewGame => {
+                // 开局永远是全新一局：上一次「读档」若还留着愿望，这里把它清掉
+                // （读档失败不会写 `Resume`，但这条不靠那一支的自觉）
+                *saves.start = StartMode::Fresh;
+                saves.notice.text = None;
+                next_scene.set(crate::scene::Scene::Board);
+            }
+            // 进「可存点」判据的**唯一**入口。这里不重复那个判断：规则层的
+            // `capture_system` 会再问一遍，被拒的理由进 `SaveDenied`，面板念同一句
+            UiAction::SaveGame => saves.request.pending = true,
+            // 读档：先真读出来，再决定进不进对局。读失败就留在菜单，把那句话写在
+            // 按钮下面 —— 「读失败了却进了一个空世界」是最糟的一种失败
+            UiAction::LoadGame => {
+                match crate::paths::read_snapshot_from(&crate::paths::save_path()) {
+                    Ok(snapshot) => {
+                        *saves.start = StartMode::Resume(Box::new(snapshot));
+                        saves.notice.text = None;
+                        next_scene.set(crate::scene::Scene::Board);
+                    }
+                    Err(why) => {
+                        warn!("读档失败：{why}");
+                        *saves.notice = crate::paths::SaveNotice {
+                            text: Some(format!("读档失败：{why}")),
+                            failed: true,
+                        };
+                    }
+                }
+            }
             UiAction::BackToMenu => next_scene.set(crate::scene::Scene::Menu),
             UiAction::Quit => {
                 sends.exit.write(AppExit::Success);
@@ -1597,6 +1647,11 @@ mod tests {
                 .init_resource::<minigame::PracticeRounds>()
                 .init_resource::<minigame::ArcadeChoiceOpen>()
                 .init_resource::<AtmAccess>()
+                // P15b：「保存进度」只往这个愿望里写；读档那一支碰 `StartMode` 与
+                // 菜单那一行回执。三格都常驻（真实应用里前两格由 core 注册）
+                .init_resource::<SaveRequest>()
+                .init_resource::<StartMode>()
+                .init_resource::<crate::paths::SaveNotice>()
                 .insert_resource(Paused(paused))
                 // 休市判据要读日历、锚点与节假日表，三者都由 core 常驻。
                 // 锚点钉 2048-01-06（周一），于是 tick 5 = 1 月 11 日（周六）是休市日
@@ -1944,6 +1999,24 @@ mod tests {
 
         h.click(h.pause);
         assert!(h.app.world().resource::<pause::PauseMenuOpen>().0);
+    }
+
+    /// P15b：保存按钮**只写一个愿望**。判据在 core（每帧重算的 `SaveDenied`），落盘在
+    /// `paths::persist_snapshot` —— 派发若自己判一遍，就会出现「按钮说能存、按下去被拒」
+    /// 那种两句话的局面。这一条钉住「它只动这个愿望，别的什么都不碰」。
+    #[test]
+    fn the_save_button_writes_a_wish_and_judges_nothing() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let save = h.app.world_mut().spawn(UiAction::SaveGame).id();
+        assert!(
+            !h.app.world().resource::<SaveRequest>().pending,
+            "前置：还没人请存，否则下面那句「写进去了」是空跑"
+        );
+        h.click(save);
+        assert!(
+            h.app.world().resource::<SaveRequest>().pending,
+            "按了保存却没把愿望写进去"
+        );
     }
 
     /// ATM 认人不认回合：卡是甲的，就该由甲办，哪怕现在轮到乙行动。
@@ -2468,6 +2541,12 @@ mod tests {
             .init_resource::<AtmAccess>()
             // P7：`sync_arcade` 读那一手布局种子（对局里由 core 发下来）
             .init_resource::<game_core::prelude::ArcadeDeal>()
+            // P15b：派发多了「保存/读档」两个出口，菜单那一行也读存档回执。
+            // 真实应用里前两格由 `CoreGamePlugin` 注册、`SaveNotice` 由 `paths::SavePlugin`
+            // 注册 —— 漏一格的话崩的是「所有按钮都死」，不是那一颗
+            .init_resource::<game_core::prelude::SaveRequest>()
+            .init_resource::<game_core::prelude::StartMode>()
+            .init_resource::<crate::paths::SaveNotice>()
             // P2④ 起派发要读日历判休市。这两条在真实应用里由 `CoreGamePlugin`
             // `init_resource` 常驻，菜单态也在 —— 少了它们崩的是测试，多的那条路径崩的会是玩家
             .init_resource::<MarketClock>()

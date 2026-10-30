@@ -24,7 +24,7 @@ use crate::ai::Controller;
 use crate::auction::Auction;
 use crate::bank::AtmAccess;
 use crate::board::BuildingKind;
-use crate::charge::{Adjustment, ChargeDomain, Corrections, Scope, Source};
+use crate::charge::{Adjustment, ChargeDomain, Correction, Corrections, Scope, Source};
 use crate::company::{CompanyLedgers, MonthLedger};
 use crate::coupon::CouponBoxes;
 use crate::deck::Deck;
@@ -46,8 +46,9 @@ use crate::rules::GameRules;
 use crate::shop::ShopStock;
 use crate::status::{LandStatus, Timed};
 use crate::stock::{PriceHistory, StockHoldings, StockId, StockPrice};
-use crate::turn::{GameSession, TurnOrder, TurnPhase};
+use crate::turn::{GameSession, LastRoll, TurnOrder, TurnPhase};
 use crate::villain::{Hired, Villain, VillainKind};
+use crate::world::{ActiveBoard, Gameplay};
 
 /// 存档格式版本。加字段＋给 `#[serde(default)]` 时递增；`migrate` 负责把旧版本搬上来。
 pub const SAVE_VERSION: u32 = 1;
@@ -200,7 +201,6 @@ pub enum ScopeState {
 ///
 /// 新增一条 `Scope::domains(&[...])` 时把它加进来；漏了不会错账（内容仍相等），
 /// 只是那一条会退回一条泄漏出来的切片并 `warn!` 一句 —— 见 [`scope_from_state`]。
-#[allow(dead_code)]
 static KNOWN_DOMAIN_LISTS: &[&[ChargeDomain]] = &[&[ChargeDomain::Rent, ChargeDomain::Penalty]];
 
 impl From<Scope> for ScopeState {
@@ -213,7 +213,6 @@ impl From<Scope> for ScopeState {
     }
 }
 
-#[allow(dead_code)]
 fn scope_from_state(state: ScopeState) -> Scope {
     match state {
         ScopeState::Any => Scope::Any,
@@ -245,7 +244,10 @@ pub struct SaveRequest {
 #[derive(Resource, Default)]
 pub struct SnapshotTaken(pub Option<GameSnapshot>);
 
-/// 上一次请存被拒的原因（面板把它念成一句人话）。
+/// 「此刻能不能存」的读数：`None` = 正是一个可存点，`Some(why)` = 灰按钮要念的那句话。
+///
+/// 每帧由 [`judge_system`] 重算。与 [`capture_system`] 走同一份事实（[`save_point`]）——
+/// 灰按钮的文案与「按下去被拒」的那句话出自同一次判断，否则会出现「亮着、按下去说不能存」。
 #[derive(Resource, Debug, Default)]
 pub struct SaveDenied(pub Option<SaveDeny>);
 
@@ -267,6 +269,17 @@ pub enum SaveDeny {
 }
 
 impl SaveDeny {
+    /// 全表。灰按钮那条用例逐条打它 —— `label` 的穷尽表已经会逼人给新拒因写文案，
+    /// 这一行把那句话也逼进测试（漏了这里，新拒因就只在「真的被拒」时才第一次上屏）。
+    pub const ALL: [Self; 6] = [
+        Self::NotInMatch,
+        Self::NotYourTurn,
+        Self::Waiting,
+        Self::GateAsking,
+        Self::AuctionRunning,
+        Self::Walking,
+    ];
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::NotInMatch => "现在没有对局",
@@ -336,8 +349,12 @@ pub fn capture_system(world: &mut World) {
     }
 }
 
-/// 把此刻的世界拍成一张快照。**不可存时返回理由**，一个字都不写。
-pub fn capture_match(world: &mut World) -> Result<GameSnapshot, SaveDeny> {
+/// 此刻能不能存。判据是六样事实，[`judge`] 只认这六个布尔 —— 分开两半是为了让
+/// 「读世界」与「拍板」各自能单独验。
+///
+/// [`capture_match`] 与 [`judge_system`] 都从这里读，于是暂停菜单那颗灰按钮的文案
+/// 与「按下去被拒」的那句话永远出自同一份事实。
+fn save_point(world: &mut World) -> Result<(), SaveDeny> {
     let in_match = world.get_resource::<crate::world::ActiveBoard>().is_some();
     let phase = world
         .get_resource::<State<TurnPhase>>()
@@ -366,7 +383,25 @@ pub fn capture_match(world: &mut World) -> Result<GameSnapshot, SaveDeny> {
         auction,
         walking,
         human,
-    })?;
+    })
+}
+
+/// 每帧把「此刻能不能存」抄进 [`SaveDenied`]（P15b）。
+///
+/// 独占 system 而不是九参数包：五样事实散在 `State`／资源／两条查询里，而
+/// [`capture_system`] 已经是同一形状的本家 —— 两处读世界的写法一样，
+/// 「按钮说能存、按下去说不能」这种分叉才没有缝可钻。
+pub fn judge_system(world: &mut World) {
+    let why = save_point(world).err();
+    let mut denied = world.resource_mut::<SaveDenied>();
+    if denied.0 != why {
+        denied.0 = why;
+    }
+}
+
+/// 把此刻的世界拍成一张快照。**不可存时返回理由**，一个字都不写。
+pub fn capture_match(world: &mut World) -> Result<GameSnapshot, SaveDeny> {
+    save_point(world)?;
 
     // 身份表：`Entity → SeatRef`。下面四处（轮转、修正、ATM、炸弹在谁身上）都靠它。
     let mut seat_of: HashMap<Entity, SeatRef> = HashMap::new();
@@ -628,10 +663,269 @@ fn place_rank(place: &OccupancyPlace) -> (u8, u32, u32) {
     }
 }
 
-/// 把快照里的 `ScopeState` 换回运行期的 [`Scope`]（读档侧用，P15b）。
-#[allow(dead_code)]
+/// 把快照里的 `ScopeState` 换回运行期的 [`Scope`]（读档侧用）。
 pub(crate) fn scope_of(state: &ScopeState) -> Scope {
     scope_from_state(state.clone())
+}
+
+// ===== 读档装配（P15b）=====
+
+/// 开局走哪条路。表现层点「读档」时插入 [`StartMode::Resume`]，`begin_game_system` 取走它。
+///
+/// 它是一次性的**许愿**而不是常驻配置：取走之后回到 `Fresh`，否则下一局「新游戏」
+/// 会把上一次选的档再读一遍。
+#[derive(Resource, Debug, Default)]
+pub enum StartMode {
+    /// 新局：按 `GameSetup` / `GameSeed` 铺一局。
+    #[default]
+    Fresh,
+    /// 读档：按快照铺一局，落点 `WaitRoll`（不重跑 `TurnStart`）。
+    Resume(Box<GameSnapshot>),
+}
+
+/// 从快照铺一局。**两遍装配**：先按稳定键铺壳（`LandId`／`PlayerId`／`VillainKind`／
+/// 股票 id／牌堆），再把状态灌进去、并把 `Entity` 引用翻译成新句柄。
+///
+/// 落点由调用方设成 `TurnPhase::WaitRoll`；这里**不跑** `TurnStart` —— 那一格会扣停留与
+/// 乌龟计数、把人从机场放回来，而存档点的语义正是「他还没开始这一回合」。
+pub fn resume_match(
+    commands: &mut Commands,
+    def: crate::board::BoardDef,
+    stocks: &crate::stock::StockSet,
+    holidays: crate::calendar::HolidaySet,
+    news: crate::news::NewsSet,
+    snapshot: GameSnapshot,
+) {
+    // 存档与数据必须同一张棋盘、同一份股票表：对不上时下面按 id 回填会**静默**漏掉整块地，
+    // 而那正是「读档之后地没了」这类最难查的错。所以这里当场 panic，把话说清楚 —
+    // 今天只有一张盘，真撞见就是拿错档或换了数据，不是运行期能兜的事。
+    {
+        let mut stored: Vec<u32> = snapshot.lands.iter().map(|land| land.id.0).collect();
+        let mut board: Vec<u32> = def.lands.iter().map(|land| land.id).collect();
+        stored.sort_unstable();
+        board.sort_unstable();
+        assert_eq!(
+            stored, board,
+            "存档与当前棋盘的 LandId 对不上 —— 这份档不是在当前棋盘上存的"
+        );
+        let mut stored: Vec<&str> = snapshot
+            .stocks
+            .iter()
+            .map(|stock| stock.id.0.as_str())
+            .collect();
+        let mut known: Vec<&str> = stocks.0.iter().map(|stock| stock.id.as_str()).collect();
+        stored.sort_unstable();
+        known.sort_unstable();
+        assert_eq!(stored, known, "存档与当前股票表对不上");
+    }
+
+    // ---- 第一遍：壳 ----
+    let lands = crate::land::spawn_lands(commands, &def);
+    let mut players_by_id: HashMap<PlayerId, Entity> = HashMap::new();
+    for state in &snapshot.players {
+        let entity = crate::player::spawn_body(
+            commands,
+            state.id,
+            state.name.clone(),
+            state.color,
+            state.gender,
+            state.controller,
+        );
+        players_by_id.insert(state.id, entity);
+    }
+    for stock in &snapshot.stocks {
+        commands.spawn((
+            stock.id.clone(),
+            stock.price,
+            stock.history.clone(),
+            Gameplay,
+        ));
+    }
+    for deck in &snapshot.decks {
+        commands.spawn((deck.clone(), Gameplay));
+    }
+    // 恶人开局的那个壳（四人、全在笼里）原样复用，再按存档改状态
+    let caged = crate::villain::spawn_caged_villains(commands, &def);
+    let villains_by_kind: HashMap<VillainKind, Entity> = VillainKind::ALL
+        .iter()
+        .copied()
+        .zip(caged.iter().copied())
+        .collect();
+
+    let seat_entity = |seat: &SeatRef| -> Entity {
+        match seat {
+            SeatRef::Player(id) => *players_by_id
+                .get(id)
+                .unwrap_or_else(|| panic!("存档里的 P{} 不在名单上", id.0)),
+            SeatRef::Villain(kind) => *villains_by_kind
+                .get(kind)
+                .unwrap_or_else(|| panic!("存档里的恶人「{}」不存在", kind.label())),
+        }
+    };
+
+    // ---- 第二遍：状态 ----
+    for state in &snapshot.players {
+        let mut player = commands.entity(seat_entity(&SeatRef::Player(state.id)));
+        player.insert((
+            state.wallet,
+            state.points,
+            state.bank,
+            state.hand.clone(),
+            state.inventory.clone(),
+            state.tickets.clone(),
+            state.tile,
+            state.heading,
+            state.mount,
+        ));
+        player.insert(StockHoldings(state.holdings.iter().cloned().collect()));
+        if let Some(detention) = state.detention {
+            player.insert(detention);
+        }
+        if let Some(stay) = state.stay {
+            player.insert(stay);
+        }
+        if let Some(move_cap) = state.move_cap {
+            player.insert(move_cap);
+        }
+        if let Some(insured) = state.insured.clone() {
+            player.insert(insured);
+        }
+        if let Some(possession) = state.possession {
+            player.insert(possession);
+        }
+        if state.bankrupt {
+            player.insert(Bankrupt);
+        }
+    }
+    for state in &snapshot.villains {
+        let mut villain = commands.entity(seat_entity(&SeatRef::Villain(state.kind)));
+        villain.insert((
+            state.name.clone(),
+            state.tile,
+            state.heading,
+            state.mount,
+            state.detention,
+        ));
+        if let Some(employer) = state.hired_by {
+            let boss = *players_by_id
+                .get(&employer)
+                .unwrap_or_else(|| panic!("存档里恶人的雇主 P{} 不在名单上", employer.0));
+            villain.insert(Hired { employer: boss });
+        }
+    }
+    for state in &snapshot.lands {
+        let entity = *lands
+            .get(&state.id)
+            .unwrap_or_else(|| panic!("存档里的地块 L{} 在棋盘上不存在", state.id.0));
+        let mut land = commands.entity(entity);
+        land.insert((
+            Owner(state.owner),
+            state.level,
+            state.mortgaged,
+            state.rent_ledger,
+        ));
+        // 设施与限时状态**两个方向都要写**：棋盘数据可能预建了设施，而存档里那一格已经
+        // 被拆掉了 —— 只写 `Some` 的那一半会让读档后的建筑比存档多一座
+        match state.facility {
+            Some(kind) => {
+                land.insert(Facility(kind));
+            }
+            None => {
+                land.remove::<Facility>();
+            }
+        }
+        match state.status {
+            Some((kind, days)) => {
+                land.insert(Timed::new(kind, days));
+            }
+            None => {
+                land.remove::<Timed<LandStatus>>();
+            }
+        }
+    }
+    for state in &snapshot.occupancy {
+        let at = match state.place {
+            OccupancyPlace::OnTile(tile) => OccupancyAt::OnTile(tile),
+            OccupancyPlace::Carried { by, steps_left } => OccupancyAt::Carried {
+                by: seat_entity(&by),
+                steps_left,
+            },
+        };
+        commands.spawn((
+            Occupancy {
+                kind: state.kind,
+                at,
+            },
+            Gameplay,
+        ));
+    }
+
+    let order = TurnOrder {
+        order: snapshot.order.order.iter().map(seat_entity).collect(),
+        cursor: if snapshot.order.order.is_empty() {
+            0
+        } else {
+            snapshot.order.cursor.min(snapshot.order.order.len() - 1)
+        },
+    };
+    let corrections = snapshot
+        .corrections
+        .iter()
+        .map(|correction| Correction {
+            bearer: seat_entity(&correction.bearer),
+            scope: scope_of(&correction.scope),
+            adjustment: correction.adjustment,
+            source: correction.source,
+        })
+        .collect::<Vec<_>>();
+    let atm = snapshot.atm.map(|id| {
+        *players_by_id
+            .get(&id)
+            .unwrap_or_else(|| panic!("存档里的 ATM 持有人 P{} 不在名单上", id.0))
+    });
+
+    // ---- 资源 ----
+    let mut rng = Rng::new(snapshot.session.seed);
+    rng.set_positions(snapshot.rng);
+    let summary = (
+        snapshot.session.turn_count,
+        snapshot.session.epoch,
+        snapshot.players.len(),
+        snapshot.lands.len(),
+    );
+    commands.insert_resource(ActiveBoard { def, lands });
+    commands.insert_resource(order);
+    commands.insert_resource(snapshot.session.clone());
+    commands.insert_resource(snapshot.rules);
+    commands.insert_resource(snapshot.market);
+    commands.insert_resource(rng);
+    commands.insert_resource(holidays);
+    commands.insert_resource(news);
+    commands.insert_resource(Corrections::from_items(corrections));
+    commands.insert_resource(AtmAccess(atm));
+    commands.insert_resource(CouponBoxes::from_entries(snapshot.coupon_boxes.clone()));
+    commands.insert_resource(snapshot.shop.clone());
+    commands.insert_resource(snapshot.jackpot);
+    commands.insert_resource(CompanyLedgers::from_months(snapshot.ledgers.clone()));
+    // 可存点上这几台「过程机器」必空（判据在 `judge`）。仍然显式清一遍：
+    // 读档走的是「回主菜单 → 再开局」，任何一处漏清都会以「上一局的窗口/拍卖还在」回来
+    commands.insert_resource(Gate::default());
+    commands.insert_resource(Auction::default());
+    commands.insert_resource(crate::magic::MagicRitual::default());
+    commands.insert_resource(LastRoll::default());
+    commands.insert_resource(crate::landing::Landing::default());
+    commands.insert_resource(PendingDecision::default());
+    commands.insert_resource(crate::walk::WalkClock::default());
+    commands.insert_resource(crate::occupancy::WalkHalt::default());
+    commands.insert_resource(crate::minigame::ArcadeDeal::default());
+    // 墙钟量不进快照（P14a 那句）：读档后「立刻可以想」，而不是回到存档那一刻的延迟
+    commands.insert_resource(crate::ai::AiClock::default());
+    commands.insert_resource(crate::ai::AiErrands::default());
+
+    info!(
+        "读档完成：第 {} 回合 · {} · {} 玩家 / {} 块地 / 20 条随机流已摆回",
+        summary.0, summary.1, summary.2, summary.3
+    );
 }
 
 #[cfg(test)]

@@ -1,9 +1,6 @@
-//! P15a 的验收：**快照的形状**。
+//! P15 的验收：**快照的形状**（P15a）与**读回来接着跑**（P15b）。
 //!
-//! 这一刀只做「捕获」：把一局对局拍成一张可序列化的快照，并钉死「什么时候能拍」。
-//! 读档装配（把快照装回世界）是 P15b，与 `begin_game_system` 共用同一条铺局链。
-//!
-//! 四条各管一件事：
+//! 每一刀各管一半：
 //! - [`a_capture_at_the_save_point_reads_the_same_world_twice`]：同一帧世界里拍两次逐字段相等 ——
 //!   它是「捕获没有偷读时间/帧序」的判据（`AiClock` 与 `AiErrands` 不在里面，正是因为它必须是）；
 //! - [`the_capture_matches_what_the_world_says`]：快照里那几个数**就是世界的数**（拿 `roster`
@@ -11,7 +8,13 @@
 //! - [`the_snapshot_round_trips_through_json_byte_for_byte`]：存→读→再存**字节一致**，
 //!   这一条是「排序与 `HashMap` 别混进存档」的全部理由；
 //! - [`every_busy_shape_refuses_the_capture_with_its_own_reason`]：正在办事时拒得干净，
-//!   且理由就是灰按钮上那句话。
+//!   且理由就是灰按钮上那句话；
+//! - [`every_state_block_reaches_the_snapshot`]：每一块状态都真的被读到（漏读一个字段时
+//!   前面几条全绿）；
+//! - [`a_loaded_match_continues_exactly_where_it_stopped`]：读档继续 == 没读档继续
+//!   （两条时间线走到同一回合，快照逐字节相同）；
+//! - [`the_save_point_reading_follows_the_world_every_frame`]：`judge_system` 的接线
+//!   （灰按钮那句为什么是每帧算出来的，不是默认值）。
 
 mod common;
 
@@ -354,4 +357,99 @@ fn every_state_block_reaches_the_snapshot() {
     assert_eq!(after.session.bank_vault, 123);
     assert!(!after.ledgers.is_empty(), "公司当月账页");
     assert_ne!(after.rng, before.rng, "随机流水位");
+}
+
+/// P15b 的核心验收：**读档继续 == 没读档继续**。
+///
+/// A 是原时间线：跑 6 回合、存档、再跑 4 回合；B 从那张档开一局、跑同样 4 回合。
+/// 两边最后各拍一张快照，**逐字节相同**才算过 —— 差一个字段、一条随机流的水位没摆回、
+/// 一个 `TurnStart` 被重跑两次，这条都会红，而画面上的差别要几十回合后才看得出来。
+#[test]
+fn a_loaded_match_continues_exactly_where_it_stopped() {
+    let mut living = boot_default();
+    boot_to_wait_roll(&mut living);
+    play_turns(&mut living, 6);
+    assert!(
+        run_until_phase(&mut living, TurnPhase::WaitRoll, 60),
+        "第 6 回合之后应当回到 WaitRoll"
+    );
+    request_save(&mut living);
+    let snapshot = taken(&living).expect("可存点应存得下");
+
+    let mut loaded = boot_default();
+    loaded
+        .world_mut()
+        .insert_resource(StartMode::Resume(Box::new(snapshot.clone())));
+    assert!(run_until_world(&mut loaded), "读档之后世界应当装配起来");
+    // `NextState` 要等下一帧的 `StateTransition` 才落地（坑 12/29）
+    assert!(
+        run_until_phase(&mut loaded, TurnPhase::WaitRoll, 10),
+        "读档之后应当落在 WaitRoll"
+    );
+    assert_eq!(
+        phase(&loaded),
+        TurnPhase::WaitRoll,
+        "落点是「他还没开始这一回合」，不是 TurnStart"
+    );
+    assert_eq!(
+        loaded.world().resource::<GameSession>().turn_count,
+        snapshot.session.turn_count,
+        "回合数照存档"
+    );
+
+    // `play_turns` 的第二个参数是**绝对**回合数（跑到 `turn_count >= want` 为止）
+    play_turns(&mut living, 10);
+    assert!(run_until_phase(&mut living, TurnPhase::WaitRoll, 60));
+    play_turns(&mut loaded, 10);
+    assert!(run_until_phase(&mut loaded, TurnPhase::WaitRoll, 60));
+
+    let living_turn = living.world().resource::<GameSession>().turn_count;
+    let loaded_turn = loaded.world().resource::<GameSession>().turn_count;
+    assert!(
+        living_turn == 10 && loaded_turn == 10,
+        "两条时间线都真的走到了第 10 回合（否则下面那条字节比对是空跑）：         存档时 {} 回合、原时间线 {living_turn}、读档侧 {loaded_turn}",
+        snapshot.session.turn_count
+    );
+
+    request_save(&mut living);
+    let after_living = taken(&living).expect("原时间线还能存");
+    request_save(&mut loaded);
+    let after_loaded = taken(&loaded).expect("读档那一条也还能存");
+    assert_eq!(
+        serde_json::to_string(&after_loaded).expect("读档侧快照"),
+        serde_json::to_string(&after_living).expect("原时间线快照"),
+        "读档继续与原时间线分叉了（随机流水位、回合落点或某个状态块没摆回去）"
+    );
+}
+
+/// P15b 接线：`judge_system` 每帧把「此刻能不能存」抄进 `SaveDenied`。
+///
+/// 这条钉的是**接线而不是判据**（判据在 `snapshot.rs` 的单测里逐条打过）：不挂这条
+/// system，`SaveDenied` 会一直停在默认的 `None`，暂停菜单那颗按钮于是永远亮着 ——
+/// 而别的用例一条都不会红，因为 `capture_match` 自己会拒。
+#[test]
+fn the_save_point_reading_follows_the_world_every_frame() {
+    let mut app = boot_default();
+    app.update();
+    assert_eq!(
+        denied(&app),
+        Some(SaveDeny::NotInMatch),
+        "还没开局就说过「能存」"
+    );
+
+    let current = boot_to_wait_roll(&mut app);
+    assert_eq!(denied(&app), None, "轮到人类、还没掷骰 —— 这一帧就是可存点");
+
+    // 挂一个窗口上去：读数必须当帧就变（这正是「按钮灰着并说出为什么」的那条数据）
+    {
+        let mut pending = app.world_mut().resource_mut::<PendingDecision>();
+        pending.player = Some(current);
+        pending.about = Some(game_core::landing::Pending::Card);
+    }
+    app.update();
+    assert_eq!(
+        denied(&app),
+        Some(SaveDeny::Waiting),
+        "窗口挂上去之后读数没跟上"
+    );
 }
