@@ -18,6 +18,7 @@ use game_core::prelude::{
 
 mod art;
 mod autopilot;
+mod boards;
 mod dev;
 mod dump;
 mod paths;
@@ -110,7 +111,15 @@ fn insert_boot_resources(world: &mut World) {
     world.insert_resource(cash);
     // AI 的伪延迟：默认 0.5..=1.5 秒（PLAN §四 P14 那句），`NM_AUTOGAP=<秒>` 压成常数
     world.insert_resource(boot_cadence());
-    world.insert_resource(DataHandles::load(&server));
+    // 可选棋盘（P2d 之后）：每张真盘都在启动时拿好句柄，设置页只改
+    // `DataHandles.board` 指哪一张。`NM_BOARD` 让 `NM_SCENE=board` 也能直接开大地图
+    let mut data = DataHandles::load(&server);
+    let library = boards::BoardLibrary::load(&server, &data);
+    let pick = boards::BoardPick::from_env(&library);
+    data.board = library.entries[pick.0].handle.clone();
+    world.insert_resource(data);
+    world.insert_resource(library);
+    world.insert_resource(pick);
     world.insert_resource(render::DevFont(server.load(DEV_FONT)));
 }
 
@@ -240,8 +249,17 @@ fn clock_seed() -> u64 {
 ///
 /// 挂在 `Boot` 态上：棋盘没装配好就一直等在这里，所以每帧都问一遍状态，
 /// 直到 `AssetServer` 给出 `Failed` 为止。
-fn check_assets(server: Res<AssetServer>, data: Res<DataHandles>) {
+fn check_assets(
+    server: Res<AssetServer>,
+    data: Res<DataHandles>,
+    library: Res<boards::BoardLibrary>,
+) {
     expect_ready(&server, &data.board, "棋盘");
+    // 设置页里每一张可选盘都要能开：失败资产在那里只会静默等下去，
+    // 而玩家点下去只会看到「开始对局」按了没反应
+    for entry in &library.entries {
+        expect_ready(&server, &entry.handle, entry.label);
+    }
     expect_ready(&server, &data.chance, "机会牌");
     expect_ready(&server, &data.fate, "命运牌");
     // 道具牌也要查：装配要四份资产齐（`world::begin_game_system` 那个元组），

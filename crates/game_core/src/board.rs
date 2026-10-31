@@ -1061,6 +1061,136 @@ mod tests {
         );
     }
 
+    // ===== P2d：中国大陆大地图 =====
+
+    const CHINA: &str = include_str!("../../../assets/data/boards/china.json");
+
+    fn china() -> BoardDef {
+        BoardDef::from_json(CHINA).expect("china.json 应能解析")
+    }
+
+    /// 大地图的验收地基：20 条街、每条 3–6 块、一圈 148 格、起始现金 30 万。
+    /// 这些数写死在测试里，改盘就必须同时解释为什么。
+    #[test]
+    fn china_is_twenty_streets_of_three_to_six_plots() {
+        let b = china();
+        assert_eq!(b.board_name, "china");
+        assert_eq!(b.start_cash, 300_000);
+        assert_eq!(b.loop_len(), 148);
+        assert_eq!(b.lands.len(), 93);
+        assert!(
+            b.validate().is_ok(),
+            "校验失败: {:?}",
+            b.validate().unwrap_err()
+        );
+
+        let mut streets: BTreeMap<&str, Vec<&LandDef>> = BTreeMap::new();
+        for l in &b.lands {
+            streets
+                .entry(l.group.as_deref().unwrap())
+                .or_default()
+                .push(l);
+        }
+        assert_eq!(streets.len(), 20, "中国大陆盘该有 20 条街");
+        for (group, plots) in &streets {
+            let n = plots.len();
+            assert!(
+                (3..=6).contains(&n),
+                "{group} 有 {n} 块地，街道应在 3–6 块之间"
+            );
+        }
+        // 十条大街是住宅+商业混排，另外十条是纯住宅；这张盘没有纯商业街
+        let mixed = streets
+            .values()
+            .filter(|p| {
+                p.iter().any(|l| l.land_type == LandType::Commercial)
+                    && p.iter().any(|l| l.land_type == LandType::Residential)
+            })
+            .count();
+        let pure_comm = streets
+            .values()
+            .filter(|p| p.iter().all(|l| l.land_type == LandType::Commercial))
+            .count();
+        assert_eq!(mixed, 10, "十条混排街");
+        assert_eq!(pure_comm, 0, "这张盘不该有纯商业街");
+
+        let commercial: Vec<_> = b
+            .lands
+            .iter()
+            .filter(|l| l.land_type == LandType::Commercial)
+            .collect();
+        assert_eq!(commercial.len(), 13, "十三块商业地");
+        assert!(commercial.iter().all(|l| l.size == 2));
+        assert!(
+            commercial.iter().any(|l| l.building_kind.is_none()),
+            "大地图上也要留空商业地给建设窗口"
+        );
+    }
+
+    /// 两条支线各 5 格、尽端是建筑、支线格不在主环上也没有地。
+    #[test]
+    fn china_branches_end_in_a_building() {
+        let b = china();
+        for (kind, name) in [(BranchKind::Jail, "监狱"), (BranchKind::Hospital, "医院")] {
+            let end = b.branch_end(kind).expect("支线存在");
+            assert_eq!(end.name, name);
+            assert_eq!(
+                end.kind,
+                if kind == BranchKind::Jail {
+                    TileKind::Jail
+                } else {
+                    TileKind::Hospital
+                }
+            );
+            let junction = b.branch_junction(kind).unwrap();
+            assert_eq!(
+                junction.kind,
+                match kind {
+                    BranchKind::Jail => TileKind::Jail,
+                    BranchKind::Hospital => TileKind::Hospital,
+                },
+                "主环接入点本身就是保释格"
+            );
+            assert_eq!(junction.branch.as_ref().unwrap().tiles.len(), 5);
+            assert_eq!(end.land_id, None, "死胡同尽端没有地");
+        }
+    }
+
+    /// P2c 蓝图里的「集中段落」在大地图上也要真的存在：连成一段的无地路段，
+    /// 点券与三款游乐场都落在那里。
+    #[test]
+    fn china_has_a_land_free_stretch_with_coupon_and_arcade() {
+        let b = china();
+        let mut run = 0;
+        let mut best = 0;
+        for t in &b.tiles {
+            if t.land_id.is_none() && t.kind != TileKind::Shop && t.kind != TileKind::Company {
+                run += 1;
+                best = best.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        assert!(best >= 6, "连成一段的无地路段只有 {best} 格");
+        assert!(b.tiles.iter().any(|t| t.kind == TileKind::Coupon));
+        assert_eq!(
+            b.tiles
+                .iter()
+                .filter(|t| t.kind == TileKind::Arcade)
+                .count(),
+            3,
+            "三款游乐场各一格"
+        );
+        assert!(
+            b.tiles.iter().any(|t| t.kind == TileKind::Neutral),
+            "公园那一格"
+        );
+        assert!(
+            b.tiles.iter().any(|t| t.kind == TileKind::Lottery),
+            "彩票中心"
+        );
+    }
+
     #[test]
     fn ring_wraps_both_directions() {
         let b = board();

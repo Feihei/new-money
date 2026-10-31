@@ -39,6 +39,8 @@ use game_core::prelude::{
     market_halt,
 };
 
+use crate::boards::{BoardLibrary, BoardPick};
+
 use theme::{col, layout, size};
 
 pub struct UiPlugin;
@@ -254,6 +256,9 @@ pub enum UiAction {
     /// 开合「新对局」设置面（P2c-c）。主菜单那颗「新游戏」开它 ——
     /// 先选起始资金，再按面板里的「开始对局」
     ToggleMatchSetup,
+    /// 选一张地图（下标进 [`BoardLibrary::entries`]）。只改设置页那一格，
+    /// 真正的换盘发生在「开始对局」那一刻（写 `DataHandles.board`）
+    SetBoard(usize),
     /// 选一档起始资金（下标进 [`START_CASH_TIERS`]）。写两个地方：`StartCashChoice`
     /// 是下一局真用的数（与 `NM_CASH` 同一条入口），`Settings.start_cash` 是记住的偏好
     SetStartCash(usize),
@@ -936,9 +941,13 @@ struct UiState<'w> {
     roster: ResMut<'w, match_setup::RosterChoice>,
     setup: ResMut<'w, GameSetup>,
     /// 角色表与数据句柄。没有它就没法把 id 翻成开局配置 —— 派发宁可拒绝开局，
-    /// 也不拿 `GameSetup::default()` 顶上（那会静默换人）
-    data: Res<'w, DataHandles>,
+    /// 也不拿 `GameSetup::default()` 顶上（那会静默换人）。`ResMut` 是为了在
+    /// 「开始对局 / 读档」那一刻把 `board` 换到选中的那张盘上
+    data: ResMut<'w, DataHandles>,
     characters: Res<'w, Assets<CharacterSet>>,
+    /// 可选棋盘与当前选择（P2d 之后）。设置页只改这一格，换盘在 `StartMatch` 做
+    board_library: Res<'w, BoardLibrary>,
+    board_pick: ResMut<'w, BoardPick>,
     /// 游乐场那四格（P7）。`arcade` 是「现在开着的那一局」——派发要往里写分数与铲数，
     /// 所以它是 `ResMut` 而不是只有 `sync_arcade` 能碰的私有状态
     arcade: ResMut<'w, minigame::Arcade>,
@@ -1028,6 +1037,12 @@ fn dispatch_ui_actions(
             UiAction::LoadGame => {
                 match crate::paths::read_snapshot_from(&crate::paths::save_path()) {
                     Ok(snapshot) => {
+                        // 存档记着它在哪张盘上（P2c-b）：读档要先把棋盘换回去，
+                        // 否则 `begin_game_system` 会因为盘名对不上而按新局开
+                        if let Some(index) = ui.board_library.index_of(&snapshot.board) {
+                            ui.board_pick.0 = index;
+                            ui.data.board = ui.board_library.entries[index].handle.clone();
+                        }
                         *saves.start = StartMode::Resume(Box::new(snapshot));
                         saves.notice.text = None;
                         next_scene.set(crate::scene::Scene::Board);
@@ -1130,6 +1145,13 @@ fn dispatch_ui_actions(
             // 下一局真用的数（与 `NM_CASH` 同一条入口），`Settings.start_cash` 是偏好；
             // 文件由 `settings::persist_settings` 单写者落盘
             UiAction::ToggleMatchSetup => ui.match_setup_open.0 = !ui.match_setup_open.0,
+            // 选地图（P2d 之后）：只改设置页这一格。真正的换盘在「开始对局」——
+            // 那一刻写 `DataHandles.board`，规则层只认那一个句柄
+            UiAction::SetBoard(index) => {
+                if ui.match_setup_open.0 && *index < ui.board_library.entries.len() {
+                    ui.board_pick.0 = *index;
+                }
+            }
             UiAction::SetStartCash(index) => {
                 if let Some(cash) = START_CASH_TIERS.get(*index) {
                     ui.start_cash.0 = Some(*cash);
@@ -1157,6 +1179,9 @@ fn dispatch_ui_actions(
                 if !ui.match_setup_open.0 {
                     continue;
                 }
+                let Some(entry) = ui.board_library.entries.get(ui.board_pick.0) else {
+                    continue;
+                };
                 let Some(set) = ui.characters.get(&ui.data.characters) else {
                     continue;
                 };
@@ -1164,6 +1189,9 @@ fn dispatch_ui_actions(
                     continue;
                 };
                 *ui.setup = setup;
+                // 换盘的唯一动作：规则层只认 `DataHandles.board` 这一个句柄。
+                // 资产已在启动时载入，等它真就绪由 `begin_game_system` 自己挡
+                ui.data.board = entry.handle.clone();
                 *saves.start = StartMode::Fresh;
                 saves.notice.text = None;
                 ui.match_setup_open.0 = false;
@@ -1475,6 +1503,7 @@ fn hover_feedback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boards::BoardEntry;
     use bevy::camera::NormalizedRenderTarget;
     use bevy::ecs::message::Messages;
     use bevy::picking::{
@@ -1673,10 +1702,39 @@ mod tests {
             .add(shipped_characters())
     }
 
+    /// 大地图（P2d 之后）：设置页第二张真盘，20 条街、148 格。
+    fn shipped_china_board() -> BoardDef {
+        serde_json::from_str(include_str!("../../../../assets/data/boards/china.json"))
+            .expect("assets/data/boards/china.json 解析失败")
+    }
+
     fn install_board(app: &mut App) -> Handle<BoardDef> {
         app.world_mut()
             .resource_mut::<Assets<BoardDef>>()
             .add(shipped_board())
+    }
+
+    fn install_china_board(app: &mut App) -> Handle<BoardDef> {
+        app.world_mut()
+            .resource_mut::<Assets<BoardDef>>()
+            .add(shipped_china_board())
+    }
+
+    fn board_library(taiwan: Handle<BoardDef>, china: Handle<BoardDef>) -> BoardLibrary {
+        BoardLibrary {
+            entries: vec![
+                BoardEntry {
+                    key: "taiwan",
+                    label: "台湾",
+                    handle: taiwan,
+                },
+                BoardEntry {
+                    key: "china",
+                    label: "中国大陆",
+                    handle: china,
+                },
+            ],
+        }
     }
 
     /// 一套只装配到「能跑 UI 派发」的对局骨架：两名玩家、一颗掷骰按钮（文字是它的子节点）、
@@ -1803,6 +1861,8 @@ mod tests {
                 // P2d：阵容、「开始对局」写出的开局配置，以及翻 id 用的角色表
                 .init_resource::<match_setup::RosterChoice>()
                 .init_resource::<GameSetup>()
+                // P2d 之后：设置页多了地图那一格（派发只改 `BoardPick`）
+                .init_resource::<BoardPick>()
                 .init_asset::<CharacterSet>()
                 .insert_resource(Paused(paused))
                 // 休市判据要读日历、锚点与节假日表，三者都由 core 常驻。
@@ -1836,6 +1896,8 @@ mod tests {
                 news: Handle::default(),
                 characters,
             });
+            // 这一套只验派发：句柄是占位，设置页与地图资产不参与
+            app.insert_resource(board_library(Handle::default(), Handle::default()));
 
             let player = app.world_mut().spawn(PlayerId(0)).id();
             let other = app.world_mut().spawn(PlayerId(1)).id();
@@ -2905,6 +2967,8 @@ mod tests {
             // `RosterChoice` 由本插件注册、两张表由 core 的 `init_asset` 注册
             .init_resource::<match_setup::RosterChoice>()
             .init_resource::<GameSetup>()
+            // P2d 之后：设置页的地图选择（真实应用里由 `insert_boot_resources` 装库）
+            .init_resource::<BoardPick>()
             .init_asset::<CharacterSet>()
             .init_asset::<BoardDef>()
             // P2④ 起派发要读日历判休市。这两条在真实应用里由 `CoreGamePlugin`
@@ -2983,6 +3047,8 @@ mod tests {
         // 让面板与「开始对局」读到的就是仓库里那份表
         let characters = install_characters(&mut app);
         let board = install_board(&mut app);
+        let china = install_china_board(&mut app);
+        app.insert_resource(board_library(board.clone(), china));
         app.insert_resource(DataHandles {
             board,
             chance: Handle::default(),
@@ -3075,6 +3141,20 @@ mod tests {
             "地图卡没读棋盘的格/地数：{texts:?}"
         );
         assert!(
+            texts.iter().any(|t| t == "中国大陆"),
+            "第二张真盘没进设置页：{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("93 块地")
+                && t.contains("20 条街")
+                && t.contains("默认 30 万")),
+            "大地图卡没读它自己的格/地/街/默认档：{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "世界"),
+            "「世界」灰位还在：{texts:?}"
+        );
+        assert!(
             texts.iter().any(|t| t == "已选 4/4 · 3 位电脑"),
             "默认阵容不是 1 真人 + 3 电脑：{texts:?}"
         );
@@ -3106,6 +3186,61 @@ mod tests {
         assert!(
             texts.iter().any(|t| t == "● 30 万"),
             "选了 30 万，面板上的 ● 没跟过去：{texts:?}"
+        );
+    }
+
+    /// P2d 之后：地图卡不是装饰。点第二张 → ● 跟过去、默认档跟着它变；
+    /// 按「开始对局」那一刻 `DataHandles.board` 必须换成那张盘的句柄 ——
+    /// 这是规则层唯一认的换盘动作（面板只改 `BoardPick`，不碰世界）。
+    #[test]
+    fn the_board_card_switches_the_next_match_to_that_board() {
+        let mut app = wired();
+
+        let new_game = app.world_mut().spawn(UiAction::NewGame).id();
+        app.world_mut()
+            .resource_mut::<Messages<PointerClick>>()
+            .write(make_click(new_game));
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let china = app.world_mut().spawn(UiAction::SetBoard(1)).id();
+        app.world_mut()
+            .resource_mut::<Messages<PointerClick>>()
+            .write(make_click(china));
+        for _ in 0..3 {
+            app.update();
+        }
+
+        assert_eq!(app.world().resource::<BoardPick>().0, 1, "点地图卡没改选择");
+        let texts = texts_of(&mut app);
+        assert!(
+            texts.iter().any(|t| t == "● 中国大陆"),
+            "选中标记没跟到大地图：{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "● 30 万"),
+            "没选过档时，● 该跟着大地图的默认档 30 万：{texts:?}"
+        );
+
+        let china_handle = app.world().resource::<BoardLibrary>().entries[1]
+            .handle
+            .clone();
+        let start = app.world_mut().spawn(UiAction::StartMatch).id();
+        app.world_mut()
+            .resource_mut::<Messages<PointerClick>>()
+            .write(make_click(start));
+        app.update();
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<DataHandles>().board,
+            china_handle,
+            "开始对局没把 `DataHandles.board` 换到选中的那张盘"
+        );
+        assert_eq!(
+            app.world().resource::<State<crate::scene::Scene>>().get(),
+            &crate::scene::Scene::Board
         );
     }
 

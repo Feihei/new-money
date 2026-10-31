@@ -20,6 +20,8 @@ use game_core::prelude::{
     StartCashChoice,
 };
 
+use crate::boards::{BoardLibrary, BoardPick};
+
 use super::theme::{col, layout, size};
 use super::{
     ButtonSpec, Disabled, MenuPiece, PRIMARY, Palette, SECONDARY, UiAction, border_color, button,
@@ -157,6 +159,8 @@ pub(crate) struct MatchSetupStamp(pub String);
 pub(crate) struct SetupFacts<'w> {
     pub roster: Res<'w, RosterChoice>,
     pub choice: Res<'w, StartCashChoice>,
+    pub library: Res<'w, BoardLibrary>,
+    pub pick: Res<'w, BoardPick>,
     pub data: Res<'w, DataHandles>,
     pub boards: Res<'w, Assets<BoardDef>>,
     pub characters: Res<'w, Assets<CharacterSet>>,
@@ -169,19 +173,41 @@ pub(crate) fn sync_match_setup_panel(
     facts: SetupFacts,
     shown: Query<(Entity, &MatchSetupStamp)>,
 ) {
-    let board = facts.boards.get(&facts.data.board);
+    let selected = facts.library.entries.get(facts.pick.0);
+    let board = selected.and_then(|entry| facts.boards.get(&entry.handle));
     let set = facts.characters.get(&facts.data.characters);
     let default = board.map(|def| def.start_cash);
     let current = facts.choice.0.or(default);
+    let maps = facts
+        .library
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| MapView {
+            index,
+            label: entry.label.to_string(),
+            line: facts
+                .boards
+                .get(&entry.handle)
+                .map(map_line)
+                .unwrap_or_else(|| "加载中…".into()),
+            selected: index == facts.pick.0,
+        })
+        .collect::<Vec<_>>();
+    let map_stamp = maps
+        .iter()
+        .map(|m| format!("{}={}", m.label, m.line))
+        .collect::<Vec<_>>()
+        .join(",");
     let stamp = format!(
-        "{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}",
         open.0,
         facts.roster.human,
         facts.roster.computers.join(","),
+        facts.pick.0,
         current.unwrap_or(-1),
         default.unwrap_or(-1),
-        board.map_or(-1, |def| (def.tiles.len() * 10_000 + def.lands.len())
-            as i64),
+        map_stamp,
         set.map_or(0, |s| s.0.len())
     );
     if open.0 && shown.iter().any(|(_, seen)| seen.0 == stamp) {
@@ -198,7 +224,7 @@ pub(crate) fn sync_match_setup_panel(
                 roster: &facts.roster,
                 picked: facts.choice.0,
                 board_cash: default,
-                board,
+                maps,
                 set,
                 stamp,
             },
@@ -206,26 +232,84 @@ pub(crate) fn sync_match_setup_panel(
     }
 }
 
-fn board_title(board_name: &str) -> &str {
-    match board_name {
-        "taiwan" => "台湾",
-        other => other,
-    }
+/// 地图卡上那一行：全部从 `BoardDef` 现读，不抄一份数进 UI。
+fn map_line(def: &BoardDef) -> String {
+    let streets: BTreeSet<&str> = def
+        .lands
+        .iter()
+        .filter_map(|land| land.group.as_deref())
+        .collect();
+    format!(
+        "{} 格 · {} 块地 · {} 条街 · 默认 {} 万",
+        def.tiles.len(),
+        def.lands.len(),
+        streets.len(),
+        def.start_cash / 10_000
+    )
 }
 
-fn map_card(
+fn map_card(parent: &mut ChildSpawnerCommands, font: &Handle<Font>, width: f32, map: &MapView) {
+    let bg = if map.selected {
+        col::HUD_CARD_ACTIVE
+    } else {
+        col::HUD_CARD
+    };
+    parent
+        .spawn((
+            Node {
+                width: Val::Px(width),
+                height: Val::Px(72.0),
+                flex_direction: FlexDirection::Column,
+                justify_content: JustifyContent::Center,
+                row_gap: Val::Px(4.0),
+                padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+                border: UiRect::all(Val::Px(if map.selected {
+                    layout::PANEL_BORDER
+                } else {
+                    layout::BTN_BORDER
+                })),
+                border_radius: BorderRadius::all(Val::Px(layout::BTN_RADIUS)),
+                ..default()
+            },
+            BackgroundColor(bg),
+            border_color(if map.selected {
+                col::BORDER_BUY
+            } else {
+                col::BTN_BORDER
+            }),
+            UiAction::SetBoard(map.index),
+            Palette {
+                normal: bg,
+                hover: col::BTN_SECONDARY_HOVER,
+            },
+        ))
+        .with_children(|card| {
+            let title = if map.selected {
+                format!("● {}", map.label)
+            } else {
+                map.label.clone()
+            };
+            card.spawn(label(
+                font,
+                title,
+                size::BODY,
+                if map.selected {
+                    col::TITLE_GOLD
+                } else {
+                    col::HINT
+                },
+            ));
+            card.spawn(label(font, &map.line, size::SMALL, col::MUTED));
+        });
+}
+
+fn pending_map_card(
     parent: &mut ChildSpawnerCommands,
     font: &Handle<Font>,
     width: f32,
     title: &str,
     line: &str,
-    live: bool,
 ) {
-    let bg = if live {
-        col::HUD_CARD_ACTIVE
-    } else {
-        col::BTN_DISABLED
-    };
     parent
         .spawn((
             Node {
@@ -239,34 +323,13 @@ fn map_card(
                 border_radius: BorderRadius::all(Val::Px(layout::BTN_RADIUS)),
                 ..default()
             },
-            BackgroundColor(bg),
-            border_color(if live {
-                col::BORDER_BUY
-            } else {
-                col::BTN_BORDER_DISABLED
-            }),
+            BackgroundColor(col::BTN_DISABLED),
+            border_color(col::BTN_BORDER_DISABLED),
+            Disabled,
         ))
         .with_children(|card| {
-            card.spawn(label(
-                font,
-                title,
-                size::BODY,
-                if live {
-                    col::TITLE_GOLD
-                } else {
-                    col::BTN_TEXT_DISABLED
-                },
-            ));
-            card.spawn(label(
-                font,
-                line,
-                size::SMALL,
-                if live {
-                    col::MUTED
-                } else {
-                    col::BTN_TEXT_DISABLED
-                },
-            ));
+            card.spawn(label(font, title, size::BODY, col::BTN_TEXT_DISABLED));
+            card.spawn(label(font, line, size::SMALL, col::BTN_TEXT_DISABLED));
         });
 }
 
@@ -409,12 +472,20 @@ fn character_card(
     });
 }
 
+/// 一张地图卡的全部可见位。统计数字在 `sync` 里从 `BoardDef` 现读。
+struct MapView {
+    index: usize,
+    label: String,
+    line: String,
+    selected: bool,
+}
+
 /// 一次重建要用的全部读数（`spawn_panel` 的参数超过七格就撞 `too_many_arguments`）。
 struct PanelView<'a> {
     roster: &'a RosterChoice,
     picked: Option<i64>,
     board_cash: Option<i64>,
-    board: Option<&'a BoardDef>,
+    maps: Vec<MapView>,
     set: Option<&'a CharacterSet>,
     stamp: String,
 }
@@ -424,13 +495,15 @@ fn spawn_panel(commands: &mut Commands, font: &DevFont, view: PanelView) {
         roster,
         picked,
         board_cash,
-        board,
+        maps,
         set,
         stamp,
     } = view;
     let width = 1000.0;
     let inner = width - layout::PANEL_PAD_X * 2.0;
-    let map_width = (inner - 2.0 * 8.0) / 3.0;
+    // 可选盘 + 一张「世界」灰位；将来加第三张真盘这里自动跟着变窄
+    let map_count = (maps.len().max(1) + 1) as f32;
+    let map_width = (inner - (map_count - 1.0) * 8.0) / map_count;
     let card_width = (inner - 5.0 * 8.0) / 6.0;
     let tier_width = (inner - 3.0 * 8.0) / 4.0;
     let current = picked.or(board_cash);
@@ -484,32 +557,13 @@ fn spawn_panel(commands: &mut Commands, font: &DevFont, view: PanelView) {
                         ..default()
                     })
                     .with_children(|row| {
-                        match board {
-                            Some(def) => {
-                                let streets: BTreeSet<&str> = def
-                                    .lands
-                                    .iter()
-                                    .filter_map(|land| land.group.as_deref())
-                                    .collect();
-                                map_card(
-                                    row,
-                                    &font.0,
-                                    map_width,
-                                    &format!("● {}", board_title(&def.board_name)),
-                                    &format!(
-                                        "{} 格 · {} 块地 · {} 条街 · 默认 {} 万",
-                                        def.tiles.len(),
-                                        def.lands.len(),
-                                        streets.len(),
-                                        def.start_cash / 10_000
-                                    ),
-                                    true,
-                                );
-                            }
-                            None => map_card(row, &font.0, map_width, "棋盘加载中…", "", false),
+                        if maps.is_empty() {
+                            pending_map_card(row, &font.0, map_width, "棋盘加载中…", "");
                         }
-                        map_card(row, &font.0, map_width, "中国大陆", "待做", false);
-                        map_card(row, &font.0, map_width, "世界", "待做", false);
+                        for map in &maps {
+                            map_card(row, &font.0, map_width, map);
+                        }
+                        pending_map_card(row, &font.0, map_width, "世界", "待做");
                     });
 
                 // ---- 角色 ----
