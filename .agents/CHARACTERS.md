@@ -176,13 +176,18 @@
 纯数据，`assets/data/characters.json` 一行一人。
 
 现金/地产的基准是 `GameRules::default()` 的 `start_cash = 20_000`、无起始地产。
+⚠️ **P2c/P2d 之后实际开局读的是四档起始资金（5/10/20/30 万，统一覆盖所有人）**，
+下表「起始现金」与「起始地产」只是角色档案的原值、今天不上场（P2d 把它们原样存进了
+`characters.json`）；真棋盘的默认档是 20 万。
 AI 先验是给 P14 的：`buy`（买地阈值高低）、`debt`（敢不敢贷款、缺钱时肯不肯把自己的资产换成钱）、
 `stock`（买不买股）、`build`（升不升级）、**`harm`（害意：用卡与道具往别人头上落事的倾向）**，
 取值 0–1，P14 拿它们当策略评估的先验。**再加一个标量 `fumble`（失误率）**：它不是第五格偏好而是
 「这次算不算错」的概率，不参与打分（理由与三档预设见 [PLAN §四・十五](./PLAN.md)）。
-**P14a 今天先落三档预设**（大佬奸／普通人／乖宝宝 = 这个向量的三个预设值），
-下表那四个数留到角色装配那一次（P2c/真棋盘）连同 `harm`、`fumble` 两列一起补齐，
-**不要一次只改一列** —— 那样十二行里会有两种形状的读数。
+**P14a 先落了三档预设**（大佬奸／普通人／乖宝宝 = 这个向量的三个预设值），
+**P2d（10-31）把十二行一次补齐**：`assets/data/characters.json` 里每人都有
+`buy / debt / stock / build / harm / fumble / who` 七格（`who` 是三档性格标量，供 P14 的
+决策器领预设），四个起始数也同时抄了进去 —— 但今天只有 AI 那一组**真的被读**，
+`cash / deposit / loan / starting_lands` 还只是存着（四档起始资金统一覆盖现金）。
 
 | 角色 | 起始现金 | 起始地产 | 起始存款/贷款 | buy | debt | stock | build |
 |---|---|---|---|---|---|---|---|
@@ -364,19 +369,28 @@ AI 先验是给 P14 的：`buy`（买地阈值高低）、`debt`（敢不敢贷�
 
 ## 九、工程挂钩
 
-1. `PlayerSetup`（`crates/game_core/src/player.rs`）加 `cash` / `deposit` / `loan` / `starting_lands`
-   与 `ai: AiProfile`（五格 + `fumble`）；`spawn_players`（同文件）按它写初值而不是统一取 `rules.start_cash`。
-   **这是砍掉技能之后唯一新增的代码面**，且它同时是 P14 的前置。
-   ⚠️ **10-28 分了一半**：P14a 只加了 `controller: Controller`（人类还是哪一档 AI），
-   那五个数与四个起始参数**照旧等 P2c/真棋盘** —— 因为 P14 的三档性格本身就是预设向量，
-   不需要先有角色表才能跑。等 `characters.json` 真被读进来时，那一行填的就是同一个 `AiProfile` 的形状。
-2. `PLAYER_COLORS`（`player.rs:32`）从 4 扩到 12。色同时驱动棋子、建筑归属色、HUD 圆点，
-   12 色要留出可分辨度——「塔萝深紫 / 姬百年酒红 / 滑铁卢礼服黑 / 阿香茶褐」这一组深色
-   在正交小图下最挤，尤其礼服黑要在 HUD 圆点上单独验一遍。
-3. 新增 `assets/data/characters.json`：诨名 / 护照名 / 注册地 / 层 / 色 / 剪影描述 / 台词 / 主场地图 /
-   起始参数 / AI 四维。**没有 `passive` / `active` 两个字段**——加了就会有人往里填。
-4. 角色选择 UI 属于 B7。
-5. 赵公明（§二之二）是独立系统，需要新阶段，不进 B6/B7。
+1. **`characters.json` 已落（P2d，10-31）**：`CharacterDef`（`crates/game_core/src/character.rs`）
+   与 `assets/data/characters.json` 一一对应。`CharacterDef::setup(controller)` 产出的 `PlayerSetup`
+   今天只消费**名字 / 颜色 / 性别 / controller**；`ai` 整行喂给电脑座位（`Controller::Ai(AiProfile)`）。
+   `cash / deposit / loan / starting_lands` 由 `CharacterDef` 原样存着但**不生效**：四档起始资金（P2c）
+   统一覆盖 `cash`，另三格与「按角色发开局资产」等角色经济落地。P14a 的 `controller` 照旧在。
+2. **颜色源换成角色表**：运行时唯一真源是 `CharacterDef::color`（`[u8;3]` → `PlayerColor`），
+   同一角色在任何座位都是同一种色，**不再按座位下标取色**。`PLAYER_COLORS`（`player.rs:44`）
+   仍是 4 格，只当 `GameSetup::default()`/`seats()` 那批**开发与测试夹具**的取色。12 色两两不同由
+   `CharacterSet::validate` 在加载期挡住；HUD 圆点上的目视可分辨度仍没逐颗验——
+   「塔萝深紫 / 姬百年酒红 / 滑铁卢礼服黑 / 阿香茶褐」这一组深色在正交小图下最挤，
+   尤其礼服黑要单独验一遍。
+3. `assets/data/characters.json` 的字段即表 A + 表 B：`id`（kebab-case，**稳定键** —— 界面与存档认它
+   不认名字）、`name` / `passport` / `home` / `tier` / `color_name` / `color` / `quote` / `silhouette` /
+   `gender` / `ai`（七格）/ `cash` / `deposit` / `loan` / `starting_lands`。
+   **没有 `passive` / `active` 两个字段**——加了就会有人往里填。
+4. **角色选择 UI 已落（P2d，10-31）**，不归 B7：主菜单「新游戏」先开对局设置页，选 1 位真人 +
+   2–3 位电脑（最多四人），「设为你」在原座位换人；默认阵容就是 `GameSetup::ai_field()` 那四位。
+   阵容只在「开始对局」那一刻写成 `GameSetup`，查不到角色就拒绝开局。
+5. **`gender` 是表 A 没有的一列，数据里已定**：女性 5 位（姬百年、莱息、玛租、温久枝、塔萝），
+   男性 7 位（贺兰山、范一文、多吉、阿香、陆仁佳、索元、滑铁卢）。魔法屋
+   「所有女生／所有男生」两条筛选读的就是这一列。
+6. 赵公明（§二之二）是独立系统，需要新阶段，不进 B6/B7。
 
 ---
 
