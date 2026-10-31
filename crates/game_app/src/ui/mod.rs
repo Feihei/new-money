@@ -15,6 +15,7 @@ pub mod dialog;
 pub mod finance;
 pub mod hand;
 pub mod items;
+pub mod match_setup;
 pub mod menu;
 pub mod minigame;
 pub mod pause;
@@ -27,12 +28,13 @@ pub mod top_bar;
 use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionMove, BailRequested, BankOp, BankOpRequested, BidMove,
-    BuildRequested, BuildingKind, BuyTicketRequested, CardAim, CardId, Decision, DecisionChosen,
-    FinancingDrawRequested, GameKind, GameSession, Halt, HolidaySet, Institution, ItemKind, LandId,
-    MagicFilter, MagicFilterPicked, MagicSpell, MagicSpellPicked, MarketClock, MinigameResult,
-    MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, Paused, Pending, PendingDecision,
-    PlaceItemRequested, PlayCardRequested, RemoteUpgradeRequested, RequestRemoteDice, RequestRoll,
-    RequestStay, SaveRequest, ShopOpRequested, StartMode, StaySentence, StockId,
+    BuildRequested, BuildingKind, BuyTicketRequested, CardAim, CardId, CharacterSet, DataHandles,
+    Decision, DecisionChosen, FinancingDrawRequested, GameKind, GameSession, GameSetup, Halt,
+    HolidaySet, Institution, ItemKind, LandId, MagicFilter, MagicFilterPicked, MagicSpell,
+    MagicSpellPicked, MarketClock, MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer,
+    PassiveMove, Paused, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
+    RemoteUpgradeRequested, RequestRemoteDice, RequestRoll, RequestStay, START_CASH_TIERS,
+    SaveRequest, ShopOpRequested, StartCashChoice, StartMode, StaySentence, StockId,
     StockTradeRequested, TileIndex, TradeSide, TurnOrder, TurnPhase, bank_op_allowed, date_of,
     market_halt,
 };
@@ -71,6 +73,10 @@ impl Plugin for UiPlugin {
             .init_resource::<minigame::ArcadeChoiceOpen>()
             // 设置面板的开关（P15c）。设置**值**本身由 `settings::SettingsPlugin` 注册
             .init_resource::<settings::SettingsOpen>()
+            // 对局设置面（P2c-c）：`NM_SETUP=1` 开局即开，判据同 `NM_STOCK` 那批；
+            // 阵容（P2d）跨局保留，不随回菜单清空 —— 与起始资金档同一条
+            .insert_resource(match_setup::MatchSetupOpen::from_env())
+            .init_resource::<match_setup::RosterChoice>()
             .add_systems(
                 Update,
                 (
@@ -118,6 +124,8 @@ impl Plugin for UiPlugin {
                     // 设置面板也排在派发之后：点「设置」那一帧就建出来。它只活在菜单上
                     // （挂 `MenuPiece`），进对局随菜单一起收走
                     settings::sync_settings_panel,
+                    // 对局设置面同理：点「新游戏」那一帧就建出来
+                    match_setup::sync_match_setup_panel,
                     hover_feedback,
                 )
                     .chain(),
@@ -243,6 +251,20 @@ pub enum UiAction {
     TogglePause,
     /// 开合设置面板（P15c）。只有主菜单那颗按钮发得出来
     ToggleSettings,
+    /// 开合「新对局」设置面（P2c-c）。主菜单那颗「新游戏」开它 ——
+    /// 先选起始资金，再按面板里的「开始对局」
+    ToggleMatchSetup,
+    /// 选一档起始资金（下标进 [`START_CASH_TIERS`]）。写两个地方：`StartCashChoice`
+    /// 是下一局真用的数（与 `NM_CASH` 同一条入口），`Settings.start_cash` 是记住的偏好
+    SetStartCash(usize),
+    /// 点一张角色卡加入或移出阵容（P2d）。卡上带**角色 id** 而不是名字 ——
+    /// 名字是文案，id 才是身份（与 `Trade` 带 `StockId` 同一条）
+    ToggleCharacter(String),
+    /// 把「你」挪到这张卡上（P2d）。只在已选中的电脑卡上长出这颗按钮
+    SetHuman(String),
+    /// 从设置面开始一局。**只在面板开着时派发**：按钮本来只长在面板里，
+    /// 这一道是第二个门（同「派发只写愿望、规则层再判一次」那条分工）
+    StartMatch,
     /// 选一档行走速度（下标进 [`crate::settings::SPEED_STEPS`] —— 烤的是档位而不是秒数：
     /// 秒数是浮点，而 `UiAction` 要能比相等）
     SetWalkSpeed(usize),
@@ -577,12 +599,14 @@ pub(crate) fn reset_ui_state(mut commands: Commands, mut kept: UiMemory) {
     // 设置面板只活在菜单上：面板实体随菜单收走，开关这一格不关的话会「下一局回来
     // 它自己又开着」。设置**值**不在这里清 —— 那是跨局的东西
     kept.settings_open.0 = false;
+    // 对局设置面同理；`NM_SETUP=1` 是「开局就开着」那条非鼠标入口，按 env 复原
+    *kept.match_setup_open = match_setup::MatchSetupOpen::from_env();
     commands.insert_resource(pause::PauseMenuOpen::from_env());
     commands.insert_resource(Paused::default());
 }
 
-/// 回菜单要清掉的那十格 UI 记忆。打包是房规（§六 坑 8）：这一条清的东西随每块浮层增加，
-/// 十一位散装参数撞的是 `too_many_arguments`，而它们要说的其实只有一件事 ——
+/// 回菜单要清掉的那十几格 UI 记忆。打包是房规（§六 坑 8）：这一条清的东西随每块浮层增加，
+/// 十几位散装参数撞的是 `too_many_arguments`，而它们要说的其实只有一件事 ——
 /// 「哪些键活过了场景切换」。加一块浮层就在这里加一格，漏了的后果见上面那张清单。
 #[derive(SystemParam)]
 pub(crate) struct UiMemory<'w> {
@@ -599,6 +623,8 @@ pub(crate) struct UiMemory<'w> {
     arcade_choice: ResMut<'w, minigame::ArcadeChoiceOpen>,
     /// 设置面板开合（P15c）。设置值本身**不在这里**：它跨局，不该被「回菜单」清掉
     settings_open: ResMut<'w, settings::SettingsOpen>,
+    /// 对局设置面（P2c-c）。面板本身随菜单收走，这一格只回答「开着吗」
+    match_setup_open: ResMut<'w, match_setup::MatchSetupOpen>,
 }
 
 /// 一个文本节点需要的三件套。包一层的理由是漏掉 `TextFont` 不会报错，
@@ -901,6 +927,18 @@ struct UiState<'w> {
     /// 落盘由那个模块的单写者负责 —— 这里改了就算数
     settings_open: ResMut<'w, settings::SettingsOpen>,
     settings: ResMut<'w, crate::settings::Settings>,
+    /// 对局设置面（P2c-c）与它写的那一格起始资金。`StartCashChoice` 是 core 的资源，
+    /// 面板与 `NM_CASH` 共用它 —— 派发只改这一格，锁档与写回规则都在 `begin_game_system`
+    match_setup_open: ResMut<'w, match_setup::MatchSetupOpen>,
+    start_cash: ResMut<'w, StartCashChoice>,
+    /// 对局设置页的阵容（P2d）与它在「开始对局」那一刻写出的开局配置。
+    /// 阵容存角色 id，写 `GameSetup` 时才翻成 `PlayerSetup`（名字/颜色/性别/AI 先验）
+    roster: ResMut<'w, match_setup::RosterChoice>,
+    setup: ResMut<'w, GameSetup>,
+    /// 角色表与数据句柄。没有它就没法把 id 翻成开局配置 —— 派发宁可拒绝开局，
+    /// 也不拿 `GameSetup::default()` 顶上（那会静默换人）
+    data: Res<'w, DataHandles>,
+    characters: Res<'w, Assets<CharacterSet>>,
     /// 游乐场那四格（P7）。`arcade` 是「现在开着的那一局」——派发要往里写分数与铲数，
     /// 所以它是 `ResMut` 而不是只有 `sync_arcade` 能碰的私有状态
     arcade: ResMut<'w, minigame::Arcade>,
@@ -977,11 +1015,10 @@ fn dispatch_ui_actions(
             .is_none_or(|session| !session.suspensions.halted(Institution::Bank));
         match action {
             UiAction::NewGame => {
-                // 开局永远是全新一局：上一次「读档」若还留着愿望，这里把它清掉
-                // （读档失败不会写 `Resume`，但这条不靠那一支的自觉）
-                *saves.start = StartMode::Fresh;
-                saves.notice.text = None;
-                next_scene.set(crate::scene::Scene::Board);
+                // P2c-c：先摆对局设置面选起始资金，再由面板里的「开始对局」真的进去。
+                // 上一次「读档」若还留着愿望，在那一颗按钮上清掉（这里不动它：
+                // 打开面板不是开局）
+                ui.match_setup_open.0 = true;
             }
             // 进「可存点」判据的**唯一**入口。这里不重复那个判断：规则层的
             // `capture_system` 会再问一遍，被拒的理由进 `SaveDenied`，面板念同一句
@@ -1089,6 +1126,49 @@ fn dispatch_ui_actions(
             // 设置面板（P15c）：三个动作都只改 `Settings`／它的开合。落盘由
             // `settings::persist_settings` 单写者做，界面不碰文件
             UiAction::ToggleSettings => ui.settings_open.0 = !ui.settings_open.0,
+            // 对局设置面（P2c-c）：四颗档位按钮只写这两个资源 —— `StartCashChoice` 是
+            // 下一局真用的数（与 `NM_CASH` 同一条入口），`Settings.start_cash` 是偏好；
+            // 文件由 `settings::persist_settings` 单写者落盘
+            UiAction::ToggleMatchSetup => ui.match_setup_open.0 = !ui.match_setup_open.0,
+            UiAction::SetStartCash(index) => {
+                if let Some(cash) = START_CASH_TIERS.get(*index) {
+                    ui.start_cash.0 = Some(*cash);
+                    ui.settings.start_cash = Some(*cash);
+                }
+            }
+            // 点角色卡与「设为你」（P2d）：只改阵容这一格，面板下一帧按签名重建。
+            // 三条拒绝（第一席不能移出、电脑不少于两位、总人数不超过四人）在
+            // `RosterChoice` 里，界面只负责把不能点的卡画灰
+            UiAction::ToggleCharacter(id) => {
+                if ui.match_setup_open.0 {
+                    ui.roster.toggle(id);
+                }
+            }
+            UiAction::SetHuman(id) => {
+                if ui.match_setup_open.0 {
+                    ui.roster.promote(id);
+                }
+            }
+            // 开始一局：永远全新一局，读档留下的愿望也在这里清掉（读档失败不会写
+            // `Resume`，但这条不靠那一支的自觉）。
+            // 阵容在**这一刻**才翻成 `GameSetup`：角色表没加载完、或阵容里有表外的 id，
+            // 就拒绝开局 —— 拿默认阵容顶上等于静默换人
+            UiAction::StartMatch => {
+                if !ui.match_setup_open.0 {
+                    continue;
+                }
+                let Some(set) = ui.characters.get(&ui.data.characters) else {
+                    continue;
+                };
+                let Some(setup) = ui.roster.to_setup(set) else {
+                    continue;
+                };
+                *ui.setup = setup;
+                *saves.start = StartMode::Fresh;
+                saves.notice.text = None;
+                ui.match_setup_open.0 = false;
+                next_scene.set(crate::scene::Scene::Board);
+            }
             UiAction::SetWalkSpeed(index) => {
                 if let Some((secs, _)) = crate::settings::SPEED_STEPS.get(*index) {
                     ui.settings.walk_step_interval = *secs;
@@ -1404,8 +1484,8 @@ mod tests {
     use bevy::state::app::StatesPlugin;
     use bevy::window::WindowRef;
     use game_core::prelude::{
-        Date, Decision, GameKind, GameRules, ItemKind, LandId, Pending, PlayerId, StaySentence,
-        TileIndex, TurnOrder,
+        BoardDef, Controller, Date, Decision, GameKind, GameRules, ItemKind, LandId, Pending,
+        PlayerId, StaySentence, TileIndex, TurnOrder,
     };
     use std::time::Duration;
 
@@ -1574,6 +1654,31 @@ mod tests {
             .extend(r.gates.read().map(|a| (a.player, a.what)));
     }
 
+    /// 仓库里那份真角色表：测试与真实客户端读同一份，数据写错先在这里红。
+    fn shipped_characters() -> CharacterSet {
+        CharacterSet::from_json(include_str!("../../../../assets/data/characters.json"))
+            .expect("assets/data/characters.json 解析失败")
+    }
+
+    /// 真台湾盘（只解析，不做 `validate`）：面板上那行「100 格 · 63 块地 · 16 条街」
+    /// 读的就是它。
+    fn shipped_board() -> BoardDef {
+        serde_json::from_str(include_str!("../../../../assets/data/boards/taiwan.json"))
+            .expect("assets/data/boards/taiwan.json 解析失败")
+    }
+
+    fn install_characters(app: &mut App) -> Handle<CharacterSet> {
+        app.world_mut()
+            .resource_mut::<Assets<CharacterSet>>()
+            .add(shipped_characters())
+    }
+
+    fn install_board(app: &mut App) -> Handle<BoardDef> {
+        app.world_mut()
+            .resource_mut::<Assets<BoardDef>>()
+            .add(shipped_board())
+    }
+
     /// 一套只装配到「能跑 UI 派发」的对局骨架：两名玩家、一颗掷骰按钮（文字是它的子节点）、
     /// 一颗决策按钮、一颗灰掉的按钮、一层没有动作的遮罩，外加详情卡、暂停、
     /// B5b 的银行操作与股票买卖、P3b 的出牌、P3d② 的百货买卖，与三个浮层开关各一颗。
@@ -1629,6 +1734,9 @@ mod tests {
         fn new(phase: TurnPhase, paused: bool, pending: PendingDecision) -> Self {
             let mut app = App::new();
             app.add_plugins(MinimalPlugins)
+                // P2d：`init_asset` 与 `Assets::add` 都要 `AssetServer`；无头不加载文件，
+                // 只借它分配句柄
+                .add_plugins(bevy::asset::AssetPlugin::default())
                 .add_plugins(StatesPlugin)
                 .init_state::<TurnPhase>()
                 .init_state::<crate::scene::Scene>()
@@ -1689,6 +1797,13 @@ mod tests {
                 .init_resource::<crate::settings::Settings>()
                 .init_resource::<crate::settings::SettingsStatus>()
                 .init_resource::<settings::SettingsOpen>()
+                // P2c-c：派发多了起始资金那一格（面板与 `NM_CASH` 共用的写入口）
+                .init_resource::<StartCashChoice>()
+                .init_resource::<match_setup::MatchSetupOpen>()
+                // P2d：阵容、「开始对局」写出的开局配置，以及翻 id 用的角色表
+                .init_resource::<match_setup::RosterChoice>()
+                .init_resource::<GameSetup>()
+                .init_asset::<CharacterSet>()
                 .insert_resource(Paused(paused))
                 // 休市判据要读日历、锚点与节假日表，三者都由 core 常驻。
                 // 锚点钉 2048-01-06（周一），于是 tick 5 = 1 月 11 日（周六）是休市日
@@ -1708,6 +1823,19 @@ mod tests {
                 })
                 .insert_resource(pending)
                 .add_systems(Update, (dispatch_ui_actions, collect).chain());
+
+            // P2d：「开始对局」要把角色 id 翻成开局配置，派发因此要读表
+            let characters = install_characters(&mut app);
+            app.insert_resource(DataHandles {
+                board: Handle::default(),
+                chance: Handle::default(),
+                fate: Handle::default(),
+                items: Handle::default(),
+                stocks: Handle::default(),
+                holidays: Handle::default(),
+                news: Handle::default(),
+                characters,
+            });
 
             let player = app.world_mut().spawn(PlayerId(0)).id();
             let other = app.world_mut().spawn(PlayerId(1)).id();
@@ -2103,6 +2231,138 @@ mod tests {
         assert!(
             h.app.world().resource::<settings::SettingsOpen>().0,
             "设置面板没打开"
+        );
+    }
+
+    /// P2c-c：四颗档位按钮写两个地方 —— `StartCashChoice`（下一局真用的数）与
+    /// `Settings.start_cash`（记住的偏好）。换一档必须覆盖上一档：两份状态各留一份旧值
+    /// 就是「面板上标着 5 万、开局发 30 万」。
+    #[test]
+    fn the_start_cash_buttons_write_the_choice_and_the_preference() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let five = h.app.world_mut().spawn(UiAction::SetStartCash(0)).id();
+        let thirty = h.app.world_mut().spawn(UiAction::SetStartCash(3)).id();
+
+        // 前置：两格都是「没选过」—— 否则下面那句「写进去了」可能是默认值
+        assert_eq!(h.app.world().resource::<StartCashChoice>().0, None);
+        assert_eq!(
+            h.app
+                .world()
+                .resource::<crate::settings::Settings>()
+                .start_cash,
+            None
+        );
+
+        h.click(five);
+        assert_eq!(
+            h.app.world().resource::<StartCashChoice>().0,
+            Some(50_000),
+            "第 1 档没写进 `StartCashChoice`"
+        );
+        assert_eq!(
+            h.app
+                .world()
+                .resource::<crate::settings::Settings>()
+                .start_cash,
+            Some(50_000),
+            "偏好没跟着记"
+        );
+
+        h.click(thirty);
+        assert_eq!(
+            h.app.world().resource::<StartCashChoice>().0,
+            Some(300_000),
+            "换档没覆盖上一档"
+        );
+        assert_eq!(
+            h.app
+                .world()
+                .resource::<crate::settings::Settings>()
+                .start_cash,
+            Some(300_000),
+            "偏好留在上一档 —— 下次启动会拿旧档开局"
+        );
+    }
+
+    /// P2c-c：「开始对局」只在设置面开着时派发。按钮本来就只长在面板里，
+    /// 但派发是第二个门 —— 这条挡的是「面板不知道被谁关了、那一颗还亮着」。
+    #[test]
+    fn start_match_needs_the_setup_sheet_open() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let start = h.app.world_mut().spawn(UiAction::StartMatch).id();
+        let open = h.app.world_mut().spawn(UiAction::ToggleMatchSetup).id();
+
+        h.click(start);
+        assert_eq!(
+            h.app.world().resource::<State<crate::scene::Scene>>().get(),
+            &crate::scene::Scene::Menu,
+            "面板没开，却进了对局"
+        );
+
+        h.click(open);
+        h.click(start);
+        assert_eq!(
+            h.app.world().resource::<State<crate::scene::Scene>>().get(),
+            &crate::scene::Scene::Board,
+            "面板开着，点「开始对局」没进对局"
+        );
+        assert!(
+            !h.app.world().resource::<match_setup::MatchSetupOpen>().0,
+            "开始之后面板该收起"
+        );
+    }
+
+    /// P2d：「开始对局」把面板上选的阵容写成 `GameSetup` —— 名字、顺序、控制器与颜色
+    /// 都来自角色表；不是拿 `GameSetup::default()` 顶上。
+    #[test]
+    fn start_match_writes_the_chosen_roster_into_the_game_setup() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let open = h.app.world_mut().spawn(UiAction::ToggleMatchSetup).id();
+        let drop_duoji = h
+            .app
+            .world_mut()
+            .spawn(UiAction::ToggleCharacter("duoji".into()))
+            .id();
+        let pick_lu = h
+            .app
+            .world_mut()
+            .spawn(UiAction::ToggleCharacter("lu-renjia".into()))
+            .id();
+        let promote_lu = h
+            .app
+            .world_mut()
+            .spawn(UiAction::SetHuman("lu-renjia".into()))
+            .id();
+        let start = h.app.world_mut().spawn(UiAction::StartMatch).id();
+
+        h.click(open);
+        h.click(drop_duoji);
+        h.click(pick_lu);
+        h.click(promote_lu);
+        h.click(start);
+
+        let setup = h.app.world().resource::<GameSetup>();
+        assert_eq!(
+            setup
+                .players
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["陆仁佳", "莱息", "范一文", "姬百年"],
+            "阵容/座位顺序与面板不一致：{:?}",
+            setup.players
+        );
+        assert_eq!(setup.players[0].controller, Controller::Human);
+        for computer in &setup.players[1..] {
+            assert!(
+                matches!(computer.controller, Controller::Ai(_)),
+                "{} 该是电脑",
+                computer.name
+            );
+        }
+        assert_eq!(
+            h.app.world().resource::<State<crate::scene::Scene>>().get(),
+            &crate::scene::Scene::Board
         );
     }
 
@@ -2639,6 +2899,14 @@ mod tests {
             // 少一格崩的同样是「所有按钮都死」
             .init_resource::<crate::settings::Settings>()
             .init_resource::<crate::settings::SettingsStatus>()
+            // P2c-c：对局设置面的那颗「开始对局」与四档按钮共用这一格
+            .init_resource::<StartCashChoice>()
+            // P2d：阵容、开局配置与两张表。真实应用里 `GameSetup` 由 core 注册、
+            // `RosterChoice` 由本插件注册、两张表由 core 的 `init_asset` 注册
+            .init_resource::<match_setup::RosterChoice>()
+            .init_resource::<GameSetup>()
+            .init_asset::<CharacterSet>()
+            .init_asset::<BoardDef>()
             // P2④ 起派发要读日历判休市。这两条在真实应用里由 `CoreGamePlugin`
             // `init_resource` 常驻，菜单态也在 —— 少了它们崩的是测试，多的那条路径崩的会是玩家
             .init_resource::<MarketClock>()
@@ -2711,6 +2979,20 @@ mod tests {
             // `spawn_menu` 要 `Res<DevFont>`（0.20 缺资源不再静默跳过而是 panic）；
             // 占位句柄即可 —— headless 不渲染，只求菜单装配系统跑得过去
             .insert_resource(crate::render::DevFont(Handle::default()));
+        // P2d：设置页要读角色表与地图。无头下资产文件不会真加载，这里直接塞两份真数据，
+        // 让面板与「开始对局」读到的就是仓库里那份表
+        let characters = install_characters(&mut app);
+        let board = install_board(&mut app);
+        app.insert_resource(DataHandles {
+            board,
+            chance: Handle::default(),
+            fate: Handle::default(),
+            items: Handle::default(),
+            stocks: Handle::default(),
+            holidays: Handle::default(),
+            news: Handle::default(),
+            characters,
+        });
         app
     }
 
@@ -2718,25 +3000,119 @@ mod tests {
     /// 而主菜单上没有 ActiveBoard —— 「新游戏」「退出」点了没反应，只能点窗口关闭。
     /// B5 验收测不到它：`NM_MENULOOP` 直改 Scene 状态，绕过了派发系统。
     ///
+    /// P2c-c 起「新游戏」是两步：先开对局设置面，再按面板里的「开始对局」。两颗都必须
+    /// 在菜单态派发得动 —— 第一颗开不出面板、第二颗进不了对局，症状都是「点了没反应」。
+    ///
     /// 所以这里必须走**真实 Plugin 接线**（不是上面手搓 dispatch 的 Harness）：
-    /// 菜单态、无 ActiveBoard，点一颗带动作的按钮，必须能切进对局。
+    /// 菜单态、无 ActiveBoard，点两颗带动作的按钮，必须能切进对局。
     #[test]
     fn the_menu_dispatches_without_an_active_board() {
         let mut app = wired();
 
         // picking 后端 headless 不跑，按钮点击手拼一份最小可信的消息
-        let button = app.world_mut().spawn(UiAction::NewGame).id();
+        let new_game = app.world_mut().spawn(UiAction::NewGame).id();
         app.world_mut()
             .resource_mut::<Messages<PointerClick>>()
-            .write(make_click(button));
+            .write(make_click(new_game));
+        app.update();
+        app.update();
+
+        assert!(
+            app.world().resource::<match_setup::MatchSetupOpen>().0,
+            "点「新游戏」没开出对局设置面 —— dispatch 是否又被挂回了 ActiveBoard 门后？"
+        );
+        assert_eq!(
+            app.world().resource::<State<crate::scene::Scene>>().get(),
+            &crate::scene::Scene::Menu,
+            "选档之前不该已经进对局"
+        );
+
+        let start = app.world_mut().spawn(UiAction::StartMatch).id();
+        app.world_mut()
+            .resource_mut::<Messages<PointerClick>>()
+            .write(make_click(start));
         app.update();
         app.update();
 
         assert_eq!(
             app.world().resource::<State<crate::scene::Scene>>().get(),
             &crate::scene::Scene::Board,
-            "菜单点击没被派发 —— dispatch 是否又被挂回了 ActiveBoard 门后？"
+            "面板上的「开始对局」没被派发到换场景"
         );
+    }
+
+    /// P2d：设置页一屏摆下地图、十二位角色与四档起始资金 —— 四档都真的改「下一局发多少钱」，
+    /// ● 跟着当前档走（没选过时标棋盘默认档），角色卡从 `characters.json` 来。
+    #[test]
+    fn the_setup_sheet_lists_maps_roster_and_cash_tiers() {
+        let mut app = wired();
+
+        let new_game = app.world_mut().spawn(UiAction::NewGame).id();
+        app.world_mut()
+            .resource_mut::<Messages<PointerClick>>()
+            .write(make_click(new_game));
+        for _ in 0..3 {
+            app.update();
+        }
+
+        let texts = texts_of(&mut app);
+        for tier in ["5 万", "10 万", "20 万", "30 万"] {
+            assert!(
+                texts.iter().any(|t| t == tier || *t == format!("● {tier}")),
+                "面板上少了「{tier}」：{texts:?}"
+            );
+        }
+        assert!(
+            texts.iter().any(|t| t == "● 20 万"),
+            "还没选过档，该标棋盘默认的 20 万：{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "● 台湾"),
+            "地图那排没有当前这张台湾盘：{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("63 块地")),
+            "地图卡没读棋盘的格/地数：{texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "已选 4/4 · 3 位电脑"),
+            "默认阵容不是 1 真人 + 3 电脑：{texts:?}"
+        );
+        for name in ["姬百年", "莱息", "范一文", "多吉", "陆仁佳", "滑铁卢"] {
+            assert!(
+                texts.iter().any(|t| t == name),
+                "角色卡上少了「{name}」：{texts:?}"
+            );
+        }
+        assert!(
+            texts.iter().any(|t| t == "开始对局"),
+            "面板上没有「开始对局」—— 那就进不了对局"
+        );
+
+        let thirty = app.world_mut().spawn(UiAction::SetStartCash(3)).id();
+        app.world_mut()
+            .resource_mut::<Messages<PointerClick>>()
+            .write(make_click(thirty));
+        for _ in 0..3 {
+            app.update();
+        }
+
+        assert_eq!(
+            app.world().resource::<StartCashChoice>().0,
+            Some(300_000),
+            "第 4 档没写进 `StartCashChoice`（下一局要用的就是这一格）"
+        );
+        let texts = texts_of(&mut app);
+        assert!(
+            texts.iter().any(|t| t == "● 30 万"),
+            "选了 30 万，面板上的 ● 没跟过去：{texts:?}"
+        );
+    }
+
+    fn texts_of(app: &mut App) -> Vec<String> {
+        let world = app.world_mut();
+        let mut query = world.query::<&Text>();
+        query.iter(world).map(|text| text.0.clone()).collect()
     }
 
     /// 坑 22 那条判据（「换一局时它归谁清」）对三块浮层同样成立：
@@ -2754,6 +3130,7 @@ mod tests {
         app.insert_resource(finance::StockPanelOpen(true));
         app.insert_resource(hand::HandPanelOpen(true));
         app.insert_resource(items::ItemsPanelOpen(true));
+        app.insert_resource(match_setup::MatchSetupOpen(true));
 
         app.world_mut()
             .resource_mut::<NextState<crate::scene::Scene>>()
@@ -2777,6 +3154,10 @@ mod tests {
         assert!(
             !app.world().resource::<items::ItemsPanelOpen>().0,
             "回主菜单没关道具浮层"
+        );
+        assert!(
+            !app.world().resource::<match_setup::MatchSetupOpen>().0,
+            "回主菜单没关对局设置面（下一局菜单上会自己浮着）"
         );
     }
 

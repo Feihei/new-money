@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use crate::board::BoardDef;
 use crate::calendar::HolidaySet;
 use crate::card::CardSet;
+use crate::character::CharacterSet;
 use crate::news::NewsSet;
 use crate::stock::StockSet;
 
@@ -27,6 +28,9 @@ pub const HOLIDAYS_PATH: &str = "data/calendar/holidays.json";
 /// 抽取算法也不同（全池随机 + 同场不连重，见 `news::draw`）—— 放同一个目录会让人
 /// 以为它归 `deck::order_of` 那张穷尽表管。
 pub const NEWS_PATH: &str = "data/news/news_items.json";
+/// 首发十二人的档案（P2d）。主菜单的对局设置页读它选人；规则层只在开局时
+/// 收下选好的 `GameSetup`，不直接读这份表。
+pub const CHARACTERS_PATH: &str = "data/characters.json";
 
 #[derive(Resource, Debug, Clone)]
 pub struct DataHandles {
@@ -37,6 +41,7 @@ pub struct DataHandles {
     pub stocks: Handle<StockSet>,
     pub holidays: Handle<HolidaySet>,
     pub news: Handle<NewsSet>,
+    pub characters: Handle<CharacterSet>,
 }
 
 impl DataHandles {
@@ -44,7 +49,7 @@ impl DataHandles {
         Self::load_with_board(server, BOARD_PATH)
     }
 
-    /// 换一张棋盘（测试夹具 / 将来多盘选择）。其余六份资产与默认路径同一套。
+    /// 换一张棋盘（测试夹具 / 将来多盘选择）。其余七份资产与默认路径同一套。
     pub fn load_with_board(server: &AssetServer, board: &'static str) -> Self {
         Self {
             board: server.load(board),
@@ -54,6 +59,7 @@ impl DataHandles {
             stocks: server.load(STOCKS_PATH),
             holidays: server.load(HOLIDAYS_PATH),
             news: server.load(NEWS_PATH),
+            characters: server.load(CHARACTERS_PATH),
         }
     }
 }

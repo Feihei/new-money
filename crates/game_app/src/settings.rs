@@ -1,8 +1,8 @@
-//! 玩家设置（P15c）：文件、加载、落盘，以及「设置说了算」的那一条。
+//! 玩家设置（P15c/P2c）：文件、加载、落盘，以及「设置说了算」的那一条。
 //!
 //! 与存档同一个目录、两个文件：存档是**这一局**的，设置是**每一局**的（`settings.json`）。
-//! 只有两件真控件 —— 行走速度与调试面板。音量等 P16（今天没有音频管线，摆上去按了
-//! 不会有任何东西响），起始资金四档仍归 P2c（等真棋盘）。
+//! 三件真控件 —— 行走速度、调试面板、起始资金四档（P2c-c）。音量等 P16（今天没有
+//! 音频管线，摆上去按了不会有任何东西响）。
 //!
 //! **`NM_*` 旋钮优先于文件**：截图与冒烟必须可控。`NM_DUMP=1` 强制开、`NM_DUMP=0`
 //! 强制关（即便文件里写着开），不设才看文件 —— 判据抽成纯函数 [`debug_panel_on`]，
@@ -16,7 +16,7 @@
 use std::path::Path;
 
 use bevy::prelude::*;
-use game_core::prelude::GameRules;
+use game_core::prelude::{GameRules, START_CASH_TIERS};
 use serde::{Deserialize, Serialize};
 
 use crate::paths::{read_json, settings_path, write_json};
@@ -43,6 +43,11 @@ pub struct Settings {
     /// 开局就装只读 dump 面板（等效 `NM_DUMP=1`，但**下次启动**才生效 —— egui 插件
     /// 一旦装上就开始吃输入，不能在运行中装卸）。
     pub debug_panel: bool,
+    /// 上次选的起始资金档（P2c-c）。`None` ＝ 没有记忆过，开局用棋盘数据的默认档。
+    ///
+    /// 它记的是**偏好**，不是这一局的事实：`StartCashChoice` 仍然是一次性写入口，
+    /// 读档时也不会被它改（读档根本不看这一格）。
+    pub start_cash: Option<i64>,
 }
 
 impl Default for Settings {
@@ -50,6 +55,7 @@ impl Default for Settings {
         Self {
             walk_step_interval: GameRules::default().walk_step_interval,
             debug_panel: false,
+            start_cash: None,
         }
     }
 }
@@ -74,7 +80,17 @@ impl Settings {
             return Self::default();
         }
         match read_json::<Self>(path) {
-            Ok(settings) => settings,
+            // 档位是**四选一**的枚举性事实：手改文件写进 12345 不是「更细的难度」，
+            // 而是一个不存在的档。读进来会让面板四颗按钮一颗都不是「当前」。
+            Ok(mut settings) => {
+                if let Some(cash) = settings.start_cash
+                    && !START_CASH_TIERS.contains(&cash)
+                {
+                    warn!("设置文件里的起始资金档 {cash} 不是四档之一，改用棋盘默认档");
+                    settings.start_cash = None;
+                }
+                settings
+            }
             Err(why) => {
                 warn!("设置文件读不出来，改用默认设置：{why}");
                 Self::default()
@@ -177,6 +193,7 @@ mod tests {
         let saved = Settings {
             walk_step_interval: 0.08,
             debug_panel: true,
+            start_cash: Some(300_000),
         };
         saved.save_to(&path).expect("写设置");
         assert_eq!(Settings::load_from(&path), saved);
@@ -215,6 +232,27 @@ mod tests {
         let loaded = Settings::load_from(&path);
         assert_eq!(loaded.walk_step_interval, 0.3);
         assert!(!loaded.debug_panel, "缺的那一格该是默认值");
+        assert_eq!(loaded.start_cash, None, "缺的起始资金档该是「没记忆过」");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 起始资金档是四选一：文件里写个 12345 不是「更细的难度」，而是一个不存在的档。
+    /// 读进来会让面板四颗按钮一颗都不是「当前」，开局还会按一个没人选的数发钱。
+    #[test]
+    fn a_start_cash_outside_the_tiers_falls_back_to_the_board_default() {
+        let path = scratch("cash-tier");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        crate::paths::write_json(&path, &serde_json::json!({ "start_cash": 12_345 }))
+            .expect("写坏档位");
+        assert_eq!(
+            Settings::load_from(&path).start_cash,
+            None,
+            "四档之外的数该被拒，而不是原样读进来"
+        );
+
+        crate::paths::write_json(&path, &serde_json::json!({ "start_cash": 300_000 }))
+            .expect("写合法档位");
+        assert_eq!(Settings::load_from(&path).start_cash, Some(300_000));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -257,6 +295,7 @@ mod tests {
             .insert_resource(Settings {
                 walk_step_interval: 0.08,
                 debug_panel: false,
+                start_cash: None,
             })
             .init_resource::<GameRules>()
             .add_systems(Update, apply_walk_speed);

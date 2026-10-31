@@ -443,6 +443,13 @@ pub struct PlayerSetup {
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct StartCashChoice(pub Option<i64>);
 
+/// 起始资金的四档（每人）：5 万 / 10 万 / 20 万 / 30 万。
+///
+/// 三个读者共用这一份：主菜单面板的按钮、`NM_CASH` 的解析、设置文件的校验。
+/// 分开各写一遍的话，改档位时总有一处漏掉 —— 而漏掉的那一处不会报错，
+/// 只会在某条路径上接受一个「不存在的档」。
+pub const START_CASH_TIERS: [i64; 4] = [50_000, 100_000, 200_000, 300_000];
+
 /// 对局配置：玩家名单。表现层/测试在开局前插入即可覆盖默认阵容。
 #[derive(Resource, Debug, Clone, PartialEq)]
 pub struct GameSetup {

@@ -45,7 +45,12 @@ impl Plugin for ScenePlugin {
                     .chain(),
             )
             .add_systems(OnEnter(Scene::Board), despawn_menu)
-            .add_systems(Update, clear_match.run_if(in_state(Scene::Menu)))
+            // 收尸排在 **Last**：`Update` 里那些带 `Books`、又只靠 `resource_exists::<ActiveBoard>`
+            // 守门的 system（拍卖那两条最典型）会与这里的 `Commands` 抢同一帧 —— 运行条件跑在
+            // 删除落地**之前**、参数校验跑在之后，于是「条件说棋盘还在、建参数时它没了」当场 panic。
+            // 放到 Last 之后，删除在两帧之间落地：这一帧谁都看得见棋盘，下一帧谁都看不见，
+            // 中间没有一段「一半在、一半不在」的窗口。细节见 ARCHITECTURE §6.1 坑 41
+            .add_systems(Last, clear_match.run_if(in_state(Scene::Menu)))
             .add_systems(Update, auto_scene_loop);
     }
 }
@@ -133,6 +138,14 @@ fn stop_turn_machine(mut phase: ResMut<NextState<TurnPhase>>) {
 /// 照常跑，可它们要的 `TurnOrder` / `ActiveBoard` 已经没了 —— Bevy 0.20 把这种参数校验
 /// 失败直接 panic，真鼠标点「返回主菜单」必崩（exit 101）。停在 `Boot` 之后回合机上
 /// 没有任何 system 会跑，这时候收才是安全的。
+///
+/// 为什么挂在 **`Last`** 而不是 `Update`（P2c-c 真鼠标踩出来的第二层）：`Update` 里还有
+/// 一批不挂相位、只挂 `resource_exists::<ActiveBoard>` 的 system（拍卖那两条、UI/Render
+/// 的 `Live` 集）。Bevy 的运行条件与参数校验**不在同一时刻**：条件可以先读到「棋盘还在」，
+/// 随后一个自动 `apply_deferred` 把本函数的删除落地，等参数建立时 `GameSession` 已经没了 ——
+/// 症状同样是 `Resource does not exist`，而且只在「刚好排在这条 sync point 之后」的 system
+/// 上偶发。放到 `Last` 之后，删除落在两帧之间：这一帧所有 `Update` system 都看得见棋盘，
+/// 下一帧全都看不见，没有中间态。ARCHITECTURE §6.1 坑 41。
 ///
 /// 两道门各挡一半：`in_state(Scene::Menu)` 保证不会在重新开局的那一帧动手（开局走
 /// `CoreSet::Boot`，那一帧 Scene 已经是 `Board`）；`TurnOrder` 还在则保证整个菜单期间

@@ -18,6 +18,7 @@ pub mod board;
 pub mod calendar;
 pub mod calendar_fx;
 pub mod card;
+pub mod character;
 pub mod charge;
 pub mod company;
 pub mod coupon;
@@ -88,6 +89,7 @@ pub mod prelude {
     pub use crate::card::{
         CardDef, CardEffect, CardKind, CardSet, CardTarget, LevyBasis, PassiveCard,
     };
+    pub use crate::character::{CharacterDef, CharacterSet, CharacterTier};
     pub use crate::charge::{
         Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, Scope, Source,
         charge_domain_of, scales_with_price, stage, transferable,
@@ -99,7 +101,7 @@ pub mod prelude {
     pub use crate::coupon::{CouponBoxes, settle_coupon_landing};
     pub use crate::damage::{DamageTally, LandDamage};
     pub use crate::data::{
-        BOARD_PATH, CHANCE_PATH, DataHandles, FATE_PATH, ITEMS_PATH, STOCKS_PATH,
+        BOARD_PATH, CHANCE_PATH, CHARACTERS_PATH, DataHandles, FATE_PATH, ITEMS_PATH, STOCKS_PATH,
     };
     pub use crate::deck::{
         CardId, Deck, DeckOrder, Shelf, apply_effects, card_of, effect_steps, order_of,
@@ -183,7 +185,8 @@ pub mod prelude {
     pub use crate::player::{
         BankBalance, Bankrupt, Detention, DetentionPlace, GameSetup, Gender, Heading, Insured,
         Mount, MoveCap, PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, Points,
-        StartCashChoice, StaySentence, Term, TokenPosition, WalkQueue, Walker, Wallet,
+        START_CASH_TIERS, StartCashChoice, StaySentence, Term, TokenPosition, WalkQueue, Walker,
+        Wallet,
     };
     pub use crate::plot::{PlotArea, area_of, is_in_area};
     pub use crate::property::{
@@ -275,11 +278,13 @@ impl Plugin for CoreGamePlugin {
 
         app.init_asset::<BoardDef>()
             .init_asset::<CardSet>()
+            .init_asset::<crate::character::CharacterSet>()
             .init_asset::<StockSet>()
             .init_asset::<HolidaySet>()
             .init_asset::<crate::news::NewsSet>()
             .register_asset_loader(JsonAssetLoader::<BoardDef>::default())
             .register_asset_loader(JsonAssetLoader::<CardSet>::default())
+            .register_asset_loader(JsonAssetLoader::<crate::character::CharacterSet>::default())
             .register_asset_loader(JsonAssetLoader::<StockSet>::default())
             .register_asset_loader(JsonAssetLoader::<HolidaySet>::default())
             .register_asset_loader(JsonAssetLoader::<crate::news::NewsSet>::default())
