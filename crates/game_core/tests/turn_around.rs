@@ -48,9 +48,10 @@ fn turn_around(app: &mut App, player: Entity, aim: Entity) {
 }
 
 #[test]
-fn every_player_starts_out_going_forward() {
-    // 这一条看着像废话，它守的是「方向是玩家身上的位」这条模型的地基：
-    // 谁哪天把 `Heading` 改成 `Option` 挂载或开局随机，第一条红的是它
+fn every_seat_carries_a_heading_and_the_fixture_pins_it_forward() {
+    // 开局那一位是**抽的**（11-01 起每人一枚硬币，`world_boot` 那条钉它）；这一层夹具
+    // 把它钉回正向，下面所有「从 x 走 n 步落到 y」都建在这一句上。缺组件时 `heading_of`
+    // 自己 panic —— 这一条同时守着「方向是玩家身上的必挂位」这条模型地基。
     let (app, p0, p1) = standing_at(0, 1);
     assert_eq!(heading_of(&app, p0), Heading::Forward);
     assert_eq!(heading_of(&app, p1), Heading::Forward);

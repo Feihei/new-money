@@ -29,11 +29,11 @@ pub use game_core::prelude::{
     DecisionChosen, Deck, DepositsRobbed, Detention, DetentionLifted, DetentionSkipped, DiceRolled,
     EffectOutcome, EpochOverride, FacilityBuilt, FinancingDrawRequested, FinancingDrawn,
     FinancingRecalled, GameKind, GameOver, GameRules, GameSeed, GameSession, GameSetup, Gameplay,
-    Gate, GiftsGiven, God, GodAppeared, GodDeed, GodLeft, GodPossessed, Hand, IndemnityPaid,
-    Insured, Inventory, ItemKind, ItemPlaced, ItemThieved, Jackpot, JackpotChanged, JackpotWhy,
-    LandBought, LandDamage, LandId, LandStatus, LandTaken, LandUpgraded, LandView, LiquidationPlan,
-    Lot, LotteryBought, LotteryDrawn, LotteryTickets, LotteryWon, MagicBlocked, MagicCast,
-    MagicFilter, MagicFilterPicked, MagicSpell, MagicSpellPicked, Market, MarketClock,
+    Gate, GiftsGiven, God, GodAppeared, GodDeed, GodLeft, GodPossessed, Hand, Heading,
+    IndemnityPaid, Insured, Inventory, ItemKind, ItemPlaced, ItemThieved, Jackpot, JackpotChanged,
+    JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken, LandUpgraded, LandView,
+    LiquidationPlan, Lot, LotteryBought, LotteryDrawn, LotteryTickets, LotteryWon, MagicBlocked,
+    MagicCast, MagicFilter, MagicFilterPicked, MagicSpell, MagicSpellPicked, Market, MarketClock,
     MinigameResult, MinigameScore, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount,
     MountChanged, MoveCap, MoveCapped, NewsSink, Occupancy, OccupancyAt, OccupancyKind, Owner,
     PassiveAnswer, PassiveCard, PassiveEvent, PassiveMove, PassiveUsed, Pending, PendingDecision,
@@ -1443,10 +1443,12 @@ pub fn run_until_world(app: &mut App) -> bool {
 ///
 /// 末尾多跑两帧：消息是帧末批量投递的，`WaitRoll` 当帧写的 `TurnStarted` 要下一帧才读得到。
 ///
-/// **顺手把每个人都摆到 0 号格**（[`pin_seats`]）。生产的开局落位是抽的（10-26 起 4 代
-/// 没有起点格），而这一层夹具要的是「他站在哪一格」可读 —— 让三十几条用例各写一遍摆位，
-/// 漏写那一条的症状是「偶发地少一步多一步」。随机落位本身由
-/// `world_boot::the_opening_deal_is_seeded_and_settles_nothing` 钉，那条**不走**这个夹具。
+/// **顺手把每个人都摆到 0 号格、朝向钉成正向**（[`pin_seats`]）。生产的开局落位与朝向
+/// 都是抽的（10-26 起 4 代没有起点格，11-01 起方向也掷硬币），而这一层夹具要的是
+/// 「他站在哪一格、往哪边走」可读 —— 让几十条用例各写一遍摆位与转向，
+/// 漏写那一条的症状是「偶发地少一步多一步」。随机落位与朝向本身由
+/// `world_boot::the_opening_deal_is_seeded_and_settles_nothing` 与
+/// `world_boot::the_opening_deal_flips_a_coin_for_each_heading` 钉，那两条**不走**这个夹具。
 pub fn boot_to_wait_roll(app: &mut App) -> Entity {
     assert!(run_until_world(app), "棋盘资产没能在时限内装配成世界");
     assert!(
@@ -1459,11 +1461,17 @@ pub fn boot_to_wait_roll(app: &mut App) -> Entity {
     current(app)
 }
 
-/// 把每名玩家摆到主环 0 号格。见 [`boot_to_wait_roll`] 那条注释；用例自己要用
-/// [`place`] / [`stand_to`] 覆盖它是常态，这里只负责给一个**已知**的起点读数。
+/// 把每名玩家摆到主环 0 号格、朝向钉回正向。见 [`boot_to_wait_roll`] 那条注释；
+/// 用例自己要用 [`place`] / [`stand_to`] / 转向卡覆盖它是常态，这里只负责给一个**已知**的
+/// 起点读数。朝向与落位同一条理由：开局那一枚硬币是抽的（11-01 起），而这一层夹具要的是
+/// 「他站在哪、往哪边走」都可读 —— 少了后半句，几十条「从 x 走 n 步落到 y」会随种子乱红。
 pub fn pin_seats(app: &mut App) {
     for (player, ..) in roster(app) {
         place(app, player, 0);
+        *app.world_mut()
+            .entity_mut(player)
+            .get_mut::<Heading>()
+            .expect("玩家应挂着 Heading（spawn_players 漏挂了？）") = Heading::Forward;
     }
 }
 

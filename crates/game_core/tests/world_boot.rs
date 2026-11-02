@@ -7,9 +7,9 @@ use bevy::prelude::*;
 use common::*;
 use game_core::CoreGamePlugin;
 use game_core::prelude::{
-    ActiveBoard, Bankrupt, DataHandles, Detention, GameRules, GameSeed, GameSetup, LandId, Owner,
-    PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, StartCashChoice, TokenPosition,
-    TurnPhase, Wallet,
+    ActiveBoard, Bankrupt, DataHandles, Detention, GameRules, GameSeed, GameSetup, Heading, LandId,
+    Owner, PLAYER_COLORS, PlayerColor, PlayerId, PlayerName, PlayerSetup, StartCashChoice,
+    TokenPosition, TurnPhase, Wallet,
 };
 
 fn snapshot(app: &mut App) -> Vec<(u32, String, i64, u32)> {
@@ -143,6 +143,53 @@ fn the_opening_deal_is_seeded_and_settles_nothing() {
     assert!(
         after.iter().any(|e| e.starts_with("Arrive(")),
         "掷骰之后落脚凭据确实会发出来 —— 上面那句否定式断言的存在理由：{after:?}"
+    );
+}
+
+/// 开局朝向（11-01 实报：落位是随机的，而方向恒顺时针，于是座位号顺带决定了
+/// 「谁先扫到哪一批格」）。
+///
+/// 三条各守一种翻法：
+/// - 同种子两次装配给出同一份朝向 —— 截图核对与回放的前提；
+/// - 跨种子两个方向都出现过 —— 有人把硬币接回常量时只有这一条会响；
+/// - **每位玩家各自掷硬币** —— 全队共用一枚（「这一局走哪边」）会让上面那两条照样通过，
+///   所以必须有一条找得出「同一局里两人方向不同」的种子。
+#[test]
+fn the_opening_deal_flips_a_coin_for_each_heading() {
+    fn deal(seed: u64) -> Vec<u32> {
+        let mut app = boot(GameSetup::default(), GameRules::instant(), GameSeed(seed));
+        assert!(run_until_world(&mut app), "棋盘资产没能在时限内装配成世界");
+        let w = app.world_mut();
+        // 按 `PlayerId` 收：四位恶人也挂 `Heading`，但那不是开局掷的硬币
+        let mut q = w.query::<(&PlayerId, &Heading)>();
+        let mut rows: Vec<(u32, u32)> = q
+            .iter(w)
+            .map(|(id, heading)| (id.0, u32::from(matches!(heading, Heading::Backward))))
+            .collect();
+        rows.sort();
+        rows.into_iter().map(|(_, back)| back).collect()
+    }
+
+    let first = deal(GameSeed::default().0);
+    assert_eq!(first.len(), 2, "默认阵容两位：{first:?}");
+    assert_eq!(
+        first,
+        deal(GameSeed::default().0),
+        "同一种子必须给出同一份朝向"
+    );
+
+    let deals: Vec<Vec<u32>> = (0..32).map(deal).collect();
+    assert!(
+        deals.iter().any(|rows| rows.contains(&1)),
+        "32 颗种子里一次逆向都没有 —— 硬币根本没抽：{deals:?}"
+    );
+    assert!(
+        deals.iter().any(|rows| rows.contains(&0)),
+        "32 颗种子里一次正向都没有 —— 硬币接成了常量：{deals:?}"
+    );
+    assert!(
+        deals.iter().any(|rows| rows[0] != rows[1]),
+        "两位玩家的方向永远一致 —— 全队共用一枚硬币等于没抽：{deals:?}"
     );
 }
 

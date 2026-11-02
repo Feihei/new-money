@@ -330,9 +330,10 @@ impl Mount {
 /// `tiles[]`，变的只是步进取 `+1` 还是 `-1`。如果这里存的是「一条反向的格子表」，
 /// 就等于承认有两份真相（硬约束第 4 条）。
 ///
-/// 缺省是 `Forward`，而开局每个玩家都挂着它（[`spawn_players`]）—— 查询一律按 `&Heading`
-/// 要它，别用 `Option`：「没有这个组件」与「正向」读出同一个方向，用 `Option` 只会把
-/// 漏挂组件这件事变成一条永远不响的静默降级。
+/// 缺省是 `Forward`，而开局每个玩家都挂着它（[`spawn_players`]）—— 开局那一枚硬币落在
+/// 哪一面就写哪一面，只有读档才照抄存档里的值。查询一律按 `&Heading` 要它，别用 `Option`：
+/// 「没有这个组件」与「正向」读出同一个方向，用 `Option` 只会把漏挂组件这件事变成一条
+/// 永远不响的静默降级。
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Heading {
     /// 沿 `tiles[]` 的下标递增方向走（正常绕行）。
@@ -543,8 +544,10 @@ impl Default for GameSetup {
 /// 「如果是开局就不结算」：触发挂在 `Landed`/`TileStepped` 上，而装配这一帧还没有人走路，
 /// 补一个 `if` 反而是第二份真相。第一次掷骰之后落到的那一格才第一次结算，正是 4 代的口径。
 ///
-/// 抽号走 `pick_start` 那条专用子流，所以「这一局有几个人、各坐在哪」不挪动牌堆、骰点、
-/// 行情与宝箱。前提：`def` 已经过 `BoardDef::validate`（主环非空）。
+/// **朝向也在这里抽**（11-01 实报）：每人一枚硬币，正向或逆向。4 代是全体顺时针，但方向
+/// 写死等于让座位号顺带决定了「谁先扫到哪一批格」；落位已经随机，方向就该一起随机。
+/// 两条读数都走 `start` 那条专用子流，所以「这一局有几个人、各坐在哪、分别朝哪边」不挪动
+/// 牌堆、骰点、行情与宝箱。前提：`def` 已经过 `BoardDef::validate`（主环非空）。
 pub fn spawn_players(
     commands: &mut Commands,
     setup: &GameSetup,
@@ -573,10 +576,11 @@ pub fn spawn_players(
             spawned.insert(Wallet { cash: start_cash });
             // 道具栏开局送一个路障（PLAN §三：路障/机器娃娃/机器工人开局即送）
             spawned.insert(crate::items::Inventory::starting());
-            // 开局坐哪一格：见函数头
+            // 开局坐哪一格、朝哪边走：见函数头
             spawned.insert(TokenPosition {
                 tile: TileIndex(rng.pick_start(0..=ring)),
             });
+            spawned.insert(rng.pick_heading());
             entity
         })
         .collect()
@@ -624,7 +628,8 @@ pub fn spawn_body(
                 // 位置由调用方改写（开局抽签、读档照抄）
                 TokenPosition { tile: TileIndex(0) },
                 WalkQueue::default(),
-                // 开局恒正向：转向卡是玩家身上的事，不是棋盘的事（见 [`Heading`]）
+                // 朝向由调用方改写（开局掷硬币、读档照抄）：方向是玩家身上的事，
+                // 不是棋盘的事（见 [`Heading`]）
                 Heading::default(),
                 // 开局步行：载具的来路（车行）还没装配
                 Mount::default(),
