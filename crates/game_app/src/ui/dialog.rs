@@ -954,6 +954,36 @@ fn loan_room(books: &Books, player: Entity) -> i64 {
     books.max_loan(player)
 }
 
+/// 这些待决事项值得一整个场景，而不是一块弹窗：银行、百货、彩票、保释（医院/监狱）、
+/// 拍卖、魔法屋两步。它们要么要摆很多行、要么本身就是「一个地点」。
+fn wants_full_scene(pending: &Pending) -> bool {
+    matches!(
+        pending,
+        Pending::BankTeller
+            | Pending::Shop
+            | Pending::Lottery
+            | Pending::Bail(_)
+            | Pending::Auction
+            | Pending::Magic
+            | Pending::MagicSpell(_)
+    )
+}
+
+/// 场景内容列宽。每个场景按自己的排版取（理由见 `layout::SCENE_*`），
+/// 不共用一个数 —— 银行那列读数放到 940 宽会让「键 → 值」之间空出一大片。
+fn scene_width(pending: &Pending) -> f32 {
+    match pending {
+        Pending::Shop => layout::SCENE_SHOP,
+        Pending::Lottery => layout::SCENE_LOTTERY,
+        Pending::Bail(_) => layout::SCENE_BAIL,
+        Pending::Auction => layout::SCENE_AUCTION,
+        Pending::Magic => layout::SCENE_MAGIC_FILTER,
+        Pending::MagicSpell(_) => layout::SCENE_MAGIC_SPELL,
+        // 银行与其余（`wants_full_scene` 为真的那一批）走最窄的一档
+        _ => layout::SCENE_BANK,
+    }
+}
+
 /// 遮罩 + 居中面板的外壳。遮罩节点是整棵子树的根，`despawn` 它即收走全部内容；
 /// `key` 是这一屏在回答哪个待决事项，[`sync_modal`] 靠它判断要不要重建。
 fn frame(
@@ -965,6 +995,41 @@ fn frame(
     accent: Color,
     body: impl FnOnce(&mut ChildSpawnerCommands),
 ) -> Entity {
+    // 全屏场景：不铺弹窗边框与皮肤。整屏铺不透明的 `MENU_BG`（顶栏与 HUD 都盖住），
+    // 内容列按场景宽度竖向居中 —— 靠上铺开会让 200 行以内的内容全堆在画面上半截。
+    if wants_full_scene(&key.1) {
+        return commands
+            .spawn((
+                BoardUi,
+                ModalRoot { key, stamp },
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    padding: UiRect::all(Val::Px(layout::SCENE_PAD)),
+                    ..default()
+                },
+                BackgroundColor(col::MENU_BG),
+                ZIndex(3),
+            ))
+            .with_children(|screen| {
+                screen
+                    .spawn(Node {
+                        width: Val::Px(scene_width(&key.1)),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Stretch,
+                        row_gap: Val::Px(10.0),
+                        ..default()
+                    })
+                    .with_children(|p| body(p));
+            })
+            .id();
+    }
     let (overlay_node, overlay_bg, overlay_z) = overlay(3);
     let pick = skins.pick(&key.1);
     let (panel_node, panel_transform, panel_bg, panel_border) = panel(
@@ -1619,13 +1684,13 @@ fn bank_modal(
             p.spawn(center_label(
                 &kit.font.0,
                 "银行柜台",
-                size::DIALOG_TITLE,
+                size::SCENE_TITLE,
                 col::TITLE_GOLD,
             ));
             p.spawn(center_label(
                 &kit.font.0,
                 "存取款、借贷都在这里办，办完才继续",
-                size::ROW,
+                size::BODY,
                 col::MUTED,
             ));
             p.spawn(separator());
@@ -2204,13 +2269,13 @@ fn shop_modal(
             p.spawn(center_label(
                 &font.0,
                 "百货公司",
-                size::DIALOG_TITLE,
+                size::SCENE_TITLE,
                 col::TITLE_GOLD,
             ));
             p.spawn(center_label(
                 &font.0,
                 format!("点券 {points} — 买卡、卖回打 9 折，办完才继续"),
-                size::ROW,
+                size::BODY,
                 col::MUTED,
             ));
             p.spawn(separator());
@@ -2448,7 +2513,7 @@ fn lottery_modal(
             p.spawn(center_label(
                 &font.0,
                 "彩票中心",
-                size::DIALOG_TITLE,
+                size::SCENE_TITLE,
                 col::TITLE_GOLD,
             ));
             p.spawn(center_label(
@@ -2468,7 +2533,8 @@ fn lottery_modal(
                 col::TITLE_GOLD,
             ));
             p.spawn(separator());
-            p.spawn(label(&font.0, "挑一个号", size::SMALL, col::KEY));
+            // 这一屏是「一张奖券」而不是一张表：说明与页脚都居中，只有号码阵自己按列排
+            p.spawn(center_label(&font.0, "挑一个号", size::NAME, col::KEY));
             for line in rows.chunks(layout::LOTTERY_COLUMNS) {
                 p.spawn(Node {
                     flex_direction: FlexDirection::Row,
@@ -2500,14 +2566,14 @@ fn lottery_modal(
                 });
             }
             if let Some(reason) = blocked {
-                p.spawn(label(&font.0, reason, size::ROW, col::JAILED));
+                p.spawn(center_label(&font.0, reason, size::ROW, col::JAILED));
             }
             // 独占的那几颗各带一个名字，塞不进「全池同一句」那一条，所以单独一行
             if let Some(line) = taken_line {
-                p.spawn(label(&font.0, line, size::ROW, col::JAILED));
+                p.spawn(center_label(&font.0, line, size::ROW, col::JAILED));
             }
             p.spawn(separator());
-            p.spawn(label(
+            p.spawn(center_label(
                 &font.0,
                 if desk.held.is_empty() {
                     "手里还没有一注".to_string()
@@ -2524,7 +2590,7 @@ fn lottery_modal(
                 size::ROW,
                 col::KEY,
             ));
-            p.spawn(label(
+            p.spawn(center_label(
                 &font.0,
                 match desk.last_draw {
                     Some(n) => format!("上期开出 {n} 号"),
@@ -2875,7 +2941,7 @@ fn auction_modal(
             p.spawn(center_label(
                 &font.0,
                 "拍卖台",
-                size::DIALOG_TITLE,
+                size::SCENE_TITLE,
                 col::TITLE_GOLD,
             ));
             p.spawn(center_label(
@@ -3047,7 +3113,8 @@ fn bail_modal(
     stamp: String,
 ) -> Entity {
     let points = books.points_of(player);
-    let paper = kit.skins.bail.image.is_some();
+    // 保释现在是全屏场景（深色底），不再有米色纸面
+    let paper = false;
 
     frame(
         kit.skins,
@@ -3060,13 +3127,13 @@ fn bail_modal(
             p.spawn(center_label(
                 &kit.font.0,
                 format!("{}门口", place.label()),
-                size::DIALOG_TITLE,
+                size::SCENE_TITLE,
                 if paper { col::INK } else { col::TITLE_GOLD },
             ));
             p.spawn(center_label(
                 &kit.font.0,
                 format!("点券 {points} — 把里面的人放出来，各行多少钱写在按钮上"),
-                size::ROW,
+                size::BODY,
                 if paper { col::INK_DIM } else { col::MUTED },
             ));
             p.spawn(separator());
@@ -3168,13 +3235,13 @@ fn magic_filter_modal(
             p.spawn(center_label(
                 &font.0,
                 "魔法屋",
-                size::DIALOG_TITLE,
+                size::SCENE_TITLE,
                 col::TITLE_GOLD,
             ));
             p.spawn(center_label(
                 &font.0,
                 "女巫只按条件指人 —— 挑一条，右边是她筛出的谁",
-                size::ROW,
+                size::BODY,
                 col::MUTED,
             ));
             p.spawn(separator());
@@ -3288,13 +3355,13 @@ fn magic_spell_modal(
             p.spawn(center_label(
                 &font.0,
                 format!("女巫按「{}」筛出 {}", filter.label(), who.join("、")),
-                size::DIALOG_TITLE,
+                size::SCENE_TITLE,
                 col::TITLE_GOLD,
             ));
             p.spawn(center_label(
                 &font.0,
                 format!("挑一道 —— 落到这 {} 个人头上", who.len()),
-                size::ROW,
+                size::BODY,
                 col::MUTED,
             ));
             p.spawn(separator());

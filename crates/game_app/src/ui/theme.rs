@@ -21,9 +21,8 @@ pub mod col {
     pub const BORDER_UPGRADE: Color = Color::srgba(0.25, 0.60, 0.35, 0.80); // upgrade_dialog.gd:117
     pub const BORDER_RENT: Color = Color::srgba(0.75, 0.55, 0.25, 0.80); // rent_notice.gd:78
     pub const BORDER_CARD: Color = Color::srgba(0.75, 0.60, 0.90, 0.85); // card_notice.gd:82
-    /// B5b 新增：柜台与两块浮层的描边（源项目没有这两块，配色跟着语义走）
+    /// B5b 新增：银行柜台的描边（源项目没有这块，配色跟着语义走）
     pub const BORDER_BANK: Color = Color::srgba(0.45, 0.70, 0.90, 0.85);
-    pub const BORDER_STOCK: Color = Color::srgba(0.55, 0.80, 0.65, 0.85);
     /// P3b 新手牌。与 `TITLE_GOLD` 同族但压暗：一块随时开合的浮层不该比标题还抢眼
     pub const BORDER_HAND: Color = Color::srgba(0.80, 0.68, 0.35, 0.85);
     /// P3d② 百货公司柜台。跟 `palette::tile(TileKind::Shop)` 那一档玫瑰同族：
@@ -135,6 +134,9 @@ pub mod size {
     pub const NAME: f32 = 15.0;
     pub const CARD_TITLE: f32 = 26.0;
     pub const DIALOG_TITLE: f32 = 22.0;
+    /// 全屏场景的标题。比弹窗标题大两档：整屏只讲一件事，22 号字落在 720 高的屏上
+    /// 读起来像「弹窗被拉大了」，而不是「到了另一个地方」
+    pub const SCENE_TITLE: f32 = 30.0;
     pub const BUY_TITLE: f32 = 24.0;
     pub const RENT_AMOUNT: f32 = 32.0;
     pub const PAUSE_TITLE: f32 = 28.0;
@@ -203,10 +205,8 @@ pub mod layout {
     /// 顶栏一行塞得下六颗，但提示行与阶段名会被挤到换行 —— 而换行的「等待掷\n骰」
     /// 看着像排版坏了。两个字符的中文标签在 16 号字下用不到 96 宽。
     pub const FINANCE_BUTTON: [f32; 2] = [84.0, 44.0];
-    /// ATM 浮层：左上，压在顶栏下面。与右上角的详情卡、左下的证券面板互不透叠
+    /// ATM 浮层：左上，压在顶栏下面。与右上角的详情卡互不透叠
     pub const ATM_PANEL: [f32; 3] = [300.0, 16.0, 72.0];
-    /// 证券浮层：左下，留出底部 HUD 的 112 + 20
-    pub const STOCK_PANEL: [f32; 3] = [460.0, 16.0, 132.0];
     /// 柜台模态：比买地面板高一截（四行按钮 + 办完）
     pub const BANK_PANEL: [f32; 3] = [440.0, -220.0, -230.0];
     /// 面板内的金额按钮：四行两列，比模态主按钮小一档
@@ -306,4 +306,24 @@ pub mod layout {
     /// 两颗动作按钮：「加到 6,840」与「放弃这一场」。比模态主按钮宽一档 ——
     /// 上面带的是**金额**，而「这一档要多少钱」正是玩家按下之前要知道的那件事
     pub const AUCTION_BUTTON: [f32; 2] = [176.0, 42.0];
+
+    // ===== P16c：全屏场景 =====
+    /// 整屏场景的内容列宽。**不共用一个数**：每家店的排版本来就不一样 ——
+    /// 银行是一列读数，720 已经把「键 → 值」读成一行；百货一行是「卡名 + 效果 + 价格」，
+    /// 720 会把免罪卡那句挤成三行；彩票是 6×6 的号码阵，760 刚好留出两指宽的边。
+    /// 所有场景都竖向居中，顶栏与 HUD 在这一屏里都被盖住（`MENU_BG` 是不透明的）。
+    pub const SCENE_BANK: f32 = 720.0;
+    pub const SCENE_SHOP: f32 = 940.0;
+    pub const SCENE_LOTTERY: f32 = 760.0;
+    pub const SCENE_BAIL: f32 = 760.0;
+    pub const SCENE_AUCTION: f32 = 720.0;
+    /// 魔法屋两步各取一档：第一步一行只有「条件按钮 + 几个名字」，640 就够；
+    /// 第二步一行是「法术名 + 一句它干什么」，最长那句要 820 才不换行。
+    /// 共用 820 会让第一步的名单后面空出小半屏
+    pub const SCENE_MAGIC_FILTER: f32 = 640.0;
+    pub const SCENE_MAGIC_SPELL: f32 = 820.0;
+    pub const SCENE_STOCK: f32 = 860.0;
+    /// 场景内容的内边距。左右与上下同值：竖向居中之后，上下留白由 flex 分配，
+    /// 这一圈只负责「内容不贴边」
+    pub const SCENE_PAD: f32 = 28.0;
 }

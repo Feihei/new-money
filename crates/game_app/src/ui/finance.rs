@@ -23,7 +23,7 @@ use super::skin::Skins;
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, SECONDARY, UiAction, border_color, button, can_bank_op, can_trade,
-    counter_of, info_row, label, market_state,
+    counter_of, info_row, label, market_state, separator,
 };
 use crate::render::DevFont;
 
@@ -277,7 +277,6 @@ pub(crate) struct StockView<'w, 's> {
 pub(crate) fn sync_stock_panel(
     mut commands: Commands,
     font: Res<DevFont>,
-    skins: Res<Skins>,
     books: Books,
     view: StockView<'_, '_>,
     shown: Query<(Entity, &StockPanel, &FinanceStamp)>,
@@ -346,138 +345,152 @@ pub(crate) fn sync_stock_panel(
         BoardUi,
         StockPanel,
         FinanceStamp(stamp),
-        Pickable::IGNORE,
+        // 全屏场景：盖住地图与浮层，内容列竖向居中（顶栏与 HUD 一并盖住）
         Node {
             position_type: PositionType::Absolute,
-            left: Val::Px(layout::STOCK_PANEL[1]),
-            bottom: Val::Px(layout::STOCK_PANEL[2]),
-            width: Val::Px(layout::STOCK_PANEL[0]),
+            left: Val::Px(0.0),
+            top: Val::Px(0.0),
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
             flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(6.0),
-            padding: super::skin::padding(&skins.float, 16.0, 14.0, layout::STOCK_PANEL[0]),
-            border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
-            border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            padding: UiRect::all(Val::Px(layout::SCENE_PAD)),
             ..default()
         },
-        BackgroundColor(col::PANEL),
-        border_color(col::BORDER_STOCK),
+        BackgroundColor(col::MENU_BG),
         ZIndex(4),
     ));
-    // 底板皮肤：盘上有 panel_float 就叠九宫格底图，没有保持纯色面板（同手牌浮层）
-    if let Some((skin_node, skin_image)) = super::skin::panel_image(&skins.float) {
-        root.with_children(|p| {
-            p.spawn((skin_node, skin_image));
-        });
-    }
-    let paper = skins.float.image.is_some();
-    root.with_children(|p| {
-        p.spawn((
-            Node {
-                width: Val::Percent(100.0),
-                ..default()
-            },
-            TextLayout::justify(Justify::Center),
-            label(
-                &font.0,
-                format!(
-                    "证券 · {} 年 {} 月 {} 日（距派息 {until} 天）",
-                    date.year, date.month, date.day
-                ),
-                size::NAME,
-                if paper { col::INK } else { col::TITLE_GOLD },
-            ),
-        ));
-        p.spawn(label(
-            &font.0,
-            // 四句各有各的「不能」，混成一句就会把休市说成「你不会操作」：
-            // 停牌那句自带剩余天数（词由 core 的 `Halt::why` 给，与规则层同源）
-            format!(
-                "现金 ${cash} — {}",
-                halt.why().unwrap_or_else(|| if tradable {
-                    "掷骰前可买卖".to_string()
-                } else {
-                    "只在掷骰前可买卖".to_string()
-                })
-            ),
-            size::ROW,
-            if tradable {
-                if paper { col::INK_DIM } else { col::MUTED }
-            } else {
-                col::BANKRUPT
-            },
-        ));
-        for (id, name, price, prev, held) in &rows {
-            // 拷出三个数字再算：迭代的是 `&rows`，留着一路 `*` 会把算术写成谜
-            let (price, prev, held) = (*price, *prev, *held);
-            let drift = if prev > 0.0 {
-                (price - prev) / prev * 100.0
-            } else {
-                0.0
-            };
-            let line_text = format!(
-                "{name}  ${}  {sign}{drift:.1}%  持 {held}",
-                format_price(price),
-                sign = if drift >= 0.0 { "+" } else { "" }
-            );
-            p.spawn(Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(8.0),
+    root.with_children(|screen| {
+        screen
+            .spawn(Node {
+                width: Val::Px(layout::SCENE_STOCK),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Stretch,
+                row_gap: Val::Px(10.0),
                 ..default()
             })
-            .with_children(|line| {
-                line.spawn((
+            .with_children(|p| {
+                p.spawn((
                     Node {
-                        flex_grow: 1.0,
+                        width: Val::Percent(100.0),
                         ..default()
                     },
+                    TextLayout::justify(Justify::Center),
                     label(
                         &font.0,
-                        line_text,
-                        size::ROW,
-                        if drift >= 0.0 { col::GAIN } else { col::COST },
+                        format!(
+                            "证券 · {} 年 {} 月 {} 日（距派息 {until} 天）",
+                            date.year, date.month, date.day
+                        ),
+                        size::SCENE_TITLE,
+                        col::TITLE_GOLD,
                     ),
                 ));
-                let shares = 10u32;
-                // 买不起与一股不卖都直接灰掉：判据与 `economy::buy_plan`/`sell_plan` 同一条
-                let affordable = (price * shares as f32).ceil() as i64 <= cash;
-                for side in [TradeSide::Buy, TradeSide::Sell] {
-                    let enough = match side {
-                        TradeSide::Buy => affordable,
-                        TradeSide::Sell => held >= shares,
+                p.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        ..default()
+                    },
+                    TextLayout::justify(Justify::Center),
+                    label(
+                        &font.0,
+                        // 四句各有各的「不能」，混成一句就会把休市说成「你不会操作」：
+                        // 停牌那句自带剩余天数（词由 core 的 `Halt::why` 给，与规则层同源）
+                        format!(
+                            "现金 ${cash} — {}",
+                            halt.why().unwrap_or_else(|| if tradable {
+                                "掷骰前可买卖".to_string()
+                            } else {
+                                "只在掷骰前可买卖".to_string()
+                            })
+                        ),
+                        size::BODY,
+                        if tradable { col::MUTED } else { col::BANKRUPT },
+                    ),
+                ));
+                for (id, name, price, prev, held) in &rows {
+                    // 拷出三个数字再算：迭代的是 `&rows`，留着一路 `*` 会把算术写成谜
+                    let (price, prev, held) = (*price, *prev, *held);
+                    let drift = if prev > 0.0 {
+                        (price - prev) / prev * 100.0
+                    } else {
+                        0.0
                     };
-                    let text = match side {
-                        TradeSide::Buy => format!("买 {shares}"),
-                        TradeSide::Sell => format!("卖 {shares}"),
-                    };
+                    let line_text = format!(
+                        "{name}  ${}  {sign}{drift:.1}%  持 {held}",
+                        format_price(price),
+                        sign = if drift >= 0.0 { "+" } else { "" }
+                    );
+                    p.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(8.0),
+                        ..default()
+                    })
+                    .with_children(|line| {
+                        line.spawn((
+                            Node {
+                                flex_grow: 1.0,
+                                ..default()
+                            },
+                            label(
+                                &font.0,
+                                line_text,
+                                size::ROW,
+                                if drift >= 0.0 { col::GAIN } else { col::COST },
+                            ),
+                        ));
+                        let shares = 10u32;
+                        // 买不起与一股不卖都直接灰掉：判据与 `economy::buy_plan`/`sell_plan` 同一条
+                        let affordable = (price * shares as f32).ceil() as i64 <= cash;
+                        for side in [TradeSide::Buy, TradeSide::Sell] {
+                            let enough = match side {
+                                TradeSide::Buy => affordable,
+                                TradeSide::Sell => held >= shares,
+                            };
+                            let text = match side {
+                                TradeSide::Buy => format!("买 {shares}"),
+                                TradeSide::Sell => format!("卖 {shares}"),
+                            };
+                            button(
+                                line,
+                                &font.0,
+                                ButtonSpec::new(
+                                    &text,
+                                    layout::PANEL_CLOSE_BUTTON,
+                                    super::PRIMARY,
+                                    UiAction::Trade {
+                                        stock: StockId(id.clone()),
+                                        side,
+                                        shares,
+                                    },
+                                )
+                                .disabled(!tradable || !enough),
+                            );
+                        }
+                    });
+                }
+                p.spawn(separator());
+                // 整屏只有这一颗出口，跟着内容列居中 —— 靠左会读成「表格下面还有别的」
+                p.spawn(Node {
+                    width: Val::Percent(100.0),
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                })
+                .with_children(|line| {
                     button(
                         line,
                         &font.0,
                         ButtonSpec::new(
-                            &text,
+                            "关闭",
                             layout::PANEL_CLOSE_BUTTON,
-                            super::PRIMARY,
-                            UiAction::Trade {
-                                stock: StockId(id.clone()),
-                                side,
-                                shares,
-                            },
-                        )
-                        .disabled(!tradable || !enough),
+                            SECONDARY,
+                            UiAction::ToggleStock,
+                        ),
                     );
-                }
+                });
             });
-        }
-        button(
-            p,
-            &font.0,
-            ButtonSpec::new(
-                "关闭",
-                layout::PANEL_CLOSE_BUTTON,
-                SECONDARY,
-                UiAction::ToggleStock,
-            ),
-        );
     });
 }
 
