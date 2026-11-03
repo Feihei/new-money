@@ -19,6 +19,7 @@ use game_core::prelude::{
     date_of, days_until_dividend,
 };
 
+use super::skin::Skins;
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, SECONDARY, UiAction, border_color, button, can_bank_op, can_trade,
@@ -90,6 +91,7 @@ pub(crate) struct AtmView<'w> {
 pub(crate) fn sync_atm_panel(
     mut commands: Commands,
     font: Res<DevFont>,
+    skins: Res<Skins>,
     books: Books,
     view: AtmView<'_>,
     shown: Query<(Entity, &AtmPanel, &FinanceStamp)>,
@@ -154,7 +156,7 @@ pub(crate) fn sync_atm_panel(
             width: Val::Px(layout::ATM_PANEL[0]),
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(layout::OP_ROW_GAP),
-            padding: UiRect::axes(Val::Px(16.0), Val::Px(14.0)),
+            padding: super::skin::padding(&skins.float, 16.0, 14.0, layout::ATM_PANEL[0]),
             border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
             border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
             ..default()
@@ -163,8 +165,27 @@ pub(crate) fn sync_atm_panel(
         border_color(col::BORDER_BANK),
         ZIndex(4),
     ));
+    // 底板皮肤：盘上有 panel_float 就叠九宫格底图，没有保持纯色面板（同手牌浮层）
+    if let Some((skin_node, skin_image)) = super::skin::panel_image(&skins.float) {
+        root.with_children(|p| {
+            p.spawn((skin_node, skin_image));
+        });
+    }
+    let paper = skins.float.image.is_some();
     root.with_children(|p| {
-        p.spawn(label(&font.0, "ATM", size::NAME, col::TITLE_GOLD));
+        p.spawn((
+            Node {
+                width: Val::Percent(100.0),
+                ..default()
+            },
+            TextLayout::justify(Justify::Center),
+            label(
+                &font.0,
+                "ATM",
+                size::NAME,
+                if paper { col::INK } else { col::TITLE_GOLD },
+            ),
+        ));
         info_row(p, &font.0, "现金", &format!("${cash}"), col::CASH_OK, 60.0);
         info_row(p, &font.0, "存款", &format!("${deposit}"), col::VALUE, 60.0);
         // 「全部」的数额在建按钮这一刻算：面板随余额重建，所以它永远是准的
@@ -256,6 +277,7 @@ pub(crate) struct StockView<'w, 's> {
 pub(crate) fn sync_stock_panel(
     mut commands: Commands,
     font: Res<DevFont>,
+    skins: Res<Skins>,
     books: Books,
     view: StockView<'_, '_>,
     shown: Query<(Entity, &StockPanel, &FinanceStamp)>,
@@ -332,7 +354,7 @@ pub(crate) fn sync_stock_panel(
             width: Val::Px(layout::STOCK_PANEL[0]),
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(6.0),
-            padding: UiRect::axes(Val::Px(16.0), Val::Px(14.0)),
+            padding: super::skin::padding(&skins.float, 16.0, 14.0, layout::STOCK_PANEL[0]),
             border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
             border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
             ..default()
@@ -341,15 +363,29 @@ pub(crate) fn sync_stock_panel(
         border_color(col::BORDER_STOCK),
         ZIndex(4),
     ));
+    // 底板皮肤：盘上有 panel_float 就叠九宫格底图，没有保持纯色面板（同手牌浮层）
+    if let Some((skin_node, skin_image)) = super::skin::panel_image(&skins.float) {
+        root.with_children(|p| {
+            p.spawn((skin_node, skin_image));
+        });
+    }
+    let paper = skins.float.image.is_some();
     root.with_children(|p| {
-        p.spawn(label(
-            &font.0,
-            format!(
-                "证券 · {} 年 {} 月 {} 日（距派息 {until} 天）",
-                date.year, date.month, date.day
+        p.spawn((
+            Node {
+                width: Val::Percent(100.0),
+                ..default()
+            },
+            TextLayout::justify(Justify::Center),
+            label(
+                &font.0,
+                format!(
+                    "证券 · {} 年 {} 月 {} 日（距派息 {until} 天）",
+                    date.year, date.month, date.day
+                ),
+                size::NAME,
+                if paper { col::INK } else { col::TITLE_GOLD },
             ),
-            size::NAME,
-            col::TITLE_GOLD,
         ));
         p.spawn(label(
             &font.0,
@@ -364,7 +400,11 @@ pub(crate) fn sync_stock_panel(
                 })
             ),
             size::ROW,
-            if tradable { col::MUTED } else { col::BANKRUPT },
+            if tradable {
+                if paper { col::INK_DIM } else { col::MUTED }
+            } else {
+                col::BANKRUPT
+            },
         ));
         for (id, name, price, prev, held) in &rows {
             // 拷出三个数字再算：迭代的是 `&rows`，留着一路 `*` 会把算术写成谜

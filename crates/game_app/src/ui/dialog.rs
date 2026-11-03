@@ -25,6 +25,7 @@ use game_core::prelude::{
 };
 
 use super::finance::{comma, money_row};
+use super::skin::{Skins, UiKit};
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, SECONDARY, UiAction, building_label, button, info_row, label, overlay,
@@ -264,6 +265,7 @@ pub(crate) struct ModalView<'w, 's> {
 pub(crate) fn sync_modal(
     mut commands: Commands,
     font: Res<DevFont>,
+    skins: Res<Skins>,
     server: Res<AssetServer>,
     desk: game_core::magic::FilterDesk<'_, '_>,
     names: Query<&PlayerName>,
@@ -407,6 +409,12 @@ pub(crate) fn sync_modal(
         }),
         _ => None,
     };
+    // 超参的三个模态构造函数（租金收据 / 银行柜台 / 保释窗口）读公共前缀：
+    // 字体与皮肤成对收拢成 UiKit（§六 坑 8）
+    let kit = UiKit {
+        font: &font,
+        skins: &skins,
+    };
     // 门这一屏的读数（P13b②）。窗口挂着而门里没有问句的那一帧确实存在（答完一问与队列空
     // 之间隔着一次消息投递），所以这里当它可能没有 —— 与拍卖台那一格同一个形状
     let gate_ask: Option<GateAsk> = match (want, view.gate.asking()) {
@@ -526,24 +534,33 @@ pub(crate) fn sync_modal(
         // 这里要的只是「建了哪一屏」这个副作用
         match about {
             Pending::Buy(land) => {
-                buy_modal(&mut commands, &font, books, player, land, stamp);
+                buy_modal(&mut commands, &font, &skins, books, player, land, stamp);
             }
             Pending::Upgrade(land) => {
-                upgrade_modal(&mut commands, &font, books, player, land, stamp);
+                upgrade_modal(&mut commands, &font, &skins, books, player, land, stamp);
             }
             Pending::RentNotice(land) => {
-                rent_modal(&mut commands, &font, books, &names, player, land, stamp);
+                rent_modal(&mut commands, &kit, books, &names, player, land, stamp);
             }
             Pending::Card => {
-                card_modal(&mut commands, &font, &server, &view.memory, player, stamp);
+                card_modal(
+                    &mut commands,
+                    &font,
+                    &skins,
+                    &server,
+                    &view.memory,
+                    player,
+                    stamp,
+                );
             }
             Pending::BankTeller => {
-                bank_modal(&mut commands, &font, books, player, stamp, &plots, &fins);
+                bank_modal(&mut commands, &kit, books, player, stamp, &plots, &fins);
             }
             Pending::Shop => {
                 shop_modal(
                     &mut commands,
                     &font,
+                    &skins,
                     books,
                     &shop_rows(books, &view.shelf, &view.stock, player, &held),
                     player,
@@ -551,31 +568,32 @@ pub(crate) fn sync_modal(
                 );
             }
             Pending::Bail(place) => {
-                bail_modal(&mut commands, &font, books, player, place, &bails, stamp);
+                bail_modal(&mut commands, &kit, books, player, place, &bails, stamp);
             }
             // 建设窗口（P10c）。候选与灰按钮的判据全在 `Books::build_probe` 里 ——
             // 面板不在自己这一侧另算一遍价（P9 那条「写的与扣的必须同一个表达式」）。
             // 建成之后窗口照开（`decision_system` 那一格的注）：这一屏会重建成
             // 「这里已经立着设施」的样子，玩家按「离开」才走
             Pending::Build(land) => {
-                build_modal(&mut commands, &font, books, player, land, stamp);
+                build_modal(&mut commands, &font, &skins, books, player, land, stamp);
             }
             // 远程建设窗口（P10d②）。与 `build_modal` 同一条分工：候选与灰按钮的判据
             // 全在 `economy::can_upgrade`（就是 `Books::upgrade` 认的那张表）；
             // 升完窗口照开，按「先不建」才收摊
             Pending::RemoteBuild => {
-                remote_build_modal(&mut commands, &font, books, player, stamp);
+                remote_build_modal(&mut commands, &font, &skins, books, player, stamp);
             }
             // 服务费收据（P10c）。与租金收据同一族：钱已经扣完（或被吃成 0），
             // 这一屏只负责把「摇了几点、住了几天」说出来。读数在 `sync_modal` 那边
             // 就像 `bails` 一样先摊好（`ServiceRow`）—— 这一屏的五个参数已经是上限了
             Pending::ServiceNotice(land) => {
                 if let Some(row) = service.as_ref() {
-                    service_modal(&mut commands, &font, player, row, stamp);
+                    service_modal(&mut commands, &font, &skins, player, row, stamp);
                 } else {
                     // 拿不到读数（注入挂的窗口、或消息还没到）：说得出「结算过了」，
                     // 与 `card_modal` 的 `fallback_note` 同一条退路，不 panic
                     fallback_note(
+                        &skins,
                         &mut commands,
                         &font,
                         (player, Pending::ServiceNotice(land)),
@@ -587,11 +605,12 @@ pub(crate) fn sync_modal(
             // 「结完了 0 元」），这一屏把「哪家公司、怎么算的、谁在当董事长」说出来
             Pending::CompanyNotice => {
                 if let Some(row) = company.as_ref() {
-                    company_modal(&mut commands, &font, player, row, stamp);
+                    company_modal(&mut commands, &font, &skins, player, row, stamp);
                 } else {
                     // 拿不到读数（注入挂的窗口、或消息还没到）：说得出「结算过了」，
                     // 与 `service_modal` 那条退路同一条，不 panic
                     fallback_note(
+                        &skins,
                         &mut commands,
                         &font,
                         (player, Pending::CompanyNotice),
@@ -604,7 +623,7 @@ pub(crate) fn sync_modal(
             // 事实：拿默认读数建一屏比整块不建更难查。
             Pending::Lottery => {
                 if let Some(desk) = lottery.as_ref() {
-                    lottery_modal(&mut commands, &font, books, desk, player, stamp);
+                    lottery_modal(&mut commands, &font, &skins, books, desk, player, stamp);
                 }
             }
             // 拍卖台（P9）。它与彩票柜台同一条形状：一个窗口、两颗动作按钮。
@@ -613,7 +632,7 @@ pub(crate) fn sync_modal(
             // 那种时候整块不重建，下一帧 `auction_hold_system` 自己会把窗口收走
             Pending::Auction => {
                 if let Some(desk) = bid.as_ref() {
-                    auction_modal(&mut commands, &font, &names, desk, player, stamp);
+                    auction_modal(&mut commands, &font, &skins, &names, desk, player, stamp);
                 }
             }
             // 魔法屋的两步（P13）：两个窗口两个 builder，因为**候选来源不同** ——
@@ -625,19 +644,20 @@ pub(crate) fn sync_modal(
             // 这里没有一句假话可说（「门在问人」而问的是什么读不出）
             Pending::Passive => {
                 if let Some(desk) = gate_ask.as_ref() {
-                    passive_modal(&mut commands, &font, &names, desk, player, stamp);
+                    passive_modal(&mut commands, &font, &skins, &names, desk, player, stamp);
                 }
             }
             Pending::Magic => {
-                magic_filter_modal(&mut commands, &font, player, &magic_rows, stamp);
+                magic_filter_modal(&mut commands, &font, &skins, player, &magic_rows, stamp);
             }
             Pending::MagicSpell(filter) => {
                 if let Some((f, who)) = magic_draft.as_ref() {
-                    magic_spell_modal(&mut commands, &font, player, *f, who, stamp);
+                    magic_spell_modal(&mut commands, &font, &skins, player, *f, who, stamp);
                 } else {
                     // 草稿与窗口分叉了（规则层那句 `warn!` 的画面对照）：宁可说一句「名单没了」，
                     // 也不摆一排点下去落向未知名单的法术
                     fallback_note(
+                        &skins,
                         &mut commands,
                         &font,
                         (player, Pending::MagicSpell(filter)),
@@ -937,6 +957,7 @@ fn loan_room(books: &Books, player: Entity) -> i64 {
 /// 遮罩 + 居中面板的外壳。遮罩节点是整棵子树的根，`despawn` 它即收走全部内容；
 /// `key` 是这一屏在回答哪个待决事项，[`sync_modal`] 靠它判断要不要重建。
 fn frame(
+    skins: &Skins,
     commands: &mut Commands,
     key: (Entity, Pending),
     stamp: String,
@@ -945,7 +966,13 @@ fn frame(
     body: impl FnOnce(&mut ChildSpawnerCommands),
 ) -> Entity {
     let (overlay_node, overlay_bg, overlay_z) = overlay(3);
-    let (panel_node, panel_transform, panel_bg, panel_border) = panel(spec[0], spec, accent);
+    let pick = skins.pick(&key.1);
+    let (panel_node, panel_transform, panel_bg, panel_border) = panel(
+        spec[0],
+        spec,
+        accent,
+        super::skin::padding(pick, layout::PANEL_PAD_X, layout::PANEL_PAD_Y, spec[0]),
+    );
     commands
         .spawn((
             BoardUi,
@@ -955,8 +982,15 @@ fn frame(
             overlay_z,
         ))
         .with_children(|mask| {
-            mask.spawn((panel_node, panel_transform, panel_bg, panel_border))
-                .with_children(|p| body(p));
+            let mut spawned = mask.spawn((panel_node, panel_transform, panel_bg, panel_border));
+            // 底板皮肤：盘上有素材就垫一张九宫格底图子节点（先于内容 spawn，压在纯色底上、
+            // 垫在文字按钮下），没有保持纯色面板。0.20 无 `Option<C>` bundle，按句柄有无再挂
+            if let Some((skin_node, skin_image)) = super::skin::panel_image(pick) {
+                spawned.with_children(|p| {
+                    p.spawn((skin_node, skin_image));
+                });
+            }
+            spawned.with_children(|p| body(p));
         })
         .id()
 }
@@ -1009,6 +1043,7 @@ fn button_row(parent: &mut ChildSpawnerCommands, f: impl FnOnce(&mut ChildSpawne
 fn buy_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     books: &Books,
     player: Entity,
     land: LandId,
@@ -1045,6 +1080,7 @@ fn buy_modal(
     let cash_text = format!("你的现金: ${cash}");
 
     frame(
+        skins,
         commands,
         (player, Pending::Buy(land)),
         stamp,
@@ -1155,13 +1191,20 @@ fn buy_modal(
 fn upgrade_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     books: &Books,
     player: Entity,
     land: LandId,
     stamp: String,
 ) -> Entity {
     let Some(view) = books.view(land) else {
-        return fallback_note(commands, font, (player, Pending::Upgrade(land)), "升级报价");
+        return fallback_note(
+            skins,
+            commands,
+            font,
+            (player, Pending::Upgrade(land)),
+            "升级报价",
+        );
     };
     let def = books.active.def.land(land.0);
     let name = def.map(|l| l.name.clone()).unwrap_or_default();
@@ -1185,6 +1228,7 @@ fn upgrade_modal(
     let cash_text = format!("你的现金: ${cash}");
 
     frame(
+        skins,
         commands,
         (player, Pending::Upgrade(land)),
         stamp,
@@ -1296,7 +1340,7 @@ fn upgrade_modal(
 
 fn rent_modal(
     commands: &mut Commands,
-    font: &DevFont,
+    kit: &UiKit,
     books: &Books,
     names: &Query<&PlayerName>,
     payer: Entity,
@@ -1337,6 +1381,7 @@ fn rent_modal(
     let ok_text = if bankrupt { "确认破产" } else { "确认" };
 
     frame(
+        kit.skins,
         commands,
         (payer, Pending::RentNotice(land)),
         stamp,
@@ -1344,14 +1389,14 @@ fn rent_modal(
         col::BORDER_RENT,
         |p| {
             p.spawn(center_label(
-                &font.0,
+                &kit.font.0,
                 title,
                 size::DIALOG_TITLE,
                 title_color,
             ));
-            p.spawn(center_label(&font.0, desc, size::NAME, col::BODY));
+            p.spawn(center_label(&kit.font.0, desc, size::NAME, col::BODY));
             p.spawn(center_label(
-                &font.0,
+                &kit.font.0,
                 format!("- ${amount}"),
                 size::RENT_AMOUNT,
                 if bankrupt { col::BANKRUPT } else { col::COST },
@@ -1359,7 +1404,7 @@ fn rent_modal(
             button_row(p, |line| {
                 button(
                     line,
-                    &font.0,
+                    &kit.font.0,
                     ButtonSpec::new(
                         ok_text,
                         layout::OK_BUTTON,
@@ -1375,13 +1420,20 @@ fn rent_modal(
 fn card_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     server: &AssetServer,
     memory: &RecentCard,
     player: Entity,
     stamp: String,
 ) -> Entity {
     let Some(card) = memory.0.as_ref() else {
-        return fallback_note(commands, font, (player, Pending::Card), "卡牌效果已结算");
+        return fallback_note(
+            skins,
+            commands,
+            font,
+            (player, Pending::Card),
+            "卡牌效果已结算",
+        );
     };
     let (type_text, accent) = match card.kind {
         CardKind::Chance => ("机会", col::CHANCE),
@@ -1395,6 +1447,7 @@ fn card_modal(
     let face = art::card_face(&card.id).map(|path| server.load(path));
 
     frame(
+        skins,
         commands,
         (player, Pending::Card),
         stamp,
@@ -1492,6 +1545,7 @@ fn card_words(
 /// 一张兜底说明。`Pending` 与消息对不上时（测试里没抽过牌却被挂着、土地数据缺行）
 /// 也要有个能点掉的东西 —— 模态挡着掷骰，弹不出内容就会把这一局卡死。
 fn fallback_note(
+    skins: &Skins,
     commands: &mut Commands,
     font: &DevFont,
     key: (Entity, Pending),
@@ -1499,6 +1553,7 @@ fn fallback_note(
 ) -> Entity {
     let text = text.to_string();
     frame(
+        skins,
         commands,
         key,
         String::new(),
@@ -1533,7 +1588,7 @@ fn fallback_note(
 /// 日历只管股市。
 fn bank_modal(
     commands: &mut Commands,
-    font: &DevFont,
+    kit: &UiKit,
     books: &Books,
     player: Entity,
     stamp: String,
@@ -1554,6 +1609,7 @@ fn bank_modal(
     let lending_open = halted == 0;
 
     frame(
+        kit.skins,
         commands,
         (player, Pending::BankTeller),
         stamp,
@@ -1561,13 +1617,13 @@ fn bank_modal(
         col::BORDER_BANK,
         |p| {
             p.spawn(center_label(
-                &font.0,
+                &kit.font.0,
                 "银行柜台",
                 size::DIALOG_TITLE,
                 col::TITLE_GOLD,
             ));
             p.spawn(center_label(
-                &font.0,
+                &kit.font.0,
                 "存取款、借贷都在这里办，办完才继续",
                 size::ROW,
                 col::MUTED,
@@ -1580,10 +1636,10 @@ fn bank_modal(
             })
             .with_children(|rows| {
                 let key_w = layout::INFO_KEY_W_WIDE;
-                info_row(rows, &font.0, "现金", &comma(cash), col::CASH_OK, key_w);
+                info_row(rows, &kit.font.0, "现金", &comma(cash), col::CASH_OK, key_w);
                 info_row(
                     rows,
-                    &font.0,
+                    &kit.font.0,
                     "存款余额",
                     &comma(bank.deposit),
                     col::VALUE,
@@ -1591,7 +1647,7 @@ fn bank_modal(
                 );
                 info_row(
                     rows,
-                    &font.0,
+                    &kit.font.0,
                     "现有负债",
                     &comma(bank.loan),
                     col::COST,
@@ -1600,7 +1656,7 @@ fn bank_modal(
                 // 融资债（P10d②）：与贷款分家 —— 不占额度、不计息，挪用与兜底都记它
                 info_row(
                     rows,
-                    &font.0,
+                    &kit.font.0,
                     "融资债",
                     &comma(bank.financing),
                     if bank.financing > 0 {
@@ -1612,7 +1668,7 @@ fn bank_modal(
                 );
                 info_row(
                     rows,
-                    &font.0,
+                    &kit.font.0,
                     "还可借",
                     // 停摆时这一行不报那个借不到的数，报的是「为什么借不到、哪天再来」：
                     // 一个 0 会被读成「你没地产可押」，那是另一件完全不同的事
@@ -1630,7 +1686,7 @@ fn bank_modal(
                 );
                 info_row(
                     rows,
-                    &font.0,
+                    &kit.font.0,
                     "利率",
                     &format!(
                         "存 {:.1}% / 贷 {:.1}%，每月末各结一次",
@@ -1644,7 +1700,7 @@ fn bank_modal(
             p.spawn(separator());
             money_row(
                 p,
-                font,
+                kit.font,
                 BankOp::Deposit,
                 true,
                 ("存", 1_000, cash >= 1_000),
@@ -1652,7 +1708,7 @@ fn bank_modal(
             );
             money_row(
                 p,
-                font,
+                kit.font,
                 BankOp::Withdraw,
                 true,
                 ("取", 1_000, bank.deposit >= 1_000),
@@ -1660,7 +1716,7 @@ fn bank_modal(
             );
             money_row(
                 p,
-                font,
+                kit.font,
                 BankOp::Borrow,
                 // 四颗里只有这一颗问停摆（其余三颗传 `true`，柜台既然开着就办得动）
                 lending_open,
@@ -1669,7 +1725,7 @@ fn bank_modal(
             );
             money_row(
                 p,
-                font,
+                kit.font,
                 BankOp::Repay,
                 true,
                 ("还", 5_000, bank.loan >= 5_000 && cash >= 5_000),
@@ -1681,7 +1737,7 @@ fn bank_modal(
             if !fins.is_empty() {
                 p.spawn(separator());
                 p.spawn(label(
-                    &font.0,
+                    &kit.font.0,
                     "融资（挪用储户存款，不计息）",
                     size::SMALL,
                     col::KEY,
@@ -1700,7 +1756,7 @@ fn bank_modal(
                                 ..default()
                             },
                             label(
-                                &font.0,
+                                &kit.font.0,
                                 format!("从 {name}（存 {deposit}）"),
                                 size::ROW,
                                 col::BODY,
@@ -1708,7 +1764,7 @@ fn bank_modal(
                         ));
                         button(
                             line,
-                            &font.0,
+                            &kit.font.0,
                             ButtonSpec::new(
                                 "挪 1,000",
                                 layout::SHOP_BUTTON,
@@ -1722,7 +1778,7 @@ fn bank_modal(
                         );
                         button(
                             line,
-                            &font.0,
+                            &kit.font.0,
                             ButtonSpec::new(
                                 "挪全部",
                                 layout::SHOP_BUTTON,
@@ -1739,22 +1795,22 @@ fn bank_modal(
             }
             p.spawn(separator());
             p.spawn(label(
-                &font.0,
+                &kit.font.0,
                 "你的地产（押出去不计息，赎回来加一成）",
                 size::SMALL,
                 col::KEY,
             ));
             if plots.is_empty() {
                 // 一句话而不是一片空白：这块面板的高度是固定的，空着读起来像坏了
-                p.spawn(label(&font.0, "名下没有地块", size::ROW, col::KEY));
+                p.spawn(label(&kit.font.0, "名下没有地块", size::ROW, col::KEY));
             }
             for row in plots {
-                plot_row(p, font, row);
+                plot_row(p, kit.font, row);
             }
             button_row(p, |line| {
                 button(
                     line,
-                    &font.0,
+                    &kit.font.0,
                     ButtonSpec::new(
                         "办完",
                         layout::MODAL_BUTTON,
@@ -1774,13 +1830,20 @@ fn bank_modal(
 fn remote_build_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     books: &Books,
     player: Entity,
     stamp: String,
 ) -> Entity {
     let Some(pid) = books.id_of(player) else {
         // 没有身份的人开不出这扇窗 —— 与柜台同一条守门
-        return fallback_note(commands, font, (player, Pending::RemoteBuild), "远程建设");
+        return fallback_note(
+            skins,
+            commands,
+            font,
+            (player, Pending::RemoteBuild),
+            "远程建设",
+        );
     };
     let free =
         game_core::company::chairman_of(books, game_core::company::BUILD_STOCK) == Some(player);
@@ -1788,6 +1851,7 @@ fn remote_build_modal(
     let views = books.views();
     let cash = books.balance(player);
     frame(
+        skins,
         commands,
         (player, Pending::RemoteBuild),
         stamp,
@@ -2121,6 +2185,7 @@ fn card_title(def: Option<&CardDef>) -> String {
 fn shop_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     books: &Books,
     rows: &ShopRows,
     player: Entity,
@@ -2129,6 +2194,7 @@ fn shop_modal(
     let points = books.points_of(player);
 
     frame(
+        skins,
         commands,
         (player, Pending::Shop),
         stamp,
@@ -2362,6 +2428,7 @@ impl LotteryDesk {
 fn lottery_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     books: &Books,
     desk: &LotteryDesk,
     player: Entity,
@@ -2371,6 +2438,7 @@ fn lottery_modal(
     let blocked = desk.one_reason();
     let taken_line = desk.taken_line();
     frame(
+        skins,
         commands,
         (player, Pending::Lottery),
         stamp,
@@ -2518,6 +2586,7 @@ pub(crate) struct GateAsk {
 fn passive_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     names: &Query<&PlayerName>,
     desk: &GateAsk,
     player: Entity,
@@ -2526,6 +2595,7 @@ fn passive_modal(
     // 「谁在答」与「谁是回合主人」两句都要念得出，否则替别人答那一下看着像自己做了决定
     let seat_of = seat(names, player);
     frame(
+        skins,
         commands,
         (player, Pending::Passive),
         stamp,
@@ -2784,6 +2854,7 @@ fn seats(names: &Query<&PlayerName>, list: &[Entity]) -> Option<String> {
 fn auction_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     names: &Query<&PlayerName>,
     desk: &BidDesk,
     player: Entity,
@@ -2794,6 +2865,7 @@ fn auction_modal(
     let fighting = seats(names, &lot.pool);
     let quit = seats(names, &desk.out());
     frame(
+        skins,
         commands,
         (player, Pending::Auction),
         stamp,
@@ -2967,7 +3039,7 @@ fn bail_rows(
 /// 之所以不是「选一个回答」，是因为同一处可以关着好几个人，玩家可能想一次放两个。
 fn bail_modal(
     commands: &mut Commands,
-    font: &DevFont,
+    kit: &UiKit,
     books: &Books,
     player: Entity,
     place: DetentionPlace,
@@ -2975,8 +3047,10 @@ fn bail_modal(
     stamp: String,
 ) -> Entity {
     let points = books.points_of(player);
+    let paper = kit.skins.bail.image.is_some();
 
     frame(
+        kit.skins,
         commands,
         (player, Pending::Bail(place)),
         stamp,
@@ -2984,30 +3058,30 @@ fn bail_modal(
         col::BORDER_SHOP,
         |p| {
             p.spawn(center_label(
-                &font.0,
+                &kit.font.0,
                 format!("{}门口", place.label()),
                 size::DIALOG_TITLE,
-                col::TITLE_GOLD,
+                if paper { col::INK } else { col::TITLE_GOLD },
             ));
             p.spawn(center_label(
-                &font.0,
+                &kit.font.0,
                 format!("点券 {points} — 把里面的人放出来，各行多少钱写在按钮上"),
                 size::ROW,
-                col::MUTED,
+                if paper { col::INK_DIM } else { col::MUTED },
             ));
             p.spawn(separator());
             if rows.is_empty() {
                 // 分派层在「没人可保」时不会摆这个窗口（见 `settle_bail_landing_system`），
                 // 走到这里只可能是保释刚把最后一个人放走、面板还没重建的那一帧
-                p.spawn(label(&font.0, "这里没有关着的人", size::ROW, col::KEY));
+                p.spawn(label(&kit.font.0, "这里没有关着的人", size::ROW, col::KEY));
             }
             for row in rows {
-                bail_row(p, font, row);
+                bail_row(p, kit.font, row, paper);
             }
             button_row(p, |line| {
                 button(
                     line,
-                    &font.0,
+                    &kit.font.0,
                     ButtonSpec::new(
                         "离开",
                         layout::MODAL_BUTTON,
@@ -3023,7 +3097,7 @@ fn bail_modal(
 /// 保释窗口的一行：「名字 + 他关着这件事 + 一颗带价目的按钮 + 灰掉时的那句话」。
 ///
 /// 价钱写在**按钮上**而不是标题里（P12）：同一排里 30 与 300 并存，而一句话只能有一个数。
-fn bail_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &BailRow) {
+fn bail_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &BailRow, paper: bool) {
     p.spawn(Node {
         flex_direction: FlexDirection::Row,
         align_items: AlignItems::Center,
@@ -3043,6 +3117,8 @@ fn bail_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &BailRow) {
                 size::ROW,
                 if row.blocked.is_some() {
                     col::KEY
+                } else if paper {
+                    col::INK_DIM
                 } else {
                     col::BODY
                 },
@@ -3076,11 +3152,13 @@ fn bail_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &BailRow) {
 fn magic_filter_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     player: Entity,
     rows: &[MagicRow],
     stamp: String,
 ) -> Entity {
     frame(
+        skins,
         commands,
         (player, Pending::Magic),
         stamp,
@@ -3193,12 +3271,14 @@ fn magic_filter_row(p: &mut ChildSpawnerCommands, font: &DevFont, row: &MagicRow
 fn magic_spell_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     player: Entity,
     filter: MagicFilter,
     who: &[String],
     stamp: String,
 ) -> Entity {
     frame(
+        skins,
         commands,
         (player, Pending::MagicSpell(filter)),
         stamp,
@@ -3295,6 +3375,7 @@ fn magic_spell_row(
 fn build_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     books: &Books,
     player: Entity,
     land: LandId,
@@ -3324,6 +3405,7 @@ fn build_modal(
         .unwrap_or(0);
 
     frame(
+        skins,
         commands,
         (player, Pending::Build(land)),
         stamp,
@@ -3466,6 +3548,7 @@ fn service_row(
 fn service_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     payer: Entity,
     row: &ServiceRow,
     stamp: String,
@@ -3481,6 +3564,7 @@ fn service_modal(
     };
 
     frame(
+        skins,
         commands,
         (payer, Pending::ServiceNotice(row.land)),
         stamp,
@@ -3591,6 +3675,7 @@ fn company_row(
 fn company_modal(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     payer: Entity,
     row: &CompanyRow,
     stamp: String,
@@ -3626,6 +3711,7 @@ fn company_modal(
     };
 
     frame(
+        skins,
         commands,
         (payer, Pending::CompanyNotice),
         stamp,

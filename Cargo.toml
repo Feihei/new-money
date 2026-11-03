@@ -8,8 +8,9 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-# 精确锁定：Bevy 0.20 小版本升级是破坏性的，禁止 cargo update
-bevy = { version = "=0.20.0" }
+# 精确锁定：Bevy 0.20 小版本升级是破坏性的，禁止 cargo update。
+# `webp` 只开 bevy_image 的解码器（UI 底板素材是 webp），版本锁定不受影响
+bevy = { version = "=0.20.0", features = ["webp"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.9"

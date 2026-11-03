@@ -68,6 +68,11 @@ pub mod col {
     // ===== 文字 =====
     pub const TITLE_GOLD: Color = Color::srgb(1.00, 0.85, 0.30);
     pub const HINT: Color = Color::srgb(0.90, 0.90, 0.95); // board.tscn:47
+    /// 浅色纸面上的字。底板皮肤把面板中央从深色底换成米色，`HINT`/`TITLE_GOLD`
+    /// 那一族在上面几乎看不见；这两档是同一套「标题 / 次要说明」的深色替身。
+    /// 只在 `skin.image.is_some()` 时用，素材缺席退回纯色面板时仍走原色。
+    pub const INK: Color = Color::srgb(0.18, 0.10, 0.06);
+    pub const INK_DIM: Color = Color::srgb(0.40, 0.27, 0.18);
     pub const PHASE: Color = Color::srgb(1.00, 0.90, 0.30); // board.tscn:54
     pub const BODY: Color = Color::srgb(0.82, 0.82, 0.88);
     pub const MUTED: Color = Color::srgb(0.70, 0.70, 0.75);
@@ -265,17 +270,10 @@ pub mod layout {
     pub const MAGIC_LIST_GAP: f32 = 2.0;
 
     // ===== P7：游乐场 =====
-    /// 那一屏的外壳：`[宽, 左上角相对屏幕中心的 x, y]`。高由内容撑开
-    /// （标题五行 ≈ 110 + 玩法区 380 + 底栏 40 + 间距与内边距 ≈ 90 → 约 620），
-    /// 在 1280×720 的窗口里上下各留 50。
-    ///
-    /// **宽度是算出来的，不是取的整数**：`ARCADE_FIELD[0] + PANEL_PAD_X * 2`。
-    /// 玩法区必须**恰好**横向居中 —— 接财宝的鼠标控制要把窗口横坐标换算进这一块，
-    /// 而那个换算只减一个常数（`(窗口宽 - 玩法区宽) / 2`）。宽出来的话定宽子节点在
-    /// `align_items: Stretch` 下会靠左，篮子就会比鼠标偏一截
-    pub const ARCADE_PANEL: [f32; 3] = [868.0, -434.0, -310.0];
-    /// 玩法区。三种游戏共用同一块地：气球升、财宝落、冰洞排，都在这个矩形里
-    pub const ARCADE_FIELD: [f32; 2] = [820.0, 380.0];
+    /// 全屏场景，不再有「外壳面板」；玩法区直接铺在窗口里。
+    /// 尺寸决定气球/财宝的横向范围；接财宝的鼠标控制按
+    /// `(窗口宽 - 玩法区宽) / 2` 换算，所以它必须横向居中。
+    pub const ARCADE_FIELD: [f32; 2] = [1160.0, 440.0];
     /// 挖宝的 4×4：格子边长与缝
     pub const ARCADE_CELL: f32 = 84.0;
     pub const ARCADE_CELL_GAP: f32 = 10.0;

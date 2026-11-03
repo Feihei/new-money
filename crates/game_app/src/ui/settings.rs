@@ -11,6 +11,7 @@
 
 use bevy::prelude::*;
 
+use super::skin::Skins;
 use super::theme::{col, layout, size};
 use super::{
     ButtonSpec, MenuPiece, PRIMARY, SECONDARY, UiAction, border_color, button, label, separator,
@@ -31,6 +32,7 @@ pub(crate) struct SettingsStamp(pub String);
 pub(crate) fn sync_settings_panel(
     mut commands: Commands,
     font: Res<DevFont>,
+    skins: Res<Skins>,
     open: Res<SettingsOpen>,
     settings: Res<Settings>,
     status: Res<SettingsStatus>,
@@ -44,19 +46,30 @@ pub(crate) fn sync_settings_panel(
         commands.entity(entity).despawn();
     }
     if open.0 {
-        spawn_panel(&mut commands, &font, &settings, &status, stamp);
+        spawn_panel(&mut commands, &font, &skins, &settings, &status, stamp);
     }
 }
 
 fn spawn_panel(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     settings: &Settings,
     status: &SettingsStatus,
     stamp: String,
 ) {
     let width = 460.0;
-    let inner = width - layout::PANEL_PAD_X * 2.0;
+    let (pad_x, pad_y) = super::skin::inset(
+        &skins.float,
+        layout::PANEL_PAD_X,
+        layout::PANEL_PAD_Y,
+        width,
+    );
+    let inner = width - pad_x * 2.0;
+    let paper = skins.float.image.is_some();
+    let ink = if paper { col::INK } else { col::TITLE_GOLD };
+    let ink_dim = if paper { col::INK_DIM } else { col::HINT };
+    let ink_soft = if paper { col::INK_DIM } else { col::MUTED };
     commands
         .spawn((
             MenuPiece,
@@ -75,25 +88,36 @@ fn spawn_panel(
             GlobalZIndex(20),
         ))
         .with_children(|mask| {
-            mask.spawn((
+            let mut panel_cmd = mask.spawn((
                 Node {
                     width: Val::Px(width),
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Stretch,
                     row_gap: Val::Px(layout::MENU_GAP),
-                    padding: UiRect::axes(
-                        Val::Px(layout::PANEL_PAD_X),
-                        Val::Px(layout::PANEL_PAD_Y),
-                    ),
+                    padding: UiRect::axes(Val::Px(pad_x), Val::Px(pad_y)),
                     border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
                     border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
                     ..default()
                 },
                 BackgroundColor(col::PANEL),
                 border_color(col::BORDER_BUY),
-            ))
-            .with_children(|panel| {
-                panel.spawn(label(&font.0, "设置", size::DIALOG_TITLE, col::TITLE_GOLD));
+            ));
+            // 底板皮肤：盘上有 panel_modal 就叠九宫格底图，没有保持纯色面板（同暂停面板）
+            if let Some((skin_node, skin_image)) = super::skin::panel_image(&skins.float) {
+                panel_cmd.with_children(|p| {
+                    p.spawn((skin_node, skin_image));
+                });
+            }
+            panel_cmd.with_children(|panel| {
+                panel
+                    .spawn(Node {
+                        width: Val::Percent(100.0),
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn(label(&font.0, "设置", size::DIALOG_TITLE, ink));
+                    });
                 panel.spawn(separator());
 
                 // ---- 行走速度 ----
@@ -104,7 +128,7 @@ fn spawn_panel(
                         align_items: AlignItems::Center,
                         ..default()
                     },
-                    label(&font.0, "行走速度", size::BODY, col::HINT),
+                    label(&font.0, "行走速度", size::BODY, ink_dim),
                 ));
                 panel
                     .spawn((Node {
@@ -142,7 +166,7 @@ fn spawn_panel(
                     &font.0,
                     format!("每格 {:.2} 秒 · 改完立刻生效", settings.walk_step_interval),
                     size::SMALL,
-                    col::MUTED,
+                    ink_soft,
                 ));
 
                 // ---- 调试面板 ----
@@ -160,7 +184,7 @@ fn spawn_panel(
                                 flex_grow: 1.0,
                                 ..default()
                             },
-                            label(&font.0, "调试面板（只读 dump）", size::BODY, col::HINT),
+                            label(&font.0, "调试面板（只读 dump）", size::BODY, ink_dim),
                         ));
                         button(
                             line,
@@ -181,7 +205,7 @@ fn spawn_panel(
                     &font.0,
                     "调试面板下次启动生效（egui 装上就开始吃输入，不能中途装卸）",
                     size::SMALL,
-                    col::MUTED,
+                    ink_soft,
                 ));
 
                 // ---- 上一次写盘的结果 ----
@@ -190,11 +214,7 @@ fn spawn_panel(
                         &font.0,
                         text.clone(),
                         size::SMALL,
-                        if status.failed {
-                            col::BANKRUPT
-                        } else {
-                            col::TITLE_GOLD
-                        },
+                        if status.failed { col::BANKRUPT } else { ink },
                     ));
                 }
 

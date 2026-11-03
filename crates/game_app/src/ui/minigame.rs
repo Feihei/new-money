@@ -31,6 +31,7 @@ use rand::Rng as _;
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha8Rng;
 
+use super::skin::Skins;
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, Disabled, MenuPiece, PRIMARY, Palette, SECONDARY, UiAction, border_color,
@@ -382,13 +383,13 @@ fn start(commands: &mut Commands, font: &DevFont, rules: &GameRules, wanted: Wan
     let payout = rules.minigames.of(game);
     let mut rng = ChaCha8Rng::seed_from_u64(wanted.seed());
 
-    let (overlay_node, overlay_bg, _) = overlay(5);
-    let (panel_node, panel_transform, panel_bg, panel_border) = panel(
-        layout::ARCADE_PANEL[0],
-        layout::ARCADE_PANEL,
-        col::BORDER_ARCADE,
-    );
-    let mut root = commands.spawn((ArcadePanel, overlay_node, overlay_bg, ZIndex(5)));
+    let (overlay_node, _, _) = overlay(5);
+    let mut root = commands.spawn((
+        ArcadePanel,
+        overlay_node,
+        BackgroundColor(col::FIELD),
+        ZIndex(5),
+    ));
     // 练习局挂在菜单上（随 `MenuPiece` 收走），对局里挂在棋盘 UI 上（随 `BoardUi` 收走）。
     // 两个标记必须给对：给错了这一屏会活过场景切换，而它是**唯一**一块两个场景都要用的面板。
     // 分成两句写是因为两个标记是不同的类型，`if … else` 给不出一个共同的 bundle
@@ -404,13 +405,21 @@ fn start(commands: &mut Commands, font: &DevFont, rules: &GameRules, wanted: Wan
         root.insert(GlobalZIndex(11));
     }
     let root = root.id();
+    // 全屏场景：不摆带边框的面板，玩法区直接铺在整块窗口上
     let panel = commands
         .spawn((
             ChildOf(root),
-            panel_node,
-            panel_transform,
-            panel_bg,
-            panel_border,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                row_gap: Val::Px(8.0),
+                padding: UiRect::axes(Val::Px(32.0), Val::Px(18.0)),
+                ..default()
+            },
+            BackgroundColor(col::FIELD),
         ))
         .id();
 
@@ -1040,7 +1049,7 @@ fn move_basket(
         && *cursor != Some(at)
     {
         *cursor = Some(at);
-        // 玩法区恰好横向居中（面板宽 = 玩法区宽 + 两侧内边距，见 `layout::ARCADE_PANEL`），
+        // 全屏场景里玩法区横向居中（面板 100% 宽、`align_items: Center`），
         // 所以窗口横坐标减去两边的留白就是它在这一块里的位置 —— 不必去读布局之后的
         // `UiTransform`，那玩意儿的原点与这一屏要的读数差着一层相机
         let margin = (window.width() - field_w()) / 2.0;
@@ -1116,6 +1125,7 @@ fn brighten(c: Color) -> Color {
 pub(crate) fn sync_choice(
     mut commands: Commands,
     font: Res<DevFont>,
+    skins: Res<Skins>,
     rules: Res<GameRules>,
     open: Res<ArcadeChoiceOpen>,
     practice: Res<Practice>,
@@ -1148,6 +1158,12 @@ pub(crate) fn sync_choice(
         layout::ARCADE_CHOICE[0],
         layout::ARCADE_CHOICE,
         col::BORDER_ARCADE,
+        super::skin::padding(
+            &skins.modal,
+            layout::PANEL_PAD_X,
+            layout::PANEL_PAD_Y,
+            layout::ARCADE_CHOICE[0],
+        ),
     );
     let root = commands
         .spawn((
@@ -1170,6 +1186,11 @@ pub(crate) fn sync_choice(
             panel_border,
         ))
         .id();
+    if let Some((skin_node, skin_image)) = super::skin::panel_image(&skins.modal) {
+        commands.entity(body).with_children(|p| {
+            p.spawn((skin_node, skin_image));
+        });
+    }
     commands.entity(body).with_children(|p| {
         p.spawn(centered(
             &font,

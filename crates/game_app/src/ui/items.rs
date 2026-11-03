@@ -15,6 +15,7 @@ use game_core::prelude::{
     place_denied,
 };
 
+use super::skin::Skins;
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, PRIMARY, SECONDARY, UiAction, border_color, button, can_play, label,
@@ -95,6 +96,7 @@ fn tile_text(board: &ActiveBoard, tile: TileIndex) -> String {
 pub(crate) fn sync_items_panel(
     mut commands: Commands,
     font: Res<DevFont>,
+    skins: Res<Skins>,
     view: ItemsView<'_, '_>,
     shown: Query<(Entity, &ItemsPanel, &ItemsStamp)>,
 ) {
@@ -205,7 +207,7 @@ pub(crate) fn sync_items_panel(
             width: Val::Px(layout::ITEMS_PANEL[0]),
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(layout::ITEM_ROW_GAP),
-            padding: UiRect::axes(Val::Px(16.0), Val::Px(14.0)),
+            padding: super::skin::padding(&skins.float, 16.0, 14.0, layout::ITEMS_PANEL[0]),
             border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
             border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
             ..default()
@@ -214,13 +216,36 @@ pub(crate) fn sync_items_panel(
         border_color(col::BORDER_ITEM),
         ZIndex(4),
     ));
+    // 底板皮肤：盘上有 panel_float 就叠九宫格底图，没有保持纯色面板（同手牌浮层）
+    if let Some((skin_node, skin_image)) = super::skin::panel_image(&skins.float) {
+        root.with_children(|p| {
+            p.spawn((skin_node, skin_image));
+        });
+    }
+    let paper = skins.float.image.is_some();
     root.with_children(|p| {
-        p.spawn(label(&font.0, "道具", size::NAME, col::TITLE_GOLD));
+        p.spawn((
+            Node {
+                width: Val::Percent(100.0),
+                ..default()
+            },
+            TextLayout::justify(Justify::Center),
+            label(
+                &font.0,
+                "道具",
+                size::NAME,
+                if paper { col::INK } else { col::TITLE_GOLD },
+            ),
+        ));
         p.spawn(label(
             &font.0,
             header,
             size::ROW,
-            if playable { col::MUTED } else { col::BANKRUPT },
+            if playable {
+                if paper { col::INK_DIM } else { col::MUTED }
+            } else {
+                col::BANKRUPT
+            },
         ));
         if rows.is_empty() && remote == 0 {
             p.spawn(label(&font.0, "身上没有道具", size::BODY, col::KEY));

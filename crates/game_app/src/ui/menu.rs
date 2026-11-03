@@ -90,8 +90,27 @@ pub fn spawn_menu(
                     BackgroundColor(scrim),
                 ))
                 .with_children(|stack| {
-                    stack.spawn(label(&font.0, "暴富", size::MENU_TITLE, col::MENU_TITLE));
-                    stack.spawn(label(&font.0, "New Money", size::BODY, col::MUTED));
+                    // 标题 logo（书法「暴富」+ 方孔铜钱 + NEW MONEY 绶带）取代了原先
+                    // 的两行文字标题。图按菜单板同宽显示、`aspect_ratio` 锁住原图
+                    // 1536×640 的比例，缩放只由 MENU_WIDTH 这一个数决定。
+                    // 盘上没有这张图时（素材目录不齐的机器）退回文字标题 ——
+                    // 与整个 art 模块「缺素材退回程序化、不报错」是同一条纪律。
+                    if let Some(logo) = art::menu_logo() {
+                        stack.spawn((
+                            ImageNode {
+                                image: server.load(logo),
+                                ..default()
+                            },
+                            Node {
+                                width: Val::Px(layout::MENU_WIDTH),
+                                aspect_ratio: Some(1536.0 / 640.0),
+                                ..default()
+                            },
+                        ));
+                    } else {
+                        stack.spawn(label(&font.0, "暴富", size::MENU_TITLE, col::MENU_TITLE));
+                        stack.spawn(label(&font.0, "New Money", size::BODY, col::MUTED));
+                    }
                     stack.spawn(separator());
                     menu_button(stack, &font.0, "新游戏", UiAction::NewGame);
                     // 游乐场练习（P7）：三款小游戏各玩一手，**不给点券**。挂在菜单上而不是

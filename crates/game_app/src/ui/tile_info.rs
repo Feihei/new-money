@@ -8,11 +8,13 @@
 //! - 内容全部从 `ActiveBoard` + 组件现算。实体上只留 `(col, row)` 这一对坐标，
 //!   格名/类型/绑定的土地都回 `BoardDef` 查（§4.2「拓扑查询走 BoardDef」，不复制第二份真相）。
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, BuildingLevel, LandId, Owner, PlayerId, PlayerName, TileKind,
 };
 
+use super::skin::Skins;
 use super::theme::{col, layout, size};
 use super::{BoardUi, ButtonSpec, UiAction, border_color, building_label, button, info_row, label};
 use crate::render::{DevFont, TilePick, palette};
@@ -84,17 +86,24 @@ pub(crate) fn pick_tile(
 }
 
 /// 当前格变了就重建卡片。判据是卡片自己那份 [`TileView`]，见它的注释。
+/// 面板要读的三样世界状态收成一包：system 参数八格撞上限，收拢是房规（§六 坑 8）。
+#[derive(SystemParam)]
+pub(crate) struct TileCtx<'w> {
+    font: Res<'w, DevFont>,
+    skins: Res<'w, Skins>,
+    active: Res<'w, ActiveBoard>,
+}
+
 pub(crate) fn sync_tile_card(
     mut commands: Commands,
-    font: Res<DevFont>,
-    active: Res<ActiveBoard>,
+    ctx: TileCtx<'_>,
     lands: Query<(&LandId, &Owner, &BuildingLevel)>,
     players: Query<(&PlayerId, &PlayerName)>,
     selected: Res<SelectedTile>,
     shown: Query<(Entity, &TileCard)>,
 ) {
     let want = selected.0.and_then(|(col, row)| {
-        let (index, tile) = active.def.tile_at_grid(col, row)?;
+        let (index, tile) = ctx.active.def.tile_at_grid(col, row)?;
         let land = tile.land_id.map(LandId);
         let state = land.and_then(|id| {
             lands
@@ -123,19 +132,31 @@ pub(crate) fn sync_tile_card(
         commands.entity(entity).despawn();
     }
     if let Some(view) = want {
-        spawn_card(&mut commands, &font, &active, &players, view);
+        spawn_card(
+            &mut commands,
+            &ctx.font,
+            &ctx.skins,
+            &ctx.active,
+            &players,
+            view,
+        );
     }
 }
 
 fn spawn_card(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     active: &ActiveBoard,
     players: &Query<(&PlayerId, &PlayerName)>,
     view: TileView,
 ) {
     let accent = palette::tile(view.kind);
-    let (title, title_font, title_color) = label(&font.0, view.name.clone(), size::NAME, accent);
+    let paper = skins.float.image.is_some();
+    let title_color = if paper { col::INK } else { accent };
+    let value_color = if paper { col::INK_DIM } else { col::VALUE };
+    let (title, title_font, title_color) =
+        label(&font.0, view.name.clone(), size::NAME, title_color);
     let def = view.land.and_then(|id| active.def.land(id.0));
     let owner_name = view
         .owner
@@ -143,14 +164,14 @@ fn spawn_card(
         .map(|(_, name)| name.0.clone());
 
     let mut rows: Vec<(&'static str, String, Color)> = vec![
-        ("类型", kind_name(view.kind).to_string(), col::VALUE),
+        ("类型", kind_name(view.kind).to_string(), value_color),
         (
             "位置",
             match view.index {
                 Some(index) => format!("主环第 {index} 格"),
                 None => "死胡同分支".to_string(),
             },
-            col::VALUE,
+            value_color,
         ),
     ];
     if let Some(def) = def {
@@ -158,14 +179,14 @@ fn spawn_card(
         rows.push((
             "归属",
             owner_name.unwrap_or_else(|| "无主".to_string()),
-            col::VALUE,
+            value_color,
         ));
         rows.push(("建筑等级", building_label(view.level), col::GAIN));
         for (i, rent) in def.rent.iter().enumerate() {
             rows.push((
                 "租金",
                 format!("{} — ${rent}", building_label((i + 1) as u8)),
-                col::VALUE,
+                value_color,
             ));
         }
     }
@@ -177,38 +198,52 @@ fn spawn_card(
         rows.push(("面额", format!("{coupon} 点券"), col::GAIN));
     }
 
-    commands
-        .spawn((
-            BoardUi,
-            TileCard(view),
-            Pickable::IGNORE,
+    let mut card = commands.spawn((
+        BoardUi,
+        TileCard(view),
+        Pickable::IGNORE,
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(layout::TOP_BAR_INSET + layout::ROLL_BUTTON[1] + 8.0),
+            right: Val::Px(layout::TOP_BAR_INSET),
+            width: Val::Px(260.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(6.0),
+            padding: super::skin::padding(&skins.float, 16.0, 26.0, 260.0),
+            border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
+            border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
+            ..default()
+        },
+        BackgroundColor(col::PANEL),
+        border_color(accent),
+        ZIndex(4),
+    ));
+    // 底板皮肤：盘上有 panel_float 就叠九宫格底图，没有保持纯色面板（浮层同一句）
+    if let Some((skin_node, skin_image)) = super::skin::panel_image(&skins.float) {
+        card.with_children(|p| {
+            p.spawn((skin_node, skin_image));
+        });
+    }
+    card.with_children(|box_| {
+        box_.spawn((
             Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(layout::TOP_BAR_INSET + layout::ROLL_BUTTON[1] + 8.0),
-                right: Val::Px(layout::TOP_BAR_INSET),
-                width: Val::Px(240.0),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(6.0),
-                padding: UiRect::axes(Val::Px(14.0), Val::Px(12.0)),
-                border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
-                border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
+                width: Val::Percent(100.0),
                 ..default()
             },
-            BackgroundColor(col::PANEL),
-            border_color(accent),
-            ZIndex(4),
-        ))
-        .with_children(|box_| {
-            box_.spawn((title, title_font, title_color));
-            for (key, val, color) in &rows {
-                info_row(box_, &font.0, key, val, *color, 72.0);
-            }
-            button(
-                box_,
-                &font.0,
-                ButtonSpec::new("关闭", [100.0, 32.0], super::SECONDARY, UiAction::CloseInfo),
-            );
-        });
+            TextLayout::justify(Justify::Center),
+            title,
+            title_font,
+            title_color,
+        ));
+        for (key, val, color) in &rows {
+            info_row(box_, &font.0, key, val, *color, 72.0);
+        }
+        button(
+            box_,
+            &font.0,
+            ButtonSpec::new("关闭", [100.0, 32.0], super::SECONDARY, UiAction::CloseInfo),
+        );
+    });
 }
 
 /// 格子类型的中文名。`TileKind` 在规则层是枚举，屏幕上要给人话，映射属于表现层。

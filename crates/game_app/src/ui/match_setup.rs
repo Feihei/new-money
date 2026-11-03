@@ -499,8 +499,9 @@ fn spawn_panel(commands: &mut Commands, font: &DevFont, view: PanelView) {
         set,
         stamp,
     } = view;
-    let width = 1000.0;
-    let inner = width - layout::PANEL_PAD_X * 2.0;
+    // 全屏场景，不再是模态框：内容宽 1184，四周留 32/20 的内边距
+    let width = 1184.0;
+    let inner = width;
     // 可选盘 + 一张「世界」灰位；将来加第三张真盘这里自动跟着变窄
     let map_count = (maps.len().max(1) + 1) as f32;
     let map_width = (inner - (map_count - 1.0) * 8.0) / map_count;
@@ -513,38 +514,42 @@ fn spawn_panel(commands: &mut Commands, font: &DevFont, view: PanelView) {
             MenuPiece,
             MatchSetupPanel,
             MatchSetupStamp(stamp),
-            // 全屏遮罩：菜单那几颗按钮不能被点穿（同设置/暂停面板的理由）
+            // 全屏场景，不是模态框：不铺遮罩、不画面板边框，内容直接铺在深色底上
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
                 position_type: PositionType::Absolute,
-                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
+                row_gap: Val::Px(8.0),
+                padding: UiRect::axes(Val::Px(32.0), Val::Px(20.0)),
                 ..default()
             },
-            BackgroundColor(col::PAUSE_DIM),
+            BackgroundColor(col::MENU_BG),
             GlobalZIndex(20),
         ))
-        .with_children(|mask| {
-            mask.spawn((
-                Node {
+        .with_children(|screen| {
+            screen
+                .spawn(Node {
                     width: Val::Px(width),
+                    flex_grow: 1.0,
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Stretch,
+                    justify_content: JustifyContent::SpaceBetween,
                     row_gap: Val::Px(8.0),
-                    padding: UiRect::axes(
-                        Val::Px(layout::PANEL_PAD_X),
-                        Val::Px(layout::PANEL_PAD_Y),
-                    ),
-                    border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
-                    border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
                     ..default()
-                },
-                BackgroundColor(col::PANEL),
-                border_color(col::BORDER_BUY),
-            ))
-            .with_children(|panel| {
-                panel.spawn(label(&font.0, "新对局", size::DIALOG_TITLE, col::TITLE_GOLD));
+                })
+                .with_children(|panel| {
+                // 标题居中
+                panel
+                    .spawn(Node {
+                        width: Val::Percent(100.0),
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn(label(&font.0, "新对局", size::DIALOG_TITLE, col::TITLE_GOLD));
+                    });
                 panel.spawn(separator());
 
                 // ---- 地图 ----

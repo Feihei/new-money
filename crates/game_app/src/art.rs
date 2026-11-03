@@ -81,6 +81,18 @@ pub fn menu_bg() -> Option<String> {
     on_disk("ui/bg_title.png")
 }
 
+/// 主菜单标题 logo（书法「暴富」+ 方孔铜钱 + NEW MONEY 绶带，AI 生成后抠透明底）。
+/// 与 bg_title 同一目录同一套门：盘上没有就由调用方退回文字标题。
+pub fn menu_logo() -> Option<String> {
+    on_disk("ui/logo_title.png")
+}
+
+/// UI 底板皮肤（`ui/skin_<键>.webp`，中央素面 + 透明外沿的剪纸底板）。
+/// 键与边距表见 `ui/skin.rs`；盘上没有时调用方退回纯色面板，不报错。
+pub fn ui_skin(key: &str) -> Option<String> {
+    on_disk(&format!("ui/skin_{key}.webp"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

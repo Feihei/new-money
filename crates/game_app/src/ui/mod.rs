@@ -21,6 +21,7 @@ pub mod minigame;
 pub mod pause;
 pub mod player_hud;
 pub mod settings;
+pub mod skin;
 pub mod theme;
 pub mod tile_info;
 pub mod top_bar;
@@ -47,6 +48,11 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
+        // 底板皮肤（剪纸面板贴图）。`load_all` 只拿句柄不解码：盘上没有哪一张就
+        // `None`，各面板退回纯色——与 art 模块「缺素材退回程序化」同一条纪律。
+        // AssetServer 属于 DefaultPlugins，UiPlugin 注册时必然已在。
+        let server = app.world_mut().resource::<AssetServer>().clone();
+        app.insert_resource(skin::Skins::load_all(&server));
         app.init_resource::<dialog::RecentCard>()
             // 最近一笔服务费（P10c）。与 `RecentCard` 同一条：面板弹在收据上，
             // 而 `Pending::ServiceNotice` 只说「哪块地」，说不出摇了几点、住了几天 ——
@@ -592,7 +598,9 @@ pub(crate) fn bank_op_subject(pending: &PendingDecision, atm: &AtmAccess) -> Opt
 pub(crate) fn reset_ui_state(mut commands: Commands, mut kept: UiMemory) {
     kept.recent_card.0 = None;
     kept.recent_service.0 = None;
-    kept.selected.0 = None;
+    // 三块浮层的开关与详情卡的选中格都按 env 复原：`NM_PICK_TILE` 与 `NM_ATM` 同一条
+    // 「开局直接摆出来」的入口，清成 None 会让它永远拍不到东西
+    kept.selected.0 = tile_info::SelectedTile::from_env().0;
     *kept.atm = finance::AtmPanelOpen::from_env();
     *kept.stock = finance::StockPanelOpen::from_env();
     *kept.hand_open = hand::HandPanelOpen::from_env();
@@ -820,6 +828,7 @@ pub fn panel(
     width: f32,
     offset: [f32; 3],
     accent: Color,
+    pad: UiRect,
 ) -> (Node, UiTransform, BackgroundColor, BorderColor) {
     (
         Node {
@@ -830,7 +839,7 @@ pub fn panel(
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(10.0),
-            padding: UiRect::axes(Val::Px(layout::PANEL_PAD_X), Val::Px(layout::PANEL_PAD_Y)),
+            padding: pad,
             border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
             border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
             ..default()

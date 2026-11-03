@@ -604,6 +604,8 @@ pub(crate) fn sync_hand_panel(
             width: Val::Px(layout::HAND_PANEL[0]),
             flex_direction: FlexDirection::Column,
             row_gap: Val::Px(layout::HAND_ROW_GAP),
+            // 手牌浮层的高度溢出还没解（见 PLAN P16c 的三笔旧账）—— 贴上皮之后
+            // 内边距再涨一档、顶出屏幕更厉害，所以这一刀保持纯色，等 P16c-2 的排版一起上
             padding: UiRect::axes(Val::Px(16.0), Val::Px(14.0)),
             border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
             border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),

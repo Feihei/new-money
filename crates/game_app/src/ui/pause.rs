@@ -12,6 +12,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{Paused, SaveDenied, SaveDeny, TurnPhase};
 
+use super::skin::Skins;
 use super::theme::{col, layout, size};
 use super::{
     BoardUi, ButtonSpec, PRIMARY, SECONDARY, UiAction, border_color, button, label, separator,
@@ -80,6 +81,7 @@ pub(crate) struct PauseView<'w, 's> {
 pub(crate) fn sync_pause_menu(
     mut commands: Commands,
     font: Res<DevFont>,
+    skins: Res<Skins>,
     mut open: ResMut<PauseMenuOpen>,
     paused: Res<Paused>,
     view: PauseView<'_, '_>,
@@ -104,7 +106,14 @@ pub(crate) fn sync_pause_menu(
         commands.entity(entity).despawn();
     }
     if open.0 {
-        spawn_pause_panel(&mut commands, &font, &view.denied, &view.notice, stamp);
+        spawn_pause_panel(
+            &mut commands,
+            &font,
+            &skins,
+            &view.denied,
+            &view.notice,
+            stamp,
+        );
     }
 }
 
@@ -112,29 +121,49 @@ pub(crate) fn sync_pause_menu(
 ///
 /// 抽成纯函数是为了能逐条打「每一种拒因都说得出为什么」——
 /// 灰按钮不带理由与坏掉在玩家眼里是同一件事（坑 27 的 UI 版）。
-fn save_row(denied: Option<SaveDeny>, notice: &SaveNotice) -> (bool, String, Color) {
+fn save_row(denied: Option<SaveDeny>, notice: &SaveNotice, paper: bool) -> (bool, String, Color) {
     if let Some(why) = denied {
         // 存不了时那句话优先：上一次存成功过，不代表此刻还能存
         return (false, why.label().to_string(), col::BANKRUPT);
     }
     match &notice.text {
         Some(text) if notice.failed => (true, text.clone(), col::BANKRUPT),
-        Some(text) => (true, text.clone(), col::TITLE_GOLD),
-        None => (true, "可存：轮到你的回合、掷骰之前".to_string(), col::MUTED),
+        Some(text) => (
+            true,
+            text.clone(),
+            if paper { col::INK } else { col::TITLE_GOLD },
+        ),
+        None => (
+            true,
+            "可存：轮到你的回合、掷骰之前".to_string(),
+            if paper { col::INK_DIM } else { col::MUTED },
+        ),
     }
 }
 
 fn spawn_pause_panel(
     commands: &mut Commands,
     font: &DevFont,
+    skins: &Skins,
     denied: &SaveDenied,
     notice: &SaveNotice,
     stamp: String,
 ) {
-    let (save_enabled, save_line, save_color) = save_row(denied.0, notice);
-    let inner_w = layout::PAUSE_PANEL[0] - layout::PANEL_PAD_X * 2.0;
-    let (title, title_font, title_color) =
-        label(&font.0, "已暂停", size::PAUSE_TITLE, col::TITLE_GOLD);
+    let paper = skins.float.image.is_some();
+    let (save_enabled, save_line, save_color) = save_row(denied.0, notice, paper);
+    let (pad_x, pad_y) = super::skin::inset(
+        &skins.float,
+        layout::PANEL_PAD_X,
+        layout::PANEL_PAD_Y,
+        layout::PAUSE_PANEL[0],
+    );
+    let inner_w = layout::PAUSE_PANEL[0] - pad_x * 2.0;
+    let (title, title_font, title_color) = label(
+        &font.0,
+        "已暂停",
+        size::PAUSE_TITLE,
+        if paper { col::INK } else { col::TITLE_GOLD },
+    );
     commands
         .spawn((
             BoardUi,
@@ -152,7 +181,7 @@ fn spawn_pause_panel(
             ZIndex(6),
         ))
         .with_children(|mask| {
-            mask.spawn((
+            let mut panel_cmd = mask.spawn((
                 Node {
                     width: Val::Px(layout::PAUSE_PANEL[0]),
                     height: Val::Px(layout::PAUSE_PANEL[1]),
@@ -160,24 +189,29 @@ fn spawn_pause_panel(
                     align_items: AlignItems::Stretch,
                     justify_content: JustifyContent::Center,
                     row_gap: Val::Px(layout::MENU_GAP),
-                    padding: UiRect::axes(
-                        Val::Px(layout::PANEL_PAD_X),
-                        Val::Px(layout::PANEL_PAD_Y),
-                    ),
+                    padding: UiRect::axes(Val::Px(pad_x), Val::Px(pad_y)),
                     border: UiRect::all(Val::Px(layout::PANEL_BORDER)),
                     border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
                     ..default()
                 },
                 BackgroundColor(col::PANEL),
                 border_color(col::BORDER_BUY),
-            ))
-            .with_children(|panel| {
+            ));
+            // 底板皮肤：盘上有 panel_modal 就叠九宫格底图，没有保持纯色面板。
+            // 0.20 无 `Option<C>` bundle，spawn 后按句柄有无再 insert（与 `dialog::frame` 同一条）
+            if let Some((skin_node, skin_image)) = super::skin::panel_image(&skins.float) {
+                panel_cmd.with_children(|p| {
+                    p.spawn((skin_node, skin_image));
+                });
+            }
+            panel_cmd.with_children(|panel| {
                 panel.spawn((
                     Node {
                         width: Val::Percent(100.0),
                         justify_content: JustifyContent::Center,
                         ..default()
                     },
+                    TextLayout::justify(Justify::Center),
                     title,
                     title_font,
                     title_color,
@@ -250,12 +284,12 @@ mod tests {
     #[test]
     fn every_save_denial_says_its_own_why_and_the_save_point_is_live() {
         let notice = SaveNotice::default();
-        let (enabled, text, _) = save_row(None, &notice);
+        let (enabled, text, _) = save_row(None, &notice, false);
         assert!(enabled, "可存点上按钮却灰着");
         assert!(text.contains("可存"), "亮的按钮也该说一句此刻是什么状态");
 
         for why in SaveDeny::ALL {
-            let (enabled, text, color) = save_row(Some(why), &notice);
+            let (enabled, text, color) = save_row(Some(why), &notice, false);
             assert!(!enabled, "{why:?} 下按钮还亮着");
             assert_eq!(text, why.label(), "{why:?} 的灰按钮没念出它自己那句话");
             assert_eq!(color, col::BANKRUPT, "{why:?} 的理由不是警告色");
@@ -270,7 +304,7 @@ mod tests {
             text: Some("已保存到 save.json".into()),
             failed: false,
         };
-        let (enabled, text, color) = save_row(None, &ok);
+        let (enabled, text, color) = save_row(None, &ok, false);
         assert!(enabled);
         assert_eq!(text, "已保存到 save.json");
         assert_eq!(color, col::TITLE_GOLD);
@@ -279,14 +313,38 @@ mod tests {
             text: Some("保存失败：磁盘满了".into()),
             failed: true,
         };
-        let (enabled, text, color) = save_row(None, &bad);
+        let (enabled, text, color) = save_row(None, &bad, false);
         assert!(enabled, "存失败过不代表此刻不能存");
         assert!(text.starts_with("保存失败"));
         assert_eq!(color, col::BANKRUPT);
 
         // 而「存不了」优先于任何回执：上一次成功了，此刻不在可存点上就别让它亮
-        let (enabled, text, _) = save_row(Some(SaveDeny::Walking), &ok);
+        let (enabled, text, _) = save_row(Some(SaveDeny::Walking), &ok, false);
         assert!(!enabled);
         assert_eq!(text, SaveDeny::Walking.label());
+    }
+
+    /// 贴了剪纸底板的面板中央是米色纸面，`TITLE_GOLD`/`MUTED` 那一族读不出来：
+    /// 同一条回执在纸面上必须换成深色，素材缺席时仍走原色。
+    #[test]
+    fn a_paper_panel_swaps_the_save_line_to_ink() {
+        let notice = SaveNotice::default();
+        let (_, _, color) = save_row(None, &notice, true);
+        assert_eq!(color, col::INK_DIM);
+
+        let ok = SaveNotice {
+            text: Some("已保存到 save.json".into()),
+            failed: false,
+        };
+        let (_, _, color) = save_row(None, &ok, true);
+        assert_eq!(color, col::INK);
+
+        // 失败那一句仍然是警告色，不因纸面换色
+        let bad = SaveNotice {
+            text: Some("保存失败：磁盘满了".into()),
+            failed: true,
+        };
+        let (_, _, color) = save_row(None, &bad, true);
+        assert_eq!(color, col::BANKRUPT);
     }
 }
