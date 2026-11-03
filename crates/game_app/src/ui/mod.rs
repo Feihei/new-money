@@ -85,6 +85,10 @@ impl Plugin for UiPlugin {
             // 阵容（P2d）跨局保留，不随回菜单清空 —— 与起始资金档同一条
             .insert_resource(match_setup::MatchSetupOpen::from_env())
             .init_resource::<match_setup::RosterChoice>()
+            // 世界地图的锚点表（盘上那份为真）+ 网格模式的光标读数。
+            // 锚点文件改完存盘会自动重载，见 `watch_map_pins`
+            .insert_resource(match_setup::MapPins::load())
+            .init_resource::<match_setup::MapCursor>()
             .add_systems(
                 Update,
                 (
@@ -132,7 +136,12 @@ impl Plugin for UiPlugin {
                     // 设置面板也排在派发之后：点「设置」那一帧就建出来。它只活在菜单上
                     // （挂 `MenuPiece`），进对局随菜单一起收走
                     settings::sync_settings_panel,
-                    // 对局设置面同理：点「新游戏」那一帧就建出来
+                    // 对局设置面同理：点「新游戏」那一帧就建出来。
+                    // 前两条排在它前面：锚点文件一改（或拖了一下）当帧就进新坐标，
+                    // 重建时读到的是最新那份
+                    match_setup::watch_map_pins,
+                    match_setup::apply_map_pins,
+                    match_setup::refresh_map_readout,
                     match_setup::sync_match_setup_panel,
                     hover_feedback,
                 )
@@ -3154,14 +3163,28 @@ mod tests {
             "第二张真盘没进设置页：{texts:?}"
         );
         assert!(
+            texts.iter().any(|t| t == "世界 待做"),
+            "「世界」灰位还在：{texts:?}"
+        );
+        // 地图统计改成**只显示选中那张**（一屏给了世界地图，地图卡收成小按钮）：
+        // 切到大地图之后，页脚那行必须换成它自己的数
+        let china = app.world_mut().spawn(UiAction::SetBoard(1)).id();
+        app.world_mut()
+            .resource_mut::<Messages<PointerClick>>()
+            .write(make_click(china));
+        for _ in 0..3 {
+            app.update();
+        }
+        let texts = texts_of(&mut app);
+        assert!(
             texts.iter().any(|t| t.contains("93 块地")
                 && t.contains("20 条街")
                 && t.contains("默认 30 万")),
-            "大地图卡没读它自己的格/地/街/默认档：{texts:?}"
+            "大地图没读它自己的格/地/街/默认档：{texts:?}"
         );
         assert!(
-            texts.iter().any(|t| t == "世界"),
-            "「世界」灰位还在：{texts:?}"
+            texts.iter().any(|t| t == "● 中国大陆"),
+            "切到大地图之后 ● 没跟过去：{texts:?}"
         );
         assert!(
             texts.iter().any(|t| t == "已选 4/4 · 3 位电脑"),

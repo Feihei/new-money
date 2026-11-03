@@ -39,6 +39,19 @@ pub mod col {
     /// P9 拍卖台。拍卖不是一格，所以没有「对上地面颜色」这句话可依 —— 用的是木槌与红泥
     /// 那一档沉一点的暖色，与柜台那几块（玫瑰、奶金）分得开：这块屏上要做的不是买，是喊价
     pub const BORDER_AUCTION: Color = Color::srgba(0.85, 0.45, 0.35, 0.90);
+    /// 选角色世界地图上的引线与城市点。地图是米色纸面，所以这两档取纸上的墨色 /
+    /// 朱砂，不能沿用 HUD 的白灰 —— 白线落在米色纸上等于没画
+    pub const MAP_LINE: Color = Color::srgba(0.42, 0.20, 0.12, 0.80);
+    pub const MAP_DOT: Color = Color::srgba(0.72, 0.18, 0.16, 0.95);
+    /// 地图底（素材缺席时的素纸）。比 `PANEL` 亮得多：头像卡是深色，
+    /// 落在深色底上会连成一片，而这一屏的主角是那张地图
+    pub const MAP_PAPER: Color = Color::srgb(0.90, 0.84, 0.70);
+    /// `NM_MAP_GRID` 的量尺：普鲁士蓝压在米色纸上，既盖得住山脉纹理，
+    /// 又不会与引线的赭红混成一片
+    pub const MAP_GRID: Color = Color::srgba(0.16, 0.34, 0.52, 0.34);
+    /// 格线数字的底：小半透明纸片，压在陆地上也读得清
+    pub const MAP_GRID_BACKDROP: Color = Color::srgba(0.92, 0.87, 0.75, 0.82);
+    pub const MAP_GRID_TEXT: Color = Color::srgba(0.10, 0.26, 0.42, 0.96);
     /// 魔法屋（P13）：与路面那一格同族但亮一档（`render::palette::tile(Magic)` 是沉的
     /// 0.52,0.28,0.66，边框要读得出「这是女巫的屋子」而不是「这是一块地」）。
     /// 与 `stock` 的紫红、`BORDER_CARD`（命运那张的淡紫）差在蓝与明度上

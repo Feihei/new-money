@@ -93,6 +93,12 @@ pub fn ui_skin(key: &str) -> Option<String> {
     on_disk(&format!("ui/skin_{key}.webp"))
 }
 
+/// 选角色那一屏的剪纸世界地图（`ui/world_map.png`，2:1）。盘上没有时设置页
+/// 仍按同一套锚点摆头像，只是背景退回素色纸面（与其余素材同一条闸门）。
+pub fn world_map() -> Option<String> {
+    on_disk("ui/world_map.png")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
