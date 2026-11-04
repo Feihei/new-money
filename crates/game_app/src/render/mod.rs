@@ -37,6 +37,19 @@ pub struct TilePick {
 #[derive(Resource)]
 pub struct DevFont(pub Handle<Font>);
 
+/// 棋盘地面的两张纸。`RenderPlugin::build` 里只拿句柄不解码 —— 与 `ui::skin::Skins` 同一条：
+/// 盘上没有就是 `None`，那一块几何退回现在的纯色方块。
+///
+/// 配色**不在这里**：`base_color` 仍由 `palette` 出，纸只出形（圆角、切边线、纸纹）。
+/// 于是 18 种格子类型共用一张图，而 `NM_ART=0/1` 两张对照图差的只是纸，不是颜色。
+#[derive(Resource, Clone)]
+pub struct BoardPaper {
+    /// 格子素面纸卡（圆角，四角真透明）
+    pub plate: Option<Handle<Image>>,
+    /// 地面满幅纸纹（不透明，给环内环外那些空格）
+    pub ground: Option<Handle<Image>>,
+}
+
 /// 表现层的两组 system。守门条件挂在**集合**上而不是逐个 system 上：
 /// 一个元组整体 `.run_if(...)` 在参数里含双生命周期 `SystemParam`（如 `MovementNews`）时
 /// 会退化成 `ObserverSystemExt::run_if` 的重载解析失败，写成分组才站得住。
@@ -53,6 +66,13 @@ pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
+        // 地面纸素材只拿句柄不解码。AssetServer 属于 DefaultPlugins，本插件注册时必然已在
+        // —— 与 `UiPlugin` 取 `Skins` 同一手。
+        let server = app.world_mut().resource::<AssetServer>().clone();
+        app.insert_resource(BoardPaper {
+            plate: crate::art::board_plate().map(|p| server.load(p)),
+            ground: crate::art::board_ground().map(|p| server.load(p)),
+        });
         app.add_systems(
             Update,
             (
@@ -233,6 +253,32 @@ pub fn flat(mats: &mut Assets<StandardMaterial>, c: Color) -> Handle<StandardMat
     mats.add(StandardMaterial {
         base_color: c,
         unlit: true,
+        ..default()
+    })
+}
+
+/// 带纸面的材质：`base_color` 出配色，纸出形与纹。素材缺席就原样退回 [`flat`]。
+///
+/// `AlphaMode::Mask` 而不是 `Blend`：纸卡四角是「要么透明要么不透明」，Mask 让这些方块
+/// 留在不透明通道里写深度 —— 几百格走混合通道就要按视深排序，而排错的症状是地面忽隐忽现。
+///
+/// 一张图会糊在 `Cuboid` 的**六个面**上（Bevy 的 `CuboidMeshBuilder` 每面 UV 都是 0..1、
+/// 只有一个材质槽）。对素面纸卡这是可接受的：侧面只有 `FLOOR_H` 高，压扁后露出的是画面
+/// 中段那条纯纸面，读起来就是「卡片的纸边」。真要「顶面贴图 + 侧面纯色」得拆几何，
+/// 等这张在板上看过了再定值不值那一刀。
+pub fn plated(
+    mats: &mut Assets<StandardMaterial>,
+    c: Color,
+    paper: &Option<Handle<Image>>,
+) -> Handle<StandardMaterial> {
+    let Some(image) = paper else {
+        return flat(mats, c);
+    };
+    mats.add(StandardMaterial {
+        base_color: c,
+        base_color_texture: Some(image.clone()),
+        unlit: true,
+        alpha_mode: AlphaMode::Mask(0.5),
         ..default()
     })
 }

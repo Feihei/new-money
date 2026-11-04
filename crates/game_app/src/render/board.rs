@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use game_core::board::{BoardDef, TileDef};
 use game_core::prelude::ActiveBoard;
 
-use super::{Rendered, TilePick, darkened, dim, flat, palette, yaw_to_face};
+use super::{BoardPaper, Rendered, TilePick, darkened, dim, flat, palette, plated, yaw_to_face};
 
 /// 一次性铺好不会变的几何。之后只有土地建筑与棋子会动。
 ///
@@ -19,14 +19,15 @@ use super::{Rendered, TilePick, darkened, dim, flat, palette, yaw_to_face};
 pub(crate) fn spawn_board_geometry(
     mut commands: Commands,
     active: Res<ActiveBoard>,
+    paper: Res<BoardPaper>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     let b = &active.def;
     let roads = spawn_roads(&mut commands, &mut meshes, &mut mats, b);
-    let floors = spawn_tile_floors(&mut commands, &mut meshes, &mut mats, b);
+    let floors = spawn_tile_floors(&mut commands, &mut meshes, &mut mats, b, &paper);
     let odd = spawn_branch_buildings(&mut commands, &mut meshes, &mut mats, b);
-    let filler = spawn_ground(&mut commands, &mut meshes, &mut mats, b);
+    let filler = spawn_ground(&mut commands, &mut meshes, &mut mats, b, &paper);
     info!(
         "棋盘几何：路面 {roads} 段 / 道路格地板 {floors} 块 / 支线尽端建筑 {odd} 座 / 地面密铺 {filler} 块（土地视觉挂在 Land 实体上）"
     );
@@ -96,14 +97,15 @@ fn spawn_tile_floors(
     meshes: &mut Assets<Mesh>,
     mats: &mut Assets<StandardMaterial>,
     b: &BoardDef,
+    paper: &BoardPaper,
 ) -> usize {
     let mut blocks = 0;
     for t in &b.tiles {
-        blocks += tile_floor(commands, meshes, mats, b, t);
+        blocks += tile_floor(commands, meshes, mats, b, t, paper);
         group_strip(commands, meshes, mats, b, t);
         if let Some(branch) = &t.branch {
             for bt in &branch.tiles {
-                blocks += tile_floor(commands, meshes, mats, b, bt);
+                blocks += tile_floor(commands, meshes, mats, b, bt, paper);
             }
         }
     }
@@ -116,11 +118,16 @@ fn tile_floor(
     mats: &mut Assets<StandardMaterial>,
     b: &BoardDef,
     t: &TileDef,
+    paper: &BoardPaper,
 ) -> usize {
     let pos = b.world_pos(t.col, t.row);
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(b.cell_size, dim::FLOOR_H, b.cell_size))),
-        MeshMaterial3d(flat(mats, darkened(palette::tile(t.kind), 0.5))),
+        MeshMaterial3d(plated(
+            mats,
+            darkened(palette::tile(t.kind), 0.5),
+            &paper.plate,
+        )),
         Transform::from_xyz(pos.x, dim::FLOOR_Y, pos.z),
         // 点格详情卡的命中目标：`TilePick` + `Pickable` 成对出现，缺一个就是「点了没反应」
         TilePick {
@@ -212,6 +219,7 @@ fn spawn_ground(
     meshes: &mut Assets<Mesh>,
     mats: &mut Assets<StandardMaterial>,
     b: &BoardDef,
+    paper: &BoardPaper,
 ) -> usize {
     let mut occupied: HashSet<(u32, u32)> = HashSet::new();
     for t in &b.tiles {
@@ -245,7 +253,7 @@ fn spawn_ground(
             };
             commands.spawn((
                 Mesh3d(meshes.add(Cuboid::new(b.cell_size, dim::FLOOR_H, b.cell_size))),
-                MeshMaterial3d(flat(mats, checker)),
+                MeshMaterial3d(plated(mats, checker, &paper.ground)),
                 Transform::from_xyz(pos.x, dim::FLOOR_Y, pos.z),
                 Rendered,
             ));

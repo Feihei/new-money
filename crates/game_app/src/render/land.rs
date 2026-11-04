@@ -9,7 +9,7 @@ use game_core::prelude::{
     ActiveBoard, BuildingLevel, GameRules, LandId, Owner, PlayerColor, PlayerId,
 };
 
-use super::{Rendered, darkened, dim, flat, palette};
+use super::{BoardPaper, Rendered, darkened, dim, flat, palette, plated};
 
 /// 挂在 Land 实体上（Land 实体本身没有 `Transform`，方体是各自摆好世界坐标的独立实体）。
 #[derive(Component)]
@@ -24,6 +24,7 @@ pub(crate) fn attach_land_visuals(
     mut commands: Commands,
     active: Res<ActiveBoard>,
     rules: Res<GameRules>,
+    paper: Res<BoardPaper>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     lands: Query<(Entity, &LandId)>,
@@ -41,7 +42,7 @@ pub(crate) fn attach_land_visuals(
                 dim::PLOT_H,
                 footprint * dim::PLOT_SCALE,
             ))),
-            MeshMaterial3d(flat(
+            MeshMaterial3d(plated(
                 &mut mats,
                 darkened(
                     def.group
@@ -50,6 +51,7 @@ pub(crate) fn attach_land_visuals(
                         .unwrap_or(Color::srgb(0.6, 0.6, 0.6)),
                     0.55,
                 ),
+                &paper.plate,
             )),
             Transform::from_xyz(center.x, dim::PLOT_H / 2.0, center.z),
             Rendered,

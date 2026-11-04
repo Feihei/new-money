@@ -99,6 +99,17 @@ pub fn world_map() -> Option<String> {
     on_disk("ui/world_map.png")
 }
 
+/// 棋盘格子的素面纸卡（`textures/board/plate.png`，圆角 + 透明角，不带徽记）。
+/// 配色仍由 `palette` 出，这张只出形与纸纹 —— 一块图盖全部 18 种格子类型。
+pub fn board_plate() -> Option<String> {
+    on_disk("textures/board/plate.png")
+}
+
+/// 棋盘地面（`textures/board/ground.png`，满幅无缝纸面，给环内环外那些空格）。
+pub fn board_ground() -> Option<String> {
+    on_disk("textures/board/ground.png")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
