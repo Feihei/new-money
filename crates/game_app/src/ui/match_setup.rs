@@ -26,6 +26,9 @@ use game_core::prelude::{
     BoardDef, CharacterDef, CharacterSet, Controller, DataHandles, GameSetup, START_CASH_TIERS,
     StartCashChoice,
 };
+use rand::SeedableRng as _;
+use rand::seq::SliceRandom as _;
+use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::art;
@@ -40,8 +43,10 @@ use crate::render::DevFont;
 
 /// 一局最多四个人（4 代的上限，也是 `PLAYER_COLORS` 那四格的原意）。
 const MAX_PLAYERS: usize = 4;
-/// 至少两位电脑：一个人开局就终局（`turn.rs` 那句「可行动的人只剩一个」直接判胜）。
-const MIN_COMPUTERS: usize = 2;
+/// 自动补齐用的随机流标签。补齐发生在开局那一刻、由表现层自己开一条流 ——
+/// 它不该动 core 的那些子流（骰子/牌序/行情……），但同一个 `NM_SEED` 必须补出同一套人，
+/// 否则长跑与截图核对都会漂。
+const ROSTER_TAG: u64 = 0x5EED_0000_0000_2020;
 
 /// 世界地图在屏上的固定尺寸（2:1）。**固定像素而不是百分比**：引线的长度与角度
 /// 要从锚点现算，而 `UiTransform` 的旋转只认像素；百分比在这里算不出角度。
@@ -207,7 +212,8 @@ impl MatchSetupOpen {
 }
 
 /// 这一局的阵容选择。存的是**角色 id** 而不是表里的下标 —— 改一次 JSON 行序
-/// 不该把玩家上次选的人换掉。默认阵容＝P14 的 `GameSetup::ai_field()` 那四位。
+/// 不该把玩家上次选的人换掉。默认只有真人那一席：电脑由「开始对局」随机补齐，
+/// 玩家也可以先在图上点几位（点过的那几位不会被随机换掉）。
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RosterChoice {
     pub human: String,
@@ -218,7 +224,7 @@ impl Default for RosterChoice {
     fn default() -> Self {
         Self {
             human: "ji-bainian".into(),
-            computers: vec!["lai-xi".into(), "fan-yiwen".into(), "duoji".into()],
+            computers: Vec::new(),
         }
     }
 }
@@ -251,17 +257,15 @@ impl RosterChoice {
 
     /// 点一下一张角色卡：已选的移出、未选的加入。
     ///
-    /// 三条拒绝都在这里，界面只负责把不能点的卡画灰：
-    /// 第一席不能移出（必须有一位真人）、电脑不能少于 [`MIN_COMPUTERS`] 位、
-    /// 总人数不能超过 [`MAX_PLAYERS`]。
+    /// 两条拒绝在这里，界面只负责把不能点的卡画灰：
+    /// 第一席不能移出（必须有一位真人）、总人数不能超过 [`MAX_PLAYERS`]。
+    /// 电脑没有下限 —— 不足的座位由 [`RosterChoice::filled`] 在开局时随机补齐。
     pub(crate) fn toggle(&mut self, id: &str) {
         if id == self.human {
             return;
         }
         if let Some(pos) = self.computers.iter().position(|c| c == id) {
-            if self.computers.len() > MIN_COMPUTERS {
-                self.computers.remove(pos);
-            }
+            self.computers.remove(pos);
             return;
         }
         if self.total() < MAX_PLAYERS {
@@ -286,13 +290,39 @@ impl RosterChoice {
     }
 
     fn can_remove(&self, id: &str) -> bool {
-        id != self.human
-            && self.computers.iter().any(|c| c == id)
-            && self.computers.len() > MIN_COMPUTERS
+        id != self.human && self.computers.iter().any(|c| c == id)
     }
 
     fn can_add(&self, id: &str) -> bool {
         !self.contains(id) && self.total() < MAX_PLAYERS
+    }
+
+    /// 「设为你」这颗按钮能不能出现在这张卡上：已选的电脑随时可以换人，
+    /// 未选的要有空位才换得动（满员时换人等于要挤掉一位，那该由玩家自己先移出）。
+    fn can_promote(&self, id: &str) -> bool {
+        id != self.human && (self.computers.iter().any(|c| c == id) || self.total() < MAX_PLAYERS)
+    }
+
+    /// 把阵容补到 [`MAX_PLAYERS`]：从角色表里排除已选的那些，按 `seed` 打乱后补进电脑席。
+    ///
+    /// 已经满员就原样返回 —— 玩家自己点满的阵容不该被随机换掉。随机流是表现层自己的
+    /// 一条（`ROSTER_TAG`），不动 core 的骰子/牌序：同一个 `NM_SEED` 仍然补出同一套人。
+    pub(crate) fn filled(&self, set: &CharacterSet, seed: u64) -> Self {
+        let mut roster = self.clone();
+        let need = MAX_PLAYERS.saturating_sub(roster.total());
+        if need == 0 {
+            return roster;
+        }
+        let mut pool = set
+            .0
+            .iter()
+            .filter(|def| !roster.contains(&def.id))
+            .map(|def| def.id.clone())
+            .collect::<Vec<_>>();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed ^ ROSTER_TAG);
+        pool.shuffle(&mut rng);
+        roster.computers.extend(pool.into_iter().take(need));
+        roster
     }
 
     /// 阵容 → 开局配置。表里查不到任何一位就返回 `None`（把「角色表坏了」挡在开局之外，
@@ -837,6 +867,7 @@ fn spawn_world_map(
                     def,
                     role,
                     clickable,
+                    promote: roster.can_promote(&def.id),
                     seat,
                     chip,
                     pin: index,
@@ -949,6 +980,8 @@ struct ChipSpec<'a> {
     def: &'a CharacterDef,
     role: Option<Role>,
     clickable: bool,
+    /// 「设为你」这颗按钮出不出现（已选的电脑，或还有空位时的其他人）
+    promote: bool,
     /// 座位号：名字查不到 sprite 时按它领人（见 `art::strip_for`）
     seat: usize,
     chip: [f32; 2],
@@ -965,6 +998,7 @@ fn character_chip(parent: &mut ChildSpawnerCommands, spec: ChipSpec) {
         def,
         role,
         clickable,
+        promote,
         seat,
         chip,
         pin,
@@ -1129,27 +1163,31 @@ fn character_chip(parent: &mut ChildSpawnerCommands, spec: ChipSpec) {
                     })
                     .with_children(|line| {
                         line.spawn(label(font, format!("电脑 {}", index + 1), 10.0, col::GAIN));
-                        let mut btn = line.spawn((
-                            Node {
-                                width: Val::Px(40.0),
-                                height: Val::Px(16.0),
-                                justify_content: JustifyContent::Center,
-                                align_items: AlignItems::Center,
-                                border: UiRect::all(Val::Px(layout::BTN_BORDER)),
-                                border_radius: BorderRadius::all(Val::Px(3.0)),
-                                ..default()
-                            },
-                            BackgroundColor(col::BTN_SECONDARY),
-                            border_color(col::BTN_BORDER),
-                            UiAction::SetHuman(def.id.clone()),
-                            Palette {
-                                normal: col::BTN_SECONDARY,
-                                hover: col::BTN_SECONDARY_HOVER,
+                        if promote {
+                            promote_button(line, font, def);
+                        }
+                    });
+                }
+                None if promote => {
+                    // 还没选上、但换得动：注册地缩成半行，右边给「设为你」让位
+                    text.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::SpaceBetween,
+                        ..default()
+                    })
+                    .with_children(|line| {
+                        line.spawn(label(
+                            font,
+                            home_city(&def.home),
+                            9.0,
+                            if clickable {
+                                col::MUTED
+                            } else {
+                                col::BTN_TEXT_DISABLED
                             },
                         ));
-                        btn.with_children(|b| {
-                            b.spawn(label(font, "设为你", 9.0, Color::WHITE));
-                        });
+                        promote_button(line, font, def);
                     });
                 }
                 None => {
@@ -1166,6 +1204,32 @@ fn character_chip(parent: &mut ChildSpawnerCommands, spec: ChipSpec) {
                 }
             }
         });
+    });
+}
+
+/// 卡片右下那颗「设为你」。已选的电脑与还有空位时的其他人都能点 ——
+/// 「人类玩家先选」不需要先去电脑席绕一圈。
+fn promote_button(line: &mut ChildSpawnerCommands, font: &Handle<Font>, def: &CharacterDef) {
+    let mut btn = line.spawn((
+        Node {
+            width: Val::Px(40.0),
+            height: Val::Px(16.0),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border: UiRect::all(Val::Px(layout::BTN_BORDER)),
+            border_radius: BorderRadius::all(Val::Px(3.0)),
+            ..default()
+        },
+        BackgroundColor(col::BTN_SECONDARY),
+        border_color(col::BTN_BORDER),
+        UiAction::SetHuman(def.id.clone()),
+        Palette {
+            normal: col::BTN_SECONDARY,
+            hover: col::BTN_SECONDARY_HOVER,
+        },
+    ));
+    btn.with_children(|b| {
+        b.spawn(label(font, "设为你", 9.0, Color::WHITE));
     });
 }
 
@@ -1256,17 +1320,17 @@ fn spawn_panel(commands: &mut Commands, font: &DevFont, server: &AssetServer, vi
                         })
                         .with_children(|row| {
                             row.spawn(label(&font.0, "新对局", size::SCENE_TITLE, col::TITLE_GOLD));
-                            row.spawn(label(
-                                &font.0,
+                            let fill = MAX_PLAYERS.saturating_sub(roster.total());
+                            let line = if fill == 0 {
+                                format!("已选 {MAX_PLAYERS}/{MAX_PLAYERS} · 阵容已满")
+                            } else {
                                 format!(
-                                    "已选 {}/{} · {} 位电脑",
+                                    "已选 {}/{} · 开局随机补齐 {fill} 位",
                                     roster.total(),
-                                    MAX_PLAYERS,
-                                    roster.computers.len()
-                                ),
-                                size::SMALL,
-                                col::MUTED,
-                            ));
+                                    MAX_PLAYERS
+                                )
+                            };
+                            row.spawn(label(&font.0, line, size::SMALL, col::MUTED));
                         });
                     panel.spawn(separator());
 
@@ -1358,7 +1422,7 @@ fn spawn_panel(commands: &mut Commands, font: &DevFont, server: &AssetServer, vi
                             let (hint, hint_color) = match start_reason {
                                 Some(reason) => (reason, col::KEY),
                                 None => (
-                                    "点头像加入 / 移出 · 选中电脑可点「设为你」换真人 · 至少两位电脑",
+                                    "点头像加入 / 移出电脑 · 「设为你」换真人 · 不足的人数开局自动补齐",
                                     col::MUTED,
                                 ),
                             };
@@ -1489,20 +1553,20 @@ mod tests {
         }
     }
 
-    /// 默认阵容就是 P14 那四位；一条补充/一条移出/一条换人都从它出发。
+    /// 默认只有真人那一席：电脑留给「开始对局」随机补齐，或由玩家自己点。
     #[test]
-    fn the_default_roster_is_one_human_and_three_computers() {
+    fn the_default_roster_is_just_the_human() {
         let roster = RosterChoice::default();
-        assert_eq!(roster.total(), 4);
+        assert_eq!(roster.total(), 1);
+        assert!(roster.computers.is_empty());
         assert_eq!(roster.role_of("ji-bainian"), Some(Role::Human));
-        assert_eq!(roster.role_of("lai-xi"), Some(Role::Computer(0)));
-        assert_eq!(roster.role_of("duoji"), Some(Role::Computer(2)));
-        assert_eq!(roster.role_of("lu-renjia"), None);
+        assert_eq!(roster.role_of("lai-xi"), None);
+        assert_eq!(roster.role_of("duoji"), None);
     }
 
-    /// 三条拒绝各一格：第一席移不掉、电脑不能少于两位、满员不能再加。
+    /// 三条拒绝各一格：第一席移不掉、电脑可以一路清空（补齐交给开局）、满员不能再加。
     #[test]
-    fn the_roster_refuses_to_lose_the_human_or_go_below_two_computers() {
+    fn the_roster_refuses_to_lose_the_human_or_overflow() {
         let mut roster = RosterChoice::default();
         roster.toggle("ji-bainian");
         assert_eq!(
@@ -1512,24 +1576,25 @@ mod tests {
         );
 
         roster.toggle("lai-xi");
-        assert_eq!(roster.total(), 3, "先移掉一位电脑");
+        assert_eq!(roster.total(), 2, "还有空位时加人应当成功");
         roster.toggle("fan-yiwen");
+        roster.toggle("duoji");
+        assert_eq!(roster.total(), 4, "满四位");
+        roster.toggle("lu-renjia");
+        assert_eq!(roster.total(), 4, "满员还能再加人");
+        assert_eq!(roster.role_of("lu-renjia"), None);
+
+        roster.toggle("lai-xi");
+        roster.toggle("fan-yiwen");
+        roster.toggle("duoji");
         assert_eq!(
             roster.total(),
-            3,
-            "电脑只剩两位时还能再移 —— 一个人开局会立刻终局"
+            1,
+            "电脑应当能全部清空 —— 不足的座位由开局随机补齐"
         );
-
-        roster.toggle("lu-renjia");
-        assert_eq!(roster.total(), 4, "还有空位时加人应当成功");
-        roster.toggle("ta-luo");
-        assert_eq!(roster.total(), 4, "满四位");
-        roster.toggle("he-lanshan");
-        assert_eq!(roster.total(), 4, "满员还能再加人");
-        assert_eq!(roster.role_of("he-lanshan"), None);
     }
 
-    /// 「设为你」：已选的电脑原地换位，未选的（还有空位时）把人挤到电脑席。
+    /// 「设为你」：已选的电脑原地换位；未选的（还有空位时）把人挤到电脑席。
     #[test]
     fn promoting_swaps_the_human_seat_without_changing_the_seat_count() {
         let mut roster = RosterChoice::default();
@@ -1540,7 +1605,7 @@ mod tests {
             Some(Role::Computer(0)),
             "原来那位应当原地退成电脑，座位顺序不变"
         );
-        assert_eq!(roster.total(), 4);
+        assert_eq!(roster.total(), 2);
 
         roster.toggle("duoji");
         assert_eq!(roster.total(), 3);
@@ -1554,23 +1619,49 @@ mod tests {
     #[test]
     fn the_roster_turns_into_a_setup_with_the_tables_names_and_colors() {
         let set = shipped();
-        let roster = RosterChoice::default();
-        let setup = roster.to_setup(&set).expect("默认阵容都在表里");
-        assert_eq!(
-            setup
-                .players
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>(),
-            ["姬百年", "莱息", "范一文", "多吉"]
-        );
+        let roster = RosterChoice::default().filled(&set, 7);
+        let setup = roster.to_setup(&set).expect("补齐之后的阵容都在表里");
+        assert_eq!(setup.players.len(), MAX_PLAYERS);
+        assert_eq!(setup.players[0].name, "姬百年");
         assert_eq!(setup.players[0].controller, Controller::Human);
         for computer in &setup.players[1..] {
             assert!(matches!(computer.controller, Controller::Ai(_)));
         }
-        let lai = set.get("lai-xi").unwrap();
-        assert_eq!(setup.players[1].color, lai.player_color());
-        assert_eq!(setup.players[1].gender, lai.gender);
+        let first_ai = set.get(&roster.computers[0]).unwrap();
+        assert_eq!(setup.players[1].color, first_ai.player_color());
+        assert_eq!(setup.players[1].gender, first_ai.gender);
+    }
+
+    /// 补齐只动空位：不重复、不替换已选的、不动真人席；同一个种子补出同一套人，
+    /// 满员时原样返回。
+    #[test]
+    fn filling_the_roster_adds_random_computers_without_touching_the_picked_ones() {
+        let set = shipped();
+        let mut picked = RosterChoice::default();
+        picked.toggle("lu-renjia");
+        picked.toggle("he-lanshan");
+        let filled = picked.filled(&set, 42);
+        assert_eq!(filled.total(), MAX_PLAYERS);
+        assert_eq!(filled.human, picked.human);
+        assert_eq!(&filled.computers[..2], &picked.computers[..]);
+        assert_eq!(filled.computers.len(), 3);
+        let ids = std::iter::once(&filled.human)
+            .chain(&filled.computers)
+            .collect::<Vec<_>>();
+        let unique = ids.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), MAX_PLAYERS, "补齐补出了重复的人：{ids:?}");
+        for id in &filled.computers {
+            assert!(set.get(id).is_some(), "补进了一个表外的 id：{id}");
+        }
+
+        assert_eq!(
+            picked.filled(&set, 42),
+            filled,
+            "同一个种子补出了不同的阵容 —— 长跑与截图核对会漂"
+        );
+
+        let full = filled.clone();
+        assert_eq!(full.filled(&set, 99), full, "满员时不该被随机换掉");
     }
 
     /// 表里查不到任何一位就拒绝开局 —— 拿默认阵容顶上等于静默换人。
@@ -1578,7 +1669,7 @@ mod tests {
     fn a_roster_with_an_unknown_id_does_not_become_a_setup() {
         let set = shipped();
         let mut roster = RosterChoice::default();
-        roster.computers[0] = "no-such-character".into();
+        roster.computers.push("no-such-character".into());
         assert!(roster.to_setup(&set).is_none());
     }
 }

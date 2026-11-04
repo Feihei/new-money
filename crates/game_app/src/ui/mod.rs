@@ -30,8 +30,8 @@ use bevy::{app::AppExit, ecs::system::SystemParam, prelude::*};
 use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionMove, BailRequested, BankOp, BankOpRequested, BidMove,
     BuildRequested, BuildingKind, BuyTicketRequested, CardAim, CardId, CharacterSet, DataHandles,
-    Decision, DecisionChosen, FinancingDrawRequested, GameKind, GameSession, GameSetup, Halt,
-    HolidaySet, Institution, ItemKind, LandId, MagicFilter, MagicFilterPicked, MagicSpell,
+    Decision, DecisionChosen, FinancingDrawRequested, GameKind, GameSeed, GameSession, GameSetup,
+    Halt, HolidaySet, Institution, ItemKind, LandId, MagicFilter, MagicFilterPicked, MagicSpell,
     MagicSpellPicked, MarketClock, MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer,
     PassiveMove, Paused, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
     RemoteUpgradeRequested, RequestRemoteDice, RequestRoll, RequestStay, START_CASH_TIERS,
@@ -889,6 +889,9 @@ struct Gate<'w, 's> {
     clock: Res<'w, MarketClock>,
     session: Option<Res<'w, GameSession>>,
     holidays: Res<'w, HolidaySet>,
+    /// 对局种子。设置页的「开始对局」用它补齐不足的电脑席（[`RosterChoice::filled`]）——
+    /// 同一个 `NM_SEED` 必须补出同一套人，否则长跑与截图核对都会漂。
+    seed: Res<'w, GameSeed>,
     /// 身上挂着停留计时的人那一颗「掷骰」是「停留」（P4④）。派发读它，不是为了替规则
     /// 层判资格 —— 那边 `roll_dice_system` 仍会拒掉被按住的掷骰，这里只决定发哪个意图。
     stays: Query<'w, 's, &'static StaySentence>,
@@ -1192,7 +1195,8 @@ fn dispatch_ui_actions(
             // 开始一局：永远全新一局，读档留下的愿望也在这里清掉（读档失败不会写
             // `Resume`，但这条不靠那一支的自觉）。
             // 阵容在**这一刻**才翻成 `GameSetup`：角色表没加载完、或阵容里有表外的 id，
-            // 就拒绝开局 —— 拿默认阵容顶上等于静默换人
+            // 就拒绝开局 —— 拿默认阵容顶上等于静默换人。玩家没点满的电脑席在这里
+            // 从表里随机补齐（同一个种子的两次跑法补出同一套人）
             UiAction::StartMatch => {
                 if !ui.match_setup_open.0 {
                     continue;
@@ -1203,7 +1207,8 @@ fn dispatch_ui_actions(
                 let Some(set) = ui.characters.get(&ui.data.characters) else {
                     continue;
                 };
-                let Some(setup) = ui.roster.to_setup(set) else {
+                let roster = ui.roster.filled(set, gate.seed.0);
+                let Some(setup) = roster.to_setup(set) else {
                     continue;
                 };
                 *ui.setup = setup;
@@ -1879,6 +1884,8 @@ mod tests {
                 // P2d：阵容、「开始对局」写出的开局配置，以及翻 id 用的角色表
                 .init_resource::<match_setup::RosterChoice>()
                 .init_resource::<GameSetup>()
+                // 「开始对局」随机补齐电脑席要读种子（真实应用里由 `insert_boot_resources` 装）
+                .init_resource::<GameSeed>()
                 // P2d 之后：设置页多了地图那一格（派发只改 `BoardPick`）
                 .init_resource::<BoardPick>()
                 .init_asset::<CharacterSet>()
@@ -2393,12 +2400,13 @@ mod tests {
     }
 
     /// P2d：「开始对局」把面板上选的阵容写成 `GameSetup` —— 名字、顺序、控制器与颜色
-    /// 都来自角色表；不是拿 `GameSetup::default()` 顶上。
+    /// 都来自角色表；玩家没点满的电脑席在这一刻从表里随机补齐（不是拿
+    /// `GameSetup::default()` 顶上）。
     #[test]
     fn start_match_writes_the_chosen_roster_into_the_game_setup() {
         let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
         let open = h.app.world_mut().spawn(UiAction::ToggleMatchSetup).id();
-        let drop_duoji = h
+        let pick_duoji = h
             .app
             .world_mut()
             .spawn(UiAction::ToggleCharacter("duoji".into()))
@@ -2416,21 +2424,27 @@ mod tests {
         let start = h.app.world_mut().spawn(UiAction::StartMatch).id();
 
         h.click(open);
-        h.click(drop_duoji);
+        h.click(pick_duoji);
         h.click(pick_lu);
         h.click(promote_lu);
         h.click(start);
 
         let setup = h.app.world().resource::<GameSetup>();
         assert_eq!(
-            setup
-                .players
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>(),
-            ["陆仁佳", "莱息", "范一文", "姬百年"],
-            "阵容/座位顺序与面板不一致：{:?}",
+            setup.players.len(),
+            4,
+            "只点了两位，开局应当随机补齐到四位：{:?}",
             setup.players
+        );
+        let names = setup
+            .players
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &names[..3],
+            ["陆仁佳", "多吉", "姬百年"],
+            "真人席与已点电脑席的顺序/成员不对：{names:?}"
         );
         assert_eq!(setup.players[0].controller, Controller::Human);
         for computer in &setup.players[1..] {
@@ -2444,6 +2458,27 @@ mod tests {
             h.app.world().resource::<State<crate::scene::Scene>>().get(),
             &crate::scene::Scene::Board
         );
+    }
+
+    /// 补齐不足的电脑席用的是同一个 `NM_SEED`：两次「开始对局」补出同一套人。
+    /// 否则长跑与截图核对都会漂（`NM_SEED` 的全部意义就在这一条）。
+    #[test]
+    fn the_random_fill_is_reproducible_within_the_same_seed() {
+        let run = || {
+            let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+            let open = h.app.world_mut().spawn(UiAction::ToggleMatchSetup).id();
+            let start = h.app.world_mut().spawn(UiAction::StartMatch).id();
+            h.click(open);
+            h.click(start);
+            h.app
+                .world()
+                .resource::<GameSetup>()
+                .players
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run(), "同一个种子补出了两套不同的阵容");
     }
 
     /// ATM 认人不认回合：卡是甲的，就该由甲办，哪怕现在轮到乙行动。
@@ -2985,6 +3020,8 @@ mod tests {
             // `RosterChoice` 由本插件注册、两张表由 core 的 `init_asset` 注册
             .init_resource::<match_setup::RosterChoice>()
             .init_resource::<GameSetup>()
+            // 「开始对局」随机补齐电脑席要读种子（真实应用里由 `insert_boot_resources` 装）
+            .init_resource::<GameSeed>()
             // P2d 之后：设置页的地图选择（真实应用里由 `insert_boot_resources` 装库）
             .init_resource::<BoardPick>()
             .init_asset::<CharacterSet>()
@@ -3187,8 +3224,15 @@ mod tests {
             "切到大地图之后 ● 没跟过去：{texts:?}"
         );
         assert!(
-            texts.iter().any(|t| t == "已选 4/4 · 3 位电脑"),
-            "默认阵容不是 1 真人 + 3 电脑：{texts:?}"
+            texts.iter().any(|t| t == "已选 1/4 · 开局随机补齐 3 位"),
+            "默认阵容不是「只有真人、其余开局随机补齐」：{texts:?}"
+        );
+        // 「人类玩家先选」不能被挤到「先点成电脑、再点设为你」那两步里去：
+        // 除真人自己以外，其余十一张卡都得直接带这颗按钮。
+        assert_eq!(
+            texts.iter().filter(|t| t.as_str() == "设为你").count(),
+            11,
+            "「设为你」没有铺到所有非真人卡上：{texts:?}"
         );
         for name in ["姬百年", "莱息", "范一文", "多吉", "陆仁佳", "滑铁卢"] {
             assert!(
