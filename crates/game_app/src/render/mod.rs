@@ -7,6 +7,7 @@
 
 pub mod board;
 pub mod camera;
+pub mod dice;
 pub mod labels;
 pub mod land;
 pub mod occupancy;
@@ -66,6 +67,8 @@ impl Plugin for RenderPlugin {
                 (
                     token::animate_tokens,
                     token::animate_sprites,
+                    dice::spawn_dice_visuals,
+                    dice::animate_dice_visuals,
                     land::sync_buildings,
                     occupancy::sync_occupancy_visuals,
                     camera::follow_current_token,

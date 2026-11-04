@@ -48,10 +48,19 @@ pub struct RequestStay {
 }
 
 /// 骰子结果。`from`/`to` 一起带上，省掉监听方再去查一次移动前的位置。
+///
+/// `faces` 是**每一颗骰子的面**（1..=6），只有前 `dice` 个有效 —— 表现层要摆出
+/// 几颗骰子并让每一颗停在正确的面上，而 `steps` 是它们的和（1 颗时与它相等，
+/// 3 颗时最多 18）。遥控骰子不是「摇」出来的，那颗骰子按 `steps` 摆一个面。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiceRolled {
     pub player: Entity,
+    /// 实际走路的点数（各骰之和；乌龟卡夹步不改它）。
     pub steps: u32,
+    /// 这一掷用了几颗骰子（1..=3，由载具决定）。
+    pub dice: u32,
+    /// 每次掷骰的面，只有前 `dice` 个有效。
+    pub faces: [u32; 3],
     pub from: TileIndex,
     pub to: TileIndex,
 }

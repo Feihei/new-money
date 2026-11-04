@@ -576,9 +576,13 @@ pub fn roll_dice_system(
     }
 
     let from = pos.tile;
-    let rolled: u32 = (0..dice_count(wanted, *mount))
-        .map(|_| rng.roll_die())
-        .sum();
+    // 逐颗摇，既为了求和，也为了把每一颗的面留给表现层 —— 拿和反推面是编的
+    let dice = dice_count(wanted, *mount);
+    let mut faces = [0u32; 3];
+    for face in faces.iter_mut().take(dice as usize) {
+        *face = rng.roll_die();
+    }
+    let rolled: u32 = faces[..dice as usize].iter().sum();
     let cap_turns = cap.as_ref().map(|c| c.turns_left);
     let plan = plan_walk(
         &input.active.def,
@@ -602,8 +606,12 @@ pub fn roll_dice_system(
         &mut next,
         &mut clock,
         &mut target,
-        current,
         &plan,
+        RollFaces {
+            player: current,
+            faces,
+            dice,
+        },
         &mut last,
     );
     if let Some(mut held) = cap {
@@ -635,15 +643,26 @@ struct WalkTarget<'a> {
     from: crate::board::TileIndex,
 }
 
+/// 这一掷的来处：谁摇的、每颗骰子的面、几颗。打包成一份是为了让 `apply_plan`
+/// 的参数表只留下真正分开的输入（clippy 的 7 个参数上限也是同一件事的提醒）。
+struct RollFaces {
+    player: Entity,
+    faces: [u32; 3],
+    dice: u32,
+}
+
 /// 把一份 [`crate::walk::WalkPlan`] 落到玩家身上，并留三条凭据。掷骰与遥控骰子共用，
 /// 所以「骰面照记、实际步数照夹」这条口径不会在两条入口上各修一半。
+///
+/// `roll` 只进凭据、不参与走路算术：表现层按 `faces` / `dice` 摆几颗骰子、每颗停在哪一面。
+/// 遥控骰子没有「摇」的过程，传一颗按 `steps` 摆面的假骰子（见 `remote_dice_system`）。
 fn apply_plan(
     writers: &mut RollWriters<'_, '_>,
     next: &mut NextState<TurnPhase>,
     clock: &mut WalkClock,
     target: &mut WalkTarget<'_>,
-    player: Entity,
     plan: &crate::walk::WalkPlan,
+    roll: RollFaces,
     last: &mut LastRoll,
 ) {
     let from = target.from;
@@ -654,15 +673,17 @@ fn apply_plan(
         from,
     };
     clock.elapsed = 0.0;
-    last.0 = Some((player, plan.rolled));
+    last.0 = Some((roll.player, plan.rolled));
     writers.rolled.write(DiceRolled {
-        player,
+        player: roll.player,
         steps: plan.rolled,
+        dice: roll.dice,
+        faces: roll.faces,
         from,
         to: plan.rolled_to,
     });
     writers.started.write(WalkStarted {
-        player,
+        player: roll.player,
         steps: plan.rolled,
         from,
         to: plan.to,
@@ -785,8 +806,12 @@ pub fn remote_dice_system(
         &mut next,
         &mut clock,
         &mut target,
-        current,
         &plan,
+        RollFaces {
+            player: current,
+            faces: [steps, 0, 0],
+            dice: 1,
+        },
         &mut last,
     );
     if let Some(mut held) = cap {

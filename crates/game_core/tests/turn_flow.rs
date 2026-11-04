@@ -7,10 +7,11 @@
 mod common;
 
 use bevy::app::App;
+use bevy::prelude::{MessageReader, ResMut, Resource, Update};
 use common::*;
 use game_core::prelude::{
-    Bankrupt, Detention, DetentionPlace, GameRules, GameSeed, GameSession, GameSetup,
-    PLAYER_COLORS, PlayerSetup, Rng, Term, TurnPhase,
+    Bankrupt, Detention, DetentionPlace, DiceRolled, GameRules, GameSeed, GameSession, GameSetup,
+    Mount, PLAYER_COLORS, PlayerSetup, Rng, Term, TurnPhase,
 };
 
 /// 独立掷 `n` 次，用来核对「对局里的点数确实只来自种子」。
@@ -250,6 +251,42 @@ fn empty_roster_ends_the_match_instead_of_hanging() {
         phase(&app)
     );
     assert!(events(&app).contains(&"GameOver(none)".to_string()));
+}
+
+#[test]
+fn dice_faces_add_up_to_the_steps() {
+    // 表现层按 `faces` 摆骰子，所以这条消息必须自己说清每一颗的面；
+    // 拿 `steps` 反推面是编的（2 颗骰子掷出 7 有六种拆法）。
+    #[derive(Resource, Default)]
+    struct Seen(Vec<(u32, u32, [u32; 3])>);
+
+    fn capture(mut reader: MessageReader<DiceRolled>, mut out: ResMut<Seen>) {
+        for roll in reader.read() {
+            out.0.push((roll.steps, roll.dice, roll.faces));
+        }
+    }
+
+    let mut app = boot_default();
+    app.init_resource::<Seen>();
+    app.add_systems(Update, capture);
+    let p0 = boot_to_wait_roll(&mut app);
+    // 两颗骰子要有机车（步行那颗 `dice_count` 会夹到 1）
+    insert(&mut app, p0, Mount::Bike);
+    roll_with_dice(&mut app, p0, 2);
+    for _ in 0..12 {
+        app.update();
+    }
+
+    let seen = app.world().resource::<Seen>().0.clone();
+    assert_eq!(seen.len(), 1, "一次掷骰应只有一条 DiceRolled：{seen:?}");
+    let (steps, dice, faces) = seen[0];
+    assert_eq!(dice, 2, "机车该摇两颗：{seen:?}");
+    let picked = &faces[..dice as usize];
+    assert_eq!(picked.iter().sum::<u32>(), steps, "骰面之和就是步数");
+    assert!(
+        picked.iter().all(|face| (1..=6).contains(face)),
+        "骰面必须落在 1..=6：{faces:?}"
+    );
 }
 
 #[test]
