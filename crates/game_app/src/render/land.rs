@@ -9,7 +9,8 @@ use game_core::prelude::{
     ActiveBoard, BuildingLevel, GameRules, LandId, Owner, PlayerColor, PlayerId,
 };
 
-use super::{BoardPaper, Rendered, darkened, dim, flat, palette, plated};
+use super::board::lay_flat;
+use super::{GroundArt, Rendered, darkened, dim, flat, palette, photo, plated};
 
 /// 挂在 Land 实体上（Land 实体本身没有 `Transform`，方体是各自摆好世界坐标的独立实体）。
 #[derive(Component)]
@@ -24,25 +25,28 @@ pub(crate) fn attach_land_visuals(
     mut commands: Commands,
     active: Res<ActiveBoard>,
     rules: Res<GameRules>,
-    paper: Res<BoardPaper>,
+    art: GroundArt<'_>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     lands: Query<(Entity, &LandId)>,
 ) {
     let b = &active.def;
+    // 地面是哪一版，地块底座就跟着哪一版：无缝版里地块只是「道路旁多出来的一块草地」，
+    // 边界靠粉笔框说；盒子版里它还是那块街色纸卡。
+    let seamless = art.units.table().is_some();
+    let chalk_pair = seamless.then(|| art.chalk.pair()).flatten();
+    let chalk_quad = chalk_pair
+        .map(|_| meshes.add(Rectangle::new(b.cell_size, b.cell_size)))
+        .clone();
     for (entity, id) in &lands {
         // `BoardDef::validate` 保证土地有定义且坐标在网格内；拿不到就是数据错，不画即可
         let (Some(def), Some(center)) = (b.land(id.0), b.land_world_pos(id.0)) else {
             continue;
         };
         let footprint = b.cell_size * def.size as f32;
-        commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(
-                footprint * dim::PLOT_SCALE,
-                dim::PLOT_H,
-                footprint * dim::PLOT_SCALE,
-            ))),
-            MeshMaterial3d(plated(
+        let base_mat = match (&art.units.grass, seamless) {
+            (Some(grass), true) => photo(&mut mats, grass, false),
+            _ => plated(
                 &mut mats,
                 darkened(
                     def.group
@@ -51,11 +55,45 @@ pub(crate) fn attach_land_visuals(
                         .unwrap_or(Color::srgb(0.6, 0.6, 0.6)),
                     0.55,
                 ),
-                &paper.plate,
-            )),
+                &art.paper.plate,
+            ),
+        };
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(
+                footprint * dim::PLOT_SCALE,
+                dim::PLOT_H,
+                footprint * dim::PLOT_SCALE,
+            ))),
+            MeshMaterial3d(base_mat),
             Transform::from_xyz(center.x, dim::PLOT_H / 2.0, center.z),
             Rendered,
         ));
+
+        // 粉笔框：1×1 一整张方框；2×2 用四张角片各转一档，拼出的是一整圈**外框**
+        // （中间那道缝不该有线）。`size >= 3` 只有四角有线、边上是空的 —— 三张盘都只有 1 与 2，
+        // 真要用大地块得先补一张「直边」角片。
+        if let (Some((frame, corner)), Some(quad)) = (chalk_pair, &chalk_quad) {
+            let y = dim::PLOT_H + dim::CHALK_LIFT;
+            let last = def.size as u32 - 1;
+            // (格偏移, 档位)：档位是这张角片要绕世界 Y 顺时针转几个 90°
+            let corners = [
+                ((0u32, 0u32), 0.0),
+                ((last, 0), 1.0),
+                ((0, last), 3.0),
+                ((last, last), 2.0),
+            ];
+            let piece = if def.size == 1 { frame } else { corner };
+            for ((dc, dr), rot) in corners {
+                let pos = b.world_pos(def.col + dc, def.row + dr);
+                commands.spawn((
+                    Mesh3d(quad.clone()),
+                    MeshMaterial3d(photo(&mut mats, piece, true)),
+                    Transform::from_xyz(pos.x, y, pos.z)
+                        .with_rotation(lay_flat(rot, std::f32::consts::FRAC_PI_2)),
+                    Rendered,
+                ));
+            }
+        }
 
         let w = footprint * dim::BUILD_SCALE;
         let owner_mat = flat(&mut mats, Color::WHITE);

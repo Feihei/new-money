@@ -8,12 +8,13 @@
 pub mod board;
 pub mod camera;
 pub mod dice;
+pub mod disc;
 pub mod labels;
 pub mod land;
 pub mod occupancy;
 pub mod token;
 
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 use game_core::prelude::ActiveBoard;
 
 /// 表现层自己 spawn 的实体标记（棋盘几何、土地视觉、棋子、格名、相机、弹层底板）。
@@ -50,6 +51,114 @@ pub struct BoardPaper {
     pub ground: Option<Handle<Image>>,
 }
 
+/// 道路单元那套接边图。**成套才上**：缺任意一张就整块退回盒子版。
+///
+/// 理由与 `board_plate` 那条相反：纸卡是皮肤，少一张只是那一格没花纹；单元图是拼图，
+/// 少一张就在那一格断出一条没有沥青的口子，而「路面偶尔断一截」比「全是盒子」难查得多。
+#[derive(Resource, Clone)]
+pub struct RoadTiles {
+    pub grass: Option<Handle<Image>>,
+    pub straight: Option<Handle<Image>>,
+    pub corner: Option<Handle<Image>>,
+    pub junction: Option<Handle<Image>>,
+    pub dead_end: Option<Handle<Image>>,
+    pub diag: Option<Handle<Image>>,
+    pub bend45: Option<Handle<Image>>,
+    pub bend135: Option<Handle<Image>>,
+}
+
+impl RoadTiles {
+    fn load(server: &AssetServer, key: &str) -> Option<Handle<Image>> {
+        crate::art::road_unit(key).map(|path| server.load(path))
+    }
+
+    pub fn load_all(server: &AssetServer) -> Self {
+        Self {
+            grass: crate::art::road_grass().map(|path| server.load(path)),
+            straight: Self::load(server, "straight_orth"),
+            corner: Self::load(server, "turn_90"),
+            junction: Self::load(server, "junction_t"),
+            dead_end: Self::load(server, "endpoint"),
+            diag: Self::load(server, "straight_diag"),
+            bend45: Self::load(server, "turn_45"),
+            bend135: Self::load(server, "turn_135"),
+        }
+    }
+
+    /// 单元 → 图。八格全在才返回，顺序与 `Unit::index()` 无关（按 `Unit` 配对，不按下标）。
+    pub fn table(&self) -> Option<Vec<(board::Unit, &Handle<Image>)>> {
+        let pairs: [(board::Unit, &Option<Handle<Image>>); 8] = [
+            (board::Unit::Grass, &self.grass),
+            (board::Unit::Straight, &self.straight),
+            (board::Unit::Corner, &self.corner),
+            (board::Unit::Junction, &self.junction),
+            (board::Unit::DeadEnd, &self.dead_end),
+            (board::Unit::Diag, &self.diag),
+            (board::Unit::Bend45, &self.bend45),
+            (board::Unit::Bend135, &self.bend135),
+        ];
+        pairs
+            .into_iter()
+            .map(|(unit, img)| Some((unit, img.as_ref()?)))
+            .collect()
+    }
+}
+
+/// 地块边界的粉笔框（`textures/board/chalk_*.png`，透明底，只画线不画面）。
+/// 两块都要有：方框盖 1×1，角片按格拼出 2×2 那一圈外框。
+#[derive(Resource, Clone)]
+pub struct Chalk {
+    pub frame: Option<Handle<Image>>,
+    pub corner: Option<Handle<Image>>,
+}
+
+impl Chalk {
+    pub fn load(server: &AssetServer) -> Self {
+        Self {
+            frame: crate::art::chalk_frame().map(|p| server.load(p)),
+            corner: crate::art::chalk_corner().map(|p| server.load(p)),
+        }
+    }
+
+    pub fn pair(&self) -> Option<(&Handle<Image>, &Handle<Image>)> {
+        Some((self.frame.as_ref()?, self.corner.as_ref()?))
+    }
+}
+
+/// 特殊格薄饼上的圆形图标，按 [`disc::disc_key`] 的键存。
+///
+/// **逐键退回**，不成套：道路单元少一张会在那一格断沥青，而这一块饼少一张只是没花纹，
+/// 饼本身（扁圆柱）照画 —— 「这一格不是地」那句话仍然说得出。
+#[derive(Resource, Clone, Default)]
+pub struct DiscIcons {
+    icons: std::collections::HashMap<&'static str, Handle<Image>>,
+}
+
+impl DiscIcons {
+    pub fn load(server: &AssetServer) -> Self {
+        Self {
+            icons: disc::KEYS
+                .iter()
+                .filter_map(|k| crate::art::disc_icon(k).map(|path| (*k, server.load(path))))
+                .collect(),
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Handle<Image>> {
+        self.icons.get(key)
+    }
+}
+
+/// 地面用到的三套素材。它们永远一起被读（哪一版地面、要不要粉笔），所以收成一个参数包：
+/// `attach_land_visuals` 逐个传会撞到 clippy 的 7 个参数上限，而那一撞会把「参数太多了」
+/// 这个真信号吃掉（§六 坑 8，与 `UiKit`、`MovementNews` 同一条房规）。
+#[derive(SystemParam)]
+pub(crate) struct GroundArt<'w> {
+    pub paper: Res<'w, BoardPaper>,
+    pub units: Res<'w, RoadTiles>,
+    pub chalk: Res<'w, Chalk>,
+}
+
 /// 表现层的两组 system。守门条件挂在**集合**上而不是逐个 system 上：
 /// 一个元组整体 `.run_if(...)` 在参数里含双生命周期 `SystemParam`（如 `MovementNews`）时
 /// 会退化成 `ObserverSystemExt::run_if` 的重载解析失败，写成分组才站得住。
@@ -73,11 +182,15 @@ impl Plugin for RenderPlugin {
             plate: crate::art::board_plate().map(|p| server.load(p)),
             ground: crate::art::board_ground().map(|p| server.load(p)),
         });
+        app.insert_resource(RoadTiles::load_all(&server));
+        app.insert_resource(Chalk::load(&server));
+        app.insert_resource(DiscIcons::load(&server));
         app.add_systems(
             Update,
             (
                 (
                     board::spawn_board_geometry,
+                    disc::spawn_disc_markers,
                     land::attach_land_visuals,
                     token::spawn_token_visuals,
                     camera::spawn_camera_rig,
@@ -118,16 +231,22 @@ pub mod dim {
     /// 道路格地板：整格密铺（`tile_view.gd:94,97`）
     pub const FLOOR_H: f32 = 0.25;
     pub const FLOOR_Y: f32 = -0.1;
+    /// 无缝版地面所在的高度 —— 就是盒子版地板的顶面，换地面模型不该挪动任何别的东西
+    pub const TILE_Y: f32 = FLOOR_Y + FLOOR_H / 2.0;
     /// 路面（`board.gd:244` 高 0.12、`board.gd:253` 宽 = 格边长 × 0.5）
     pub const ROAD_H: f32 = 0.12;
     pub const ROAD_W: f32 = 0.5;
-    /// 同色组标记条（`tile_view.gd:111-114`）
-    pub const STRIP_H: f32 = 0.08;
-    pub const STRIP_DEPTH: f32 = 0.5;
-    pub const STRIP_Y: f32 = 0.16;
-    pub const STRIP_OFF: f32 = 0.4;
+    /// 特殊格薄饼（[`super::disc`]）：半径与厚度按 `cell_size` 的倍数给。
+    /// 撤了同色组色条之后，「这一格不是地」全靠这块饼说出来，所以它要明显小于格、
+    /// 又明显高于地面 —— 0.4 是格边长的八成直径，留出一圈草边读得出「摆在草地上」。
+    pub const DISC_R: f32 = 0.4;
+    pub const DISC_H: f32 = 0.14;
+    /// 薄饼的轴心高度：坐在无缝地面上（盒子版的地面也是这个顶面）
+    pub const DISC_Y: f32 = TILE_Y + DISC_H / 2.0;
     /// 土地底座与建筑方体（`land_view.gd:19-23`）
     pub const PLOT_H: f32 = 0.3;
+    /// 粉笔框浮在地块顶面之上多少 —— 只要够躲开 z 竞争，肉眼看不出它是浮着的
+    pub const CHALK_LIFT: f32 = 0.01;
     pub const SLAB_H: f32 = 0.4;
     pub const SLAB_GAP: f32 = 0.12;
     pub const PLOT_SCALE: f32 = 0.96;
@@ -279,6 +398,28 @@ pub fn plated(
         base_color_texture: Some(image.clone()),
         unlit: true,
         alpha_mode: AlphaMode::Mask(0.5),
+        ..default()
+    })
+}
+
+/// 一张**不乘色**的贴图材质：`base_color` 留白，图原样上屏。道路单元与粉笔框用它，
+/// 因为它们的颜色已经画在图里（草坪色调是「无缝」的前提，被乘一下就断了）。
+///
+/// `cutout` 是「透明底要挖掉」：粉笔是画在透明底上的线，不挖就会有一块绿框压在草地上。
+pub fn photo(
+    mats: &mut Assets<StandardMaterial>,
+    image: &Handle<Image>,
+    cutout: bool,
+) -> Handle<StandardMaterial> {
+    mats.add(StandardMaterial {
+        base_color: Color::WHITE,
+        base_color_texture: Some(image.clone()),
+        unlit: true,
+        alpha_mode: if cutout {
+            AlphaMode::Mask(0.5)
+        } else {
+            AlphaMode::Opaque
+        },
         ..default()
     })
 }

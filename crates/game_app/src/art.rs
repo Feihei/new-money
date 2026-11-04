@@ -110,6 +110,38 @@ pub fn board_ground() -> Option<String> {
     on_disk("textures/board/ground.png")
 }
 
+/// 道路单元图（`textures/road/units/<键>.png`，256²，俯视平面：直路／直角／丁字／断头／斜路／45° 弯）。
+/// 与 `board_plate` 不同一条纪律：那一张是「缺一块少一块」的皮肤，这六张是**一套接边表**，
+/// 缺哪张路面就在那一格断缝，所以成套才上 —— 判据在 `render::RoadTiles::table`。
+pub fn road_unit(key: &str) -> Option<String> {
+    on_disk(&format!("textures/road/units/{key}.png"))
+}
+
+/// 单元图之外那大片草坪（`textures/road/grass.png`）。草坪均值与六张单元图里的草是同一个数
+/// (116,135,61)，这是「无缝」唯一的前提。
+pub fn road_grass() -> Option<String> {
+    on_disk("textures/road/grass.png")
+}
+
+/// 地块边界的粉笔方框（`textures/board/chalk_frame.png`，透明底，只画四条边）。给 1×1 的地。
+pub fn chalk_frame() -> Option<String> {
+    on_disk("textures/board/chalk_frame.png")
+}
+
+/// 粉笔角片（`textures/board/chalk_corner.png`，透明底，左上角那两条边）。
+/// 2×2 的地用四张各转一档，拼出的是一整圈**外框**而不是田字格 —— 中间那道缝不该有线。
+pub fn chalk_corner() -> Option<String> {
+    on_disk("textures/board/chalk_corner.png")
+}
+
+/// 特殊格薄饼上的圆形图标（`textures/disc/<格类型>.png`，圆外真透明）。
+///
+/// 与道路单元不同一条纪律：那六张是接边表，缺一就断缝；这十六张各盖各的饼，
+/// 缺一张只是那一格没花纹、饼还在。所以按键单独问，不做「成套才上」。
+pub fn disc_icon(key: &str) -> Option<String> {
+    on_disk(&format!("textures/disc/{key}.png"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
