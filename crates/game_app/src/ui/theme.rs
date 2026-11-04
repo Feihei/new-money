@@ -129,11 +129,7 @@ pub mod col {
 
     // ===== 主菜单（main_menu.tscn）=====
     pub const MENU_BG: Color = Color::srgb(0.12, 0.12, 0.16); // :21
-    /// 有背景图时按钮那一叠底下的垫板。底色取 `MENU_BG` 那一档、压到八成不透明：
-    /// 牌楼那张画的正中是白天空，黄标题直接落上去就读不出来了
-    pub const MENU_SCRIM: Color = Color::srgba(0.10, 0.10, 0.14, 0.80);
     pub const MENU_TITLE: Color = Color::srgb(1.00, 0.85, 0.20); // :38
-    pub const MENU_FOOTER: Color = Color::srgb(0.50, 0.50, 0.55); // :79
 }
 
 /// 字号。名字按用途而不是按数字，改数值不改调用点。

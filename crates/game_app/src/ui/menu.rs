@@ -46,8 +46,9 @@ pub fn spawn_menu(
             GlobalZIndex(10),
         ))
         .with_children(|screen| {
-            // 背景图排在按钮那一叠之前，且 `ZIndex(-1)`：那张牌楼的正中是一片白天空，
-            // 而标题是黄的 —— 不垫一块板就看不见「新游戏」四个字（见下面 `scrim`）
+            // 背景图排在按钮那一叠之前，且 `ZIndex(-1)`。标题换成 logo 贴图后
+            // 不再需要垫板：金书法自带深棕描边、红绶带自带底色，直接压在牌楼
+            // 那片白天空上也读得清（当初的半透明 scrim 随文字标题一起退役）
             if let Some(bg) = &bg {
                 screen.spawn((
                     ImageNode {
@@ -65,30 +66,20 @@ pub fn spawn_menu(
                     ZIndex(-1),
                 ));
             }
-            // 没有背景图时这块板保持全透明：与素材上路前逐像素同一张画面
-            let scrim = if bg.is_some() {
-                col::MENU_SCRIM
-            } else {
-                Color::NONE
-            };
             screen
-                .spawn((
-                    Node {
-                        // `BoxSizing::BorderBox` 是 Bevy 的默认：`width` 含 padding，
-                        // 所以这一块板要比按钮宽出两份内边距
-                        width: Val::Px(layout::MENU_WIDTH + 2.0 * layout::MENU_PAD),
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Stretch,
-                        row_gap: Val::Px(layout::MENU_GAP),
-                        padding: UiRect::axes(
-                            Val::Px(layout::MENU_PAD),
-                            Val::Px(layout::MENU_PAD * 1.25),
-                        ),
-                        border_radius: BorderRadius::all(Val::Px(layout::PANEL_RADIUS)),
-                        ..default()
-                    },
-                    BackgroundColor(scrim),
-                ))
+                .spawn((Node {
+                    // `BoxSizing::BorderBox` 是 Bevy 的默认：`width` 含 padding，
+                    // 所以这一列要比按钮宽出两份内边距
+                    width: Val::Px(layout::MENU_WIDTH + 2.0 * layout::MENU_PAD),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Stretch,
+                    row_gap: Val::Px(layout::MENU_GAP),
+                    padding: UiRect::axes(
+                        Val::Px(layout::MENU_PAD),
+                        Val::Px(layout::MENU_PAD * 1.25),
+                    ),
+                    ..default()
+                },))
                 .with_children(|stack| {
                     // 标题 logo（书法「暴富」+ 方孔铜钱 + NEW MONEY 绶带）取代了原先
                     // 的两行文字标题。图按菜单板同宽显示、`aspect_ratio` 锁住原图
@@ -133,11 +124,16 @@ pub fn spawn_menu(
                         .disabled(!has_save),
                     );
                     if !has_save {
-                        stack.spawn(label(
-                            &font.0,
-                            "没有存档 —— 对局里暂停后可以保存",
-                            size::SMALL,
-                            col::KEY,
+                        stack.spawn((
+                            label(
+                                &font.0,
+                                "没有存档 —— 对局里暂停后可以保存",
+                                size::SMALL,
+                                Color::srgb(0.96, 0.94, 0.88),
+                            ),
+                            // 垫板撤了，这几行小字直接落在背景画上：暖白字 + 深投影
+                            // 是在白天空/红墙/金匾上都读得出的组合
+                            menu_small_text_shadow(),
                         ));
                     }
                     // 存档/读档最后那句话（失败时说为什么）。空的时候不占位：
@@ -150,20 +146,33 @@ pub fn spawn_menu(
                             size::SMALL,
                             notice_color(&notice),
                         ),
+                        menu_small_text_shadow(),
                     ));
                     // 设置（P15c）：真按钮。面板里只有两件真控件（行走速度、调试面板），
                     // 见 `ui/settings.rs` 模块头
                     menu_button(stack, &font.0, "设置", UiAction::ToggleSettings);
                     menu_button(stack, &font.0, "退出", UiAction::Quit);
                     stack.spawn(separator());
-                    stack.spawn(label(
-                        &font.0,
-                        "v0.1.0 · Bevy 0.20 重写 · B5",
-                        size::SMALL,
-                        col::MENU_FOOTER,
+                    stack.spawn((
+                        label(
+                            &font.0,
+                            "v0.1.0 · Bevy 0.20 重写 · B5",
+                            size::SMALL,
+                            Color::srgba(0.92, 0.92, 0.90, 0.92),
+                        ),
+                        menu_small_text_shadow(),
                     ));
                 });
         });
+}
+
+/// 主菜单上裸落在背景画上的小字共用的投影。深色右下偏移，
+/// 让浅色字在白天空、红墙与街道上都能读出来。
+fn menu_small_text_shadow() -> TextShadow {
+    TextShadow {
+        offset: Vec2::new(1.2, 1.8),
+        color: Color::srgba(0.0, 0.0, 0.0, 0.92),
+    }
 }
 
 fn menu_button(
