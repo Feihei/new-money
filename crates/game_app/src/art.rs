@@ -134,6 +134,14 @@ pub fn chalk_corner() -> Option<String> {
     on_disk("textures/board/chalk_corner.png")
 }
 
+/// 住宅建筑模型（`model/dwell_L<level>.glb`，level 1..=5 正好对上 `BuildingLevel` 的
+/// 1..=5）。与贴图同一条闸门：盘上没有就退回程序化方体，不报错。
+///
+/// **成套才上**的判据不在这里 —— 这里是逐级问，成套由 [`crate::render::BuildingModels`] 判。
+pub fn dwell_model(level: u8) -> Option<String> {
+    on_disk(&format!("model/dwell_L{level}.glb"))
+}
+
 /// 特殊格薄饼上的圆形图标（`textures/disc/<格类型>.png`，圆外真透明）。
 ///
 /// 与道路单元不同一条纪律：那六张是接边表，缺一就断缝；这十六张各盖各的饼，

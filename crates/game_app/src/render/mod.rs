@@ -14,7 +14,9 @@ pub mod land;
 pub mod occupancy;
 pub mod token;
 
-use bevy::{ecs::system::SystemParam, prelude::*};
+use bevy::{
+    ecs::system::SystemParam, gltf::GltfAssetLabel, prelude::*, world_serialization::WorldAsset,
+};
 use game_core::prelude::ActiveBoard;
 
 /// 表现层自己 spawn 的实体标记（棋盘几何、土地视觉、棋子、格名、相机、弹层底板）。
@@ -149,14 +151,25 @@ impl DiscIcons {
     }
 }
 
-/// 地面用到的三套素材。它们永远一起被读（哪一版地面、要不要粉笔），所以收成一个参数包：
-/// `attach_land_visuals` 逐个传会撞到 clippy 的 7 个参数上限，而那一撞会把「参数太多了」
-/// 这个真信号吃掉（§六 坑 8，与 `UiKit`、`MovementNews` 同一条房规）。
+/// 住宅五级建筑模型（`model/dwell_L1..L5.glb`，下标 = 等级 − 1）。
+///
+/// **成套才上**：缺任意一级就整块退回方体 —— 半套素材摆出来会是「Lv2 是一栋房子、
+/// Lv3 是一摞盒子」，而那种画面查起来比全是盒子难得多（与 `RoadTiles` 同一条纪律）。
+/// 素材不入库（AGENTS.md 硬约束 8），所以空表在别的机器上是正常状态，不是错误。
+#[derive(Resource, Clone, Default)]
+pub struct BuildingModels {
+    pub levels: Vec<Handle<WorldAsset>>,
+}
+
+/// 地面与住宅模型用到的素材。它们永远一起被读（哪一版地面、要不要粉笔、有没有模型），
+/// 所以收成一个参数包：`attach_land_visuals` 逐个传会撞到 clippy 的 7 个参数上限，
+/// 而那一撞会把「参数太多了」这个真信号吃掉（§六 坑 8，与 `UiKit`、`MovementNews` 同一条房规）。
 #[derive(SystemParam)]
 pub(crate) struct GroundArt<'w> {
     pub paper: Res<'w, BoardPaper>,
     pub units: Res<'w, RoadTiles>,
     pub chalk: Res<'w, Chalk>,
+    pub models: Res<'w, BuildingModels>,
 }
 
 /// 表现层的两组 system。守门条件挂在**集合**上而不是逐个 system 上：
@@ -185,6 +198,28 @@ impl Plugin for RenderPlugin {
         app.insert_resource(RoadTiles::load_all(&server));
         app.insert_resource(Chalk::load(&server));
         app.insert_resource(DiscIcons::load(&server));
+        // 五级齐了才装；缺一级就整块退回方体（见 `BuildingModels` 的注释）
+        let levels = (1..=5)
+            .map(crate::art::dwell_model)
+            .collect::<Option<Vec<String>>>();
+        app.init_resource::<land::OutlineMeshes>();
+        app.insert_resource(BuildingModels {
+            levels: levels
+                .map(|paths| {
+                    paths
+                        .into_iter()
+                        .map(|p| server.load(GltfAssetLabel::Scene(0).from_asset(p)))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
+        // 建筑模型是带 PBR 材质的 glb，对局里一个光源都没有会渲成黑剪影（§7.5）。
+        // 环境光只有 PBR 材质读，盘上那些 `unlit` 的平涂色块不受影响。
+        app.insert_resource(GlobalAmbientLight {
+            color: Color::WHITE,
+            brightness: 280.0,
+            ..default()
+        });
         app.add_systems(
             Update,
             (
@@ -192,6 +227,7 @@ impl Plugin for RenderPlugin {
                     board::spawn_board_geometry,
                     disc::spawn_disc_markers,
                     land::attach_land_visuals,
+                    land::spawn_building_light,
                     token::spawn_token_visuals,
                     camera::spawn_camera_rig,
                     labels::spawn_tile_labels,
@@ -203,6 +239,7 @@ impl Plugin for RenderPlugin {
                     dice::spawn_dice_visuals,
                     dice::animate_dice_visuals,
                     land::sync_buildings,
+                    land::paint_outline_meshes,
                     occupancy::sync_occupancy_visuals,
                     camera::follow_current_token,
                     labels::project_tile_labels,
@@ -226,7 +263,7 @@ impl Plugin for RenderPlugin {
 
 /// 等轴测几何尺寸。逐个对应 Godot 表现层的常量，改这里等于改全图比例。
 pub mod dim {
-    use bevy::math::Vec3;
+    use bevy::math::{Quat, Vec3};
 
     /// 道路格地板：整格密铺（`tile_view.gd:94,97`）
     pub const FLOOR_H: f32 = 0.25;
@@ -251,6 +288,17 @@ pub mod dim {
     pub const SLAB_GAP: f32 = 0.12;
     pub const PLOT_SCALE: f32 = 0.96;
     pub const BUILD_SCALE: f32 = 0.84;
+    /// 住宅模型（`dwell_L1..L5.glb`）的缩放。生成时墙体外皮 0.362、原点在脚底、
+    /// **+Z 朝上**（Blender 里按 Z-up 导出），所以进对局先立起来再缩。
+    /// 取 1.7：最宽的一级（Lv3/Lv4 的 0.73）约 1.24 世界单位 —— 地块 2.0、粉笔框画在格边，
+    /// 楼基两侧各留约 0.38 才看得见框；Lv1 的墙宽约 0.80（四成格宽），是空地中间的一间小屋。
+    /// Lv5 的楼高约 3.35，仍要抬头看，但不至于占掉邻格的屋顶。
+    pub const DWELL_SCALE: f32 = 1.7;
+    /// Z-up → Y-up：绕 X 转 −90°。转完模型正面（Blender 的 −Y）朝 +Z，
+    /// 正好对着 (8,16,8) 那台等轴测相机。
+    pub fn dwell_upright() -> Quat {
+        Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
+    }
     /// 棋子（`player_token.gd:18-19`）与落格弹跳峰值（`:109` 的 +0.3）
     pub const TOKEN_R: f32 = 0.5;
     pub const TOKEN_REST_Y: f32 = 0.8;
