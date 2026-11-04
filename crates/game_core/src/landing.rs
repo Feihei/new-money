@@ -88,8 +88,8 @@ pub enum LandingDomain {
     Bank,
     /// 证券格报到（`market::settle_market_landing`）
     Market,
-    /// 抽一张卡并当场结算（`deck::settle_card_landing`）。带的就是该抽的那副牌 ——
-    /// 于是「机会格抽机会牌」这条配对也只写一次，不在牌堆域里再 `match` 一遍格类型。
+    /// 抽一张卡（`deck::settle_card_landing`）。带的就是该抽的那副牌 ——
+    /// 命运牌当场结算、道具卡进手牌；「哪一格抽哪一副」只在 `domain_of` 写一次。
     Card(CardKind),
     /// 点券箱一次性拾取（`coupon::settle_coupon_landing`）
     Coupon,
@@ -142,8 +142,9 @@ pub const fn domain_of(kind: TileKind) -> LandingDomain {
         TileKind::Property => D::Property,
         TileKind::Bank => D::Bank,
         TileKind::Stock => D::Market,
-        TileKind::Chance => D::Card(CardKind::Chance),
         TileKind::Fate => D::Card(CardKind::Fate),
+        // 卡片格抽的是百货卖的那批道具卡：抽到手里，不立刻结算
+        TileKind::Card => D::Card(CardKind::Item),
         TileKind::Coupon => D::Coupon,
         TileKind::Shop => D::Shop,
         TileKind::Arcade => D::Arcade,
@@ -625,8 +626,8 @@ mod tests {
         TileKind::Property,
         TileKind::Bank,
         TileKind::Stock,
-        TileKind::Chance,
         TileKind::Fate,
+        TileKind::Card,
         TileKind::Jail,
         TileKind::Hospital,
         TileKind::Lottery,
@@ -649,8 +650,8 @@ mod tests {
             (TileKind::Property, D::Property),
             (TileKind::Bank, D::Bank),
             (TileKind::Stock, D::Market),
-            (TileKind::Chance, D::Card(CardKind::Chance)),
             (TileKind::Fate, D::Card(CardKind::Fate)),
+            (TileKind::Card, D::Card(CardKind::Item)),
             (TileKind::Coupon, D::Coupon),
             (TileKind::Shop, D::Shop),
             (TileKind::Arcade, D::Arcade),

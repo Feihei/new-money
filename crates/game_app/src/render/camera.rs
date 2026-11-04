@@ -20,12 +20,16 @@ pub(crate) fn spawn_camera_rig(
     players: Query<&TokenPosition, With<PlayerId>>,
 ) {
     let b = &active.def;
-    // 开局先看着手玩家，而不是棋盘中心：整盘取景时两者一样，跟随取景时才看得出区别
-    let focus = order
-        .current()
-        .and_then(|p| players.get(p).ok())
-        .and_then(|tp| b.tile_world_pos(tp.tile.0 as i64))
-        .unwrap_or_else(|| board_center(b));
+    // 开局先看着手玩家，而不是棋盘中心；整盘取景必须钉在中心，否则棋子随机落位会把盘推出窗口
+    let focus = if full_board_view() {
+        board_center(b)
+    } else {
+        order
+            .current()
+            .and_then(|p| players.get(p).ok())
+            .and_then(|tp| b.tile_world_pos(tp.tile.0 as i64))
+            .unwrap_or_else(|| board_center(b))
+    };
 
     commands
         .spawn((
@@ -70,6 +74,9 @@ pub(crate) fn follow_current_token(
     tokens: Query<(&TokenVisual, &GlobalTransform)>,
     mut rigs: Query<&mut Transform, With<CameraRig>>,
 ) {
+    if full_board_view() {
+        return;
+    }
     let (Some(player), Ok(mut rig)) = (order.current(), rigs.single_mut()) else {
         return;
     };
@@ -85,11 +92,18 @@ pub(crate) fn follow_current_token(
 /// 取景高度（世界单位）。默认沿用 Godot `board.gd:31` 的 `CAM_SIZE=8.0` —— 约看得见棋子
 /// 四周 4×4 格。`NM_CAM_SIZE=0` 退化成整盘取景（B0–B3 截图的形态）：§7.1 要求这两个值
 /// 都做成可配置、肉眼定标一次，所以开关留着，默认值听代码的而不是听文档的。
-fn view_height(b: &BoardDef) -> f32 {
-    let size = std::env::var("NM_CAM_SIZE")
+fn cam_size_override() -> Option<f32> {
+    std::env::var("NM_CAM_SIZE")
         .ok()
         .and_then(|s| s.parse::<f32>().ok())
-        .unwrap_or(dim::CAM_SIZE);
+}
+
+fn full_board_view() -> bool {
+    cam_size_override().is_some_and(|s| s <= f32::EPSILON)
+}
+
+fn view_height(b: &BoardDef) -> f32 {
+    let size = cam_size_override().unwrap_or(dim::CAM_SIZE);
     if size > f32::EPSILON {
         return size;
     }

@@ -101,7 +101,7 @@ pub mod prelude {
     pub use crate::coupon::{CouponBoxes, settle_coupon_landing};
     pub use crate::damage::{DamageTally, LandDamage};
     pub use crate::data::{
-        BOARD_PATH, CHANCE_PATH, CHARACTERS_PATH, DataHandles, FATE_PATH, ITEMS_PATH, STOCKS_PATH,
+        BOARD_PATH, CHARACTERS_PATH, DataHandles, FATE_PATH, ITEMS_PATH, STOCKS_PATH,
     };
     pub use crate::deck::{
         CardId, Deck, DeckOrder, Shelf, apply_effects, card_of, effect_steps, order_of,

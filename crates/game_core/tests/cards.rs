@@ -321,8 +321,8 @@ fn item_cards_are_not_a_deck_anybody_can_draw() {
     let (mut app, _p0, _p1) = two_players_before_the_roll();
     assert_eq!(
         deck_kinds(&mut app),
-        vec!["Chance".to_string(), "Fate".to_string()],
-        "牌堆只有机会与命运两副"
+        vec!["Fate".to_string()],
+        "事件池只剩命运一副（机会牌堆已删）"
     );
     assert_eq!(
         hand_owners(&mut app),

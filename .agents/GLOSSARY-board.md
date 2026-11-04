@@ -48,7 +48,7 @@
   满足分支退出条件（保释 / 等 N 回合等）后，token 传送回接入点并维持原 heading。
 
 - **TileType（格类型）**
-  `start / property / bank / stock / chance / fate / jail / hospital / lottery / god_deity / neutral / road / transport` 共 13 种。
+  `property / bank / stock / fate / card / jail / hospital / lottery / god_deity / neutral / road / transport / coupon / shop / arcade / company / news / magic` —— 机会格已删除（2026-11-04），起点格也不存在；`card` 是卡片格（2026-11-04 补），踩到随机抽一张道具卡进手牌。
   分支接入点仍为主环上的普通类型格（如 property）；`jail` / `hospital` 作为分支死胡同的 `type`。
 
 - **原型 (Prototype)**

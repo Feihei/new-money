@@ -26,6 +26,7 @@
 | `loop` | array\<Tile\> | 主环**道路格**，有序；相邻可正交/对角 |
 | `lands` | array\<Land\> | 路旁土地（归属/等级），与道路格绑定 |
 | `branches` | array\<Branch\> | 分支列表（也可内联，见下） |
+| `street_labels` | object\<string,string\>? | **仅作者化/图示工具读**：街键 → 中文街名（`{"taipei":"台北"}`）。运行期不读，删掉不影响对局；`tools/render_board_map.py` 与 `tools/board_text.py` 用它把 `taipei` 显示成「台北」 |
 
 ## Tile（主环道路格）
 
@@ -51,7 +52,7 @@
 | `land_id` | int? | **仅 property 道路格**有；指向 `lands[]` 的土地 |
 | `branch` | object? | **可选**；存在即为分支接入点 |
 
-**道路格 `type` 取值**：`road` / `chance` / `fate` / `bank` / `stock` / `coupon` / `shop` / `arcade` / `transport` / `property` / `company`(P10d①) / `jail`(接入点) / `hospital`(接入点) ……
+**道路格 `type` 取值**：`road` / `fate` / `card`(11-04) / `bank` / `stock` / `coupon` / `shop` / `arcade` / `transport` / `property` / `company`(P10d①) / `jail`(接入点) / `hospital`(接入点) ……（`chance` 已删除：大富翁 4 没有机会格，新闻中心与命运牌接管了那两类事件）
 - **没有 `start`**。10-26 实报：起点是 Monopoly 桌游的产物，大富翁 4 的环上没有那一格，开局玩家在主环上随机落位且不触发落格事件（`TileKind::Start` 与它那条「什么都不发」的特判一起删掉，演示盘那格改成了一条普通 `road`）。
 - `property` 道路格：**必带 `land_id`**，落到此格经 `land_id` 触发土地的购买/收租/升级。
 - 拐角格必须是 `fate`/`bank`/`news` 等特殊类型，**不绑土地**（无 `land_id`）。
@@ -59,6 +60,7 @@
 - 演示盘把拘留分支挂在地产格上（2 汉口路 / 7 徐家汇），所以「走到监狱门口」表现为先结算地产、再弹保释窗口；将来的真棋盘可以把 `type: jail` 直接放在主环上，两条入口共用同一张窗口。
 - `arcade`（游乐场，P7）：踩上去开一局小游戏，成绩按 `GameRules::minigames` 那张表换点券。**三种游戏共用这一个 `type`**，靠 `data.game` 分流（`pop_balloons` / `catch_treasure` / `penguin_dig`）—— 不各开一个 `type`，否则格类型的数量会被美术资产的数量牵着走。
 - `lottery`（彩票中心，P8）：踩上去开买券窗口，一注 `GameRules::ticket_price`（现金），每月 15 号与分红同一天开奖。**格子本身没有任何参数** —— 号码池、票价、月息都在 `GameRules` 里（改它们要动的平衡读数是同一份，见 `rules.rs`）。与 `jail`/`hospital` 一样是「窗口而不是报价」。
+- `card`（卡片格，11-04）：**无土地、无参数**，踩到后从**道具牌堆**随机抽一张进手牌 —— 与百货公司卖的是同一批道具卡（`item_cards.json`），不是当场结算的命运事件牌。卡面收据复用 `Pending::Card`；抽卡走 `DeckOrder::Shuffled`，与百货「这一趟的货」互不影响。
 - `company`（公司门面，P10d①）：**不可拥有的固定格**，绑一只股票（`data.stock`）。落到此格按 `data.fee` 收一笔服务费进该公司的当月账（持股最多者＝董事长，免费通行且连账都不记）；每月 15 号分红按「当月真账净额 ÷ 总股数」摊给全体持股人，**亏损月是负数、按比例扣现金**（10-20 实报口径）。没有 `fee` 的公司是 D 型门面：踩上去只弹一张到访收据、不收钱、不记账。「公司的地是哪块」没有答案 —— 它不走 `land_id`/`building_kind`，拓扑上就是一格。
 - 其余类型按各自事件处理，无 `land_id`。
 
@@ -82,6 +84,7 @@
 - `arcade` 格不绑土地：它是一个窗口，没有归属、等级、租金。
 - 非 `property` 格带 `land_id` → 报错（`tools/validate_board.py` 10 与 `BoardDef::validate` 两边都查）。规则 4 只管到了「`property` 缺 `land_id`」那一半，而反方向不响的话，「这一格绑了地块」就成一个只有校验器看不见的字段。
 - `lottery` 格带任何 `data` 字段 → 报错：彩票没有格子级参数，写了就是没人读（与上面那条同一条理由）。
+- `card` 格不绑土地、不带任何 `data` 字段：它的参数就是「道具池」本身；写成 `coupon`/`game`/`stock`/`fee` 会被现有那几条字段归属检查拦下。
 - `company` 格**必须带 `data.stock`**；反过来 `stock`/`fee` 挂到别的格上 → 报错（「这一格绑了股票」不能是一个只有校验器看不见的字段）。B 型 `sides == 0` → 报错（住 0 天不是「免费住」而是这条参数根本没意义）。
 - 保险格（P10d②）：`"fee": {"insure": {"sides": 4, "premium_per_day": 300, "indemnity_per_day": 800}}` —— 转盘摇出的是**投保天数**而不是离场天数：人不离场，付 `premium_per_day × 天数` 保费（进公司账）换一份保单；投保期间被拘留由公司按 `indemnity_per_day × 拘留天数` 赔现金（公司账记负数，分红日按当月真账结算时就是亏损）。**不进 `FeePrototype`**：保险的产物是身上的保单不是一笔离场，`assess` 在这里没有对应物。
 
@@ -109,7 +112,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | int | 土地唯一索引（被 `land_id` 引用） |
-| `col` / `row` | int | 土地起点坐标，**必须紧贴它绑定的道路格**（相邻，含对角）；可以摆在环路内侧或外侧（作者摆放） |
+| `col` / `row` | int | 土地起点坐标，**必须紧贴它绑定的道路格**（相邻，含对角）。真盘一律摆在环路**外侧**（`tools/board_layout.py` 的硬约束；内侧会让转角处的 2×2 足迹互相撞） |
 | `size` | int | 1 = 住宅 1×1；2 = 商业/保险 2×2 |
 | `name` | string | 地名 |
 | `owner` | int? | 归属玩家 id；`null` = 无主 |
@@ -138,6 +141,8 @@
 - 2×2 商业：**2 个相邻 property 道路格** 共享同一 `land_id`（对应 2 格道路）。
 - 土地足迹必须**紧贴**它绑定的道路格（相邻）；足迹之间不得重叠，也不得压在主环格或死胡同格上 —— 这四条都由 `BoardDef::validate` 在加载期拦（P2c）。
 - 建筑（含 `level` 高度）渲染在**土地格**，不在道路格；死胡同尽端由表现层画一座楼（不挂 `land_id`）。
+
+**真盘布局约定（2026-11-04）**：主环按「街区 → 1 个非土地格 → 街区」严格交替；街区是一段连续且共线的道路格，占 3–6 格（全住宅 3–6 格，或 4 住宅 + 1 个 2×2 商业 = 6 格；斜街只放 1×1 住宅）。土地一律摆在环路外侧，2×2 商业在 top/left 退两格、right/bottom 退一格，否则方块会压到道路那一行/列。两张真盘因此放大到 34×34（台湾 100 格 / 16 街）与 47×47（中国 140 格 / 20 街）；生成器 `tools/board_layout.py` 把这几条写成断言。
 
 ## Branch（死胡同链）
 
@@ -188,7 +193,7 @@
     {"id":7,"col":4,"row":3,"type":"hospital","name":"医院入口","data":{},
      "branch":{"type":"hospital","tiles":[{"col":3,"row":3,"type":"hospital","name":"医院","data":{}}]}},
     {"id":8,"col":3,"row":3,"type":"property","name":"公园","land_id":3,"data":{}},
-    {"id":9,"col":2,"row":3,"type":"chance","name":"机会","data":{}},
+    {"id":9,"col":2,"row":3,"type":"fate","name":"命运","data":{}},
     {"id":10,"col":1,"row":3,"type":"property","name":"车站","land_id":4,"data":{}},
     {"id":11,"col":1,"row":2,"type":"bank","name":"银行","data":{}}
   ],

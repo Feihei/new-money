@@ -1,4 +1,4 @@
-//! 牌堆：机会 / 命运两副牌（`card_deck.gd`）。
+//! 牌堆：命运 / 道具两副牌（`card_deck.gd`）。命运格与卡片格各抽一副；百货货架另算。
 //!
 //! 卡定义是静态资产（`Assets<CardSet>`），牌堆实体只持 **下标**（`CardId`），
 //! 于是「洗牌」是排下标，不复制卡面数据，也不会出现两份卡面真相。
@@ -18,6 +18,8 @@ use crate::board::TileIndex;
 use crate::card::{CardDef, CardEffect, CardKind, CardSet, LevyBasis};
 use crate::charge::{Charge, ChargeKind};
 use crate::data::DataHandles;
+use crate::gods::BestowKit;
+use crate::hand::deal_to;
 use crate::landing::{Landed, Landing, LandingDomain, Pending, teleport};
 use crate::msg::{
     CardDrawn, CardNotice, CardPlayed, DetentionLifted, EffectOutcome, LandBought, PlayerDetained,
@@ -54,15 +56,14 @@ pub enum DeckOrder {
 /// [`crate::charge::scales_with_price`] 同一条纪律：新增一副池必须当场决定它的发法。
 pub const fn order_of(kind: CardKind) -> DeckOrder {
     match kind {
-        CardKind::Chance => DeckOrder::Shuffled,
         CardKind::Fate => DeckOrder::Fixed,
-        // 道具卡没有牌堆（它的来源是货架，`settle_card_landing` 对 `Item` 直接 return）。
-        // 这一格写什么都行，写在这里是为了「哪天给道具卡开一格」时当场暴露这个决定还没做。
+        // 道具卡有两处来源：百货货架（点券买）与卡片格（踩到随机抽一张）。
+        // 抽卡走牌堆，与货架的「这一趟的货」互不影响，所以照常洗牌发。
         CardKind::Item => DeckOrder::Shuffled,
     }
 }
 
-/// 一副可循环抽的牌。存在即「这一堆牌」，机会 / 命运各一个实体。
+/// 一副可循环抽的牌。存在即「这一堆牌」；事件池现在只有命运一副。
 #[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deck {
     pub kind: CardKind,
@@ -177,10 +178,9 @@ impl<'w> Shelf<'w> {
 
     fn handle(&self, kind: CardKind) -> &Handle<CardSet> {
         match kind {
-            CardKind::Chance => &self.data.chance,
             CardKind::Fate => &self.data.fate,
             // 道具卡没有对应的格子（`domain_of` 不产出 `Card(Item)`），它的「池」是货架。
-            // 这一支行文与上面两行同形，是为了让「哪天给道具卡开一格」这件事在
+            // 这一支行文与上面那行同形，是为了让「哪天给道具卡开一格」这件事在
             // 分派表上留痕，而不是靠调用方记得去拿 `data.items`
             CardKind::Item => &self.data.items,
         }
@@ -662,26 +662,54 @@ pub fn settle_card_landing(mut desk: GateDesk, landing: Res<'_, Landing>) {
         return;
     };
 
-    // 牌堆与卡定义按种类配对：机会格抽机会牌，命运格抽命运牌。
+    // 牌堆与卡定义按种类配对：命运格抽命运牌、卡片格抽道具牌。
     // 这条配对写在 `domain_of` 的分派表里，所以这里不必再 `match` 一遍格类型。
-    // `Item` 单独挡在这里：道具卡**不该被抽到**（它没有格子，来源是货架），
-    // 而这一行存在的意义就是让「哪天有人给道具卡开一格」在这儿编译停一下。
-    let kind = match expect {
-        CardKind::Chance | CardKind::Fate => expect,
-        CardKind::Item => return,
-    };
+    let kind = expect;
     // 卡面先 clone 出来：`def` 借在 `desk.sink.kit.shelf` 里，而 `submit` 要整个 `desk`
     let drawn_id = {
         let GateDesk { decks, sink, .. } = &mut desk;
         draw_one(decks, kind, &mut sink.kit.rng)
     };
-    let Some(def) = drawn_id.and_then(|id| desk.sink.kit.shelf.get(kind, id).cloned()) else {
+    let Some(drawn) = drawn_id.and_then(|id| {
+        desk.sink
+            .kit
+            .shelf
+            .get(kind, id)
+            .cloned()
+            .map(|def| (id, def))
+    }) else {
         debug!("{kind:?} 牌堆是空的或那张牌不在池里，本回合不抽卡");
         return;
     };
+    let (id, def) = drawn;
 
-    // 抽到的卡没有目标可选（`aim: None`）：两副事件池的效果都是打在抽卡人自己身上的，
-    // 而带 `target` 的道具卡压根不在池里（上面那一格对 `Item` 直接 return）。
+    if kind == CardKind::Item {
+        // 卡片格与命运格的区别：道具卡**进手牌**，不在这里结算卡面效果。
+        // 抽到即用会让带目标的卡（陷害/购地/拍卖）在落地时没有目标可选，
+        // 而「获得」与「打出」本来就是两件事（`tests/cards.rs` 的第一条）。
+        let limit = desk.sink.books.rules.hand_limit;
+        {
+            let BestowKit {
+                hands,
+                shelf,
+                gained,
+                ..
+            } = &mut desk.sink.kit;
+            let Ok(mut hand) = hands.get_mut(player) else {
+                return;
+            };
+            deal_to(&mut hand, limit, id, player, shelf, gained);
+        }
+        // 卡面收据与命运抽卡共用同一屏：`CardDrawn` 给顶栏/模态，`Pending::Card` 把回合押住
+        desk.drawn.write(CardDrawn {
+            player,
+            card: crate::hand::card_notice(&desk.sink.kit.shelf, id),
+        });
+        desk.pending.offer(player, Pending::Card);
+        return;
+    }
+
+    // 抽到的卡没有目标可选（`aim: None`）：命运池的效果都是打在抽卡人自己身上的。
     // 抽卡这条路没有「别人」：主语与承受者是同一个人
     submit(
         &mut desk,
@@ -819,9 +847,9 @@ mod tests {
 
     #[test]
     fn shuffled_deck_holds_every_card_exactly_once() {
-        let cards = set(10, CardKind::Chance);
+        let cards = set(10, CardKind::Item);
         let mut rng = Rng::new(3);
-        let deck = Deck::dealt(CardKind::Chance, &cards, &mut rng);
+        let deck = Deck::dealt(CardKind::Item, &cards, &mut rng);
         assert_eq!(deck.remaining(), 10, "总张数不能因洗牌增减");
         let mut sorted = deck.draw_pile.clone();
         sorted.sort();
@@ -834,9 +862,8 @@ mod tests {
 
     #[test]
     fn shuffle_is_seeded_and_seed_sensitive() {
-        let cards = set(7, CardKind::Chance);
-        let order =
-            |seed: u64| Deck::dealt(CardKind::Chance, &cards, &mut Rng::new(seed)).draw_pile;
+        let cards = set(7, CardKind::Item);
+        let order = |seed: u64| Deck::dealt(CardKind::Item, &cards, &mut Rng::new(seed)).draw_pile;
         assert_eq!(order(21), order(21), "同种子必须复现同一副顺序");
         assert_ne!(order(21), order(22), "换种子却同一副顺序说明洗牌没读种子");
     }
@@ -876,8 +903,8 @@ mod tests {
 
     #[test]
     fn drawing_decrements_and_never_repeats_within_a_pass() {
-        let cards = set(5, CardKind::Chance);
-        let mut deck = Deck::dealt(CardKind::Chance, &cards, &mut Rng::new(9));
+        let cards = set(5, CardKind::Item);
+        let mut deck = Deck::dealt(CardKind::Item, &cards, &mut Rng::new(9));
         assert_eq!(deck.remaining(), 5);
         let mut drawn = Vec::new();
         for _ in 0..5 {
@@ -894,8 +921,8 @@ mod tests {
     #[test]
     fn empty_pile_reshuffles_and_keeps_going() {
         // Godot 的 test_deck_auto_reshuffle_when_empty：抽穿后下一张照样有
-        let cards = set(3, CardKind::Chance);
-        let mut deck = Deck::dealt(CardKind::Chance, &cards, &mut Rng::new(4));
+        let cards = set(3, CardKind::Item);
+        let mut deck = Deck::dealt(CardKind::Item, &cards, &mut Rng::new(4));
         let mut rng = Rng::new(4);
         let mut second_pass = Vec::new();
         for i in 0..6 {
@@ -914,7 +941,7 @@ mod tests {
     fn empty_deck_reports_none_instead_of_panicking() {
         let cards = CardSet(Vec::new());
         let mut deck = Deck {
-            kind: CardKind::Chance,
+            kind: CardKind::Item,
             order: DeckOrder::Shuffled,
             draw_pile: Vec::new(),
             discard: Vec::new(),
@@ -930,7 +957,7 @@ mod tests {
 
     #[test]
     fn card_lookup_maps_index_to_definition() {
-        let cards = set(4, CardKind::Chance);
+        let cards = set(4, CardKind::Item);
         assert_eq!(card_of(&cards, CardId(2)).unwrap().title, "卡2");
         assert!(
             card_of(&cards, CardId(99)).is_none(),

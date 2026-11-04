@@ -304,10 +304,11 @@ fn bankruptcy_takes_the_mortgage_off_the_deed() {
     own(&mut app, 5, Some(1), 0, false); // 整组在手 → 王府井空地租 160×2 = 320
     set_cash(&mut app, p0, 50);
     make_current(&mut app, p0);
-    // 骰流退回开局（第一掷 = 2）：从 9 号徐家汇掷 2 点正好踩上 11 号王府井 ——
-    // yellow 组整在 P1 手里，空地租 160×2 = 320，他身上只有 50
+    // 骰流退回开局（第一掷 = 2）：从 10 号徐家汇掷 2 点正好踩上 12 号王府井 ——
+    // yellow 组整在 P1 手里，空地租 160×2 = 320，他身上只有 50。
+    // （11 号现在是命运格，机会格删掉后不再有「踩上去抽一张罚款卡」那条破产路径。）
     rewind_dice(&mut app);
-    place(&mut app, p0, 9);
+    place(&mut app, p0, 10);
     roll(&mut app, p0);
     settle(&mut app, 8);
 

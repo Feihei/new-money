@@ -1712,7 +1712,7 @@ mod tests {
             .expect("assets/data/characters.json 解析失败")
     }
 
-    /// 真台湾盘（只解析，不做 `validate`）：面板上那行「100 格 · 63 块地 · 16 条街」
+    /// 真台湾盘（只解析，不做 `validate`）：面板上那行「100 格 · 75 块地 · 16 条街」
     /// 读的就是它。
     fn shipped_board() -> BoardDef {
         serde_json::from_str(include_str!("../../../../assets/data/boards/taiwan.json"))
@@ -1913,7 +1913,6 @@ mod tests {
             let characters = install_characters(&mut app);
             app.insert_resource(DataHandles {
                 board: Handle::default(),
-                chance: Handle::default(),
                 fate: Handle::default(),
                 items: Handle::default(),
                 stocks: Handle::default(),
@@ -3106,7 +3105,6 @@ mod tests {
         app.insert_resource(board_library(board.clone(), china));
         app.insert_resource(DataHandles {
             board,
-            chance: Handle::default(),
             fate: Handle::default(),
             items: Handle::default(),
             stocks: Handle::default(),
@@ -3192,7 +3190,7 @@ mod tests {
             "地图那排没有当前这张台湾盘：{texts:?}"
         );
         assert!(
-            texts.iter().any(|t| t.contains("63 块地")),
+            texts.iter().any(|t| t.contains("75 块地")),
             "地图卡没读棋盘的格/地数：{texts:?}"
         );
         assert!(
@@ -3214,7 +3212,7 @@ mod tests {
         }
         let texts = texts_of(&mut app);
         assert!(
-            texts.iter().any(|t| t.contains("93 块地")
+            texts.iter().any(|t| t.contains("107 块地")
                 && t.contains("20 条街")
                 && t.contains("默认 30 万")),
             "大地图没读它自己的格/地/街/默认档：{texts:?}"

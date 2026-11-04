@@ -546,9 +546,8 @@ fn format_decks(view: &DumpView) -> String {
         .map(|d| {
             (
                 match d.kind {
-                    CardKind::Chance => 0,
-                    CardKind::Fate => 1,
-                    CardKind::Item => 2,
+                    CardKind::Fate => 0,
+                    CardKind::Item => 1,
                 },
                 format!(
                     "{:?}{} {}/{}",

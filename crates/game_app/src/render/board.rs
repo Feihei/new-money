@@ -514,21 +514,22 @@ mod tests {
     }
 
     // 下面几组数是 11-04 用一份独立实现（python，同一套接边表）在同一张盘上数出来的。
-    // 改道路拓扑（加斜路、加支线）要连这几行一起改。
+    // 改道路拓扑（加斜路、加支线）要连这几行一起改。八角形主环没有 90° 直角与 135°
+    // 折返：四边是直路、四个角是 45° 斜街，街角与斜街接边都是 Bend45。
     #[test]
-    fn taiwan_is_covered_by_the_orthogonal_units() {
+    fn taiwan_is_covered_by_straights_diagonals_and_45_bends() {
         let c = census(&board("taiwan"));
         assert_eq!(
             c,
-            [674, 102, 4, 2, 2, 0, 0, 0],
+            [1046, 86, 0, 2, 2, 12, 8, 0],
             "草地/直/直角/丁字/断头/斜/45/135"
         );
     }
 
     #[test]
-    fn china_is_covered_by_the_orthogonal_units() {
+    fn china_is_covered_by_straights_diagonals_and_45_bends() {
         let c = census(&board("china"));
-        assert_eq!(c, [1442, 150, 4, 2, 2, 0, 0, 0]);
+        assert_eq!(c, [2059, 114, 0, 2, 2, 24, 8, 0]);
     }
 
     #[test]

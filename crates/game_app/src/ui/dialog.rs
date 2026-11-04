@@ -166,7 +166,7 @@ pub(crate) fn remember_drawn_card(
 /// 那一张空壳 —— 而这一屏正是卡面图（`assets/cards/`）唯一的非鼠标入口。判据同 `NM_SHOP`：
 /// 进不了截图的界面等于没做完。
 ///
-/// 发**机会池第一张**而不是随机一张：这一屏要核对的是图与文各占哪一栏，换一张卡不该
+/// 发**命运池第一张**而不是随机一张：这一屏要核对的是图与文各占哪一栏，换一张卡不该
 /// 连图一起换掉。`outcomes` 留空 —— 它是排版前置，不是一笔结算，伪造一条会让顶栏流水说谎。
 ///
 /// 不必与 [`remember_drawn_card`]、[`sync_modal`] 争先后：卡 id 进了模态签名（见
@@ -183,7 +183,7 @@ pub(crate) fn dev_seed_card(
     let Some(player) = order.as_ref().and_then(|o| o.current()) else {
         return;
     };
-    let Some(def) = shelf.set(CardKind::Chance).and_then(|set| set.0.first()) else {
+    let Some(def) = shelf.set(CardKind::Fate).and_then(|set| set.0.first()) else {
         return;
     };
     drawn.write(CardDrawn {
@@ -1501,7 +1501,6 @@ fn card_modal(
         );
     };
     let (type_text, accent) = match card.kind {
-        CardKind::Chance => ("机会", col::CHANCE),
         CardKind::Fate => ("命运", col::FATE),
         // 道具卡不该出现在这个模态里：它是玩家主动打出的，反馈走手牌浮层与提示行。
         // 这一支只为穷尽存在 —— 写成 `_ => unreachable!()` 会让「哪天有人把它挂成

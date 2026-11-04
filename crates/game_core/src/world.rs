@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::board::BoardDef;
+use crate::board::{BoardDef, TileKind};
 use crate::calendar::{Date, EPOCH_YEAR, EpochOverride, HolidaySet};
 use crate::card::{CardKind, CardSet};
 use crate::charge::Corrections;
@@ -101,29 +101,18 @@ pub fn begin_game_system(
     if active.is_some() {
         return;
     }
-    let (
-        Some(def),
-        Some(chance),
-        Some(fate),
-        Some(items),
-        Some(stocks),
-        Some(holidays),
-        Some(news),
-    ) = (
+    let (Some(def), Some(fate), Some(items), Some(stocks), Some(holidays), Some(news)) = (
         assets.boards.get(&assets.data.board).cloned(),
-        assets.card_sets.get(&assets.data.chance),
         assets.card_sets.get(&assets.data.fate),
         assets.card_sets.get(&assets.data.items),
         assets.stock_sets.get(&assets.data.stocks).cloned(),
         assets.holidays.get(&assets.data.holidays).cloned(),
         assets.news.get(&assets.data.news).cloned(),
-    )
-    else {
+    ) else {
         return;
     };
     for (what, errs) in [
         ("棋盘", def.validate()),
-        ("机会牌", chance.validate(CardKind::Chance)),
         ("命运牌", fate.validate(CardKind::Fate)),
         ("道具牌", items.validate(CardKind::Item)),
         ("股票", stocks.validate()),
@@ -171,11 +160,11 @@ pub fn begin_game_system(
     // 所以「这一局有几个人、各坐在哪」不挪动牌序、骰点、行情与宝箱
     let players = player::spawn_players(&mut commands, &cfg.setup, start_cash, &def, &mut rng);
     spawn_stocks(&mut commands, &stocks);
-    for deck in [
-        Deck::dealt(CardKind::Chance, chance, &mut rng),
-        Deck::dealt(CardKind::Fate, fate, &mut rng),
-    ] {
-        commands.spawn((deck, Gameplay));
+    commands.spawn((Deck::dealt(CardKind::Fate, fate, &mut rng), Gameplay));
+    // 道具牌堆只在这张盘真的有卡片格时才发：百货货架自带「这一趟的货」，
+    // 没有卡片格的盘（如 prototype）不需要多背一副牌。
+    if def.tiles.iter().any(|t| t.kind == TileKind::Card) {
+        commands.spawn((Deck::dealt(CardKind::Item, items, &mut rng), Gameplay));
     }
     // 路上的宝箱（P5）。位置走专用子流，所以「宝箱在哪」不改变骰点、牌序与行情。
     let chests = crate::occupancy::spawn_starting_chests(&mut commands, &def, &mut rng);
@@ -195,13 +184,12 @@ pub fn begin_game_system(
     }
 
     info!(
-        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副牌（{}+{}）+ 货架 {} 张 + 新闻 {} 条 + 宝箱 {} 个 + 神明 {} 位 + 笼中恶人 {} 位（起始现金 {}）· 开局 {epoch}",
+        "世界装配完成：棋盘「{}」{} 主环格 / {} 土地实体 / {} 玩家 / {} 只股票 / 两副池（命运 {} + 道具 {}）+ 新闻 {} 条 + 宝箱 {} 个 + 神明 {} 位 + 笼中恶人 {} 位（起始现金 {}）· 开局 {epoch}",
         def.board_name,
         def.loop_len(),
         lands.len(),
         players.len(),
         stocks.0.len(),
-        chance.0.len(),
         fate.0.len(),
         items.0.len(),
         news.0.len(),

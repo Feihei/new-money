@@ -343,8 +343,9 @@ pub mod palette {
             TileKind::Property => Color::srgb(0.3, 0.6, 0.9),
             TileKind::Bank => Color::srgb(0.5, 0.85, 0.5),
             TileKind::Stock => Color::srgb(0.85, 0.5, 0.85),
-            TileKind::Chance => Color::srgb(0.95, 0.7, 0.3),
             TileKind::Fate => Color::srgb(0.85, 0.4, 0.4),
+            // 卡片格（11-04）：琥珀一档，与 fate 的砖红、shop 的玫瑰、lottery 的黄都分得开
+            TileKind::Card => Color::srgb(0.92, 0.66, 0.32),
             TileKind::Jail => Color::srgb(0.6, 0.6, 0.65),
             TileKind::Hospital => Color::srgb(0.9, 0.9, 0.95),
             TileKind::Lottery => Color::srgb(0.95, 0.85, 0.4),
@@ -357,7 +358,7 @@ pub mod palette {
             // （transport）、紫（stock）、黄（start/lottery）都不撞的那一档
             TileKind::Coupon => Color::srgb(0.35, 0.9, 0.75),
             // 百货公司同样没有 Godot 对照。玫瑰一档：与 stock 的紫红差在蓝分量上，
-            // 与 chance 的橙差在绿分量上，两个都是「暖色但不同族」，扫一眼分得开
+            // 与 fate 的砖红差在绿分量上，两个都是「暖色但不同族」，扫一眼分得开
             TileKind::Shop => Color::srgb(0.9, 0.55, 0.65),
             // 游乐场（P7）也没有对照。青柠一档：它是这一盘上唯一「黄绿」的格子 ——
             // bank 的绿偏蓝（0.5,0.85,0.5）、coupon 的 mint 偏青（0.35,0.9,0.75），

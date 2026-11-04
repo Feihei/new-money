@@ -1,4 +1,4 @@
-//! 卡牌定义：机会 / 命运牌池。效果用内部标签枚举，新增 action 时编译器会强制补分支。
+//! 卡牌定义：命运 / 道具牌池。效果用内部标签枚举，新增 action 时编译器会强制补分支。
 //!
 //! 对应 Godot 端 `card_data.gd` + `card_effects.gd`（后者是 `Dictionary` 弱类型 match，
 //! 且 `deduct_cash` 失败时只回文案不真的判破产 —— 见 `.agents/ARCHITECTURE.md` §三 第 3 条）。
@@ -7,13 +7,15 @@ use bevy::asset::Asset;
 use bevy::reflect::TypePath;
 use serde::{Deserialize, Serialize};
 
-/// 三副池。前两副是**踩到格子就抽、当场结算**的事件池（PLAN §三「命运 32 条」），
-/// 第三副 `Item` 是**拿在手里、由玩家主动打出**的卡 —— 它没有对应的格子，
+/// 两副池。`Fate` 是**踩到格子就抽、当场结算**的事件池（PLAN §三「命运 32 条」），
+/// `Item` 是**拿在手里、由玩家主动打出**的卡 —— 它没有对应的格子，
 /// 来源是百货公司（P3d），所以 `domain_of` 里永远不会出现 `Card(Item)`。
+///
+/// 机会池已删除（2026-11-04）：大富翁 4 没有「机会」格，新闻中心有自己独立的一池
+/// （`news::NewsSet`），命运牌是唯一的事件手牌来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CardKind {
-    Chance,
     Fate,
     Item,
 }
@@ -483,17 +485,13 @@ impl CardSet {
 mod tests {
     use super::*;
 
-    const CHANCE: &str = include_str!("../../../assets/data/cards/chance_cards.json");
     const FATE: &str = include_str!("../../../assets/data/cards/fate_cards.json");
     const ITEMS: &str = include_str!("../../../assets/data/cards/item_cards.json");
 
     #[test]
-    fn both_pools_parse_and_validate() {
-        let chance = CardSet::from_json(CHANCE).expect("机会牌应能解析");
+    fn the_fate_pool_parses_and_validates() {
         let fate = CardSet::from_json(FATE).expect("命运牌应能解析");
-        assert!(chance.validate(CardKind::Chance).is_ok());
         assert!(fate.validate(CardKind::Fate).is_ok());
-        assert!(chance.0.len() >= 5, "机会牌数偏少: {}", chance.0.len());
         assert!(fate.0.len() >= 5, "命运牌数偏少: {}", fate.0.len());
     }
 
@@ -596,11 +594,10 @@ mod tests {
 
     #[test]
     fn every_effect_kind_is_exercised_by_the_data() {
-        let all = CardSet::from_json(CHANCE)
+        let all = CardSet::from_json(FATE)
             .unwrap()
             .0
             .into_iter()
-            .chain(CardSet::from_json(FATE).unwrap().0)
             .chain(CardSet::from_json(ITEMS).unwrap().0)
             .flat_map(|c| c.effects)
             .collect::<Vec<_>>();
@@ -718,17 +715,17 @@ mod tests {
 
     #[test]
     fn card_ids_are_unique_within_pool() {
-        let mut set = CardSet::from_json(CHANCE).unwrap();
+        let mut set = CardSet::from_json(FATE).unwrap();
         let first = set.0[0].clone();
         set.0.push(first);
-        assert!(set.validate(CardKind::Chance).is_err());
+        assert!(set.validate(CardKind::Fate).is_err());
     }
 
     #[test]
     fn wrong_kind_is_rejected() {
-        let mut set = CardSet::from_json(CHANCE).unwrap();
-        set.0[0].kind = CardKind::Fate;
-        let errs = set.validate(CardKind::Chance).unwrap_err();
+        let mut set = CardSet::from_json(FATE).unwrap();
+        set.0[0].kind = CardKind::Item;
+        let errs = set.validate(CardKind::Fate).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("不符")), "{errs:?}");
     }
 

@@ -2,122 +2,178 @@
 	"board_name": "taiwan",
 	"start_cash": 200000,
 	"cell_size": 2.0,
-	"grid_cols": 28,
-	"grid_rows": 28,
+	"grid_cols": 34,
+	"grid_rows": 34,
 	"loop": [
 		{
 			"id": 0,
-			"col": 1,
-			"row": 1,
+			"col": 6,
+			"row": 2,
 			"type": "bank",
 			"name": "银行"
 		},
 		{
 			"id": 1,
-			"col": 2,
-			"row": 1,
-			"type": "fate",
-			"name": "命运"
-		},
-		{
-			"id": 2,
-			"col": 3,
-			"row": 1,
+			"col": 7,
+			"row": 2,
 			"type": "property",
-			"name": "基隆庙口",
+			"name": "忠孝东路",
 			"land_id": 0
 		},
 		{
-			"id": 3,
-			"col": 4,
-			"row": 1,
+			"id": 2,
+			"col": 8,
+			"row": 2,
 			"type": "property",
-			"name": "中正路",
+			"name": "仁爱路",
 			"land_id": 1
 		},
 		{
-			"id": 4,
-			"col": 5,
-			"row": 1,
+			"id": 3,
+			"col": 9,
+			"row": 2,
 			"type": "property",
-			"name": "海洋广场",
+			"name": "信义路",
 			"land_id": 2
 		},
 		{
-			"id": 5,
-			"col": 6,
-			"row": 1,
-			"type": "stock",
-			"name": "证券交易所"
-		},
-		{
-			"id": 6,
-			"col": 7,
-			"row": 1,
+			"id": 4,
+			"col": 10,
+			"row": 2,
 			"type": "property",
-			"name": "忠孝东路",
+			"name": "南京东路",
 			"land_id": 3
 		},
 		{
-			"id": 7,
-			"col": 8,
-			"row": 1,
+			"id": 5,
+			"col": 11,
+			"row": 2,
 			"type": "property",
-			"name": "仁爱路",
+			"name": "台北101·西",
 			"land_id": 4
 		},
 		{
-			"id": 8,
-			"col": 9,
-			"row": 1,
+			"id": 6,
+			"col": 12,
+			"row": 2,
 			"type": "property",
-			"name": "台北101·西",
+			"name": "台北101·东",
+			"land_id": 4
+		},
+		{
+			"id": 7,
+			"col": 13,
+			"row": 2,
+			"type": "card",
+			"name": "卡片格"
+		},
+		{
+			"id": 8,
+			"col": 14,
+			"row": 2,
+			"type": "property",
+			"name": "大溪老街",
 			"land_id": 5
 		},
 		{
 			"id": 9,
-			"col": 10,
-			"row": 1,
+			"col": 15,
+			"row": 2,
 			"type": "property",
-			"name": "台北101·东",
-			"land_id": 5
+			"name": "石门水库",
+			"land_id": 6
 		},
 		{
 			"id": 10,
-			"col": 11,
-			"row": 1,
+			"col": 16,
+			"row": 2,
 			"type": "property",
-			"name": "西门町·西",
-			"land_id": 6
-		},
-		{
-			"id": 11,
-			"col": 12,
-			"row": 1,
-			"type": "property",
-			"name": "西门町·东",
-			"land_id": 6
-		},
-		{
-			"id": 12,
-			"col": 13,
-			"row": 1,
-			"type": "property",
-			"name": "信义路",
+			"name": "慈湖",
 			"land_id": 7
 		},
 		{
-			"id": 13,
-			"col": 14,
-			"row": 1,
+			"id": 11,
+			"col": 17,
+			"row": 2,
 			"type": "property",
-			"name": "南京东路",
+			"name": "拉拉山",
 			"land_id": 8
 		},
 		{
+			"id": 12,
+			"col": 18,
+			"row": 2,
+			"type": "property",
+			"name": "中坜商业区·西",
+			"land_id": 9
+		},
+		{
+			"id": 13,
+			"col": 19,
+			"row": 2,
+			"type": "property",
+			"name": "中坜商业区·东",
+			"land_id": 9
+		},
+		{
 			"id": 14,
-			"col": 15,
-			"row": 1,
+			"col": 20,
+			"row": 2,
+			"type": "fate",
+			"name": "命运"
+		},
+		{
+			"id": 15,
+			"col": 21,
+			"row": 2,
+			"type": "property",
+			"name": "城隍庙",
+			"land_id": 10
+		},
+		{
+			"id": 16,
+			"col": 22,
+			"row": 2,
+			"type": "property",
+			"name": "科学园区",
+			"land_id": 11
+		},
+		{
+			"id": 17,
+			"col": 23,
+			"row": 2,
+			"type": "property",
+			"name": "竹北",
+			"land_id": 12
+		},
+		{
+			"id": 18,
+			"col": 24,
+			"row": 2,
+			"type": "property",
+			"name": "南寮",
+			"land_id": 13
+		},
+		{
+			"id": 19,
+			"col": 25,
+			"row": 2,
+			"type": "property",
+			"name": "竹北商圈·西",
+			"land_id": 14
+		},
+		{
+			"id": 20,
+			"col": 26,
+			"row": 2,
+			"type": "property",
+			"name": "竹北商圈·东",
+			"land_id": 14
+		},
+		{
+			"id": 21,
+			"col": 27,
+			"row": 2,
 			"type": "company",
 			"name": "航空公司",
 			"data": {
@@ -131,192 +187,198 @@
 			}
 		},
 		{
-			"id": 15,
-			"col": 16,
-			"row": 1,
-			"type": "property",
-			"name": "中坜商业区·西",
-			"land_id": 9
-		},
-		{
-			"id": 16,
-			"col": 17,
-			"row": 1,
-			"type": "property",
-			"name": "中坜商业区·东",
-			"land_id": 9
-		},
-		{
-			"id": 17,
-			"col": 18,
-			"row": 1,
-			"type": "property",
-			"name": "桃园站前·西",
-			"land_id": 10
-		},
-		{
-			"id": 18,
-			"col": 19,
-			"row": 1,
-			"type": "property",
-			"name": "桃园站前·东",
-			"land_id": 10
-		},
-		{
-			"id": 19,
-			"col": 20,
-			"row": 1,
-			"type": "neutral",
-			"name": "公园"
-		},
-		{
-			"id": 20,
-			"col": 21,
-			"row": 1,
-			"type": "property",
-			"name": "城隍庙",
-			"land_id": 11
-		},
-		{
-			"id": 21,
-			"col": 22,
-			"row": 1,
-			"type": "property",
-			"name": "科学园区",
-			"land_id": 12
-		},
-		{
 			"id": 22,
-			"col": 23,
-			"row": 1,
+			"col": 28,
+			"row": 3,
 			"type": "property",
-			"name": "竹北",
-			"land_id": 13
-		},
-		{
-			"id": 23,
-			"col": 24,
-			"row": 1,
-			"type": "property",
-			"name": "南寮",
-			"land_id": 14
-		},
-		{
-			"id": 24,
-			"col": 25,
-			"row": 1,
-			"type": "property",
-			"name": "青草湖",
+			"name": "基隆庙口",
 			"land_id": 15
 		},
 		{
-			"id": 25,
-			"col": 26,
-			"row": 1,
-			"type": "shop",
-			"name": "百货公司",
-			"data": {
-				"stock": "stock_004"
-			}
-		},
-		{
-			"id": 26,
-			"col": 26,
-			"row": 2,
-			"type": "bank",
-			"name": "银行"
-		},
-		{
-			"id": 27,
-			"col": 26,
-			"row": 3,
+			"id": 23,
+			"col": 29,
+			"row": 4,
 			"type": "property",
-			"name": "客家园区",
+			"name": "中正路",
 			"land_id": 16
 		},
 		{
-			"id": 28,
-			"col": 26,
-			"row": 4,
+			"id": 24,
+			"col": 30,
+			"row": 5,
 			"type": "property",
-			"name": "三义木雕",
+			"name": "海洋广场",
 			"land_id": 17
 		},
 		{
-			"id": 29,
-			"col": 26,
-			"row": 5,
-			"type": "property",
-			"name": "苑里",
-			"land_id": 18
-		},
-		{
-			"id": 30,
-			"col": 26,
+			"id": 25,
+			"col": 31,
 			"row": 6,
 			"type": "news",
 			"name": "新闻中心"
 		},
 		{
-			"id": 31,
-			"col": 26,
+			"id": 26,
+			"col": 31,
 			"row": 7,
 			"type": "property",
 			"name": "逢甲夜市",
-			"land_id": 19
+			"land_id": 18
 		},
 		{
-			"id": 32,
-			"col": 26,
+			"id": 27,
+			"col": 31,
 			"row": 8,
 			"type": "property",
 			"name": "一中街",
+			"land_id": 19
+		},
+		{
+			"id": 28,
+			"col": 31,
+			"row": 9,
+			"type": "property",
+			"name": "精明一街",
 			"land_id": 20
 		},
 		{
-			"id": 33,
-			"col": 26,
-			"row": 9,
-			"type": "property",
-			"name": "台中港·北",
-			"land_id": 21
-		},
-		{
-			"id": 34,
-			"col": 26,
+			"id": 29,
+			"col": 31,
 			"row": 10,
 			"type": "property",
-			"name": "台中港·南",
+			"name": "彩虹眷村",
 			"land_id": 21
 		},
 		{
-			"id": 35,
-			"col": 26,
+			"id": 30,
+			"col": 31,
 			"row": 11,
 			"type": "property",
-			"name": "丽宝乐园·北",
+			"name": "台中港·北",
 			"land_id": 22
 		},
 		{
-			"id": 36,
-			"col": 26,
+			"id": 31,
+			"col": 31,
 			"row": 12,
 			"type": "property",
-			"name": "丽宝乐园·南",
+			"name": "台中港·南",
 			"land_id": 22
 		},
 		{
-			"id": 37,
-			"col": 26,
+			"id": 32,
+			"col": 31,
 			"row": 13,
+			"type": "magic",
+			"name": "魔法屋"
+		},
+		{
+			"id": 33,
+			"col": 31,
+			"row": 14,
 			"type": "property",
-			"name": "精明一街",
+			"name": "北港朝天宫",
 			"land_id": 23
 		},
 		{
+			"id": 34,
+			"col": 31,
+			"row": 15,
+			"type": "property",
+			"name": "剑湖山",
+			"land_id": 24
+		},
+		{
+			"id": 35,
+			"col": 31,
+			"row": 16,
+			"type": "property",
+			"name": "斗六",
+			"land_id": 25
+		},
+		{
+			"id": 36,
+			"col": 31,
+			"row": 17,
+			"type": "property",
+			"name": "古坑",
+			"land_id": 26
+		},
+		{
+			"id": 37,
+			"col": 31,
+			"row": 18,
+			"type": "property",
+			"name": "虎尾",
+			"land_id": 27
+		},
+		{
 			"id": 38,
-			"col": 26,
-			"row": 14,
+			"col": 31,
+			"row": 19,
+			"type": "property",
+			"name": "西螺",
+			"land_id": 28
+		},
+		{
+			"id": 39,
+			"col": 31,
+			"row": 20,
+			"type": "arcade",
+			"name": "游乐场"
+		},
+		{
+			"id": 40,
+			"col": 31,
+			"row": 21,
+			"type": "property",
+			"name": "奋起湖",
+			"land_id": 29
+		},
+		{
+			"id": 41,
+			"col": 31,
+			"row": 22,
+			"type": "property",
+			"name": "布袋港",
+			"land_id": 30
+		},
+		{
+			"id": 42,
+			"col": 31,
+			"row": 23,
+			"type": "property",
+			"name": "民雄",
+			"land_id": 31
+		},
+		{
+			"id": 43,
+			"col": 31,
+			"row": 24,
+			"type": "property",
+			"name": "朴子",
+			"land_id": 32
+		},
+		{
+			"id": 44,
+			"col": 31,
+			"row": 25,
+			"type": "property",
+			"name": "阿里山森林游乐区·北",
+			"land_id": 33
+		},
+		{
+			"id": 45,
+			"col": 31,
+			"row": 26,
+			"type": "property",
+			"name": "阿里山森林游乐区·南",
+			"land_id": 33
+		},
+		{
+			"id": 46,
+			"col": 31,
+			"row": 27,
 			"type": "company",
 			"name": "保险公司",
 			"data": {
@@ -331,369 +393,33 @@
 			}
 		},
 		{
-			"id": 39,
-			"col": 26,
-			"row": 15,
-			"type": "property",
-			"name": "鹿港老街",
-			"land_id": 24
-		},
-		{
-			"id": 40,
-			"col": 26,
-			"row": 16,
-			"type": "property",
-			"name": "八卦山",
-			"land_id": 25
-		},
-		{
-			"id": 41,
-			"col": 26,
-			"row": 17,
-			"type": "property",
-			"name": "田尾花乡",
-			"land_id": 26
-		},
-		{
-			"id": 42,
-			"col": 26,
-			"row": 18,
-			"type": "magic",
-			"name": "魔法屋"
-		},
-		{
-			"id": 43,
-			"col": 26,
-			"row": 19,
-			"type": "property",
-			"name": "北港朝天宫",
-			"land_id": 27
-		},
-		{
-			"id": 44,
-			"col": 26,
-			"row": 20,
-			"type": "property",
-			"name": "剑湖山",
-			"land_id": 28
-		},
-		{
-			"id": 45,
-			"col": 26,
-			"row": 21,
-			"type": "property",
-			"name": "斗六",
-			"land_id": 29
-		},
-		{
-			"id": 46,
-			"col": 26,
-			"row": 22,
-			"type": "property",
-			"name": "古坑",
-			"land_id": 30
-		},
-		{
 			"id": 47,
-			"col": 26,
-			"row": 23,
+			"col": 30,
+			"row": 28,
 			"type": "property",
-			"name": "虎尾",
-			"land_id": 31
-		},
-		{
-			"id": 48,
-			"col": 26,
-			"row": 24,
-			"type": "property",
-			"name": "西螺",
-			"land_id": 32
-		},
-		{
-			"id": 49,
-			"col": 26,
-			"row": 25,
-			"type": "fate",
-			"name": "命运"
-		},
-		{
-			"id": 50,
-			"col": 26,
-			"row": 26,
-			"type": "chance",
-			"name": "机会"
-		},
-		{
-			"id": 51,
-			"col": 25,
-			"row": 26,
-			"type": "chance",
-			"name": "机会"
-		},
-		{
-			"id": 52,
-			"col": 24,
-			"row": 26,
-			"type": "property",
-			"name": "阿里山",
-			"land_id": 33
-		},
-		{
-			"id": 53,
-			"col": 23,
-			"row": 26,
-			"type": "property",
-			"name": "布袋港",
+			"name": "客家园区",
 			"land_id": 34
 		},
 		{
-			"id": 54,
-			"col": 22,
-			"row": 26,
+			"id": 48,
+			"col": 29,
+			"row": 29,
 			"type": "property",
-			"name": "民雄",
+			"name": "三义木雕",
 			"land_id": 35
 		},
 		{
-			"id": 55,
-			"col": 21,
-			"row": 26,
+			"id": 49,
+			"col": 28,
+			"row": 30,
 			"type": "property",
-			"name": "朴子",
+			"name": "苑里",
 			"land_id": 36
 		},
 		{
-			"id": 56,
-			"col": 20,
-			"row": 26,
-			"type": "jail",
-			"name": "监狱",
-			"branch": {
-				"type": "jail",
-				"tiles": [
-					{
-						"type": "road",
-						"name": "探监路",
-						"col": 20,
-						"row": 25
-					},
-					{
-						"type": "road",
-						"name": "探监路",
-						"col": 20,
-						"row": 24
-					},
-					{
-						"type": "road",
-						"name": "探监路",
-						"col": 20,
-						"row": 23
-					},
-					{
-						"type": "road",
-						"name": "探监路",
-						"col": 20,
-						"row": 22
-					},
-					{
-						"type": "jail",
-						"name": "监狱",
-						"col": 20,
-						"row": 21
-					}
-				]
-			}
-		},
-		{
-			"id": 57,
-			"col": 19,
-			"row": 26,
-			"type": "coupon",
-			"name": "点券箱",
-			"data": {
-				"coupon": 30
-			}
-		},
-		{
-			"id": 58,
-			"col": 18,
-			"row": 26,
-			"type": "arcade",
-			"name": "游乐场",
-			"data": {
-				"game": "pop_balloons"
-			}
-		},
-		{
-			"id": 59,
-			"col": 17,
-			"row": 26,
-			"type": "road",
-			"name": "大马路"
-		},
-		{
-			"id": 60,
-			"col": 16,
-			"row": 26,
-			"type": "coupon",
-			"name": "点券箱",
-			"data": {
-				"coupon": 50
-			}
-		},
-		{
-			"id": 61,
-			"col": 15,
-			"row": 26,
-			"type": "arcade",
-			"name": "游乐场",
-			"data": {
-				"game": "penguin_dig"
-			}
-		},
-		{
-			"id": 62,
-			"col": 14,
-			"row": 26,
-			"type": "road",
-			"name": "大马路"
-		},
-		{
-			"id": 63,
-			"col": 13,
-			"row": 26,
-			"type": "hospital",
-			"name": "医院",
-			"branch": {
-				"type": "hospital",
-				"tiles": [
-					{
-						"type": "road",
-						"name": "探病路",
-						"col": 13,
-						"row": 25
-					},
-					{
-						"type": "road",
-						"name": "探病路",
-						"col": 13,
-						"row": 24
-					},
-					{
-						"type": "road",
-						"name": "探病路",
-						"col": 13,
-						"row": 23
-					},
-					{
-						"type": "road",
-						"name": "探病路",
-						"col": 13,
-						"row": 22
-					},
-					{
-						"type": "hospital",
-						"name": "医院",
-						"col": 13,
-						"row": 21
-					}
-				]
-			}
-		},
-		{
-			"id": 64,
-			"col": 12,
-			"row": 26,
-			"type": "property",
-			"name": "台南科学园区·东",
-			"land_id": 37
-		},
-		{
-			"id": 65,
-			"col": 11,
-			"row": 26,
-			"type": "property",
-			"name": "台南科学园区·西",
-			"land_id": 37
-		},
-		{
-			"id": 66,
-			"col": 10,
-			"row": 26,
-			"type": "property",
-			"name": "安平古堡",
-			"land_id": 38
-		},
-		{
-			"id": 67,
-			"col": 9,
-			"row": 26,
-			"type": "property",
-			"name": "赤崁楼",
-			"land_id": 39
-		},
-		{
-			"id": 68,
-			"col": 8,
-			"row": 26,
-			"type": "property",
-			"name": "花园夜市",
-			"land_id": 40
-		},
-		{
-			"id": 69,
-			"col": 7,
-			"row": 26,
-			"type": "property",
-			"name": "孔庙",
-			"land_id": 41
-		},
-		{
-			"id": 70,
-			"col": 6,
-			"row": 26,
-			"type": "shop",
-			"name": "百货公司",
-			"data": {
-				"stock": "stock_004"
-			}
-		},
-		{
-			"id": 71,
-			"col": 5,
-			"row": 26,
-			"type": "property",
-			"name": "淡水老街",
-			"land_id": 42
-		},
-		{
-			"id": 72,
-			"col": 4,
-			"row": 26,
-			"type": "property",
-			"name": "渔人码头",
-			"land_id": 43
-		},
-		{
-			"id": 73,
-			"col": 3,
-			"row": 26,
-			"type": "property",
-			"name": "红毛城",
-			"land_id": 44
-		},
-		{
-			"id": 74,
-			"col": 2,
-			"row": 26,
-			"type": "property",
-			"name": "小白宫",
-			"land_id": 45
-		},
-		{
-			"id": 75,
-			"col": 1,
-			"row": 26,
+			"id": 50,
+			"col": 27,
+			"row": 31,
 			"type": "company",
 			"name": "科技公司",
 			"data": {
@@ -707,9 +433,237 @@
 			}
 		},
 		{
-			"id": 76,
-			"col": 1,
-			"row": 25,
+			"id": 51,
+			"col": 26,
+			"row": 31,
+			"type": "property",
+			"name": "安平古堡",
+			"land_id": 37
+		},
+		{
+			"id": 52,
+			"col": 25,
+			"row": 31,
+			"type": "property",
+			"name": "赤崁楼",
+			"land_id": 38
+		},
+		{
+			"id": 53,
+			"col": 24,
+			"row": 31,
+			"type": "property",
+			"name": "花园夜市",
+			"land_id": 39
+		},
+		{
+			"id": 54,
+			"col": 23,
+			"row": 31,
+			"type": "property",
+			"name": "孔庙",
+			"land_id": 40
+		},
+		{
+			"id": 55,
+			"col": 22,
+			"row": 31,
+			"type": "property",
+			"name": "台南科学园区·东",
+			"land_id": 41
+		},
+		{
+			"id": 56,
+			"col": 21,
+			"row": 31,
+			"type": "property",
+			"name": "台南科学园区·西",
+			"land_id": 41
+		},
+		{
+			"id": 57,
+			"col": 20,
+			"row": 31,
+			"type": "jail",
+			"name": "监狱",
+			"branch": {
+				"type": "jail",
+				"tiles": [
+					{
+						"type": "road",
+						"name": "探监路",
+						"col": 20,
+						"row": 30
+					},
+					{
+						"type": "road",
+						"name": "探监路",
+						"col": 20,
+						"row": 29
+					},
+					{
+						"type": "road",
+						"name": "探监路",
+						"col": 20,
+						"row": 28
+					},
+					{
+						"type": "road",
+						"name": "探监路",
+						"col": 20,
+						"row": 27
+					},
+					{
+						"type": "jail",
+						"name": "监狱",
+						"col": 20,
+						"row": 26
+					}
+				]
+			}
+		},
+		{
+			"id": 58,
+			"col": 19,
+			"row": 31,
+			"type": "property",
+			"name": "淡水老街",
+			"land_id": 42
+		},
+		{
+			"id": 59,
+			"col": 18,
+			"row": 31,
+			"type": "property",
+			"name": "渔人码头",
+			"land_id": 43
+		},
+		{
+			"id": 60,
+			"col": 17,
+			"row": 31,
+			"type": "property",
+			"name": "红毛城",
+			"land_id": 44
+		},
+		{
+			"id": 61,
+			"col": 16,
+			"row": 31,
+			"type": "property",
+			"name": "小白宫",
+			"land_id": 45
+		},
+		{
+			"id": 62,
+			"col": 15,
+			"row": 31,
+			"type": "property",
+			"name": "淡水名品城·东",
+			"land_id": 46
+		},
+		{
+			"id": 63,
+			"col": 14,
+			"row": 31,
+			"type": "property",
+			"name": "淡水名品城·西",
+			"land_id": 46
+		},
+		{
+			"id": 64,
+			"col": 13,
+			"row": 31,
+			"type": "hospital",
+			"name": "医院",
+			"branch": {
+				"type": "hospital",
+				"tiles": [
+					{
+						"type": "road",
+						"name": "探病路",
+						"col": 13,
+						"row": 30
+					},
+					{
+						"type": "road",
+						"name": "探病路",
+						"col": 13,
+						"row": 29
+					},
+					{
+						"type": "road",
+						"name": "探病路",
+						"col": 13,
+						"row": 28
+					},
+					{
+						"type": "road",
+						"name": "探病路",
+						"col": 13,
+						"row": 27
+					},
+					{
+						"type": "hospital",
+						"name": "医院",
+						"col": 13,
+						"row": 26
+					}
+				]
+			}
+		},
+		{
+			"id": 65,
+			"col": 12,
+			"row": 31,
+			"type": "property",
+			"name": "西子湾",
+			"land_id": 47
+		},
+		{
+			"id": 66,
+			"col": 11,
+			"row": 31,
+			"type": "property",
+			"name": "旗津",
+			"land_id": 48
+		},
+		{
+			"id": 67,
+			"col": 10,
+			"row": 31,
+			"type": "property",
+			"name": "爱河",
+			"land_id": 49
+		},
+		{
+			"id": 68,
+			"col": 9,
+			"row": 31,
+			"type": "property",
+			"name": "六合夜市",
+			"land_id": 50
+		},
+		{
+			"id": 69,
+			"col": 8,
+			"row": 31,
+			"type": "property",
+			"name": "梦时代·东",
+			"land_id": 51
+		},
+		{
+			"id": 70,
+			"col": 7,
+			"row": 31,
+			"type": "property",
+			"name": "梦时代·西",
+			"land_id": 51
+		},
+		{
+			"id": 71,
+			"col": 6,
+			"row": 31,
 			"type": "company",
 			"name": "日产建设",
 			"data": {
@@ -717,248 +671,237 @@
 			}
 		},
 		{
-			"id": 77,
-			"col": 1,
-			"row": 24,
+			"id": 72,
+			"col": 5,
+			"row": 30,
 			"type": "property",
-			"name": "梦时代·南",
-			"land_id": 46
-		},
-		{
-			"id": 78,
-			"col": 1,
-			"row": 23,
-			"type": "property",
-			"name": "梦时代·北",
-			"land_id": 46
-		},
-		{
-			"id": 79,
-			"col": 1,
-			"row": 22,
-			"type": "property",
-			"name": "义大世界·南",
-			"land_id": 47
-		},
-		{
-			"id": 80,
-			"col": 1,
-			"row": 21,
-			"type": "property",
-			"name": "义大世界·北",
-			"land_id": 47
-		},
-		{
-			"id": 81,
-			"col": 1,
-			"row": 20,
-			"type": "bank",
-			"name": "银行"
-		},
-		{
-			"id": 82,
-			"col": 1,
-			"row": 19,
-			"type": "property",
-			"name": "垦丁大街",
-			"land_id": 48
-		},
-		{
-			"id": 83,
-			"col": 1,
-			"row": 18,
-			"type": "property",
-			"name": "东港",
-			"land_id": 49
-		},
-		{
-			"id": 84,
-			"col": 1,
-			"row": 17,
-			"type": "property",
-			"name": "潮州",
-			"land_id": 50
-		},
-		{
-			"id": 85,
-			"col": 1,
-			"row": 16,
-			"type": "property",
-			"name": "恒春",
-			"land_id": 51
-		},
-		{
-			"id": 86,
-			"col": 1,
-			"row": 15,
-			"type": "stock",
-			"name": "证券交易所"
-		},
-		{
-			"id": 87,
-			"col": 1,
-			"row": 14,
-			"type": "property",
-			"name": "知本温泉",
+			"name": "鹿港老街",
 			"land_id": 52
 		},
 		{
-			"id": 88,
-			"col": 1,
-			"row": 13,
+			"id": 73,
+			"col": 4,
+			"row": 29,
 			"type": "property",
-			"name": "绿岛",
+			"name": "八卦山",
 			"land_id": 53
 		},
 		{
-			"id": 89,
-			"col": 1,
-			"row": 12,
+			"id": 74,
+			"col": 3,
+			"row": 28,
 			"type": "property",
-			"name": "兰屿",
+			"name": "田尾花乡",
 			"land_id": 54
 		},
 		{
-			"id": 90,
-			"col": 1,
-			"row": 11,
+			"id": 75,
+			"col": 2,
+			"row": 27,
+			"type": "lottery",
+			"name": "彩票中心"
+		},
+		{
+			"id": 76,
+			"col": 2,
+			"row": 26,
 			"type": "property",
-			"name": "太麻里",
+			"name": "垦丁大街",
 			"land_id": 55
 		},
 		{
-			"id": 91,
-			"col": 1,
-			"row": 10,
-			"type": "chance",
-			"name": "机会"
-		},
-		{
-			"id": 92,
-			"col": 1,
-			"row": 9,
+			"id": 77,
+			"col": 2,
+			"row": 25,
 			"type": "property",
-			"name": "太鲁阁",
+			"name": "东港",
 			"land_id": 56
 		},
 		{
-			"id": 93,
-			"col": 1,
-			"row": 8,
+			"id": 78,
+			"col": 2,
+			"row": 24,
 			"type": "property",
-			"name": "七星潭",
+			"name": "潮州",
 			"land_id": 57
 		},
 		{
-			"id": 94,
-			"col": 1,
-			"row": 7,
+			"id": 79,
+			"col": 2,
+			"row": 23,
 			"type": "property",
-			"name": "瑞穗",
+			"name": "恒春",
 			"land_id": 58
 		},
 		{
+			"id": 80,
+			"col": 2,
+			"row": 22,
+			"type": "property",
+			"name": "垦丁福华饭店·南",
+			"land_id": 59
+		},
+		{
+			"id": 81,
+			"col": 2,
+			"row": 21,
+			"type": "property",
+			"name": "垦丁福华饭店·北",
+			"land_id": 59
+		},
+		{
+			"id": 82,
+			"col": 2,
+			"row": 20,
+			"type": "shop",
+			"name": "百货公司",
+			"data": {
+				"stock": "stock_004"
+			}
+		},
+		{
+			"id": 83,
+			"col": 2,
+			"row": 19,
+			"type": "property",
+			"name": "知本温泉",
+			"land_id": 60
+		},
+		{
+			"id": 84,
+			"col": 2,
+			"row": 18,
+			"type": "property",
+			"name": "绿岛",
+			"land_id": 61
+		},
+		{
+			"id": 85,
+			"col": 2,
+			"row": 17,
+			"type": "property",
+			"name": "兰屿",
+			"land_id": 62
+		},
+		{
+			"id": 86,
+			"col": 2,
+			"row": 16,
+			"type": "property",
+			"name": "太麻里",
+			"land_id": 63
+		},
+		{
+			"id": 87,
+			"col": 2,
+			"row": 15,
+			"type": "property",
+			"name": "三仙台",
+			"land_id": 64
+		},
+		{
+			"id": 88,
+			"col": 2,
+			"row": 14,
+			"type": "property",
+			"name": "都兰",
+			"land_id": 65
+		},
+		{
+			"id": 89,
+			"col": 2,
+			"row": 13,
+			"type": "coupon",
+			"name": "点券箱",
+			"data": {
+				"coupon": 50
+			}
+		},
+		{
+			"id": 90,
+			"col": 2,
+			"row": 12,
+			"type": "property",
+			"name": "礁溪温泉",
+			"land_id": 66
+		},
+		{
+			"id": 91,
+			"col": 2,
+			"row": 11,
+			"type": "property",
+			"name": "罗东夜市",
+			"land_id": 67
+		},
+		{
+			"id": 92,
+			"col": 2,
+			"row": 10,
+			"type": "property",
+			"name": "冬山河",
+			"land_id": 68
+		},
+		{
+			"id": 93,
+			"col": 2,
+			"row": 9,
+			"type": "property",
+			"name": "龟山岛",
+			"land_id": 69
+		},
+		{
+			"id": 94,
+			"col": 2,
+			"row": 8,
+			"type": "property",
+			"name": "太平山",
+			"land_id": 70
+		},
+		{
 			"id": 95,
-			"col": 1,
+			"col": 2,
+			"row": 7,
+			"type": "property",
+			"name": "南方澳",
+			"land_id": 71
+		},
+		{
+			"id": 96,
+			"col": 2,
 			"row": 6,
 			"type": "fate",
 			"name": "命运"
 		},
 		{
-			"id": 96,
-			"col": 1,
+			"id": 97,
+			"col": 3,
 			"row": 5,
 			"type": "property",
-			"name": "礁溪温泉",
-			"land_id": 59
-		},
-		{
-			"id": 97,
-			"col": 1,
-			"row": 4,
-			"type": "property",
-			"name": "罗东夜市",
-			"land_id": 60
+			"name": "太鲁阁",
+			"land_id": 72
 		},
 		{
 			"id": 98,
-			"col": 1,
-			"row": 3,
+			"col": 4,
+			"row": 4,
 			"type": "property",
-			"name": "冬山河",
-			"land_id": 61
+			"name": "七星潭",
+			"land_id": 73
 		},
 		{
 			"id": 99,
-			"col": 1,
-			"row": 2,
+			"col": 5,
+			"row": 3,
 			"type": "property",
-			"name": "龟山岛",
-			"land_id": 62
+			"name": "瑞穗",
+			"land_id": 74
 		}
 	],
 	"lands": [
 		{
 			"id": 0,
-			"col": 3,
-			"row": 2,
-			"size": 1,
-			"name": "基隆庙口",
-			"group": "keelung",
-			"land_type": "residential",
-			"price": 10000,
-			"rent": [
-				400,
-				1200,
-				2800,
-				5600,
-				9600,
-				16000
-			],
-			"upgrade_cost": 5000
-		},
-		{
-			"id": 1,
-			"col": 4,
-			"row": 2,
-			"size": 1,
-			"name": "中正路",
-			"group": "keelung",
-			"land_type": "residential",
-			"price": 11000,
-			"rent": [
-				440,
-				1320,
-				3080,
-				6160,
-				10560,
-				17600
-			],
-			"upgrade_cost": 5500
-		},
-		{
-			"id": 2,
-			"col": 5,
-			"row": 2,
-			"size": 1,
-			"name": "海洋广场",
-			"group": "keelung",
-			"land_type": "residential",
-			"price": 12000,
-			"rent": [
-				480,
-				1440,
-				3360,
-				6720,
-				11520,
-				19200
-			],
-			"upgrade_cost": 6000
-		},
-		{
-			"id": 3,
 			"col": 7,
-			"row": 2,
+			"row": 1,
 			"size": 1,
 			"name": "忠孝东路",
 			"group": "taipei",
@@ -975,9 +918,9 @@
 			"upgrade_cost": 11000
 		},
 		{
-			"id": 4,
+			"id": 1,
 			"col": 8,
-			"row": 2,
+			"row": 1,
 			"size": 1,
 			"name": "仁爱路",
 			"group": "taipei",
@@ -994,9 +937,47 @@
 			"upgrade_cost": 12000
 		},
 		{
-			"id": 5,
+			"id": 2,
 			"col": 9,
-			"row": 2,
+			"row": 1,
+			"size": 1,
+			"name": "信义路",
+			"group": "taipei",
+			"land_type": "residential",
+			"price": 26000,
+			"rent": [
+				1040,
+				3120,
+				7280,
+				14560,
+				24960,
+				41600
+			],
+			"upgrade_cost": 13000
+		},
+		{
+			"id": 3,
+			"col": 10,
+			"row": 1,
+			"size": 1,
+			"name": "南京东路",
+			"group": "taipei",
+			"land_type": "residential",
+			"price": 28000,
+			"rent": [
+				1120,
+				3360,
+				7840,
+				15680,
+				26880,
+				44800
+			],
+			"upgrade_cost": 14000
+		},
+		{
+			"id": 4,
+			"col": 11,
+			"row": 0,
 			"size": 2,
 			"name": "台北101",
 			"group": "taipei",
@@ -1027,66 +1008,85 @@
 			}
 		},
 		{
-			"id": 6,
-			"col": 11,
-			"row": 2,
-			"size": 2,
-			"name": "西门町",
-			"group": "taipei",
-			"land_type": "commercial",
-			"price": 60000,
+			"id": 5,
+			"col": 14,
+			"row": 1,
+			"size": 1,
+			"name": "大溪老街",
+			"group": "taoyuan",
+			"land_type": "residential",
+			"price": 15000,
 			"rent": [
-				3750,
-				11250,
-				22500,
-				45000,
-				67500,
-				105000
+				600,
+				1800,
+				4200,
+				8400,
+				14400,
+				24000
 			],
-			"upgrade_cost": 30000
+			"upgrade_cost": 7500
+		},
+		{
+			"id": 6,
+			"col": 15,
+			"row": 1,
+			"size": 1,
+			"name": "石门水库",
+			"group": "taoyuan",
+			"land_type": "residential",
+			"price": 16500,
+			"rent": [
+				660,
+				1980,
+				4620,
+				9240,
+				15840,
+				26400
+			],
+			"upgrade_cost": 8200
 		},
 		{
 			"id": 7,
-			"col": 13,
-			"row": 2,
+			"col": 16,
+			"row": 1,
 			"size": 1,
-			"name": "信义路",
-			"group": "taipei",
+			"name": "慈湖",
+			"group": "taoyuan",
 			"land_type": "residential",
-			"price": 26000,
+			"price": 18000,
 			"rent": [
-				1040,
-				3120,
-				7280,
-				14560,
-				24960,
-				41600
+				720,
+				2160,
+				5040,
+				10080,
+				17280,
+				28800
 			],
-			"upgrade_cost": 13000
+			"upgrade_cost": 9000
 		},
 		{
 			"id": 8,
-			"col": 14,
-			"row": 2,
+			"col": 17,
+			"row": 1,
 			"size": 1,
-			"name": "南京东路",
-			"group": "taipei",
+			"name": "拉拉山",
+			"group": "taoyuan",
 			"land_type": "residential",
-			"price": 28000,
+			"price": 19500,
 			"rent": [
-				1120,
-				3360,
-				7840,
-				15680,
-				26880,
-				44800
+				780,
+				2340,
+				5460,
+				10920,
+				18720,
+				31200
 			],
-			"upgrade_cost": 14000
+			"upgrade_cost": 9800
 		},
 		{
 			"id": 9,
-			"col": 16,
-			"row": 2,
+			"col": 18,
+			"row": 0,
 			"size": 2,
 			"name": "中坜商业区",
 			"group": "taoyuan",
@@ -1118,27 +1118,8 @@
 		},
 		{
 			"id": 10,
-			"col": 18,
-			"row": 2,
-			"size": 2,
-			"name": "桃园站前",
-			"group": "taoyuan",
-			"land_type": "commercial",
-			"price": 41000,
-			"rent": [
-				2560,
-				7680,
-				15360,
-				30720,
-				46080,
-				71680
-			],
-			"upgrade_cost": 20500
-		},
-		{
-			"id": 11,
 			"col": 21,
-			"row": 2,
+			"row": 1,
 			"size": 1,
 			"name": "城隍庙",
 			"group": "hsinchu",
@@ -1155,9 +1136,9 @@
 			"upgrade_cost": 7500
 		},
 		{
-			"id": 12,
+			"id": 11,
 			"col": 22,
-			"row": 2,
+			"row": 1,
 			"size": 1,
 			"name": "科学园区",
 			"group": "hsinchu",
@@ -1174,9 +1155,9 @@
 			"upgrade_cost": 8200
 		},
 		{
-			"id": 13,
+			"id": 12,
 			"col": 23,
-			"row": 2,
+			"row": 1,
 			"size": 1,
 			"name": "竹北",
 			"group": "hsinchu",
@@ -1193,9 +1174,9 @@
 			"upgrade_cost": 9000
 		},
 		{
-			"id": 14,
+			"id": 13,
 			"col": 24,
-			"row": 2,
+			"row": 1,
 			"size": 1,
 			"name": "南寮",
 			"group": "hsinchu",
@@ -1212,84 +1193,84 @@
 			"upgrade_cost": 9800
 		},
 		{
-			"id": 15,
+			"id": 14,
 			"col": 25,
-			"row": 2,
-			"size": 1,
-			"name": "青草湖",
+			"row": 0,
+			"size": 2,
+			"name": "竹北商圈",
 			"group": "hsinchu",
-			"land_type": "residential",
-			"price": 21000,
+			"land_type": "commercial",
+			"price": 38000,
 			"rent": [
-				840,
-				2520,
-				5880,
-				11760,
-				20160,
-				33600
+				2380,
+				7140,
+				14280,
+				28560,
+				42840,
+				66640
 			],
-			"upgrade_cost": 10500
+			"upgrade_cost": 19000
+		},
+		{
+			"id": 15,
+			"col": 29,
+			"row": 3,
+			"size": 1,
+			"name": "基隆庙口",
+			"group": "keelung",
+			"land_type": "residential",
+			"price": 10000,
+			"rent": [
+				400,
+				1200,
+				2800,
+				5600,
+				9600,
+				16000
+			],
+			"upgrade_cost": 5000
 		},
 		{
 			"id": 16,
-			"col": 25,
-			"row": 3,
+			"col": 30,
+			"row": 4,
 			"size": 1,
-			"name": "客家园区",
-			"group": "miaoli",
+			"name": "中正路",
+			"group": "keelung",
 			"land_type": "residential",
-			"price": 15000,
+			"price": 11000,
 			"rent": [
-				600,
-				1800,
-				4200,
-				8400,
-				14400,
-				24000
+				440,
+				1320,
+				3080,
+				6160,
+				10560,
+				17600
 			],
-			"upgrade_cost": 7500
+			"upgrade_cost": 5500
 		},
 		{
 			"id": 17,
-			"col": 25,
-			"row": 4,
+			"col": 31,
+			"row": 5,
 			"size": 1,
-			"name": "三义木雕",
-			"group": "miaoli",
+			"name": "海洋广场",
+			"group": "keelung",
 			"land_type": "residential",
-			"price": 16500,
+			"price": 12000,
 			"rent": [
-				660,
-				1980,
-				4620,
-				9240,
-				15840,
-				26400
+				480,
+				1440,
+				3360,
+				6720,
+				11520,
+				19200
 			],
-			"upgrade_cost": 8200
+			"upgrade_cost": 6000
 		},
 		{
 			"id": 18,
-			"col": 25,
-			"row": 5,
-			"size": 1,
-			"name": "苑里",
-			"group": "miaoli",
-			"land_type": "residential",
-			"price": 18000,
-			"rent": [
-				720,
-				2160,
-				5040,
-				10080,
-				17280,
-				28800
-			],
-			"upgrade_cost": 9000
-		},
-		{
-			"id": 19,
-			"col": 25,
+			"col": 32,
 			"row": 7,
 			"size": 1,
 			"name": "逢甲夜市",
@@ -1307,8 +1288,8 @@
 			"upgrade_cost": 11000
 		},
 		{
-			"id": 20,
-			"col": 25,
+			"id": 19,
+			"col": 32,
 			"row": 8,
 			"size": 1,
 			"name": "一中街",
@@ -1326,9 +1307,47 @@
 			"upgrade_cost": 12000
 		},
 		{
-			"id": 21,
-			"col": 24,
+			"id": 20,
+			"col": 32,
 			"row": 9,
+			"size": 1,
+			"name": "精明一街",
+			"group": "taichung",
+			"land_type": "residential",
+			"price": 26000,
+			"rent": [
+				1040,
+				3120,
+				7280,
+				14560,
+				24960,
+				41600
+			],
+			"upgrade_cost": 13000
+		},
+		{
+			"id": 21,
+			"col": 32,
+			"row": 10,
+			"size": 1,
+			"name": "彩虹眷村",
+			"group": "taichung",
+			"land_type": "residential",
+			"price": 28000,
+			"rent": [
+				1120,
+				3360,
+				7840,
+				15680,
+				26880,
+				44800
+			],
+			"upgrade_cost": 14000
+		},
+		{
+			"id": 22,
+			"col": 32,
+			"row": 11,
 			"size": 2,
 			"name": "台中港",
 			"group": "taichung",
@@ -1352,105 +1371,9 @@
 			}
 		},
 		{
-			"id": 22,
-			"col": 24,
-			"row": 11,
-			"size": 2,
-			"name": "丽宝乐园",
-			"group": "taichung",
-			"land_type": "commercial",
-			"price": 60000,
-			"rent": [
-				3750,
-				11250,
-				22500,
-				45000,
-				67500,
-				105000
-			],
-			"upgrade_cost": 30000,
-			"building_kind": "park"
-		},
-		{
 			"id": 23,
-			"col": 25,
-			"row": 13,
-			"size": 1,
-			"name": "精明一街",
-			"group": "taichung",
-			"land_type": "residential",
-			"price": 26000,
-			"rent": [
-				1040,
-				3120,
-				7280,
-				14560,
-				24960,
-				41600
-			],
-			"upgrade_cost": 13000
-		},
-		{
-			"id": 24,
-			"col": 25,
-			"row": 15,
-			"size": 1,
-			"name": "鹿港老街",
-			"group": "changhua",
-			"land_type": "residential",
-			"price": 15000,
-			"rent": [
-				600,
-				1800,
-				4200,
-				8400,
-				14400,
-				24000
-			],
-			"upgrade_cost": 7500
-		},
-		{
-			"id": 25,
-			"col": 25,
-			"row": 16,
-			"size": 1,
-			"name": "八卦山",
-			"group": "changhua",
-			"land_type": "residential",
-			"price": 16500,
-			"rent": [
-				660,
-				1980,
-				4620,
-				9240,
-				15840,
-				26400
-			],
-			"upgrade_cost": 8200
-		},
-		{
-			"id": 26,
-			"col": 25,
-			"row": 17,
-			"size": 1,
-			"name": "田尾花乡",
-			"group": "changhua",
-			"land_type": "residential",
-			"price": 18000,
-			"rent": [
-				720,
-				2160,
-				5040,
-				10080,
-				17280,
-				28800
-			],
-			"upgrade_cost": 9000
-		},
-		{
-			"id": 27,
-			"col": 25,
-			"row": 19,
+			"col": 32,
+			"row": 14,
 			"size": 1,
 			"name": "北港朝天宫",
 			"group": "yunlin",
@@ -1467,9 +1390,9 @@
 			"upgrade_cost": 7500
 		},
 		{
-			"id": 28,
-			"col": 25,
-			"row": 20,
+			"id": 24,
+			"col": 32,
+			"row": 15,
 			"size": 1,
 			"name": "剑湖山",
 			"group": "yunlin",
@@ -1486,9 +1409,9 @@
 			"upgrade_cost": 8200
 		},
 		{
-			"id": 29,
-			"col": 25,
-			"row": 21,
+			"id": 25,
+			"col": 32,
+			"row": 16,
 			"size": 1,
 			"name": "斗六",
 			"group": "yunlin",
@@ -1505,9 +1428,9 @@
 			"upgrade_cost": 9000
 		},
 		{
-			"id": 30,
-			"col": 25,
-			"row": 22,
+			"id": 26,
+			"col": 32,
+			"row": 17,
 			"size": 1,
 			"name": "古坑",
 			"group": "yunlin",
@@ -1524,9 +1447,9 @@
 			"upgrade_cost": 9800
 		},
 		{
-			"id": 31,
-			"col": 25,
-			"row": 23,
+			"id": 27,
+			"col": 32,
+			"row": 18,
 			"size": 1,
 			"name": "虎尾",
 			"group": "yunlin",
@@ -1543,9 +1466,9 @@
 			"upgrade_cost": 10500
 		},
 		{
-			"id": 32,
-			"col": 25,
-			"row": 24,
+			"id": 28,
+			"col": 32,
+			"row": 19,
 			"size": 1,
 			"name": "西螺",
 			"group": "yunlin",
@@ -1562,11 +1485,11 @@
 			"upgrade_cost": 11200
 		},
 		{
-			"id": 33,
-			"col": 24,
-			"row": 25,
+			"id": 29,
+			"col": 32,
+			"row": 21,
 			"size": 1,
-			"name": "阿里山",
+			"name": "奋起湖",
 			"group": "chiayi",
 			"land_type": "residential",
 			"price": 15000,
@@ -1581,9 +1504,9 @@
 			"upgrade_cost": 7500
 		},
 		{
-			"id": 34,
-			"col": 23,
-			"row": 25,
+			"id": 30,
+			"col": 32,
+			"row": 22,
 			"size": 1,
 			"name": "布袋港",
 			"group": "chiayi",
@@ -1600,9 +1523,9 @@
 			"upgrade_cost": 8200
 		},
 		{
-			"id": 35,
-			"col": 22,
-			"row": 25,
+			"id": 31,
+			"col": 32,
+			"row": 23,
 			"size": 1,
 			"name": "民雄",
 			"group": "chiayi",
@@ -1619,9 +1542,9 @@
 			"upgrade_cost": 9000
 		},
 		{
-			"id": 36,
-			"col": 21,
-			"row": 25,
+			"id": 32,
+			"col": 32,
+			"row": 24,
 			"size": 1,
 			"name": "朴子",
 			"group": "chiayi",
@@ -1638,9 +1561,162 @@
 			"upgrade_cost": 9800
 		},
 		{
+			"id": 33,
+			"col": 32,
+			"row": 25,
+			"size": 2,
+			"name": "阿里山森林游乐区",
+			"group": "chiayi",
+			"land_type": "commercial",
+			"price": 38000,
+			"rent": [
+				2380,
+				7140,
+				14280,
+				28560,
+				42840,
+				66640
+			],
+			"upgrade_cost": 19000,
+			"building_kind": "park"
+		},
+		{
+			"id": 34,
+			"col": 31,
+			"row": 28,
+			"size": 1,
+			"name": "客家园区",
+			"group": "miaoli",
+			"land_type": "residential",
+			"price": 15000,
+			"rent": [
+				600,
+				1800,
+				4200,
+				8400,
+				14400,
+				24000
+			],
+			"upgrade_cost": 7500
+		},
+		{
+			"id": 35,
+			"col": 30,
+			"row": 29,
+			"size": 1,
+			"name": "三义木雕",
+			"group": "miaoli",
+			"land_type": "residential",
+			"price": 16500,
+			"rent": [
+				660,
+				1980,
+				4620,
+				9240,
+				15840,
+				26400
+			],
+			"upgrade_cost": 8200
+		},
+		{
+			"id": 36,
+			"col": 29,
+			"row": 30,
+			"size": 1,
+			"name": "苑里",
+			"group": "miaoli",
+			"land_type": "residential",
+			"price": 18000,
+			"rent": [
+				720,
+				2160,
+				5040,
+				10080,
+				17280,
+				28800
+			],
+			"upgrade_cost": 9000
+		},
+		{
 			"id": 37,
-			"col": 11,
-			"row": 24,
+			"col": 26,
+			"row": 32,
+			"size": 1,
+			"name": "安平古堡",
+			"group": "tainan",
+			"land_type": "residential",
+			"price": 22000,
+			"rent": [
+				880,
+				2640,
+				6160,
+				12320,
+				21120,
+				35200
+			],
+			"upgrade_cost": 11000
+		},
+		{
+			"id": 38,
+			"col": 25,
+			"row": 32,
+			"size": 1,
+			"name": "赤崁楼",
+			"group": "tainan",
+			"land_type": "residential",
+			"price": 24000,
+			"rent": [
+				960,
+				2880,
+				6720,
+				13440,
+				23040,
+				38400
+			],
+			"upgrade_cost": 12000
+		},
+		{
+			"id": 39,
+			"col": 24,
+			"row": 32,
+			"size": 1,
+			"name": "花园夜市",
+			"group": "tainan",
+			"land_type": "residential",
+			"price": 26000,
+			"rent": [
+				1040,
+				3120,
+				7280,
+				14560,
+				24960,
+				41600
+			],
+			"upgrade_cost": 13000
+		},
+		{
+			"id": 40,
+			"col": 23,
+			"row": 32,
+			"size": 1,
+			"name": "孔庙",
+			"group": "tainan",
+			"land_type": "residential",
+			"price": 28000,
+			"rent": [
+				1120,
+				3360,
+				7840,
+				15680,
+				26880,
+				44800
+			],
+			"upgrade_cost": 14000
+		},
+		{
+			"id": 41,
+			"col": 21,
+			"row": 32,
 			"size": 2,
 			"name": "台南科学园区",
 			"group": "tainan",
@@ -1658,85 +1734,9 @@
 			"building_kind": "lab"
 		},
 		{
-			"id": 38,
-			"col": 10,
-			"row": 25,
-			"size": 1,
-			"name": "安平古堡",
-			"group": "tainan",
-			"land_type": "residential",
-			"price": 22000,
-			"rent": [
-				880,
-				2640,
-				6160,
-				12320,
-				21120,
-				35200
-			],
-			"upgrade_cost": 11000
-		},
-		{
-			"id": 39,
-			"col": 9,
-			"row": 25,
-			"size": 1,
-			"name": "赤崁楼",
-			"group": "tainan",
-			"land_type": "residential",
-			"price": 24000,
-			"rent": [
-				960,
-				2880,
-				6720,
-				13440,
-				23040,
-				38400
-			],
-			"upgrade_cost": 12000
-		},
-		{
-			"id": 40,
-			"col": 8,
-			"row": 25,
-			"size": 1,
-			"name": "花园夜市",
-			"group": "tainan",
-			"land_type": "residential",
-			"price": 26000,
-			"rent": [
-				1040,
-				3120,
-				7280,
-				14560,
-				24960,
-				41600
-			],
-			"upgrade_cost": 13000
-		},
-		{
-			"id": 41,
-			"col": 7,
-			"row": 25,
-			"size": 1,
-			"name": "孔庙",
-			"group": "tainan",
-			"land_type": "residential",
-			"price": 28000,
-			"rent": [
-				1120,
-				3360,
-				7840,
-				15680,
-				26880,
-				44800
-			],
-			"upgrade_cost": 14000
-		},
-		{
 			"id": 42,
-			"col": 5,
-			"row": 25,
+			"col": 19,
+			"row": 32,
 			"size": 1,
 			"name": "淡水老街",
 			"group": "tamsui",
@@ -1754,8 +1754,8 @@
 		},
 		{
 			"id": 43,
-			"col": 4,
-			"row": 25,
+			"col": 18,
+			"row": 32,
 			"size": 1,
 			"name": "渔人码头",
 			"group": "tamsui",
@@ -1773,8 +1773,8 @@
 		},
 		{
 			"id": 44,
-			"col": 3,
-			"row": 25,
+			"col": 17,
+			"row": 32,
 			"size": 1,
 			"name": "红毛城",
 			"group": "tamsui",
@@ -1792,8 +1792,8 @@
 		},
 		{
 			"id": 45,
-			"col": 2,
-			"row": 25,
+			"col": 16,
+			"row": 32,
 			"size": 1,
 			"name": "小白宫",
 			"group": "tamsui",
@@ -1811,8 +1811,117 @@
 		},
 		{
 			"id": 46,
-			"col": 2,
-			"row": 23,
+			"col": 14,
+			"row": 32,
+			"size": 2,
+			"name": "淡水名品城",
+			"group": "tamsui",
+			"land_type": "commercial",
+			"price": 28000,
+			"rent": [
+				1750,
+				5250,
+				10500,
+				21000,
+				31500,
+				49000
+			],
+			"upgrade_cost": 14000,
+			"building_kind": "mall",
+			"fee": {
+				"random_amount": {
+					"sides": 6,
+					"tiers": [
+						400,
+						800,
+						1200,
+						1600,
+						2400,
+						3200
+					]
+				}
+			}
+		},
+		{
+			"id": 47,
+			"col": 12,
+			"row": 32,
+			"size": 1,
+			"name": "西子湾",
+			"group": "kaohsiung",
+			"land_type": "residential",
+			"price": 22000,
+			"rent": [
+				880,
+				2640,
+				6160,
+				12320,
+				21120,
+				35200
+			],
+			"upgrade_cost": 11000
+		},
+		{
+			"id": 48,
+			"col": 11,
+			"row": 32,
+			"size": 1,
+			"name": "旗津",
+			"group": "kaohsiung",
+			"land_type": "residential",
+			"price": 24000,
+			"rent": [
+				960,
+				2880,
+				6720,
+				13440,
+				23040,
+				38400
+			],
+			"upgrade_cost": 12000
+		},
+		{
+			"id": 49,
+			"col": 10,
+			"row": 32,
+			"size": 1,
+			"name": "爱河",
+			"group": "kaohsiung",
+			"land_type": "residential",
+			"price": 26000,
+			"rent": [
+				1040,
+				3120,
+				7280,
+				14560,
+				24960,
+				41600
+			],
+			"upgrade_cost": 13000
+		},
+		{
+			"id": 50,
+			"col": 9,
+			"row": 32,
+			"size": 1,
+			"name": "六合夜市",
+			"group": "kaohsiung",
+			"land_type": "residential",
+			"price": 28000,
+			"rent": [
+				1120,
+				3360,
+				7840,
+				15680,
+				26880,
+				44800
+			],
+			"upgrade_cost": 14000
+		},
+		{
+			"id": 51,
+			"col": 7,
+			"row": 32,
 			"size": 2,
 			"name": "梦时代",
 			"group": "kaohsiung",
@@ -1843,35 +1952,66 @@
 			}
 		},
 		{
-			"id": 47,
-			"col": 2,
-			"row": 21,
-			"size": 2,
-			"name": "义大世界",
-			"group": "kaohsiung",
-			"land_type": "commercial",
-			"price": 60000,
+			"id": 52,
+			"col": 4,
+			"row": 30,
+			"size": 1,
+			"name": "鹿港老街",
+			"group": "changhua",
+			"land_type": "residential",
+			"price": 15000,
 			"rent": [
-				3750,
-				11250,
-				22500,
-				45000,
-				67500,
-				105000
+				600,
+				1800,
+				4200,
+				8400,
+				14400,
+				24000
 			],
-			"upgrade_cost": 30000,
-			"building_kind": "hotel",
-			"fee": {
-				"random_stay": {
-					"sides": 4,
-					"per_day": 1200
-				}
-			}
+			"upgrade_cost": 7500
 		},
 		{
-			"id": 48,
+			"id": 53,
+			"col": 3,
+			"row": 29,
+			"size": 1,
+			"name": "八卦山",
+			"group": "changhua",
+			"land_type": "residential",
+			"price": 16500,
+			"rent": [
+				660,
+				1980,
+				4620,
+				9240,
+				15840,
+				26400
+			],
+			"upgrade_cost": 8200
+		},
+		{
+			"id": 54,
 			"col": 2,
-			"row": 19,
+			"row": 28,
+			"size": 1,
+			"name": "田尾花乡",
+			"group": "changhua",
+			"land_type": "residential",
+			"price": 18000,
+			"rent": [
+				720,
+				2160,
+				5040,
+				10080,
+				17280,
+				28800
+			],
+			"upgrade_cost": 9000
+		},
+		{
+			"id": 55,
+			"col": 1,
+			"row": 26,
 			"size": 1,
 			"name": "垦丁大街",
 			"group": "pingtung",
@@ -1888,9 +2028,9 @@
 			"upgrade_cost": 7500
 		},
 		{
-			"id": 49,
-			"col": 2,
-			"row": 18,
+			"id": 56,
+			"col": 1,
+			"row": 25,
 			"size": 1,
 			"name": "东港",
 			"group": "pingtung",
@@ -1907,9 +2047,9 @@
 			"upgrade_cost": 8200
 		},
 		{
-			"id": 50,
-			"col": 2,
-			"row": 17,
+			"id": 57,
+			"col": 1,
+			"row": 24,
 			"size": 1,
 			"name": "潮州",
 			"group": "pingtung",
@@ -1926,9 +2066,9 @@
 			"upgrade_cost": 9000
 		},
 		{
-			"id": 51,
-			"col": 2,
-			"row": 16,
+			"id": 58,
+			"col": 1,
+			"row": 23,
 			"size": 1,
 			"name": "恒春",
 			"group": "pingtung",
@@ -1945,9 +2085,35 @@
 			"upgrade_cost": 9800
 		},
 		{
-			"id": 52,
-			"col": 2,
-			"row": 14,
+			"id": 59,
+			"col": 0,
+			"row": 21,
+			"size": 2,
+			"name": "垦丁福华饭店",
+			"group": "pingtung",
+			"land_type": "commercial",
+			"price": 38000,
+			"rent": [
+				2380,
+				7140,
+				14280,
+				28560,
+				42840,
+				66640
+			],
+			"upgrade_cost": 19000,
+			"building_kind": "hotel",
+			"fee": {
+				"random_stay": {
+					"sides": 4,
+					"per_day": 1200
+				}
+			}
+		},
+		{
+			"id": 60,
+			"col": 1,
+			"row": 19,
 			"size": 1,
 			"name": "知本温泉",
 			"group": "taitung",
@@ -1964,9 +2130,9 @@
 			"upgrade_cost": 5000
 		},
 		{
-			"id": 53,
-			"col": 2,
-			"row": 13,
+			"id": 61,
+			"col": 1,
+			"row": 18,
 			"size": 1,
 			"name": "绿岛",
 			"group": "taitung",
@@ -1983,9 +2149,9 @@
 			"upgrade_cost": 5500
 		},
 		{
-			"id": 54,
-			"col": 2,
-			"row": 12,
+			"id": 62,
+			"col": 1,
+			"row": 17,
 			"size": 1,
 			"name": "兰屿",
 			"group": "taitung",
@@ -2002,9 +2168,9 @@
 			"upgrade_cost": 6000
 		},
 		{
-			"id": 55,
-			"col": 2,
-			"row": 11,
+			"id": 63,
+			"col": 1,
+			"row": 16,
 			"size": 1,
 			"name": "太麻里",
 			"group": "taitung",
@@ -2021,66 +2187,47 @@
 			"upgrade_cost": 6500
 		},
 		{
-			"id": 56,
-			"col": 2,
-			"row": 9,
+			"id": 64,
+			"col": 1,
+			"row": 15,
 			"size": 1,
-			"name": "太鲁阁",
-			"group": "hualien",
+			"name": "三仙台",
+			"group": "taitung",
 			"land_type": "residential",
-			"price": 10000,
+			"price": 14000,
 			"rent": [
-				400,
-				1200,
-				2800,
-				5600,
-				9600,
-				16000
+				560,
+				1680,
+				3920,
+				7840,
+				13440,
+				22400
 			],
-			"upgrade_cost": 5000
+			"upgrade_cost": 7000
 		},
 		{
-			"id": 57,
-			"col": 2,
-			"row": 8,
+			"id": 65,
+			"col": 1,
+			"row": 14,
 			"size": 1,
-			"name": "七星潭",
-			"group": "hualien",
+			"name": "都兰",
+			"group": "taitung",
 			"land_type": "residential",
-			"price": 11000,
+			"price": 15000,
 			"rent": [
-				440,
-				1320,
-				3080,
-				6160,
-				10560,
-				17600
+				600,
+				1800,
+				4200,
+				8400,
+				14400,
+				24000
 			],
-			"upgrade_cost": 5500
+			"upgrade_cost": 7500
 		},
 		{
-			"id": 58,
-			"col": 2,
-			"row": 7,
-			"size": 1,
-			"name": "瑞穗",
-			"group": "hualien",
-			"land_type": "residential",
-			"price": 12000,
-			"rent": [
-				480,
-				1440,
-				3360,
-				6720,
-				11520,
-				19200
-			],
-			"upgrade_cost": 6000
-		},
-		{
-			"id": 59,
-			"col": 2,
-			"row": 5,
+			"id": 66,
+			"col": 1,
+			"row": 12,
 			"size": 1,
 			"name": "礁溪温泉",
 			"group": "yilan",
@@ -2097,9 +2244,9 @@
 			"upgrade_cost": 5000
 		},
 		{
-			"id": 60,
-			"col": 2,
-			"row": 4,
+			"id": 67,
+			"col": 1,
+			"row": 11,
 			"size": 1,
 			"name": "罗东夜市",
 			"group": "yilan",
@@ -2116,9 +2263,9 @@
 			"upgrade_cost": 5500
 		},
 		{
-			"id": 61,
-			"col": 2,
-			"row": 3,
+			"id": 68,
+			"col": 1,
+			"row": 10,
 			"size": 1,
 			"name": "冬山河",
 			"group": "yilan",
@@ -2135,9 +2282,9 @@
 			"upgrade_cost": 6000
 		},
 		{
-			"id": 62,
-			"col": 2,
-			"row": 2,
+			"id": 69,
+			"col": 1,
+			"row": 9,
 			"size": 1,
 			"name": "龟山岛",
 			"group": "yilan",
@@ -2152,8 +2299,121 @@
 				20800
 			],
 			"upgrade_cost": 6500
+		},
+		{
+			"id": 70,
+			"col": 1,
+			"row": 8,
+			"size": 1,
+			"name": "太平山",
+			"group": "yilan",
+			"land_type": "residential",
+			"price": 14000,
+			"rent": [
+				560,
+				1680,
+				3920,
+				7840,
+				13440,
+				22400
+			],
+			"upgrade_cost": 7000
+		},
+		{
+			"id": 71,
+			"col": 1,
+			"row": 7,
+			"size": 1,
+			"name": "南方澳",
+			"group": "yilan",
+			"land_type": "residential",
+			"price": 15000,
+			"rent": [
+				600,
+				1800,
+				4200,
+				8400,
+				14400,
+				24000
+			],
+			"upgrade_cost": 7500
+		},
+		{
+			"id": 72,
+			"col": 2,
+			"row": 5,
+			"size": 1,
+			"name": "太鲁阁",
+			"group": "hualien",
+			"land_type": "residential",
+			"price": 10000,
+			"rent": [
+				400,
+				1200,
+				2800,
+				5600,
+				9600,
+				16000
+			],
+			"upgrade_cost": 5000
+		},
+		{
+			"id": 73,
+			"col": 3,
+			"row": 4,
+			"size": 1,
+			"name": "七星潭",
+			"group": "hualien",
+			"land_type": "residential",
+			"price": 11000,
+			"rent": [
+				440,
+				1320,
+				3080,
+				6160,
+				10560,
+				17600
+			],
+			"upgrade_cost": 5500
+		},
+		{
+			"id": 74,
+			"col": 4,
+			"row": 3,
+			"size": 1,
+			"name": "瑞穗",
+			"group": "hualien",
+			"land_type": "residential",
+			"price": 12000,
+			"rent": [
+				480,
+				1440,
+				3360,
+				6720,
+				11520,
+				19200
+			],
+			"upgrade_cost": 6000
 		}
 	],
+	"street_labels": {
+		"taipei": "台北",
+		"taoyuan": "桃园",
+		"hsinchu": "新竹",
+		"keelung": "基隆",
+		"taichung": "台中",
+		"yunlin": "云林",
+		"chiayi": "嘉义",
+		"miaoli": "苗栗",
+		"tainan": "台南",
+		"tamsui": "淡水",
+		"kaohsiung": "高雄",
+		"changhua": "彰化",
+		"pingtung": "屏东",
+		"taitung": "台东",
+		"yilan": "宜兰",
+		"hualien": "花莲"
+	},
 	"facility_fees": {
 		"mall": {
 			"random_amount": {

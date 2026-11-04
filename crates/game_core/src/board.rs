@@ -18,8 +18,11 @@ pub enum TileKind {
     Property,
     Bank,
     Stock,
-    Chance,
     Fate,
+    /// 卡片格：无土地，踩到后从**道具牌堆**随机抽一张进手牌（与百货公司卖的是同一批卡）。
+    /// 它不立刻结算卡面效果 —— 「获得」与「打出」是两件事（区别于 [`TileKind::Fate`] 的
+    /// 命运卡：那一副是当场生效的事件牌）。实现见 `deck::settle_card_landing`。
+    Card,
     Jail,
     Hospital,
     Lottery,
@@ -942,43 +945,160 @@ mod tests {
         BoardDef::from_json(TAIWAN).expect("taiwan.json 应能解析")
     }
 
-    /// 真盘的验收地基：16 条街、每条 3–6 块（纯商业街是 2 块）、商业与住宅混排、
-    /// 一圈 100 格、起始现金 20 万。这些数写死在测试里，改盘就必须同时解释为什么。
+    fn streets(b: &BoardDef) -> BTreeMap<&str, Vec<&LandDef>> {
+        let mut out: BTreeMap<&str, Vec<&LandDef>> = BTreeMap::new();
+        for l in &b.lands {
+            out.entry(l.group.as_deref().unwrap()).or_default().push(l);
+        }
+        out
+    }
+
+    /// 主环上每个街区的道路格下标与朝向。街区必须是一段**连续且共线**的 property 格：
+    /// 相邻两格的方向差恒定（正交街一格一个轴、斜街两轴同时走一格）。
+    fn street_runs(b: &BoardDef) -> BTreeMap<&str, Vec<(usize, &TileDef)>> {
+        let mut out: BTreeMap<&str, Vec<(usize, &TileDef)>> = BTreeMap::new();
+        for (i, t) in b.tiles.iter().enumerate() {
+            let Some(id) = t.land_id else { continue };
+            let land = b.land(id).expect("property 格必须绑到现有土地");
+            out.entry(land.group.as_deref().unwrap())
+                .or_default()
+                .push((i, t));
+        }
+        out
+    }
+
+    /// 严格交替：任意两个相邻主环格不能同时是特殊的非土地格。
+    ///
+    /// 这一条就是「每两条街之间只有 1 个非土地格」的结构判据 —— 街区之间被一个特殊格
+    /// 隔开，特殊格本身不能再连着一个特殊格。
+    fn assert_one_special_between_streets(b: &BoardDef) {
+        let n = b.tiles.len();
+        for i in 0..n {
+            let a = &b.tiles[i];
+            let c = &b.tiles[(i + 1) % n];
+            assert!(
+                !(a.land_id.is_none() && c.land_id.is_none()),
+                "格 {} ({}) 与格 {} ({}) 都是非土地格，街间应只有 1 个",
+                a.id,
+                a.name,
+                c.id,
+                c.name
+            );
+        }
+    }
+
+    /// 每条街：连续、共线、3–6 格；至少 3 块住宅；斜街只由 3–6 块 1×1 住宅组成。
+    fn assert_straight_streets(b: &BoardDef) {
+        let runs = street_runs(b);
+        for (group, tiles) in &runs {
+            let indices: Vec<usize> = tiles.iter().map(|(i, _)| *i).collect();
+            for pair in indices.windows(2) {
+                assert_eq!(pair[1], pair[0] + 1, "{group} 的格号不连续: {indices:?}");
+            }
+            let cells: usize = b
+                .lands
+                .iter()
+                .filter(|l| l.group.as_deref() == Some(*group))
+                .map(|l| l.size as usize)
+                .sum();
+            assert!(
+                (3..=6).contains(&cells),
+                "{group} 占 {cells} 格，街区应为 3–6 格"
+            );
+            let residential = b
+                .lands
+                .iter()
+                .filter(|l| l.group.as_deref() == Some(*group))
+                .filter(|l| l.land_type == LandType::Residential)
+                .count();
+            assert!(residential >= 3, "{group} 只有 {residential} 块住宅");
+
+            // 共线：相邻两格的位移必须始终是同一个向量
+            let first = &tiles[0].1;
+            if let Some(second) = tiles.get(1) {
+                let step = (
+                    second.1.col as i64 - first.col as i64,
+                    second.1.row as i64 - first.row as i64,
+                );
+                for pair in tiles.windows(2) {
+                    let d = (
+                        pair[1].1.col as i64 - pair[0].1.col as i64,
+                        pair[1].1.row as i64 - pair[0].1.row as i64,
+                    );
+                    assert_eq!(d, step, "{group} 的街道不直: 先 {step:?} 后 {d:?}");
+                    assert!(
+                        d.0.abs().max(d.1.abs()) == 1,
+                        "{group} 相邻格跨了不止一格: {d:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 土地中心必须比它绑定的道路格更远离棋盘中心 —— 这就是「土地沿环路外侧布置」。
+    ///
+    /// 2×2 商业地的中心比 1×1 更外一格，所以用「严格大于」而不是「不等于」。
+    fn assert_lands_outside(b: &BoardDef) {
+        let center = (
+            (b.grid_cols as f32 - 1.0) / 2.0,
+            (b.grid_rows as f32 - 1.0) / 2.0,
+        );
+        let dist = |c: f32, r: f32| ((c - center.0).powi(2) + (r - center.1).powi(2)).sqrt();
+        for l in &b.lands {
+            let lc = l.col as f32 + (l.size as f32 - 1.0) / 2.0;
+            let lr = l.row as f32 + (l.size as f32 - 1.0) / 2.0;
+            let land_d = dist(lc, lr);
+            let road_d = b
+                .tiles_bound_to_land(l.id)
+                .iter()
+                .filter_map(|id| b.tiles.iter().find(|t| t.id == *id))
+                .map(|t| dist(t.col as f32, t.row as f32))
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                land_d > road_d + 0.01,
+                "土地 {} {} 在环路内侧（地 {land_d:.2} / 路 {road_d:.2}）",
+                l.id,
+                l.name
+            );
+        }
+    }
+
+    fn diagonal_streets(b: &BoardDef) -> usize {
+        street_runs(b)
+            .values()
+            .filter(|tiles| {
+                tiles.len() >= 2 && {
+                    let d = (
+                        tiles[1].1.col as i64 - tiles[0].1.col as i64,
+                        tiles[1].1.row as i64 - tiles[0].1.row as i64,
+                    );
+                    d.0 != 0 && d.1 != 0
+                }
+            })
+            .count()
+    }
+
+    /// 真盘的验收地基：16 条街、每条 3–6 格、商业与住宅混排、一圈 100 格、起始现金 20 万。
+    /// 2026-11-04 改成**严格交替 + 八角形主环**：四边各 3 条 6 格街、四个角各 1 条 3 格
+    /// 斜街；每两条街之间恰好 1 个特殊格；土地全部在环路外侧。
     #[test]
-    fn taiwan_is_sixteen_streets_of_three_to_six_plots() {
+    fn taiwan_is_sixteen_straight_streets_between_single_specials() {
         let b = taiwan();
         assert_eq!(b.board_name, "taiwan");
         assert_eq!(b.start_cash, 200_000);
         assert_eq!(b.loop_len(), 100);
-        assert_eq!(b.lands.len(), 63);
+        assert_eq!(b.lands.len(), 75);
         assert!(
             b.validate().is_ok(),
             "校验失败: {:?}",
             b.validate().unwrap_err()
         );
+        assert_one_special_between_streets(&b);
+        assert_straight_streets(&b);
+        assert_lands_outside(&b);
 
-        let mut streets: BTreeMap<&str, Vec<&LandDef>> = BTreeMap::new();
-        for l in &b.lands {
-            streets
-                .entry(l.group.as_deref().unwrap())
-                .or_default()
-                .push(l);
-        }
+        let streets = streets(&b);
         assert_eq!(streets.len(), 16, "台湾盘该有 16 条街");
-        for (group, plots) in &streets {
-            let commercial_only = plots.iter().all(|l| l.land_type == LandType::Commercial);
-            let n = plots.len();
-            if commercial_only {
-                assert_eq!(n, 2, "{group} 是纯商业街，该是两块大地");
-            } else {
-                assert!(
-                    (3..=6).contains(&n),
-                    "{group} 有 {n} 块地，街道应在 3–6 块之间"
-                );
-            }
-        }
-        // 商业与住宅混排的街至少三条；纯商业街两条 —— 这是「商业可以单独一条街，
-        // 也可以与住宅同街」那条口径在数据上的两种形状
         let mixed = streets
             .values()
             .filter(|p| {
@@ -990,11 +1110,10 @@ mod tests {
             .values()
             .filter(|p| p.iter().all(|l| l.land_type == LandType::Commercial))
             .count();
-        assert!(mixed >= 3, "混合街只有 {mixed} 条");
-        assert_eq!(pure_comm, 2, "纯商业街该是桃园与高雄两条");
+        assert_eq!(mixed, 9, "九条混排街（4 住宅 + 1 商业）");
+        assert_eq!(pure_comm, 0, "这一版没有纯商业街");
+        assert_eq!(diagonal_streets(&b), 4, "四个角各一条斜街");
 
-        // 商业地都是 2×2，且空商业地（没有 building_kind）真的存在 —— P10c 的建设窗口
-        // 靠它；`validate` 若继续把 (None,None) 当错误，这一条会先红
         let commercial: Vec<_> = b
             .lands
             .iter()
@@ -1005,6 +1124,11 @@ mod tests {
         assert!(
             commercial.iter().any(|l| l.building_kind.is_none()),
             "真盘上要留空商业地给建设窗口"
+        );
+        assert_eq!(
+            b.tiles.iter().filter(|t| t.land_id.is_none()).count(),
+            16,
+            "16 条街之间恰好 16 个特殊格"
         );
     }
 
@@ -1037,27 +1161,42 @@ mod tests {
         }
     }
 
-    /// 无地段落（P2c 蓝图里的「集中段落」）：真有连续的行车段没有地，
-    /// 且点券/小游戏都落在那里。没有这条断言的话，把 coupon 挪到地旁边也不会有人发现。
+    /// 严格交替之后特殊格只剩 16 个，但每个系统仍要在盘上有一格入口 ——
+    /// 少掉的那几类（机会格整类已删）由编译期保证，其余在这里钉住。
     #[test]
-    fn taiwan_has_a_land_free_stretch_with_coupon_and_arcade() {
+    fn taiwan_keeps_one_entry_for_every_special_system() {
         let b = taiwan();
-        let mut run = 0;
-        let mut best = 0;
-        for t in &b.tiles {
-            if t.land_id.is_none() && t.kind != TileKind::Shop && t.kind != TileKind::Company {
-                run += 1;
-                best = best.max(run);
-            } else {
-                run = 0;
-            }
+        for kind in [
+            TileKind::Bank,
+            TileKind::Fate,
+            TileKind::Card,
+            TileKind::News,
+            TileKind::Magic,
+            TileKind::Lottery,
+            TileKind::Jail,
+            TileKind::Hospital,
+            TileKind::Coupon,
+            TileKind::Shop,
+            TileKind::Arcade,
+            TileKind::Company,
+        ] {
+            assert!(
+                b.tiles.iter().any(|t| t.kind == kind),
+                "台湾盘缺 {kind:?} 入口"
+            );
         }
-        assert!(best >= 6, "连成一段的无地路段只有 {best} 格");
-        assert!(b.tiles.iter().any(|t| t.kind == TileKind::Coupon));
-        assert!(b.tiles.iter().any(|t| t.kind == TileKind::Arcade));
-        assert!(
-            b.tiles.iter().any(|t| t.kind == TileKind::Neutral),
-            "公园那一格"
+        assert_eq!(
+            b.tiles
+                .iter()
+                .filter(|t| t.kind == TileKind::Company)
+                .count(),
+            4,
+            "四家公司门面"
+        );
+        assert_eq!(
+            b.tiles.iter().filter(|t| t.kind == TileKind::Fate).count(),
+            2,
+            "两格命运（机会格删掉后它是唯一的手牌入口）"
         );
     }
 
@@ -1069,37 +1208,26 @@ mod tests {
         BoardDef::from_json(CHINA).expect("china.json 应能解析")
     }
 
-    /// 大地图的验收地基：20 条街、每条 3–6 块、一圈 148 格、起始现金 30 万。
-    /// 这些数写死在测试里，改盘就必须同时解释为什么。
+    /// 大地图的验收地基：20 条街、每条 3–6 格、一圈 140 格、起始现金 30 万。
+    /// 严格交替下 20 条街 × 每街最多 6 格 + 20 个特殊格 = 140，所以这一版从 148 缩到 140。
     #[test]
-    fn china_is_twenty_streets_of_three_to_six_plots() {
+    fn china_is_twenty_straight_streets_between_single_specials() {
         let b = china();
         assert_eq!(b.board_name, "china");
         assert_eq!(b.start_cash, 300_000);
-        assert_eq!(b.loop_len(), 148);
-        assert_eq!(b.lands.len(), 93);
+        assert_eq!(b.loop_len(), 140);
+        assert_eq!(b.lands.len(), 107);
         assert!(
             b.validate().is_ok(),
             "校验失败: {:?}",
             b.validate().unwrap_err()
         );
+        assert_one_special_between_streets(&b);
+        assert_straight_streets(&b);
+        assert_lands_outside(&b);
 
-        let mut streets: BTreeMap<&str, Vec<&LandDef>> = BTreeMap::new();
-        for l in &b.lands {
-            streets
-                .entry(l.group.as_deref().unwrap())
-                .or_default()
-                .push(l);
-        }
+        let streets = streets(&b);
         assert_eq!(streets.len(), 20, "中国大陆盘该有 20 条街");
-        for (group, plots) in &streets {
-            let n = plots.len();
-            assert!(
-                (3..=6).contains(&n),
-                "{group} 有 {n} 块地，街道应在 3–6 块之间"
-            );
-        }
-        // 十条大街是住宅+商业混排，另外十条是纯住宅；这张盘没有纯商业街
         let mixed = streets
             .values()
             .filter(|p| {
@@ -1111,8 +1239,9 @@ mod tests {
             .values()
             .filter(|p| p.iter().all(|l| l.land_type == LandType::Commercial))
             .count();
-        assert_eq!(mixed, 10, "十条混排街");
-        assert_eq!(pure_comm, 0, "这张盘不该有纯商业街");
+        assert_eq!(mixed, 13, "十三条混排街（4 住宅 + 1 商业）");
+        assert_eq!(pure_comm, 0, "这张盘没有纯商业街");
+        assert_eq!(diagonal_streets(&b), 4, "四个角各一条斜街");
 
         let commercial: Vec<_> = b
             .lands
@@ -1124,6 +1253,11 @@ mod tests {
         assert!(
             commercial.iter().any(|l| l.building_kind.is_none()),
             "大地图上也要留空商业地给建设窗口"
+        );
+        assert_eq!(
+            b.tiles.iter().filter(|t| t.land_id.is_none()).count(),
+            20,
+            "20 条街之间恰好 20 个特殊格"
         );
     }
 
@@ -1159,35 +1293,39 @@ mod tests {
     /// P2c 蓝图里的「集中段落」在大地图上也要真的存在：连成一段的无地路段，
     /// 点券与三款游乐场都落在那里。
     #[test]
-    fn china_has_a_land_free_stretch_with_coupon_and_arcade() {
+    fn china_keeps_one_entry_for_every_special_system() {
         let b = china();
-        let mut run = 0;
-        let mut best = 0;
-        for t in &b.tiles {
-            if t.land_id.is_none() && t.kind != TileKind::Shop && t.kind != TileKind::Company {
-                run += 1;
-                best = best.max(run);
-            } else {
-                run = 0;
-            }
+        for kind in [
+            TileKind::Bank,
+            TileKind::Fate,
+            TileKind::Card,
+            TileKind::News,
+            TileKind::Magic,
+            TileKind::Lottery,
+            TileKind::Jail,
+            TileKind::Hospital,
+            TileKind::Coupon,
+            TileKind::Shop,
+            TileKind::Arcade,
+            TileKind::Company,
+        ] {
+            assert!(
+                b.tiles.iter().any(|t| t.kind == kind),
+                "中国大陆盘缺 {kind:?} 入口"
+            );
         }
-        assert!(best >= 6, "连成一段的无地路段只有 {best} 格");
-        assert!(b.tiles.iter().any(|t| t.kind == TileKind::Coupon));
         assert_eq!(
             b.tiles
                 .iter()
-                .filter(|t| t.kind == TileKind::Arcade)
+                .filter(|t| t.kind == TileKind::Company)
                 .count(),
-            3,
-            "三款游乐场各一格"
+            5,
+            "五家公司门面"
         );
-        assert!(
-            b.tiles.iter().any(|t| t.kind == TileKind::Neutral),
-            "公园那一格"
-        );
-        assert!(
-            b.tiles.iter().any(|t| t.kind == TileKind::Lottery),
-            "彩票中心"
+        assert_eq!(
+            b.tiles.iter().filter(|t| t.kind == TileKind::Fate).count(),
+            2,
+            "两格命运（机会格删掉后它是唯一的手牌入口）"
         );
     }
 

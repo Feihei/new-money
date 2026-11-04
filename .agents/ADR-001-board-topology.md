@@ -74,7 +74,7 @@
 
 > **修正**：建筑不应建在角色走过的道路上。道路格只负责"通行 + 触发"，土地（归属/等级）是路旁独立对象。
 
-- **道路格 (Road Tile)**：`loop[]` 中的格都是道路格，是 token 实际走过的格。其 `type` 决定"落到此格触发什么事件"：`start`(领钱) / `chance`(抽卡) / `fate`(命运) / `bank`(银行) / `transport`(车站) / `property`(触发地产) / `jail`·`hospital` 接入点等。
+- **道路格 (Road Tile)**：`loop[]` 中的格都是道路格，是 token 实际走过的格。其 `type` 决定"落到此格触发什么事件"：`fate`(抽卡) / `news`(新闻) / `bank`(银行) / `transport`(车站) / `property`(触发地产) / `jail`·`hospital` 接入点等（`chance` 已删除，见 `.agents/PLAN.md`）。
 - **土地 (Land Plot)**：独立对象，只记录**归属权 (owner) 与等级 (level)**，以及价格/租金/升级费/分组等静态数据。**不落在道路上**，渲染在环路**外侧**的相邻格。
 - **绑定 (Binding)**：道路格用 `land_id` 指向 `lands[]` 中的土地；token 落到带 `land_id` 的道路格时，对该土地执行"购买 / 收租 / 升级"逻辑。
 - **绑定基数**：
@@ -107,7 +107,7 @@
 - 主环 **12 格**（每边 3 格的小方环）
 - 1 个 **jail** 分支（接入点 1 格 + 死胡同 1 格）
 - 1 个 **hospital** 分支（接入点 1 格 + 死胡同 1 格）
-- 含 start / 若干 property / chance / fate / 2 个 branch 接入点
+- 含若干 property / fate / 2 个 branch 接入点
 
 ---
 

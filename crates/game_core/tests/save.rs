@@ -53,7 +53,7 @@ fn a_capture_at_the_save_point_reads_the_same_world_twice() {
     assert_eq!(first, second, "同一个世界拍两次，快照逐字段必须相等");
     assert_eq!(first.version, SAVE_VERSION);
     assert_eq!(first.players.len(), 2, "两人夹具");
-    assert_eq!(first.decks.len(), 2, "机会与命运两副");
+    assert_eq!(first.decks.len(), 1, "事件池只剩命运一副");
 }
 
 #[test]

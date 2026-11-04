@@ -1355,6 +1355,12 @@ fn pump_inputs(mut pump: Pump<'_>) {
 }
 
 pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
+    boot_on("data/boards/prototype.json", setup, rules, seed)
+}
+
+/// 与 [`boot`] 同一套装配，但换一张盘。只有需要真盘形状的用例才该用它 ——
+/// 其余几百条用例的格号/地号是按 prototype 写的。
+pub fn boot_on(board: &'static str, setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
     let mut app = App::new();
     // 任务池（尤其 IoTaskPool）必须由测试自己初始化：AssetServer 的读盘跑在它上面
     app.add_plugins(TaskPoolPlugin::default())
@@ -1394,13 +1400,10 @@ pub fn boot(setup: GameSetup, rules: GameRules, seed: GameSeed) -> App {
         .init_resource::<JackpotAudit>()
         .add_systems(
             Startup,
-            |mut commands: Commands, server: Res<AssetServer>| {
+            move |mut commands: Commands, server: Res<AssetServer>| {
                 // P2c：默认盘换成了台湾真棋盘；规则层这批集成测试的格号/地号/地名
                 // 是按演示盘写的，所以这里**显式钉住** prototype，而不是跟着默认盘漂。
-                commands.insert_resource(DataHandles::load_with_board(
-                    &server,
-                    "data/boards/prototype.json",
-                ));
+                commands.insert_resource(DataHandles::load_with_board(&server, board));
             },
         )
         .add_systems(PreUpdate, pump_inputs)

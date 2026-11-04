@@ -39,7 +39,7 @@
 | `tests/` | 2403 | 16 个 GUT 文件，单元 + 集成 | **翻译**为 `cargo test`（模板见 §八） |
 | `scripts/ui/` + `board/` + `entities/` | 2451 | 等轴测渲染、相机、行走动画、HUD、4 个决策对话框、主菜单/暂停菜单 | **重写** |
 | `scripts/autoload/` | 341 | `event_bus`(61，24 个信号) `game_state`(89) `data_manager`(39) `save_manager`(40，**全是 TODO 占位**) `scene_manager`(41) `audio_manager`(占位) | **映射**为 Message / Resource / Asset |
-| `data/*.json` | — | `boards/prototype.json`（12 主环格 + jail/hospital 分支）、`cards/{chance,fate}_cards.json`、`stocks/stocks.json` | **原样复用** |
+| `data/*.json` | — | `boards/prototype.json`（12 主环格 + jail/hospital 分支）、`cards/{fate,item}_cards.json`、`stocks/stocks.json` | **原样复用** |
 | `docs/` | — | `DEV_PLAN.md`、`ADR-001-board-topology.md`（已 Accepted）、`board-data-schema.md`、`GLOSSARY-board.md`、`PHASE_1_5_PLAN.md` | **原样复用**，是移植的最有价值资产 |
 | `tools/` | — | `validate_board.py`、`render_board_svg.py`、`selftest.gd` | Python 那两个与引擎无关，**直接搬过去继续用** |
 
@@ -130,7 +130,7 @@ new-money-bevy/
 | 路旁土地 | 若干 | `LandId(u32)` `GridPos` `LandSize(u8=1\|2)` `LandDef`(Arc：group/land_type/price/rent[6]/upgrade_cost) `OwnerAddr(Option<PlayerId>)` `BuildingLevel(u8)` `Mortgaged{proceeds:i64}`（**每块地都挂着，`proceeds>0` 即押着** —— P3d③ 之前它是「存在即抵押」的单位标记；改成带本金的值有两个理由：赎回要按「当初到手那笔 + 手续费」算，而标记存不下那个数；且 `Commands` 的延迟写会让同一帧内两条押同一块地的请求都读到「还没押」，钱付两遍） |
 | 玩家 | 2–4 | `PlayerId(u32)` `PlayerName` `PlayerColor` `Wallet{cash:i64}` `TokenPosition{tile:TileIndex, off_board:Option<GridPos>}` `Detention{place:DetentionPlace,turns_left}`（P4① 拘留统一模型：**监狱／医院／出国三处去处共用一个组件**，`DetentionPlace` 那两条映射 `branch`（棋盘上那条死胡同）与 `label`/`back_verb`（人话）是它们的全部差别；`Away` 没有分支 —— 那个地方不在地图上，所以棋子留在接入点）`StaySentence{turns_left}`（停留卡，**P4④ 起是字面口径**：写 N 停 N 个回合，且不再自动跳回合 —— 轮到他的那颗「掷骰」翻成「停留」，点一下才消耗，`take_stay_system` 收这条意图。它与拘留是两条独立计时：被拘留的人进不了 `WaitRoll`，所以拘留那几回合不消耗停留的计数；不合成一个「处境」组件的理由见 `player.rs` 那段 —— 服刑的人被挪进死胡同格且 P4 起丧失收租权，停留的人还在自己踩到的那一格上、地照收租）`Heading`（`Forward \| Backward`，P3d④b 转向卡翻的就是这一位 —— **环只有一份**，方向是玩家的状态，见 ADR-001 行为规则 3）`StockHoldings(HashMap<StockId,u32>)` `BankBalance{deposit,loan:i64}` `Controller`（`Human \| Ai(AiProfile)`，**P14a 已落地，形状与当初的设想差在两处**：① 它**必挂**而不是 `Option` —— 查不到组件的默认是「等人点」而不是「替他决定」，漏装配的阶段会静默吃掉玩家的操作，那种症状没人报；② `Ai` 里装的不是 `difficulty` 一档枚举而是一个**向量** `AiProfile{buy,debt,stock,build,harm,fumble}`，三档性格（大佬奸／普通人／乖宝宝）是这个向量的三个预设常量，于是「大佬奸」在代码里永远是一行读数而不是十处 `if`。它的全部差别见 `game_core/src/ai.rs`）`Bankrupt`（marker，取代 `status=="bankrupt"` 判断） |
 | 棋子（视觉） | 每玩家 1 | `TokenVisual{player:PlayerId}` `Transform` `WalkQueue{path,step_clock}` |
-| 卡牌堆 | 2（机会/命运） | `Deck{kind, pile:Vec<CardId>, discard:Vec<CardId>}`，卡定义走 `Assets<CardDef>` |
+| 卡牌堆 | 1（命运） | `Deck{kind, pile:Vec<CardId>, discard:Vec<CardId>}`，卡定义走 `Assets<CardDef>`；机会牌堆 2026-11-04 删除 |
 | 股票 | 每只 1 | `StockId` `StockDef`(Arc：base/floor/ceiling/volatility/outstanding) `StockPrice{current:f64}` `PriceHistory(VecDeque<f64>，MAX 50)` |
 | 相机/灯光/UI | — | 归 `game_app`，core 里没有 |
 
@@ -201,7 +201,7 @@ new-money-bevy/
 | `take_stay_system` | `in_state(WaitRoll)` | `MessageReader<RequestStay>` `Query<&mut StaySentence>` | 当前回合玩家按「停留」：计数减一；还剩则发 `StaySkipped`，扣到 0 摘组件并发 `StayLifted`；→`TurnEnd`（人还在场上，地照收租） |
 | `roll_dice_system` | `in_state(WaitRoll)` | `MessageReader<RequestRoll>` `Res<Rng>` `Option<&StaySentence>` | 被停留按住的人**不掷**（缺 `StaySentence` 才走）；`DiceRolled`；算 `destination`；`TokenPosition`；`WalkQueue`；→`Walking` |
 | `walk_step_system` | `in_state(Walking)` | `Res<WalkClock>` `WalkQueue` `ActiveBoard` | `TileStepped`；步数耗尽→发 `PlayerArrived`，→`Landed` |
-| `resolve_landing_system` | `OnEnter(Landed)` | `TileKind` `LinkedLand` `Query<(&LandDef,&OwnerAddr,&BuildingLevel)>` `GameRules` | 分派：property→`BuyOffered`/`RentDue`+`DecisionChosen` 等待；stock→`StockTick`；bank→`InterestApplied`；chance/fate→抽卡并结算效果；road/start→直接 `TurnEnd` |
+| `resolve_landing_system` | `OnEnter(Landed)` | `TileKind` `LinkedLand` `Query<(&LandDef,&OwnerAddr,&BuildingLevel)>` `GameRules` | 分派：property→`BuyOffered`/`RentDue`+`DecisionChosen` 等待；stock→`StockTick`；bank→`InterestApplied`；fate→抽命运卡并结算效果；card→抽道具卡进手牌；road→直接 `TurnEnd` |
 | `decision_system` | `in_state(WaitDecision)` | `MessageReader<DecisionChosen>` `Res<PendingDecision>` `Res<Landing>` | 执行买/升级/确认，清 `PendingDecision`，→`TurnEnd`；**报价答完后**若这一格是拘留分支的接入点且那里关着人，改挂 `Pending::Bail`（P4③，窗口留着直到「离开」） |
 | `end_turn_system` | `OnEnter(TurnEnd)` | `Wallet` `GameSession` | `TurnEnded`；`turn_count+=1`；活跃人数 ≤1 → `Over`，否则推进 cursor → `TurnStart` |
 | `market_tick_on_turn_end_system` | `OnEnter(TurnEnd)` | `Market`（股票实体 + `Rng` + `MarketClock` + `HolidaySet`） `GameSession.epoch` | 一天 = 一回合结束：`tick+1`；**休市日（周末 ∪ 节假日）只推日历、不推行情**；每月 15 号分红（`calendar::is_dividend_day`）。银行不受日历影响 |
