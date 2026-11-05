@@ -42,6 +42,20 @@
 
 金属与钟一律用 `bell()`（分音比 1 : 1.6 : 2.76）而不是叠八度的正弦 —— 后者只会听着像电子琴。
 
+## 接线状态（P16a，11-05）
+
+`audio.rs` 只认上表**键名**，所以逐条换素材不牵动接线：
+
+- **对局九条全部接上**：`dice_roll`（`DiceRolled`）、`coin_gain`/`coin_loss`（`CashChanged` 按方向）、
+  `card_play`（`CardPlayed`）、`item_place`（`ItemPlaced`）、`jail`（`PlayerDetained`/`PlayerBailed`）、
+  `fate`（抽到 `CardKind::Fate`）、`monopoly`（买下那条街第 3 块）、`bankrupt`（`PlayerBankrupt`）。
+  同一帧同一个键只放一条。
+- **UI 只接了 soft 四声**：`ui_click_soft` / `ui_confirm_soft` / `ui_cancel_soft` / `ui_error_soft`
+  （`UiAction` 47 变体穷尽分类，禁用按钮发 error）。**`ui_hover_*` 与 crisp 那套都没接** ——
+  hover 音是刻意不做，crisp 等有人真听过再决定。
+- **试听**：`NM_AUDIO_SELFTEST=1` 开局把 15 句语音 + 9 条音效 + 4 条 UI 逐条放一遍，
+  `NM_AUDIO_LOG=1` 每条打一行。这是「素材好不好听」的入口，不需要走一局。
+
 ## 重跑
 
 ```
@@ -57,13 +71,6 @@ ffmpeg -y -i .tmp/game-sfx/game/<键>.wav -ac 2 -ar 44100 -c:a libvorbis -q:a 5 
 ```
 
 UI 那五条改名进 `assets/audio/sfx/ui_*.ogg` 时同样走这条转换，不要直接拷 wav。
-
-## 历史：MiniMax Music 3 路线（已否决）
-
-2026-10-28 曾用 ComfyUI + 本地 MiniMax Music 3 权重生成过三批候选
-（seed 11/42/77 与 v2 的 7/23/99，留档 `.tmp/game-sfx/`），听感不达标，一个都
-没采用。工作流模板一并退到 `.tmp/game-sfx/sfx_workflow_template.json.rejected.bak`，
-不入库。
 
 ## 历史：MiniMax Music 3 路线（已否决）
 

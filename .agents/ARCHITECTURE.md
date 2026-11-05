@@ -370,6 +370,10 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 42. **`Overflow::clip()` 的父节点会把所有后代一起挡在命中测试之外 —— 画面照画、点击全空**（P16c 选角色世界地图踩出来的）。地图框为了圆角写了 `overflow: Overflow::clip()`，头像卡片是它的子节点：截图里十二张卡片清清楚楚，`PointerClick` 却连一张都命不中（症状与「按钮是死的」完全一样，而 `NM_SHOT` 还会照常截出「一切正常」）。它和坑 34 是同一属性的两面：34 说「不写 clip 孩子会画出去」，这一条说「写了 clip 孩子就点不到」—— 两件事都不报错。修法：**把裁剪收窄到只包住需要裁的那一层**（底图单独套一个 `overflow: clip()` 的绝对定位壳，卡片仍是地图框的直接子节点、排在裁剪壳之后）。判据：凡一个容器同时要「裁某个孩子」与「让另一个孩子可点」，裁剪必须下沉到那个孩子的包装层，**不能写在共同祖先上**。
 43. **`.chain()` 只保证不并行，不在链的节点之间 flush `Commands`**（11-05 棋盘几何换折线版踩出来的）。`render::geom` 是给其余每条渲染 system 提供坐标的资源，所以它必须排在同一帧的 `Boot`/`Live` 之前；写成 `build_board_geom.pipe(apply_deferred).before(..)` 那种「靠链插 flush」的形状在 0.20 不成立 —— 命令要等帧末，同帧的九条 system 全报 `Parameter 'Res<BoardGeom>' failed validation`。修法：**资源就地写**（`ResMut<BoardGeom>` 直接改），根本不产生命令。
 44. **同一个 `resource_added::<T>` 条件挂到两个调度集合上，只有先求值的那个能跑**。它是「条件」不是「事件」：求值一次就消费掉那一帧的 change tick，后一个集合看到的已经是「不新」。症状是整块渲染什么都不做、日志里一条记录都没有（连失败都数不出来）。修法：**条件只挂一处**，其余用 `resource_exists` 或干脆不挂、在 system 内部判空（`Option<Res<ActiveBoard>>`）。
+45. **`AudioSink` 不是「一 spawn 就有」，它是资产加载完成之后由 `play_queued_audio_system` 插上的组件**（P16a 的 spike 实测：spawn 当帧查 sink 是空的，短 ogg 在 0.6s 后 `empty()` 才为真）。推论两条：① 任何「放下去立刻读 `sink.volume()`/`position()`」的写法在加载前读不到，必须等到下一帧或更晚；② 世界列表「放完换下一首」只能问 `empty()`，而**暂停期间 `empty()` 恒假**（rodio 的行为，不是我们的规则）—— 把它写进判据才不会被下一次升级悄悄改掉。反面是 `LoadState::Failed` 必须自己查，失败不会 panic，只会永远等下去（同坑 6）。落地在 `audio.rs::retire_finished_world`。
+46. **`AudioSinkPlayback::set_volume` 收 `&mut AudioSink`，而同一 trait 里 `pause`/`play`/`set_speed` 收 `&self`**（P16a⑤ 核过 0.20.0 `sinks.rs`）。于是「BGM 一条查询、语音一条查询」两条都写 `&mut AudioSink` 时过不了冲突检查：`With<BgmTag>` 与 `With<VoiceLine>` 在过滤层证明不了互斥（同坑 33）。修法：合成**一条**查询 `Query<(&mut AudioSink, Option<&BgmTag>, Option<&VoiceLine>)>`，在循环里按标签选总线（`audio::apply_audio_volumes` / `bus_of`）。判据：trait 上取 `&mut self` 的方法，天然会把「按标签分区」写成一条查询加分支。
+47. **`App` 上没有 `disable::<T>()`**（P16a 起手踩的）。运行时不装某个内建插件只有一条路：先拿 `let mut plugins = DefaultPlugins…`，在 `add_plugins` **之前**调 `PluginGroupBuilder::disable::<bevy::audio::AudioPlugin>()`。装下去之后没有卸载 API —— 所以 `NM_AUDIO=0` 必须是启动期的一次判断，不是运行中能翻的开关（同 P15c「调试面板下次启动生效」）。
+48. **`MessageReader` 的游标是「读到哪」而不是「读过没有」，`read().next()` 只消费一条、剩下的下一帧还会再触发**（P16a 音效去重时踩的：一次掷骰的 `DiceRolled` 被读出两条，骰子音下一帧又响一次）。判「这一帧有没有这类消息」要用 `read().count() > 0` 把它排干（或 `for .. in reader.read()` 走完）；同理同一帧两处 `read()` 只有第一处拿得到东西 —— 要两处用就先收进 `Vec`，别各读一遍。落地在 `audio.rs::cash_context` / `sfx_for_frame`。
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
@@ -526,6 +530,43 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 - **代价**：每块住宅地 10 份场景实例（5 体 + 5 壳），两侧共用同一批 glb 网格。
   壳的场景根要等 glTF 实例化长出 `Children` 之后才能逐片换网格/材质（`paint_outline_meshes`），
   只扫一遍、置 `patched`。
+
+---
+
+### 7.7 音频三总线与 BGM 场景机（P16a，11-05）
+
+全部在 `game_app/src/audio.rs`（`AudioPlugin` 八条 system），规则层一行不知道有声音。它**只读**世界状态
+（在哪一屏、挂着哪扇窗口、按没按暂停），一个字节都不写回去；`NM_AUDIO=0` 时主入口连 bevy 的
+`AudioPlugin` 都不装（坑 47），而本模块照样算意图、照样记 `NM_AUDIO_LOG` —— 于是无音频设备的机器
+也能验「换场景就该换曲」这条**判据**，验的不只是「没崩」。
+
+- **三条槽，不是一个「当前曲目」**：世界槽是播放列表（`WORLD_LIST` 五首 `Once`，放完由 `empty()` 推进，
+  走完回第 0 首）；事件槽是五套 `Loop`（银行柜台/百货/证券＝market、彩票＝fortune、魔法屋＝night、
+  保释与拍卖＝chase、游乐场＝fiesta）；独占槽给菜单与终局。事件起时**世界那条按住不销毁**，
+  事件结束 `play()` 从断点继续（spike 实测 rodio 的 pause 保留位置）—— 这条是拍板原话
+  「从刚才的断点继续」的落地方式。优先级链：菜单 ＞ 终局 ＞ 事件窗口 ＞ 证券浮层 ＞ 世界。
+- **`EventMusic` ↔ `Pending` 是一张穷尽表**（`event_music`，16 个变体逐个表态）：只有「整屏换了一屏」的
+  窗口才换曲，九个普通模态（买地/升级/收据/被动门……）一律 `None` —— 否则每开一次确认框音乐就抽一下。
+- **语音**：15 个事件（进场、大额得失、垄断、被关、命运得失、用卡/被卡、转向/停留/乌龟、地雷、破产、胜利）。
+  角色键共用 `art::ROSTER` 的第三列（12 位有声；四恶人与无名座位**静默是设计**，不 `warn!`）。
+  `loud_enough` 的门槛是 2000 × 物价指数；**静默族**（买地、升级、融资等）不许通用现金语音插嘴 ——
+  「大额失钱」那种话在买地时每笔都喊一次，耳朵听两句就烦。同一帧的租金成对按**付款方的回合序**排队、
+  收款方用子序 0 排在前面，于是「按回合顺序」与「得钱者先说」不打架。队列上限 8、满了丢尾不丢头；
+  一次点击只掐当前那一条。开场白挂 `TurnStarted{turn_count == 0}`，所以**读档不重播**（不靠 `StartMode`，
+  它已被 `begin_game` 取走）。
+- **音效**：九条通用（`dice_roll / coin_gain / coin_loss / card_play / item_place / jail / fate / monopoly /
+  bankrupt`）同帧同键去重；UI 四声（click/confirm/cancel/error）由派发处对 47 个 `UiAction` 做**穷尽分类**，
+  禁用按钮发 error —— 新增一个动作不填表就编译失败。
+- **音量**：三条总线各五档（0/25/50/75/100，`settings::VOLUME_STEPS`），默认 50/75/100 是按盘上素材的
+  实测响度定的（BGM 约 −14.5 LUFS、UI 峰值 −6 dBFS、语音约 −20 LUFS）。改档在 `Settings` 变化的那一帧
+  对**正在响**的 BGM/语音 sink 就地 `set_volume`（坑 46）；音效是一次性短声，按下那一刻的档位就是它的全部寿命。
+  越界档位读档时回落默认并 `warn!`，面板上五颗按钮永远有一颗是「当前」。
+- **旋钮**：`NM_AUDIO=0` 全静音、`NM_AUDIO_LOG=1` 每首换曲/每次暂停/每条事件各记一行、
+  `NM_AUDIO_SELFTEST=1` 开局把 28 条素材（15 语音 + 9 音效 + 4 UI）逐条放一遍 —— 语音**走真队列**，
+  所以点击打断那条也在自检里验得到。
+
+运行代码引用的是 `assets/audio/**`（mp3 已转 ogg，不入库，见硬约束 8）与 `game-sfx/` 里的合成脚本。
+素材全缺时整块静默，不影响 build 与测试。
 
 ---
 
