@@ -21,6 +21,7 @@ use std::env;
 use bevy::{
     asset::LoadState,
     audio::Volume,
+    ecs::change_detection::DetectChanges,
     prelude::{
         App, AssetServer, AudioPlayer, AudioSink, AudioSinkPlayback, Commands, Component, Entity,
         IntoScheduleConfigs, MessageReader, OnEnter, PlaybackSettings, Plugin, PointerButton,
@@ -36,6 +37,7 @@ use game_core::prelude::{
 };
 
 use crate::scene::Scene;
+use crate::settings::{Settings, VolumeBus};
 use crate::ui::finance::StockPanelOpen;
 
 /// 曲库在资产根下的位置。`main.rs::asset_root` 把资产根钉成绝对路径（指向仓库的 `assets/`），
@@ -54,11 +56,6 @@ const WORLD_LIST: [&str; 5] = [
     "bgm_10_candy",
     "bgm_11_simple",
 ];
-
-/// BGM 总线的默认增益。拍板是「三条总线各五档，默认 BGM 50／音效 75／语音 100」，
-/// 依据是盘上素材的实测响度（BGM 约 −14.5 LUFS，比 UI 音效的 −6 dBFS 低一截）；
-/// 档位与设置文件那一半接进来之前，这里就是那一句「50」。
-const BGM_GAIN: f32 = 0.5;
 
 /// 事件场景的五套曲子。**只有整屏场景换曲**，判据在 [`event_music`] 那张穷尽表里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,6 +426,7 @@ fn play_bgm(
     mut commands: Commands,
     bgm: Res<Bgm>,
     cfg: Res<AudioConfig>,
+    settings: Res<Settings>,
     server: Res<AssetServer>,
     live: Query<(Entity, &BgmTag)>,
 ) {
@@ -459,7 +457,7 @@ fn play_bgm(
         } else {
             PlaybackSettings::ONCE
         };
-        let with_volume = base.with_volume(Volume::Linear(BGM_GAIN));
+        let with_volume = base.with_volume(Volume::Linear(VolumeBus::Bgm.gain(&settings)));
         // 出生时就按它该在的状态起：事件场景里被按住的那条世界槽、暂停中进的对局都是
         let settings = if bgm.audible(slot) && !bgm.paused {
             with_volume
@@ -488,6 +486,41 @@ fn duck_bgm(bgm: Res<Bgm>, paused: Res<Paused>, live: Query<(&AudioSink, &BgmTag
                 sink.play();
             }
         }
+    }
+}
+
+/// 设置里的音量档一改，把新增益按到**已经在响**的那几条上。
+///
+/// 起新声时读档位是不够的：世界列表里一首 BGM 放几分钟，不按下去的话「拉到静音」要等到
+/// 换曲才生效。只在 `Settings` 变了的那一帧动手 —— `set_volume` 与 `pause` 一样是发到
+/// 音频线程的消息，每帧无脑调一次会白占那条线程。
+///
+/// 一条查询同时认两种声：`BgmTag` 与 `VoiceLine` 是两条互斥的槽，分成两条 `&mut AudioSink`
+/// 查询则过不了 Bevy 的冲突检查（过滤器证明不了两者不交）。音效是一次性的短声，
+/// 按下那一刻的档位就是它的全部寿命，没有「已经在响的那条」要改。
+fn apply_audio_volumes(
+    settings: Res<Settings>,
+    live: Query<(&mut AudioSink, Option<&BgmTag>, Option<&VoiceLine>)>,
+) {
+    if !settings.is_changed() {
+        return;
+    }
+    for (mut sink, tag, line) in live {
+        if let Some(bus) = bus_of(tag, line) {
+            sink.set_volume(Volume::Linear(bus.gain(&settings)));
+        }
+    }
+}
+
+/// 这条 sink 归哪条总线。抽出来是为了能单测：`AudioSink` 要真音频设备才造得出来，
+/// 而「BGM 的 sink 被按语音档」这种串线错误不该只有上机才看得见。
+fn bus_of(tag: Option<&BgmTag>, line: Option<&VoiceLine>) -> Option<VolumeBus> {
+    if tag.is_some() {
+        Some(VolumeBus::Bgm)
+    } else if line.is_some() {
+        Some(VolumeBus::Voice)
+    } else {
+        None
     }
 }
 
@@ -527,9 +560,7 @@ impl UiSound {
     }
 }
 
-/// 音效总线的默认增益（拍板 75%；UI 素材峰值 −6 dBFS，比 BGM 高一大截）。
-const SFX_GAIN: f32 = 0.75;
-
+/// 音效总线同样走 [`Settings`] 的档位（默认 75%：UI 素材峰值 −6 dBFS，比 BGM 高一大截）。
 /// 十五个语音事件：文件名（去 `.ogg`）与日志键同字面量。`CHARACTERS-dialogue.md` §三
 /// 那张触发矩阵是这里的地基，改口径先改那张表。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -592,8 +623,7 @@ impl VoiceEvent {
     }
 }
 
-/// 语音总线的默认增益（与 BGM 那一条同一条拍板：素材响度约 −20 LUFS，所以给 100%）。
-const VOICE_GAIN: f32 = 1.0;
+/// 语音总线同样走 [`Settings`] 的档位（默认 100%：素材约 −20 LUFS，比音效低一截）。
 /// 队列上限。满了丢队尾而**不丢队头**：队头是此刻该说的那一句。
 const MAX_QUEUE: usize = 8;
 /// 大额现金的门槛（未乘物价）。乘完之后才是判据 —— 门槛钉死的话，物价涨一倍时
@@ -981,6 +1011,7 @@ fn cash_context(
 fn collect_sfx(
     mut inbox: AudioInbox<'_, '_>,
     cfg: Res<AudioConfig>,
+    settings: Res<Settings>,
     server: Res<AssetServer>,
     mut commands: Commands,
 ) {
@@ -994,10 +1025,11 @@ fn collect_sfx(
     if !cfg.playback {
         return;
     }
+    let gain = VolumeBus::Sfx.gain(&settings);
     for key in keys {
         commands.spawn((
             AudioPlayer::new(server.load(format!("audio/sfx/{key}.ogg"))),
-            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(SFX_GAIN)),
+            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(gain)),
         ));
     }
 }
@@ -1099,6 +1131,7 @@ fn advance_voice(
     mut commands: Commands,
     mut queue: ResMut<VoiceQueue>,
     cfg: Res<AudioConfig>,
+    settings: Res<Settings>,
     server: Res<AssetServer>,
     live: Query<Entity, With<VoiceLine>>,
     players: Query<&PlayerName>,
@@ -1122,7 +1155,8 @@ fn advance_voice(
                 commands
                     .spawn((
                         AudioPlayer::new(server.load(path)),
-                        PlaybackSettings::DESPAWN.with_volume(Volume::Linear(VOICE_GAIN)),
+                        PlaybackSettings::DESPAWN
+                            .with_volume(Volume::Linear(VolumeBus::Voice.gain(&settings))),
                         VoiceLine,
                     ))
                     .id(),
@@ -1233,6 +1267,7 @@ struct SelftestView<'w, 's> {
 fn run_selftest(
     mut selftest: ResMut<Selftest>,
     view: SelftestView<'_, '_>,
+    settings: Res<Settings>,
     mut queue: ResMut<VoiceQueue>,
     server: Res<AssetServer>,
     mut commands: Commands,
@@ -1314,7 +1349,8 @@ fn run_selftest(
             if view.cfg.playback {
                 commands.spawn((
                     AudioPlayer::new(server.load(path)),
-                    PlaybackSettings::DESPAWN,
+                    PlaybackSettings::DESPAWN
+                        .with_volume(Volume::Linear(VolumeBus::Sfx.gain(&settings))),
                 ));
             }
         }
@@ -1357,6 +1393,8 @@ impl Plugin for AudioPlugin {
             )
             // 音效自己不排队：它只在这一帧读一遍、去重、放
             .add_systems(Update, collect_sfx)
+            // 音量档位改了就把正在响的那几条按到新增益上（只在 `Settings` 变的那一帧动手）
+            .add_systems(Update, apply_audio_volumes)
             .add_systems(Update, run_selftest);
     }
 }
@@ -2031,5 +2069,32 @@ mod tests {
         );
         assert_eq!(voice_path("沈万三", VoiceEvent::Enter), None);
         assert_eq!(voice_path("甲", VoiceEvent::Enter), None);
+    }
+
+    /// 每条正在响的 sink 归哪条总线。串线的症状是「拉满语音，背景音乐也变响」，
+    /// 而两边都出得了声、都在该在的位置上 —— 耳朵分得出，测试分不出，除非这里钉住。
+    #[test]
+    fn a_sink_belongs_to_the_bus_that_started_it() {
+        assert_eq!(
+            bus_of(Some(&BgmTag::World(2)), None),
+            Some(VolumeBus::Bgm),
+            "世界列表那条该走 BGM 档"
+        );
+        assert_eq!(
+            bus_of(Some(&BgmTag::Solo(Solo::Menu)), None),
+            Some(VolumeBus::Bgm),
+            "菜单曲也是 BGM 总线"
+        );
+        assert_eq!(
+            bus_of(Some(&BgmTag::Event(EventMusic::Fiesta)), None),
+            Some(VolumeBus::Bgm),
+            "事件曲也是 BGM 总线"
+        );
+        assert_eq!(
+            bus_of(None, Some(&VoiceLine)),
+            Some(VolumeBus::Voice),
+            "语音该走语音档"
+        );
+        assert_eq!(bus_of(None, None), None, "音效是一次性的，不在这条路上");
     }
 }

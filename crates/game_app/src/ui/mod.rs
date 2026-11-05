@@ -287,6 +287,13 @@ pub enum UiAction {
     /// 选一档行走速度（下标进 [`crate::settings::SPEED_STEPS`] —— 烤的是档位而不是秒数：
     /// 秒数是浮点，而 `UiAction` 要能比相等）
     SetWalkSpeed(usize),
+    /// 选一条总线的音量档（P16a⑤）：档位下标进 [`crate::settings::VOLUME_STEPS`]。
+    /// **总线烤在按钮里** —— 面板上一排五行，点的是哪一行不能等派发时再猜；
+    /// 越界由派发处挡掉，与 `SetWalkSpeed` 同一条（档位是枚举性事实，0..=4）。
+    SetVolume {
+        bus: crate::settings::VolumeBus,
+        level: usize,
+    },
     /// 调试面板开 / 关（**下次启动生效**，见 [`crate::settings`] 的模块头）
     ToggleDebugPanel,
     /// 开合 ATM 浮层（B5b：路过银行格解锁）
@@ -462,6 +469,7 @@ fn action_sound(action: &UiAction) -> crate::audio::UiSound {
         UiAction::SetBoard(_)
         | UiAction::SetStartCash(_)
         | UiAction::SetWalkSpeed(_)
+        | UiAction::SetVolume { .. }
         | UiAction::ToggleCharacter(_)
         | UiAction::SetHuman(_)
         | UiAction::ToggleDebugPanel
@@ -1274,6 +1282,13 @@ fn dispatch_ui_actions(
             UiAction::SetWalkSpeed(index) => {
                 if let Some((secs, _)) = crate::settings::SPEED_STEPS.get(*index) {
                     ui.settings.walk_step_interval = *secs;
+                }
+            }
+            // 音量：档位是五选一，越界不进设置（`UiAction` 只由本文件的面板发出来，
+            // 但这一道与 `SetStartCash` 同一条纪律 —— 资源里的数只来自受校验的入口）
+            UiAction::SetVolume { bus, level } => {
+                if *level < crate::settings::VOLUME_STEPS.len() {
+                    bus.set(&mut ui.settings, *level as u8);
                 }
             }
             UiAction::ToggleDebugPanel => {
@@ -2345,6 +2360,61 @@ mod tests {
         assert!(
             h.app.world().resource::<settings::SettingsOpen>().0,
             "设置面板没打开"
+        );
+    }
+
+    /// P16a⑤：音量按钮一次只动**一条**总线，档位越界不进设置。分三条断言而不是
+    /// 「点完读一遍」：三条总线共用 `Settings` 与同一个「五档」表，写错一格就会串到隔壁。
+    #[test]
+    fn the_volume_buttons_write_one_bus_at_a_time() {
+        use crate::settings::{VOLUME_STEPS, VolumeBus};
+
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        let bgm_max = h
+            .app
+            .world_mut()
+            .spawn(UiAction::SetVolume {
+                bus: VolumeBus::Bgm,
+                level: VOLUME_STEPS.len() - 1,
+            })
+            .id();
+        let voice_zero = h
+            .app
+            .world_mut()
+            .spawn(UiAction::SetVolume {
+                bus: VolumeBus::Voice,
+                level: 0,
+            })
+            .id();
+        let sfx_over = h
+            .app
+            .world_mut()
+            .spawn(UiAction::SetVolume {
+                bus: VolumeBus::Sfx,
+                level: VOLUME_STEPS.len(),
+            })
+            .id();
+
+        let levels = |h: &Harness| {
+            let s = h.app.world().resource::<crate::settings::Settings>();
+            (s.bgm_volume, s.sfx_volume, s.voice_volume)
+        };
+        // 前置：默认是拍板那句 50／75／100 —— 否则下面「改了一条」可能只是默认值
+        assert_eq!(levels(&h), (2, 3, 4));
+
+        h.click(bgm_max);
+        assert_eq!(
+            levels(&h),
+            (4, 3, 4),
+            "拉满 BGM 把音效或语音也改了，或者没写进去"
+        );
+        h.click(voice_zero);
+        assert_eq!(levels(&h), (4, 3, 0), "静音语音把别的总线也改了");
+        h.click(sfx_over);
+        assert_eq!(
+            levels(&h),
+            (4, 3, 0),
+            "越界档位进了设置 —— 面板五颗按钮会一颗都不是「当前」"
         );
     }
 
@@ -3814,6 +3884,14 @@ mod tests {
         assert_eq!(action_sound(&UiAction::BackToMenu), UiSound::Cancel);
         assert_eq!(action_sound(&UiAction::CloseInfo), UiSound::Cancel);
         assert_eq!(action_sound(&UiAction::SetBoard(0)), UiSound::Click);
+        assert_eq!(
+            action_sound(&UiAction::SetVolume {
+                bus: crate::settings::VolumeBus::Sfx,
+                level: 1,
+            }),
+            UiSound::Click,
+            "拨音量是纯浏览，不该冒充「确认」"
+        );
         assert_eq!(action_sound(&UiAction::Pop { slot: 3 }), UiSound::Click);
     }
 }

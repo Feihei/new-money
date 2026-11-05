@@ -1,13 +1,14 @@
-//! 设置面板（P15c）：行走速度与调试面板。
+//! 设置面板（P15c/P16a⑤）：行走速度、三条音量总线与调试面板。
 //!
-//! 只有主菜单进得来（面板挂 `MenuPiece`，进对局随菜单一起收走）。两件真控件 ——
-//! 音量等 P16（今天没有音频管线，摆上去按了不会有任何东西响），起始资金四档仍归 P2c。
+//! 只有主菜单进得来（面板挂 `MenuPiece`，进对局随菜单一起收走）。最早那版写「音量等 P16」
+//! 摆上去按了不会有任何东西响 —— P16a 接上音频之后这三行是真控件了：BGM／音效／语音
+//! 各五档，改完**立刻**按到正在响的那几条上（`audio::apply_audio_volumes`）。
 //!
 //! 「改完立刻生效」与「下次启动才生效」在同一个屏上并存，所以每一行都得说清楚：
-//! 行走速度是**立刻**的（`settings::apply_walk_speed` 每帧把它抄进 `GameRules`），
-//! 调试面板要重开进程（egui 插件一旦装上就开始吃输入，不能在运行中装卸）。
+//! 行走速度与三条音量都是**立刻**的，调试面板要重开进程（egui 插件一旦装上就开始吃输入，
+//! 不能在运行中装卸）。
 //!
-//! 面板按签名重建（同手牌/暂停）：速度、开关、上一次写盘的成败，三位都是可见位。
+//! 面板按签名重建（同手牌/暂停）：速度、三条音量、开关、上一次写盘的成败，全是可见位。
 
 use bevy::prelude::*;
 
@@ -17,7 +18,7 @@ use super::{
     ButtonSpec, MenuPiece, PRIMARY, SECONDARY, UiAction, border_color, button, label, separator,
 };
 use crate::render::DevFont;
-use crate::settings::{SPEED_STEPS, Settings, SettingsStatus};
+use crate::settings::{SPEED_STEPS, Settings, SettingsStatus, VOLUME_LABELS, VolumeBus};
 
 /// 面板开着吗。菜单那颗「设置」翻它，离开菜单时 [`super::reset_ui_state`] 关掉它。
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +170,18 @@ fn spawn_panel(
                     ink_soft,
                 ));
 
+                // ---- 三条音量总线 ----
+                panel.spawn(separator());
+                for bus in VolumeBus::ALL {
+                    volume_row(panel, &font.0, bus, settings, ink_dim);
+                }
+                panel.spawn(label(
+                    &font.0,
+                    "音量改完立刻生效（正在响的那几条当场跟着变）",
+                    size::SMALL,
+                    ink_soft,
+                ));
+
                 // ---- 调试面板 ----
                 panel
                     .spawn((Node {
@@ -225,5 +238,59 @@ fn spawn_panel(
                     ButtonSpec::new("关闭", [inner, 42.0], SECONDARY, UiAction::ToggleSettings),
                 );
             });
+        });
+}
+
+/// 一条总线一行：左边是「名字 + 当前档」，右边五颗档位按钮。
+///
+/// 当前档用 `PRIMARY` 底色标出来而不是在文字前加「●」—— 五颗按钮最窄那颗只有 56px，
+/// 「● 100%」在 13px 字号下正好卡在折行的边上，而按钮里的文字一折行就会把行撑高。
+fn volume_row(
+    panel: &mut ChildSpawnerCommands,
+    font: &Handle<Font>,
+    bus: VolumeBus,
+    settings: &Settings,
+    ink: Color,
+) {
+    let level = usize::from(bus.level(settings));
+    panel
+        .spawn(Node {
+            width: Val::Px(412.0),
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(4.0),
+            ..default()
+        })
+        .with_children(|line| {
+            line.spawn((
+                Node {
+                    // 「背景音乐 100%」在 16px 下约 110px 宽：窄一点就折成两行，
+                    // 那一行会比另外两条高、三排按钮也对不齐
+                    width: Val::Px(124.0),
+                    ..default()
+                },
+                label(
+                    font,
+                    format!("{} {}", bus.label(), VOLUME_LABELS[level]),
+                    size::BODY,
+                    ink,
+                ),
+            ));
+            for (index, text) in VOLUME_LABELS.iter().enumerate() {
+                let current = index == level;
+                button(
+                    line,
+                    font,
+                    ButtonSpec {
+                        font: size::SMALL,
+                        ..ButtonSpec::new(
+                            text,
+                            [52.0, 32.0],
+                            if current { PRIMARY } else { SECONDARY },
+                            UiAction::SetVolume { bus, level: index },
+                        )
+                    },
+                );
+            }
         });
 }

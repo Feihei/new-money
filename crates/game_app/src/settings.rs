@@ -1,8 +1,8 @@
 //! 玩家设置（P15c/P2c）：文件、加载、落盘，以及「设置说了算」的那一条。
 //!
 //! 与存档同一个目录、两个文件：存档是**这一局**的，设置是**每一局**的（`settings.json`）。
-//! 三件真控件 —— 行走速度、调试面板、起始资金四档（P2c-c）。音量等 P16（今天没有
-//! 音频管线，摆上去按了不会有任何东西响）。
+//! 控件 —— 行走速度、调试面板、起始资金四档（P2c-c），加上 P16a 的三条音量总线
+//! （BGM／音效／语音各五档）。
 //!
 //! **`NM_*` 旋钮优先于文件**：截图与冒烟必须可控。`NM_DUMP=1` 强制开、`NM_DUMP=0`
 //! 强制关（即便文件里写着开），不设才看文件 —— 判据抽成纯函数 [`debug_panel_on`]，
@@ -33,6 +33,56 @@ pub const SPEED_STEPS: [(f32, &str); 5] = [
     (0.45, "很慢"),
 ];
 
+/// 音量五档（线性增益）。与 [`SPEED_STEPS`] 同一种形状：一条链上点按钮，
+/// 不摆滑杆 —— 五档在截图里数得出来，滑杆的位置读不出数。
+pub const VOLUME_STEPS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+pub const VOLUME_LABELS: [&str; 5] = ["静音", "25%", "50%", "75%", "100%"];
+
+/// 三条总线。界面那一行按它摆，`Settings` 按它读写 —— 面板与音频模块读的是同一枚举，
+/// 少一份「第 0 行是 BGM 还是音效」的口头约定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeBus {
+    Bgm,
+    Sfx,
+    Voice,
+}
+
+impl VolumeBus {
+    pub const ALL: [VolumeBus; 3] = [VolumeBus::Bgm, VolumeBus::Sfx, VolumeBus::Voice];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            VolumeBus::Bgm => "背景音乐",
+            VolumeBus::Sfx => "音效",
+            VolumeBus::Voice => "语音",
+        }
+    }
+
+    pub fn level(self, settings: &Settings) -> u8 {
+        match self {
+            VolumeBus::Bgm => settings.bgm_volume,
+            VolumeBus::Sfx => settings.sfx_volume,
+            VolumeBus::Voice => settings.voice_volume,
+        }
+    }
+
+    pub fn set(self, settings: &mut Settings, level: u8) {
+        let slot = match self {
+            VolumeBus::Bgm => &mut settings.bgm_volume,
+            VolumeBus::Sfx => &mut settings.sfx_volume,
+            VolumeBus::Voice => &mut settings.voice_volume,
+        };
+        *slot = level;
+    }
+
+    /// 这一档对应的线性增益。越界钳到最近一档而不是归零 —— 静音是玩家点得出来的
+    /// 一个档（第 0 档），不该也是「读到一个陌生数」的副作用。
+    pub fn gain(self, settings: &Settings) -> f32 {
+        let last = VOLUME_STEPS.len() - 1;
+        VOLUME_STEPS[usize::from(self.level(settings)).min(last)]
+    }
+}
+
 /// 设置文件的内容。加字段时要给 `serde(default)`（整份 struct 上那个），否则旧文件
 /// 缺一格就整份读不出来 —— 而「读不出来」在这个文件里等于「玩家所有设置突然回默认」。
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -48,6 +98,12 @@ pub struct Settings {
     /// 它记的是**偏好**，不是这一局的事实：`StartCashChoice` 仍然是一次性写入口，
     /// 读档时也不会被它改（读档根本不看这一格）。
     pub start_cash: Option<i64>,
+    /// 三条总线的档位（下标进 [`VOLUME_STEPS`]）。默认按盘上素材的实测响度定的：
+    /// BGM 约 −14.5 LUFS、UI 与音效峰值 −6 dBFS、语音约 −20 LUFS ——
+    /// 50／75／100 之下三者正好叠平，玩家第一耳不需要去调。
+    pub bgm_volume: u8,
+    pub sfx_volume: u8,
+    pub voice_volume: u8,
 }
 
 impl Default for Settings {
@@ -56,6 +112,9 @@ impl Default for Settings {
             walk_step_interval: GameRules::default().walk_step_interval,
             debug_panel: false,
             start_cash: None,
+            bgm_volume: 2,
+            sfx_volume: 3,
+            voice_volume: 4,
         }
     }
 }
@@ -88,6 +147,15 @@ impl Settings {
                 {
                     warn!("设置文件里的起始资金档 {cash} 不是四档之一，改用棋盘默认档");
                     settings.start_cash = None;
+                }
+                // 音量档同理：手改文件写个 9 不是「更响」，而是一个不存在的档 ——
+                // 面板五颗按钮一颗都不是「当前」，听起来还可能爆音
+                let defaults = Settings::default();
+                for bus in VolumeBus::ALL {
+                    if bus.level(&settings) >= VOLUME_STEPS.len() as u8 {
+                        warn!("设置文件里的{}档不是五档之一，改用默认档", bus.label());
+                        bus.set(&mut settings, bus.level(&defaults));
+                    }
                 }
                 settings
             }
@@ -194,6 +262,9 @@ mod tests {
             walk_step_interval: 0.08,
             debug_panel: true,
             start_cash: Some(300_000),
+            bgm_volume: 1,
+            sfx_volume: 2,
+            voice_volume: 4,
         };
         saved.save_to(&path).expect("写设置");
         assert_eq!(Settings::load_from(&path), saved);
@@ -256,6 +327,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
+    /// 默认三档正好是拍板那句「BGM 50／音效 75／语音 100」—— 换错一格，玩家第一耳
+    /// 听到的就是某条总线偏了一截，而三颗按钮都显示着「当前」。
+    #[test]
+    fn the_default_volumes_are_the_signed_off_mix() {
+        let settings = Settings::default();
+        assert_eq!(settings.bgm_volume, 2, "BGM 默认该是 50%");
+        assert_eq!(settings.sfx_volume, 3, "音效默认该是 75%");
+        assert_eq!(settings.voice_volume, 4, "语音默认该是 100%");
+        for bus in VolumeBus::ALL {
+            assert_eq!(
+                bus.gain(&settings),
+                VOLUME_STEPS[usize::from(bus.level(&settings))],
+                "{}的档位与增益没对上",
+                bus.label()
+            );
+        }
+        assert_eq!(VolumeBus::Bgm.gain(&settings), 0.5);
+        assert_eq!(VolumeBus::Sfx.gain(&settings), 0.75);
+        assert_eq!(VolumeBus::Voice.gain(&settings), 1.0);
+    }
+
+    /// 文件里的音量档也必须是五选一：手改个 9 不是「更响」，是面板五颗按钮一颗都不是「当前」。
+    /// 越界只改那一格，另外两条总线不受牵连。
+    #[test]
+    fn an_out_of_range_volume_falls_back_one_bus_at_a_time() {
+        let path = scratch("volume-range");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        crate::paths::write_json(
+            &path,
+            &serde_json::json!({ "bgm_volume": 9, "sfx_volume": 1, "voice_volume": 4 }),
+        )
+        .expect("写坏档位");
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.bgm_volume, 2, "越界那一格该回落默认档");
+        assert_eq!(loaded.sfx_volume, 1, "合法的那一格不该被连带改掉");
+        assert_eq!(loaded.voice_volume, 4);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 档位与增益是**同一条链**：五档逐格走一遍，且越界钳到最近一档而不是沉默。
+    #[test]
+    fn every_volume_step_maps_to_its_gain() {
+        let mut settings = Settings::default();
+        for (level, gain) in VOLUME_STEPS.iter().enumerate() {
+            settings.bgm_volume = level as u8;
+            assert_eq!(VolumeBus::Bgm.gain(&settings), *gain);
+        }
+        settings.bgm_volume = 99;
+        assert_eq!(
+            VolumeBus::Bgm.gain(&settings),
+            1.0,
+            "越界该钳到最近一档（100%），不是归零"
+        );
+    }
+
     /// 旋钮优先：`NM_DUMP=1` 压过文件里的「关」，`NM_DUMP=0` 压过文件里的「开」，
     /// 没设才听文件的。三种各一格，少一种就会出现「截图脚本管不住面板」。
     #[test]
@@ -294,8 +420,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .insert_resource(Settings {
                 walk_step_interval: 0.08,
-                debug_panel: false,
-                start_cash: None,
+                ..Settings::default()
             })
             .init_resource::<GameRules>()
             .add_systems(Update, apply_walk_speed);
