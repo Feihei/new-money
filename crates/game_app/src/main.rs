@@ -17,6 +17,7 @@ use game_core::prelude::{
 };
 
 mod art;
+mod audio;
 mod autopilot;
 mod boards;
 mod dev;
@@ -32,21 +33,26 @@ const DEV_FONT: &str = "font/dev_SourceHanSansSC-Regular.otf";
 fn main() {
     let root = asset_root();
     let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "暴富 · B5 UI 与交互".into(),
-                    present_mode: PresentMode::AutoNoVsync,
-                    ..default()
-                }),
-                ..default()
-            })
-            .set(AssetPlugin {
-                file_path: root.display().to_string(),
+    // 音频（P16a）：`NM_AUDIO=0` 时连 bevy 的 `AudioPlugin` 都不装 —— `disable` 是
+    // `PluginGroupBuilder` 上的方法，插件装下去就退不回来了，所以这一问必须排在
+    // `add_plugins` 之前。判据与 `audio::AudioConfig::from_env` 是同一条函数，不另抄一份。
+    let mut plugins = DefaultPlugins
+        .set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "暴富 · B5 UI 与交互".into(),
+                present_mode: PresentMode::AutoNoVsync,
                 ..default()
             }),
-    );
+            ..default()
+        })
+        .set(AssetPlugin {
+            file_path: root.display().to_string(),
+            ..default()
+        });
+    if !audio::playback_on_from_env() {
+        plugins = plugins.disable::<bevy::audio::AudioPlugin>();
+    }
+    app.add_plugins(plugins);
     info!("资产根：{}", root.display());
     // P15c：**先读设置再装依赖它的插件** —— 调试面板装不装由它决定，而 `add_plugins`
     // 一旦调用 egui 就开始吃输入，不能在运行中装卸（所以面板上那句「下次启动生效」是实话）。
@@ -73,6 +79,9 @@ fn main() {
         .add_plugins(paths::SavePlugin)
         // 设置（P15c）：行走速度写回 `GameRules`，值一变就落盘
         .add_plugins(settings::SettingsPlugin)
+        // 音频（P16a）：BGM 场景机 + 世界播放列表。它只读别人的状态（哪一屏、开着哪扇窗口、
+        // 按没按暂停），一个字都不写回去 —— 所以 `NM_AUDIO=0` 那条路能整块关掉而不碰玩法
+        .add_plugins(audio::AudioPlugin)
         .add_plugins(ui::UiPlugin)
         .add_plugins(scene::ScenePlugin)
         .add_plugins(autopilot::AutopilotPlugin);
