@@ -202,7 +202,7 @@ fn spawn_card(
         for (i, rent) in def.rent.iter().enumerate() {
             rows.push((
                 "租金",
-                format!("{} — ${rent}", building_label((i + 1) as u8)),
+                format!("{} — ${rent}", building_label(i as u8)),
                 value_color,
             ));
         }

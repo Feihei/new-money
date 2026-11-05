@@ -14,12 +14,12 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, Ask, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Blocker, Books,
-    BuildingKind, BuildingLevel, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind,
-    CompanyCharged, Decision, Detention, DetentionPlace, EffectOutcome, Facility, Gate, Gavel,
-    Hand, Institution, Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets,
-    MagicFilter, MagicRitual, MagicSpell, MortgageDeny, MortgageOp, Owner, PassiveCard,
-    PassiveEvent, PassiveMove, Pending, PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged,
-    Shelf, ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders,
+    BuildingKind, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind, CompanyCharged,
+    Decision, Detention, DetentionPlace, EffectOutcome, Facility, Gate, Gavel, Hand, Institution,
+    Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets, MagicFilter,
+    MagicRitual, MagicSpell, MortgageDeny, MortgageOp, Owner, PassiveCard, PassiveEvent,
+    PassiveMove, Pending, PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf,
+    ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders,
     blame_candidates, buy_allowed, buyback, counter_plots, filter_targets, mortgage_op_allowed,
     read_facts, restock, shop_op_allowed,
 };
@@ -1180,7 +1180,7 @@ fn buy_modal(
                     key_w,
                 );
                 // 地上已经有楼：那几层不是赠品，而是买价里最贵的一截，必须自己占一行说话。
-                // 等级念的是 `building_label` 那一套（内部 Lv3 ＝「建筑 Lv2」），
+                // 等级念的是 `building_label` 那一套（Lv0＝空地、Lv1..=5＝建筑 Lv1..=5），
                 // 而这一行恰好是那条映射最有用的地方 —— 「楼上已有 Lv3」会被读成盖了三层
                 if storeys >= 2 {
                     info_row(
@@ -1207,7 +1207,7 @@ fn buy_modal(
                         info_row(
                             rows,
                             &font.0,
-                            &building_label((i + 1) as u8),
+                            &building_label(i as u8),
                             &format!("${amount}"),
                             col::VALUE,
                             key_w,
@@ -4029,7 +4029,7 @@ pub(crate) fn dev_open_shop(
     }
 }
 
-/// 开发用：`NM_PLOTS=<n>` 把棋盘上前 n 块地划给当前回合玩家（Lv1、未抵押）。
+/// 开发用：`NM_PLOTS=<n>` 把棋盘上前 n 块地划给当前回合玩家（Lv0 空地、未抵押）。
 ///
 /// 为什么需要它：银行柜台新长出的那一节「你的地产」要有地块才拍得到，而「名下有地」在
 /// 正经玩法里要靠踩中一块无主地再回答「买」—— 那一掷同样由骰子说了算（判据同 `NM_SHOP`：
@@ -4078,10 +4078,10 @@ pub(crate) fn dev_grant_plots(
         let Some(entity) = active.lands.get(&land).copied() else {
             continue;
         };
-        // Lv1 = 「刚购入即 1 级」（`Books::buy` 同一条），留成空地拍出来的读数最干净
-        commands
-            .entity(entity)
-            .insert((Owner(Some(*pid)), BuildingLevel(1)));
+        // 只改归属、不碰等级：`Books::buy` 也不碰，买下的地就是 Lv0 **空地**。
+        // 早先这里跟着旧级数写 `BuildingLevel(1)`，那是把「平房」当成了空地 ——
+        // 拍出来会是一栋楼配一件标志物，而这两样在真局里永远不会同框。
+        commands.entity(entity).insert(Owner(Some(*pid)));
     }
     info!("NM_PLOTS：把 {want} 块地划给玩家 {pid:?}（只为截图，未走交易入口）");
 }

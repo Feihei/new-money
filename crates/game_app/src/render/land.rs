@@ -297,11 +297,9 @@ pub(crate) fn attach_land_visuals(
         // `sync_buildings` 按「有主人 + 还是空地 + 这位角色有素材」决定。
         // 蒙版那张沿远离相机方向退一点：两张同位置会 z 打架。
         let prop_rot = billboard_rot();
-        // 摆在地块**近角**而不是正中：Lv1 的模型是一栋小房子，摆正中会站到屋顶上。
-        // 位移沿「相机方向在地面上的投影」，也就是屏幕往下那条线，于是它总在房子前面。
-        let toward_cam = Vec3::new(dim::CAM_OFFSET.x, 0.0, dim::CAM_OFFSET.z).normalize();
-        let prop_base = Vec3::new(center.x, dim::PROP_BASE, center.z)
-            + toward_cam * (footprint * dim::PROP_AHEAD);
+        // 锚在格子**正中央**：底边落在中心、身子立起来越过格子上沿，读数就是「立在这块地上」。
+        // 空地（Lv0）上没有楼，中心是空着的，不必再为避开建筑做任何位移。
+        let prop_base = Vec3::new(center.x, dim::PROP_BASE, center.z);
         let prop_body_mat = mats.add(StandardMaterial {
             unlit: true,
             alpha_mode: AlphaMode::Mask(0.5),
@@ -426,12 +424,12 @@ pub(crate) fn sync_buildings(
             }
         }
 
-        // 空地的归属标志物：只在**还是空地**（Lv1）时露出来。楼一盖起来，描边已经在说
-        // 归属，两处同时摆等于说两遍，而且楼会把那件道具吃掉一半。
+        // 空地的归属标志物：只在 `BuildingLevel == 0`（**空地**）时露出来。买下地就是 Lv0，
+        // 加盖第一层才起楼 —— 楼一立起来就只靠模型 + 描边说归属，两样东西不可能同框。
         // 「这位有没有素材」也在这里判 —— 查不到就不摆，不按座位借别人的道具（那是假信息）。
         let want = who
             .and_then(|(_, _, name)| crate::art::prop_key(&name.0))
-            .filter(|key| level.0 <= 1 && props.get(key).is_some());
+            .filter(|key| level.0 == 0 && props.get(key).is_some());
         if want != visual.prop_key {
             if let Some(key) = want
                 && let Some((body, edge)) = props.get(key)

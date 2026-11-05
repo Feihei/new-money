@@ -1405,7 +1405,7 @@ fn the_angel_raises_every_plot_he_walks_over_regardless_of_who_owns_it() {
     assert_eq!(
         plot_state(&mut app, 2).1,
         1,
-        "无主地也盖 —— 这条是括号里点名的那一半，也是 `buy` 那处「下限 1」存在的前提"
+        "无主地也盖 —— 这条是括号里点名的那一半，也是「买地不碰层数」的前提"
     );
     assert_eq!(
         cash_of(&mut app, p0),
@@ -1416,8 +1416,8 @@ fn the_angel_raises_every_plot_he_walks_over_regardless_of_who_owns_it() {
 
 #[test]
 fn a_plot_that_was_blessed_while_unowned_keeps_its_building_when_bought() {
-    // `Books::buy` 那句从「等级置 1」改成「下限 1」的全部理由：无主地平时是 Lv0，
-    // 两种写法结果一样，而天使会先在无主地上盖出几层 —— 那时「置 1」等于把别人的楼抹平。
+    // `Books::buy` 现在**完全不碰** `BuildingLevel`：无主地平时是 Lv0、买下来还是 Lv0，
+    // 而天使会先在无主地上盖出几层 —— 买地时若把层数归零，等于把那些楼抹平。
     // PLAN §三 拍卖行那句「建筑随土地一起过户」说的就是这件事
     let (mut app, p0, _p1) = two_players();
     own(&mut app, RENT_LAND, None, 0, false);

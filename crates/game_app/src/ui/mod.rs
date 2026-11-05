@@ -761,21 +761,17 @@ pub fn separator() -> (Node, BackgroundColor) {
     )
 }
 
-/// 建筑等级怎么说成人话。**这是内部编号与屏幕编号唯一的翻译点**，五块屏共用它。
+/// 建筑等级怎么说成人话。**这是规则层编号与屏幕文案唯一的翻译点**，五块屏共用它。
 ///
-/// 规则层那个数从 1 起算：`BuildingLevel(1)` 是**空地**（买地即 1，`rent[0]` 就是空地租金，
-/// `settle::buy` 把无主的 Lv0 钳到 1），`BuildingLevel(2)` 才是盖了第一层楼。
-/// 于是「Lv1」在屏幕上读起来像「有一层楼」，而它的意思是「一块空地」—— 10-22 就为这一格
-/// 争过一轮（「地价 + 升级费 × 等级」到底是 `× L` 还是 `× (L−1)`，答案是同一个数被数了两遍：
-/// 花钱盖的楼只有 `L−1` 层，见 `economy::estate_value`）。
-///
-/// 所以玩家面前不出现裸的内部编号：空地就叫空地（它不是一级建筑，也不该显示成 Lv0），
-/// 往上才是建筑 Lv1、Lv2…。内部编号只在规则层、测试流水与注释里活着。
+/// 级数只有一套：`BuildingLevel` 0..=5 共六个状态，**Lv0＝空地、Lv1..=5＝建筑 Lv1..Lv5**
+/// （10-23 级数重判之后买地不再钳层，`rent[level]` 直接下标，`economy::estate_value` 的
+/// 建筑数就是 `level`）。屏幕与规则层从此念**同一个数**，这里只做一件事：把 0 那一档
+/// 译成「空地」—— 「Lv0 空地」不是一级建筑，写成裸编号会被读成「一层还没盖的楼」。
 pub fn building_label(level: u8) -> String {
-    if level <= 1 {
+    if level == 0 {
         "空地".to_string()
     } else {
-        format!("建筑 Lv{}", level - 1)
+        format!("建筑 Lv{level}")
     }
 }
 
@@ -1541,17 +1537,16 @@ mod tests {
     };
     use std::time::Duration;
 
-    /// 内部编号 → 屏幕编号那一条映射，本身要钉住：它错位一格，五块屏就同时全都错，
+    /// 级数 0..=5 六个状态与屏幕文案的对应，本身要钉住：错位一格，五块屏就同时全都错，
     /// 而症状是「一块空地写着有一层楼」这种没人会去查的话。
-    /// 尤其钉 0 与 1 都算空地（无主的 Lv0 与刚买下的 Lv1 在玩家眼里是同一件事），
-    /// 以及顶格那一档（`max_building_level` 默认 6 → 建筑 Lv5，租金表恰好六行）。
+    /// 0 是空地（无主与刚买下是同一个状态），1..=5 与建筑 Lv1..=Lv5 一一对应。
     #[test]
     fn the_level_label_never_shows_a_bare_plot_as_a_storey() {
-        assert_eq!(building_label(0), "空地", "无主空地");
-        assert_eq!(building_label(1), "空地", "买地即内部 Lv1，而它没有一层楼");
-        assert_eq!(building_label(2), "建筑 Lv1");
+        assert_eq!(building_label(0), "空地", "空地说成 Lv0 会被读成一级楼");
+        assert_eq!(building_label(1), "建筑 Lv1");
+        assert_eq!(building_label(2), "建筑 Lv2");
         assert_eq!(
-            building_label(6),
+            building_label(5),
             "建筑 Lv5",
             "满级那一档少说一层就是全场读错"
         );
