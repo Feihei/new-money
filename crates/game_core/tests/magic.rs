@@ -1,10 +1,12 @@
-//! P13 魔法屋的验收：11 种筛选条件 × 12 种法术，外加 PLAN §四 点名那张**免疫矩阵**。
+//! P13/P13c 魔法屋的验收：11 种筛选条件 × 12 种法术，外加 PLAN §四 点名那张**免疫矩阵**。
 //!
-//! 分四段，与计划里那一行的三半对齐：
+//! 分五段：
 //!
-//! - **窗口**（第一段）验的是「两步」这件事本身：主语不对不算回答、空名单当场收摊、
-//!   草稿与窗口同生同灭、施法之后回合交得回去。前三条各对应一种「不报错、只是不动了」
-//!   的挂死，第四条（交回合）是 P13 写完真跑出来的那一个；
+//! - **窗口**（第一段）验的是那一屏的形状：条件与名单是同一次结算的产物、主语不对不算回答、
+//!   窗口与草稿同生同灭、施法之后回合交得回去、**钉住的空名单也必须把回合交出去**
+//!   （坑 38 唯一可达的那条路）；
+//! - **摇条件**（第二段）是 P13c 新长出来的那一半：筛不出人就重摇（且这一格真被走到）、
+//!   同一种子同一条、而「走路的人」保留但降权；
 //! - **条件**验的是三个口径：「最多」并列取回合序第一个、0 也是合法答案、
 //!   破产者与恶人**不在名单里**（而「名单里只有玩家」由等号钉住，不是靠查不到）；
 //! - **法术**12 条各有**正面**断言（钱、等级、手牌、拍卖台真的动了），因为「法术落空」与
@@ -34,14 +36,15 @@
 //!
 //! 夹具全部**现读格号**（[`common::kind_tile`]）：魔法屋插在主环 9 号，把 9 之后每一格都
 //! 顺移了一位，而这批用例不该因为下次再插一格而集体变红。判据多用 [`common::hits`]
-//! （规则层那同一个 `filter_targets`），因为一场法事只答得出一个条件，而「并排看五条判据」
-//! 这类断言不该为此重启五局 —— 真窗口那条路由 `pick` 那几条覆盖。
+//! （规则层那同一个 `filter_targets`），因为**一局窗口只挂一条条件**（P13c 之后那条是摇/钉
+//! 出来的，不是玩家挑的），而「并排看五条判据」这类断言不该为此重启五局。真窗口那一条路由
+//! [`pick`]（钉一条 → 再踩一次女巫家）覆盖，`pin_witch` 走的就是 `NM_MAGIC=<条件>` 那格接缝。
 
 mod common;
 
 use bevy::app::App;
 use bevy::ecs::entity::Entity;
-use bevy::prelude::Assets;
+use bevy::prelude::{Assets, ResMut, Resource, Update};
 use common::*;
 use game_core::prelude::{
     Ask, BankBalance, Bankrupt, CardId, CardSet, DataHandles, Detention, DetentionPlace, GameRules,
@@ -65,13 +68,18 @@ fn other(app: &mut App, p0: Entity) -> Entity {
         .expect("默认阵容有两名玩家")
 }
 
-/// 装配到「P0 刚踩上魔法屋、第一步窗口挂着没人答」。
+/// 装配到「P0 刚踩上魔法屋、那一屏挂着」。
 ///
 /// 与彩票那批同一手法：不替他 `offer` 窗口 —— 先按种子读出第一掷，再把他摆到「走那么多步
 /// 正好落到魔法屋」那一格，于是踩到与开窗口走的都是真走路、真落格分派。
 /// 开局那两位神与路上的宝箱在这里清掉（`clear_gods` 把 `Occupancy` 整族 despawn），否则
 /// 「走过去踩到女巫家」这一路上撞见财神会当场搬一笔钱，下面那些现金断言就不再只等于法术。
-fn at_the_witch() -> (App, Entity, Entity) {
+///
+/// ⚠️ 条件不再是玩家挑的，所以这里必须**钉一条**（走 [`pin_witch`] —— 与 `NM_MAGIC=girls`
+/// 同一格开发接缝）。传 `None` 是让规则层按权重摇，那一条的形状由
+/// [`stepping_on_the_witch_house_opens_the_drawn_screen`] 单独验；钉住的话这批用例才敢写
+/// `[p1]` 这种具体名单，而不会被某一局的骰子翻面。默认钉「所有女生」。
+fn at_the_witch_pinned(pinned: Option<MagicFilter>) -> (App, Entity, Entity) {
     let seed = GameSeed::default();
     let mut app = boot(GameSetup::default(), GameRules::instant(), seed);
     app.insert_resource(DecisionPolicy::Hold);
@@ -84,6 +92,7 @@ fn at_the_witch() -> (App, Entity, Entity) {
     insert(&mut app, p0, (Gender::Male,));
     insert(&mut app, p1, (Gender::Female,));
     clear_gods(&mut app);
+    pin_witch(&mut app, pinned);
     let face = Rng::new(seed.0).roll_die();
     let at = kind_tile(&app, TileKind::Magic);
     stand_to(&mut app, p0, at, face);
@@ -91,33 +100,144 @@ fn at_the_witch() -> (App, Entity, Entity) {
     roll(&mut app, p0);
     settle(&mut app, 6);
 
-    assert_eq!(
-        pending_of(&app),
-        Some((p0, Pending::Magic)),
-        "前置该把 P0 送到女巫家门口：骰面 {face}，该落在 {at} 号，流水 {:?}",
-        events(&app)
-    );
+    if let Some(filter) = pinned {
+        assert_eq!(
+            pending_of(&app),
+            Some((p0, Pending::MagicSpell(filter))),
+            "前置该把 P0 送到女巫家门口并钉好这一条：骰面 {face}，该落在 {at} 号，流水 {:?}",
+            events(&app)
+        );
+    } else {
+        // 让规则层自己摇，那就只能验**形状**而不是那一条：窗口是法术那一屏、
+        // 窗口上的条件与草稿是同一条、且筛得出人（这三条就是 P13c 的口径）
+        let Some((_, Pending::MagicSpell(on_window))) = pending_of(&app) else {
+            panic!(
+                "前置该把 P0 送到女巫家门口并直接开法术那一屏：骰面 {face}，\
+                 该落在 {at} 号，实际挂着 {:?}，流水 {:?}",
+                pending_of(&app),
+                events(&app)
+            );
+        };
+        let (on_draft, hits) = draft(&app).expect("窗口挂着，草稿就该已经筛好");
+        assert_eq!(on_window, on_draft, "窗口与草稿该是同一条条件");
+        assert!(!hits.is_empty(), "摇出来的条件筛不出人就该重摇");
+    }
     (app, p0, p1)
+}
+
+/// 钉好「所有女生」那一条的常用夹具 —— 名单就是 `[p1]`，一个人，最好断言。
+fn at_the_witch() -> (App, Entity, Entity) {
+    at_the_witch_pinned(Some(MagicFilter::AllGirls))
 }
 
 // ===== 读数 =====
 
-/// 草稿里那份名单 —— 第二步窗口显示的与法术真正落到的共用它，所以断言读它就等于读面板。
+/// 草稿里那份名单 —— 法术真正落到的就是它，而它**不上屏**（P13c），所以读它等于读规则层。
 fn draft(app: &App) -> Option<(MagicFilter, Vec<Entity>)> {
     app.world().resource::<MagicRitual>().draft.clone()
 }
 
-/// 点第一步那颗条件，返回筛出的人（空名单时窗口当场收摊，这里回 `vec![]`）。
+/// 让 P0 **再踩一次**女巫家，钉住 `filter` 那一条，返回这一次筛出的人。
+///
+/// P13c 之前这一格是「点第一步那颗条件按钮」；现在条件由规则层摇，测试要控制它只能钉
+/// （[`pin_witch`]，与 `NM_MAGIC=girls` 同一条路径）。走的仍是真走路 + 真落格分派：
+/// 先把上一场按「离开」收干净（窗口与草稿同生同灭那条纪律），再把轮转指针挪回他、
+/// 随机流退回开局第一条（于是骰面还是 `face`，[`common::rewind_dice`] 存在的理由就是这一格），
+/// 摆到门口走那一趟。
+///
+/// 钉住的条件筛空时**照旧开窗**（名单是空的），落空由施法那一步收尾 —— 与生产路径
+/// （摇到空就重摇）相反的那一格，只有这条接缝进得去。
 fn pick(app: &mut App, caster: Entity, filter: MagicFilter) -> Vec<Entity> {
-    magic_filter_ask(app, caster, filter);
+    set_policy(app, DecisionPolicy::DeclineAll);
     settle(app, 2);
+    assert!(
+        run_until_phase(app, TurnPhase::WaitRoll, 30),
+        "离开之后回合机该回到掷骰前，实际停在 {:?}",
+        phase(app)
+    );
+    set_policy(app, DecisionPolicy::Hold);
+    make_current(app, caster);
+    rewind_dice(app);
+    pin_witch(app, Some(filter));
+    let at = kind_tile(app, TileKind::Magic);
+    let face = Rng::new(app.world().resource::<GameSeed>().0).roll_die();
+    stand_to(app, caster, at, face);
+    roll(app, caster);
+    settle(app, 6);
     draft(app).map(|(_, hits)| hits).unwrap_or_default()
 }
 
-/// 点第二步那颗法术，并跑两帧让规则层施法。
+/// 点那一屏的法术按钮，并跑两帧让规则层施法。
 fn cast(app: &mut App, caster: Entity, spell: MagicSpell) {
     magic_spell_ask(app, caster, spell);
     settle(app, 2);
+}
+
+/// 一次「按权重摇条件」的请求（[`drawn_with_seed`] / [`drawn_series`] 的载体）。
+#[derive(Resource)]
+struct DrawReq(Option<(u64, Entity, u32)>);
+
+/// 摇出来的那一条，**与第一试摇到的那一条**分开记 —— 后者是用来证明重摇真的被走到了，
+/// 否则「每次摇出来都筛得出人」可能只是因为第一试本来就筛得出人（空跑的那一类）。
+#[derive(Resource, Default)]
+struct DrawOut {
+    first: Option<MagicFilter>,
+    drawn: Option<(MagicFilter, Vec<Entity>)>,
+    /// `drawn_series` 的那一条流：连抽 N 次定下来的条件，按序
+    series: Vec<MagicFilter>,
+}
+
+/// 摇条件要 `FilterDesk`（里面是 `Books`），与 [`common::hits`] 同一条理由单开一次 system，
+/// 走的仍是规则层那两个公开函数（`weighted_filter` / `draw_filter`）。
+fn draw_system(
+    mut req: ResMut<DrawReq>,
+    mut out: ResMut<DrawOut>,
+    desk: game_core::magic::FilterDesk<'_, '_>,
+) {
+    let Some((seed, current, times)) = req.0.take() else {
+        return;
+    };
+    // 每次现装一条流：分布类断言要的是「同一种子同一条序列」，而局内那条已经被开局
+    // 那几掷与前面几百次抽样走过了水位
+    let mut first_rng = Rng::new(seed);
+    let first = game_core::magic::weighted_filter(&mut first_rng);
+    let mut rng = Rng::new(seed);
+    out.drawn = Some(game_core::magic::draw_filter(
+        &mut rng, current, &desk, None,
+    ));
+    out.first = Some(first);
+    // 连抽那一段读的是**同一条已经走过一次的流**：分布要看的是「一条流连着施法几百场」，
+    // 而不是「几百个连续整数种子各自的第一抽」—— 后者是相邻状态，第一抽会互相相关，
+    // 比例统计出来是假的（第一版就栽在这里：200 个连续种子把 1:2 抽成了 21:27）
+    out.series = (0..times)
+        .map(|_| game_core::magic::draw_filter(&mut rng, current, &desk, None).0)
+        .collect();
+}
+
+/// 按种子 `seed` 现摇一条条件，返回「第一试摇到谁」与「重摇之后定下谁」。
+fn drawn_with_seed(
+    app: &mut App,
+    seed: u64,
+    current: Entity,
+) -> (MagicFilter, (MagicFilter, Vec<Entity>)) {
+    app.insert_resource(DrawReq(Some((seed, current, 0))));
+    app.insert_resource(DrawOut::default());
+    app.add_systems(Update, draw_system);
+    app.update();
+    let out = app.world().resource::<DrawOut>();
+    (
+        out.first.expect("第一试该摇出一条"),
+        out.drawn.clone().expect("摇完该有一条定下来"),
+    )
+}
+
+/// 同一条流上连抽 `times` 场法事，返回每次定下来的那一条条件。
+fn drawn_series(app: &mut App, seed: u64, current: Entity, times: u32) -> Vec<MagicFilter> {
+    app.insert_resource(DrawReq(Some((seed, current, times))));
+    app.insert_resource(DrawOut::default());
+    app.add_systems(Update, draw_system);
+    app.update();
+    app.world().resource::<DrawOut>().series.clone()
 }
 
 /// 流水里那两条魔法屋的记录（`Magic(…)` 与 `MagicBlock(…)`）。
@@ -175,66 +295,96 @@ fn set_loan(app: &mut App, player: Entity, loan: i64) {
         .loan = loan;
 }
 
-// ===== 一、两步窗口 =====
+// ===== 一、那一屏（P13c 之后只有一屏）=====
 
-/// 踩到魔法屋开的是**第一步**（选条件），而第一步还没有名单 —— 名单是条件的产出。
+/// 踩到魔法屋开的是**那一屏**：窗口带着一条条件，而名单已经摇完、填进草稿。
+///
+/// P13c 之前这一格断的是「开的是第一步、还没有名单」；现在条件与名单是**同一次结算**的
+/// 产物（[`draw_filter`] 摇一条、当场筛人），所以「窗口挂着而草稿是空的」在结构上就是分叉 ——
+/// 这一条把它钉住，而钉的方式是让规则层**自己摇**（`pin_witch(None)`，与玩家实际那一屏同一条路）。
 #[test]
-fn stepping_on_the_witch_house_offers_the_condition_step_only() {
-    let (app, p0, _p1) = at_the_witch();
+fn stepping_on_the_witch_house_opens_the_drawn_screen() {
+    let (app, p0, _p1) = at_the_witch_pinned(None);
     assert_eq!(
         phase(&app),
         TurnPhase::WaitDecision,
         "窗口挂着时回合不该往前走"
     );
-    assert_eq!(pending_of(&app), Some((p0, Pending::Magic)));
-    assert!(
-        draft(&app).is_none(),
-        "条件还没答，草稿就该是空的 —— 否则第二步的名单是猜出来的"
+    let Some((who, Pending::MagicSpell(on_window))) = pending_of(&app) else {
+        panic!(
+            "踩到女巫家该直接开法术那一屏，实际挂着 {:?}",
+            pending_of(&app)
+        );
+    };
+    assert_eq!(who, p0, "窗口挂在踩格那位身上");
+    let (on_draft, hits) = draft(&app).expect("窗口挂着，草稿就该已经筛好");
+    assert_eq!(
+        on_window, on_draft,
+        "窗口上的条件与草稿里的必须是同一条 —— 面板念一条、法术落另一条就是分叉"
     );
+    assert!(!hits.is_empty(), "摇出来的条件必须筛得出人（筛空就重摇）");
 }
 
-/// 主语门禁：窗口挂在 P0 身上，**别人**答的条件不算回答。
+/// 主语门禁：窗口挂在 P0 身上，**别人**答的法术不算回答。
 ///
-/// 与保释／柜台那几条同一条形状。少了这一格，「两个人同时对着一场法事」就能把名单换成
-/// 自己那一份，而窗口的主人毫不知情。
+/// 与保释／柜台那几条同一条形状。少了这一格，「两个人同时对着一场法事」就能替女巫把
+/// 那道法术落到 P0 选好的名单上，而窗口的主人毫不知情。
 #[test]
-fn a_condition_from_the_wrong_seat_is_not_an_answer() {
+fn a_spell_from_the_wrong_seat_is_not_an_answer() {
     let (mut app, p0, p1) = at_the_witch();
-    magic_filter_ask(&mut app, p1, MagicFilter::Walker);
+    magic_spell_ask(&mut app, p1, MagicSpell::Jail);
     settle(&mut app, 2);
 
     assert_eq!(
         pending_of(&app),
-        Some((p0, Pending::Magic)),
-        "别人答的条件不该把窗口推进一步"
+        Some((p0, Pending::MagicSpell(MagicFilter::AllGirls))),
+        "别人答的法术不该把这一屏收走"
     );
-    assert!(draft(&app).is_none(), "更不该留下一份名单");
+    assert!(
+        magic_lines(&app).is_empty(),
+        "别人那一句该一个字都不办，流水 {:?}",
+        magic_lines(&app)
+    );
+    assert_eq!(
+        draft(&app).map(|(_, hits)| hits),
+        Some(vec![p1]),
+        "草稿也不该被别人的那一句消耗掉"
+    );
 }
 
-/// 条件答完 → 开第二步，而**第二步显示的名单与法术落到的人必须是同一批**
-/// （`filter_targets` 只有一个口径，两条 system 都调它，而不是一个筛一个猜）。
+/// 窗口上的条件**就是**草稿里那一条，而法术落到的是同一次筛出的名单。
+///
+/// 「名单不上屏」是这一格的全部玩法（看得见名单的玩家一定能选到对自己有利的那一条），
+/// 但规则层内部必须只有一份口径：`settle_magic_landing` 筛一次、`magic_spell_system` 读那一份，
+/// 而不是施法时再筛一次 —— 中间世界动了（有人破产、被新闻搬走）就会给出一份不同的名单。
 #[test]
-fn picking_a_condition_opens_the_spell_step_with_that_same_list() {
-    let (mut app, p0, p1) = at_the_witch();
-    let hits = pick(&mut app, p0, MagicFilter::AllGirls);
+fn the_window_and_the_draft_are_the_same_ritual() {
+    let (mut app, p0, p1) = at_the_witch_pinned(None);
+    let on_window = match pending_of(&app).expect("前置：窗口挂着") {
+        (_, Pending::MagicSpell(filter)) => filter,
+        (_, other) => panic!("踩到女巫家该开法术那一屏，实际挂着 {other:?}"),
+    };
+    let on_draft = draft(&app).expect("草稿该与窗口同时出现");
+    assert_eq!(on_window, on_draft.0);
 
-    assert_eq!(hits, vec![p1], "条件筛出的名单不对");
+    // 钉一条「所有女生」再踩一次：名单换成一个人，窗口跟着换
+    assert_eq!(pick(&mut app, p0, MagicFilter::AllGirls), vec![p1]);
     assert_eq!(
         pending_of(&app),
         Some((p0, Pending::MagicSpell(MagicFilter::AllGirls))),
-        "第二步窗口该带上**哪一个条件**，面板才念得出这场法事在筛谁"
+        "窗口该带上**摇出来那一条**，面板才念得出女巫说的是什么"
     );
 }
 
-/// 第二步按「离开」：窗口与草稿**同生同灭**。
+/// 按「离开」：窗口与草稿**同生同灭**。
 ///
 /// 草稿是资源而不是 `Pending` 的字段（`Pending` 是 `Copy` 枚举，装不下 `Vec`），所以没有
-/// 任何东西替它收账 —— 不跟着清就留下一份过期名单，dump 与面板都读得到它，而回主菜单
+/// 任何东西替它收账 —— 不跟着清就留下一份过期名单，dump 读得到它，而回主菜单
 /// 那一帧也没有东西清（坑 22/25 同族）。
 #[test]
-fn leaving_the_spell_step_clears_the_draft_with_the_window() {
-    let (mut app, p0, p1) = at_the_witch();
-    assert_eq!(pick(&mut app, p0, MagicFilter::AllGirls), vec![p1]);
+fn leaving_the_screen_clears_the_draft_with_the_window() {
+    let (mut app, _p0, p1) = at_the_witch();
+    assert_eq!(draft(&app).map(|(_, hits)| hits), Some(vec![p1]));
 
     set_policy(&mut app, DecisionPolicy::DeclineAll);
     settle(&mut app, 2);
@@ -244,39 +394,50 @@ fn leaving_the_spell_step_clears_the_draft_with_the_window() {
     assert_ne!(phase(&app), TurnPhase::WaitDecision, "回合该交还给状态机");
 }
 
-/// 没人命中的条件**当场收摊**，而不是把玩家摆到一排「点不着任何人的法术」前面。
+/// 钉住一条**没人命中**的条件：窗口照样开，点一道下去照样落空、照样把回合交出去。
 ///
-/// 收摊也算「把回合交出去」：`decision_system` 只在有人答了一句时才动回合机，而这一步
-/// 没有回答（面板上那颗按钮本来就是灰的，规则层却必须假设有人能把它送进来）。
-/// 只 `pending.clear()` 的写法会把回合永久停在 `WaitDecision`，且不报错、只是不动了。
+/// 生产路径摇不出空名单（筛空就重摇），所以这一格只有 `NM_MAGIC=<没人命中的条件>` 这条
+/// 接缝进得来 —— 而它是**坑 38 唯一可达的路**：「谁清窗口谁就得交还回合」这句话在
+/// 空名单那一条分支上最容易漏（只 `pending.clear()` 的写法把整局停在 `WaitDecision`，
+/// 不报错、只是不动了）。
 #[test]
-fn a_condition_that_hits_nobody_ends_the_ritual_and_hands_the_turn_back() {
+fn a_pinned_empty_list_still_hands_the_turn_back() {
     let (mut app, p0, _p1) = at_the_witch();
     // 默认阵容两位都步行，所以「开机车的」是空的
     assert_eq!(
         pick(&mut app, p0, MagicFilter::OnBike),
         vec![],
-        "前置：没人骑车，这一条该筛空"
+        "前置：没人骑车，钉住这一条就该筛空"
+    );
+    assert_eq!(
+        pending_of(&app),
+        Some((p0, Pending::MagicSpell(MagicFilter::OnBike))),
+        "钉住的条件筛空时窗口照开 —— 落空是玩家那一屏的合法结果"
     );
 
-    assert_eq!(pending_of(&app), None, "空名单不该开第二步");
-    assert!(draft(&app).is_none());
+    cast(&mut app, p0, MagicSpell::Jail);
+
+    assert_eq!(pending_of(&app), None, "施完法窗口就收");
+    assert!(draft(&app).is_none(), "草稿一次就消耗掉");
     assert_ne!(
         phase(&app),
         TurnPhase::WaitDecision,
         "落空也得把回合交还 —— 否则整局停在这一格"
     );
+    // 正面断言：落空也要留下一条「施了、没人挨着」的凭据（`targets` 是空的），
+    // 而不是静默什么都不写 —— 只断「没人被关起来」的那一类否定式很容易空跑
     assert!(
-        magic_lines(&app).is_empty(),
-        "落空不是一场施法，不该有 Magic 流水"
+        was_cast(&app, MagicSpell::Jail, ""),
+        "空名单也得有一条落空的凭据，流水 {:?}",
+        magic_lines(&app)
     );
 }
 
 /// 施法即收尾：一颗法术按钮既办完事又交还回合（与建设柜台那种「办完还要再按一次先不建」不同）。
 #[test]
-fn the_spell_step_hands_the_turn_back_after_casting() {
+fn the_screen_hands_the_turn_back_after_casting() {
     let (mut app, p0, p1) = at_the_witch();
-    assert_eq!(pick(&mut app, p0, MagicFilter::AllGirls), vec![p1]);
+    assert_eq!(draft(&app).map(|(_, hits)| hits), Some(vec![p1]));
     cast(&mut app, p0, MagicSpell::Stay);
 
     assert!(was_cast(&app, MagicSpell::Stay, "P1"), "法术该落到她头上");
@@ -289,10 +450,12 @@ fn the_spell_step_hands_the_turn_back_after_casting() {
     );
 }
 
-/// 两张穷尽表的形状：11 条条件、12 道法术，名字与说明都上得了屏。
+/// 三张表的形状：11 条条件、11 格权重、12 道法术，名字与说明都上得了屏。
 ///
 /// 「玩家不能指定具体人」这条玩法（PLAN §三）由条件的**条数与形状**表达：表里若长出
 /// 「指定某人」那一格，这一条就红在条数上，而那一格的代价是「害人变成一次查名操作」。
+/// 权重表（P13c）与条件表**同源**这一条只能钉在这里：漏一条不会编译失败（`FILTER_WEIGHTS`
+/// 是手写的表而不是 `match`），症状只会是「那条条件永远摇不出来」。
 #[test]
 fn the_two_lists_are_eleven_conditions_and_twelve_spells() {
     assert_eq!(MagicFilter::ALL.len(), 11);
@@ -304,6 +467,56 @@ fn the_two_lists_are_eleven_conditions_and_twelve_spells() {
         names.iter().collect::<std::collections::HashSet<_>>().len(),
         11,
         "两条条件同名 —— 面板上就点不出是哪一条"
+    );
+
+    // ===== 权重表与条件表同源（P13c）=====
+    let weighted: Vec<MagicFilter> = game_core::magic::FILTER_WEIGHTS
+        .iter()
+        .map(|(f, _)| *f)
+        .collect();
+    assert_eq!(
+        weighted.len(),
+        MagicFilter::ALL.len(),
+        "权重表与条件表不同宽 —— 多出来的那一格摇的是空气"
+    );
+    for filter in MagicFilter::ALL {
+        assert!(
+            weighted.contains(&filter),
+            "「{}」不在权重表里 —— 这条条件永远摇不出来",
+            filter.label()
+        );
+    }
+    assert_eq!(
+        weighted
+            .iter()
+            .map(|f| f.label())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        MagicFilter::ALL.len(),
+        "权重表里有重复的条件 —— 抽数区间会盖住后面那一格"
+    );
+    let sum: u32 = game_core::magic::FILTER_WEIGHTS
+        .iter()
+        .map(|(_, weight)| *weight)
+        .sum();
+    assert_eq!(
+        sum,
+        game_core::magic::TOTAL_WEIGHT,
+        "权重总和与抽数上限漂了 —— `weighted_filter` 会喊「回落第一条」，那就是替玩家改结果"
+    );
+    // 「走路的人」降权那一格：它恒等于施法者自己，等权的话自我惩罚约 1/11 而不是 1/21
+    let walker = game_core::magic::FILTER_WEIGHTS
+        .iter()
+        .find(|(f, _)| *f == MagicFilter::Walker)
+        .map(|(_, weight)| *weight)
+        .expect("「走路的人」该在权重表里");
+    assert_eq!(walker, 1, "「走路的人」的降权被抹平了");
+    assert!(
+        game_core::magic::FILTER_WEIGHTS
+            .iter()
+            .filter(|(f, _)| *f != MagicFilter::Walker)
+            .all(|(_, weight)| *weight > walker),
+        "其余条件都不比「走路的人」重 —— 那就不是降权而是只留它一条"
     );
 
     let spells: Vec<&str> = MagicSpell::ALL.iter().map(|s| s.label()).collect();
@@ -333,6 +546,103 @@ fn the_two_lists_are_eleven_conditions_and_twelve_spells() {
     );
 }
 
+// ===== 一b、摇条件（P13c 新增的那一半）=====
+
+/// 摇出来的条件**筛得出人** —— 而重摇这一格不是理论上的：演示盘此刻就有三条筛不出人。
+///
+/// 这条用例的形状是三条断言一起才成立：
+/// ① 第一试确实会摇到筛不出人的那几条（`OnBike`／`OnCar`／`Possessed` —— 开局没人骑车、
+///    `clear_gods` 之后没人附身），否则「筛空就重摇」这句话永远不被走到，断言就是空跑；
+/// ② 定下来的那一条筛得出人；
+/// ③ 摇到筛不出人时**换了一条**（`first != drawn`），而不是原地把空名单交回去。
+#[test]
+fn a_drawn_condition_always_hits_somebody() {
+    let (mut app, p0, _p1) = at_the_witch_pinned(None);
+    let empty_at_the_start = [
+        MagicFilter::OnBike,
+        MagicFilter::OnCar,
+        MagicFilter::Possessed,
+    ];
+    let mut redraw_fired = 0;
+    for seed in 0..80 {
+        let (first, (drawn, hits)) = drawn_with_seed(&mut app, seed, p0);
+        assert!(
+            !hits.is_empty(),
+            "种子 {seed} 定下「{}」却筛不出人 —— 重摇没收住",
+            drawn.label()
+        );
+        if empty_at_the_start.contains(&first) {
+            redraw_fired += 1;
+            assert_ne!(
+                first,
+                drawn,
+                "种子 {seed}：第一试「{}」筛不出人，定下来的却还是同一条",
+                first.label()
+            );
+        }
+    }
+    assert!(
+        redraw_fired > 0,
+        "六十次抽样里没有一次摇到筛不出人的条件 —— 那这一条什么都没验，权重表怕是空了"
+    );
+}
+
+/// 同一个种子摇出同一条条件。
+///
+/// 这条不是形式：截图核对与 `NM_SEED` 复现靠的就是它，而「重摇」很容易写成读全局时钟或
+/// 读 `frame` 那种不可复现的东西。抽数走的是 `pick_magic` 那一条子流（第 11 条）。
+#[test]
+fn the_same_seed_draws_the_same_condition() {
+    let (mut app, p0, _p1) = at_the_witch_pinned(None);
+    for seed in [3, 17, 41] {
+        let (_, first) = drawn_with_seed(&mut app, seed, p0);
+        let (_, again) = drawn_with_seed(&mut app, seed, p0);
+        assert_eq!(
+            first, again,
+            "种子 {seed} 两次摇出不一样的条件 —— 复现拍图就拍不出同一次法事"
+        );
+    }
+}
+
+/// 「走路的人」确实降权，但**不是从表里删掉**。
+///
+/// 拍板的是「保留但降权」：自我惩罚那一格荒诞感要留着，而它恒等于施法者自己，等权会让
+/// 大约每九场法事就有一次「女巫把玩家自己关起来」。200 个种子里它该出现（否则等价于删掉），
+/// 又该**明显少于一条正常条件的两倍之一**（否则等价于等权）。
+///
+/// 断言是**上下界 + 一个比值**而不是一个具体分布：演示盘此刻筛不出人的那三条会被重摇替掉，
+/// 所以实际比例是 1/15 而不是 1/21 —— 写死一个数就成了一条会随棋盘漂红的用例。
+/// 比值那一头是这条用例的牙：真权重下「所有女生」是它的两倍（2 vs 1），等权时两者相等，
+/// 而 `girls * 2 >= walker * 3` 恰好卡在中间（red-check 换回等权就是靠这一条红的）。
+///
+/// ⚠️ 抽样走 [`drawn_series`]（一条流连抽 600 场）而不是「600 个连续种子各抽一场」：
+/// 相邻种子的第一抽是相关的，那样量出来的比例是假的 —— 第一版就是这样，1:2 抽成 21:27。
+#[test]
+fn the_walker_keeps_its_weight_but_the_lightest() {
+    let (mut app, p0, _p1) = at_the_witch_pinned(None);
+    let total = 600;
+    let drawn = drawn_series(&mut app, 7, p0, total);
+    assert_eq!(
+        drawn.len(),
+        total as usize,
+        "抽样没跑够次数 —— 那下面两条比值都是空谈"
+    );
+    let walker = drawn.iter().filter(|f| **f == MagicFilter::Walker).count();
+    let girls = drawn
+        .iter()
+        .filter(|f| **f == MagicFilter::AllGirls)
+        .count();
+    assert!(walker > 0, "「走路的人」从没被摇出来 —— 降权降成了删除");
+    assert!(
+        walker * 4 <= total as usize,
+        "{total} 场里自我惩罚 {walker} 次，比拍板的量级高出一截 —— 权重表怕是又等权了"
+    );
+    assert!(
+        girls * 2 >= walker * 3,
+        "「所有女生」{girls} 次对「走路的人」{walker} 次 —— 比值不到 1.5，那条降权怕是已经抹平了（拍的是 1 vs 2）"
+    );
+}
+
 // ===== 二、11 种筛选条件 =====
 
 /// 「走路的人」是**此刻该行动的那一位**，也就是踩到女巫家的他自己 —— 与他的钱包、性别无关。
@@ -353,7 +663,7 @@ fn walker_is_the_one_standing_at_the_witch_house() {
     assert_eq!(
         draft(&app).map(|(f, _)| f),
         Some(MagicFilter::Walker),
-        "草稿得记住**是哪个条件**筛出的这份名单，第二步的面板才念得出来"
+        "草稿得记住**是哪个条件**筛出的这份名单，那一屏才念得出女巫说的是什么"
     );
 }
 
@@ -386,7 +696,11 @@ fn mounts_split_the_table_and_miss_when_nobody_rides() {
         "没人骑车时该筛空，而不是把两人都算进来"
     );
     assert_eq!(pick(&mut app, p0, MagicFilter::OnBike), vec![]);
-    assert_eq!(pending_of(&app), None, "没人命中 → 不落第二步");
+    assert_eq!(
+        pending_of(&app),
+        Some((p0, Pending::MagicSpell(MagicFilter::OnBike))),
+        "钉住的条件筛空时那一屏照开 —— 落空由施法那一步收尾（见上面坑 38 那条）"
+    );
 
     let (mut app, p0, _p1) = at_the_witch();
     set_mount(&mut app, p0, Mount::Bike);
@@ -506,6 +820,9 @@ fn wealth_adds_the_estate_and_the_stocks_and_subtracts_the_debts() {
 /// 破产的人**不在名单里**：女巫的法术落不到一个已经离场的人头上。
 ///
 /// 这一条的牙齿在「她此刻真的最有钱」那一格 —— 不筛掉破产者，答案就是她。
+/// P13c 之后这里不再走真窗口：全场只剩一位不破产的人时，「所有女生」筛空 → 摇到它就重摇，
+/// 而两位玩家只剩一位能行动，回合机当场判终局 —— 那一格由
+/// [`a_pinned_empty_list_still_hands_the_turn_back`] 用没破产的阵容验。
 #[test]
 fn a_bankrupt_player_is_off_the_witch_s_list() {
     let (mut app, p0, p1) = at_the_witch();
@@ -517,13 +834,16 @@ fn a_bankrupt_player_is_off_the_witch_s_list() {
     );
 
     insert(&mut app, p1, (Bankrupt,));
-    assert_eq!(hits(&mut app, MagicFilter::TopCash, p0), vec![p0]);
     assert_eq!(
-        pick(&mut app, p0, MagicFilter::AllGirls),
-        vec![],
-        "「所有女生」只剩一个破产者 → 筛空、当场收摊"
+        hits(&mut app, MagicFilter::TopCash, p0),
+        vec![p0],
+        "破产之后她整个从名单上消失：「最多」的答案改到 P0 头上"
     );
-    assert_eq!(pending_of(&app), None);
+    assert_eq!(
+        hits(&mut app, MagicFilter::AllGirls, p0),
+        vec![],
+        "场上唯一的女生破产 → 「所有女生」筛空（生产路径摇到它就重摇）"
+    );
 }
 
 /// 名单里**只有玩家**：四位恶人此刻也在世界上（在笼里），但他们没有 `PlayerId`，

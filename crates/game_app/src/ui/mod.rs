@@ -31,13 +31,12 @@ use game_core::prelude::{
     ActiveBoard, AtmAccess, AuctionMove, BailRequested, BankOp, BankOpRequested, BidMove,
     BuildRequested, BuildingKind, BuyTicketRequested, CardAim, CardId, CharacterSet, DataHandles,
     Decision, DecisionChosen, FinancingDrawRequested, GameKind, GameSeed, GameSession, GameSetup,
-    Halt, HolidaySet, Institution, ItemKind, LandId, MagicFilter, MagicFilterPicked, MagicSpell,
-    MagicSpellPicked, MarketClock, MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer,
-    PassiveMove, Paused, Pending, PendingDecision, PlaceItemRequested, PlayCardRequested,
-    RemoteUpgradeRequested, RequestRemoteDice, RequestRoll, RequestStay, START_CASH_TIERS,
-    SaveRequest, ShopOpRequested, StartCashChoice, StartMode, StaySentence, StockId,
-    StockTradeRequested, TileIndex, TradeSide, TurnOrder, TurnPhase, bank_op_allowed, date_of,
-    market_halt,
+    Halt, HolidaySet, Institution, ItemKind, LandId, MagicFilter, MagicSpell, MagicSpellPicked,
+    MarketClock, MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, Paused,
+    Pending, PendingDecision, PlaceItemRequested, PlayCardRequested, RemoteUpgradeRequested,
+    RequestRemoteDice, RequestRoll, RequestStay, START_CASH_TIERS, SaveRequest, ShopOpRequested,
+    StartCashChoice, StartMode, StaySentence, StockId, StockTradeRequested, TileIndex, TradeSide,
+    TurnOrder, TurnPhase, bank_op_allowed, date_of, market_halt,
 };
 
 use crate::boards::{BoardLibrary, BoardPick};
@@ -383,13 +382,10 @@ pub enum UiAction {
     /// 挂着这一问的那一位，而他每帧都可能换人），而「嫁祸给谁」那一位**在**按钮里 ——
     /// 点名是意图的一部分，与 [`Self::Bail`] 那颗「保释 阿土伯」同一条形状
     Gate(PassiveMove),
-    /// 在女巫那里挑一条**筛选条件**（P13 第一步）。主语不在按钮里（派发时取挂着
-    /// 这一步窗口的那一位），而「这一条筛出谁」全交给规则层那一条 `filter_targets` ——
-    /// 面板的灰按钮与它读的是同一个函数，所以「亮着却筛出没人」在结构上写不出来。
-    MagicFilter(MagicFilter),
-    /// 在女巫那里挑一道**法术**（P13 第二步）。窗口自己带着条件，所以派发还要比对
-    /// 「按钮上烤的条件」与「窗口挂着的那一步」是不是同一个（与 [`Self::Build`] 比地块
-    /// 同一条形状）—— 少了这一问，从旧面板上点出来的一道法术就能落到另一场法事头上。
+    /// 在女巫那里挑一道**法术**（P13c 之后这是魔法屋唯一的一颗动作按钮）。窗口自己带着
+    /// 摇出来的条件，所以派发还要比对「按钮上烤的条件」与「窗口挂着的那一条」是不是同一个
+    /// （与 [`Self::Build`] 比地块同一条形状）—— 少了这一问，从旧面板上点出来的一道法术
+    /// 就能落到另一场法事头上。
     MagicSpell(MagicFilter, MagicSpell),
     /// 点掉第 `slot` 只气球（P7 打气球）。槽位在建屏那一刻就烤进按钮里，
     /// 而「这一下算不算」仍由那一局的状态说了算（收工了、槽位越界都不算）
@@ -516,17 +512,9 @@ pub(crate) fn gate_asked(pending: &PendingDecision) -> Option<Entity> {
     }
 }
 
-/// 魔法屋**第一步**挂着谁（P13）。与柜台那几种同一条形状：窗口就是全部的判据。
-pub(crate) fn magic_filter_asked(pending: &PendingDecision) -> Option<Entity> {
-    match pending.active() {
-        Some((player, Pending::Magic)) => Some(player),
-        _ => None,
-    }
-}
-
-/// 魔法屋**第二步**挂着谁、以及挂着的是**哪一条条件**（P13）。
+/// 魔法屋那一屏挂着谁、以及挂的是**哪一条摇出来的条件**（P13c）。
 ///
-/// 条件要从窗口读而不是信按钮：玩家按「离开」再踩一次魔法屋、挑了另一条条件之后，
+/// 条件要从窗口读而不是信按钮：玩家按「离开」再踩一次魔法屋、摇出另一条条件之后，
 /// 旧面板上那颗按钮（重建之前的那几帧）指向的是一场已经不存在的法事。比对不一致就
 /// 一个字都不发 —— 与拍卖台那句「主语取机器而不是取窗口」是同一条纪律。
 pub(crate) fn magic_spell_asked(pending: &PendingDecision) -> Option<(Entity, MagicFilter)> {
@@ -928,10 +916,8 @@ struct Sends<'w> {
     /// **同一个问题的三种答案**，而「问的是哪一问」在门里，不在按钮里 ——
     /// 拆成三条消息就多了三处可以各说各话的地方
     gates: MessageWriter<'w, PassiveAnswer>,
-    /// 魔法屋的两步回答（P13）：条件与法术各一条，与那两个窗口一一对应。
-    /// 分成两条而不是「一个魔法屋请求带两个位」：第二步的候选是第一步筛出来的，
-    /// 规则层要在中间改窗口 —— 一条消息说不清「答完了条件、还没答法术」那个状态
-    magic_filters: MessageWriter<'w, MagicFilterPicked>,
+    /// 魔法屋的那一句回答（P13c 之后只有一条）：条件不再由玩家挑，所以「答完条件、
+    /// 还没答法术」那个中间状态在结构上消失了，只剩「挑一道法术」
     magic_spells: MessageWriter<'w, MagicSpellPicked>,
     exit: MessageWriter<'w, AppExit>,
 }
@@ -1307,23 +1293,10 @@ fn dispatch_ui_actions(
                     what: *what,
                 });
             }
-            // 魔法屋的两步（P13）。两颗按钮都只发**意图**：筛出谁、法术落不落得空，
-            // 全由规则层那两条 system 对着窗口判（`magic_filter_system`/`magic_spell_system`），
-            // 而面板的灰按钮读的是同一个 `filter_targets` —— 这里一个字都不判断。
-            UiAction::MagicFilter(filter) => {
-                if gate.paused.0 {
-                    continue;
-                }
-                let Some(player) = magic_filter_asked(&gate.pending) else {
-                    continue;
-                };
-                sends.magic_filters.write(MagicFilterPicked {
-                    player,
-                    filter: *filter,
-                });
-            }
-            // 第二步多一问：按钮上烤的条件要与窗口挂着的那一条一致才发。不一致的意思是
-            // 「这场法事已经不是那一场了」，而玩家那一步点的是**旧名单**上的法术
+            // 魔法屋（P13c）：按钮只发**意图**。法术落不落得空、落到谁头上，全由规则层
+            // 那条 `magic_spell_system` 对着窗口判 —— 面板上连名单都不出现，这里更不判断。
+            // 按钮上烤的条件要与窗口挂着的那一条一致才发。不一致的意思是
+            // 「这场法事已经不是那一场了」，而玩家那一步点的是一道**旧条件**下的法术
             UiAction::MagicSpell(wanted, spell) => {
                 if gate.paused.0 {
                     continue;
@@ -1629,10 +1602,8 @@ mod tests {
         /// 建设窗口按下的那一类（P10c）：`(谁, 哪块地, 建什么)`。地块也记下来，
         /// 因为按钮里烤着它，而「窗口问的是另一块地」必须被挡掉
         builds: Vec<(Entity, LandId, BuildingKind)>,
-        /// 魔法屋第一步按的那颗条件（P13）：`(谁, 哪一条)`。主语来自窗口而不是按钮
-        magic_filters: Vec<(Entity, MagicFilter)>,
-        /// 第二步按的那颗法术（P13）：`(谁, 哪一道)`。按钮上另外烤着**条件**，但那条不进
-        /// 消息（规则层从窗口里读它），所以这一栏记的是「发出去的是什么」，
+        /// 魔法屋按下的那颗法术（P13c 之后这是这一屏唯一的动作）。按钮上另外烤着**条件**，
+        /// 但那条不进消息（规则层从窗口里读它），所以这一栏记的是「发出去的是什么」，
         /// 「条件不匹配就没发」由断言用 `is_empty` 说
         magic_spells: Vec<(Entity, MagicSpell)>,
         /// 被动卡那道门按下的那一句（P13b②）：`(谁, 哪个动作)`。这一栏的主语是**这一阶段
@@ -1658,7 +1629,6 @@ mod tests {
         tickets: MessageReader<'w, 's, BuyTicketRequested>,
         bids: MessageReader<'w, 's, AuctionMove>,
         builds: MessageReader<'w, 's, BuildRequested>,
-        magic_filters: MessageReader<'w, 's, MagicFilterPicked>,
         magic_spells: MessageReader<'w, 's, MagicSpellPicked>,
         gates: MessageReader<'w, 's, PassiveAnswer>,
     }
@@ -1693,8 +1663,6 @@ mod tests {
         seen.bids.extend(r.bids.read().map(|b| (b.player, b.what)));
         seen.builds
             .extend(r.builds.read().map(|b| (b.player, b.land, b.kind)));
-        seen.magic_filters
-            .extend(r.magic_filters.read().map(|m| (m.player, m.filter)));
         seen.magic_spells
             .extend(r.magic_spells.read().map(|m| (m.player, m.spell)));
         seen.gates
@@ -1787,9 +1755,8 @@ mod tests {
         mortgage_take: Entity,
         /// 建设窗口上的「建购物中心」（P10c）：地块与类别都烤在按钮里
         build_mall: Entity,
-        /// 魔法屋的两步各一颗（P13）：第一步「所有女生」，第二步「坐牢 3 天」——
-        /// 而后者烤着**所有女生**这个条件，所以窗口换成别的条件时它该失灵
-        magic_girls: Entity,
+        /// 魔法屋那颗「坐牢 3 天」（P13c 之后这一屏只剩一颗）：它烤着**所有女生**这个条件，
+        /// 所以窗口摇出别的条件时它该失灵
         magic_jail: Entity,
         /// 道具面板上的两颗（P5）：放一个路障到 5 号格、用遥控骰子走 3 步
         place_rock: Entity,
@@ -1834,9 +1801,8 @@ mod tests {
                 // P9：拍卖台那两颗按钮共用这一条出口（漏了它 = 派发这个 system 建不出来，
                 // 于是上面那一整片按钮全死，而不是只死拍卖那两颗）
                 .add_message::<AuctionMove>()
-                // P13：魔法屋两步的出口。同一条坑的第四遍 —— 少一条不是「那颗按钮不灵」，
-                // 而是整片按钮都不灵，所以两步各一条，写在这里而不是写在用例里
-                .add_message::<game_core::prelude::MagicFilterPicked>()
+                // P13c：魔法屋那一颗法术按钮的出口。同一条坑的第四遍 —— 少注册一条不是
+                // 「那颗按钮不灵」，而是整片按钮都不灵，所以写在这里而不是写在用例里
                 .add_message::<game_core::prelude::MagicSpellPicked>()
                 // 顶栏那两行播报的读侧（施法凭据与「被挡下」凭据各一条）
                 .add_message::<game_core::prelude::MagicCast>()
@@ -1997,12 +1963,8 @@ mod tests {
                     kind: BuildingKind::Mall,
                 })
                 .id();
-            // 魔法屋那两颗（P13）：与建设窗口同一形 —— 意图在按钮里，主语在窗口里。
-            // 第二步那颗自带「这一屏是从哪条条件开出来的」，所以它的失灵条件是**条件**而不是主语
-            let magic_girls = app
-                .world_mut()
-                .spawn(UiAction::MagicFilter(MagicFilter::AllGirls))
-                .id();
+            // 魔法屋那颗（P13c）：与建设窗口同一形 —— 意图在按钮里，主语在窗口里。
+            // 按钮自带「这一屏是从哪条条件开出来的」，所以它的失灵条件是**条件**而不是主语
             let magic_jail = app
                 .world_mut()
                 .spawn(UiAction::MagicSpell(
@@ -2053,7 +2015,6 @@ mod tests {
                 bid_pass,
                 mortgage_take,
                 build_mall,
-                magic_girls,
                 magic_jail,
                 place_rock,
                 remote_three,
@@ -3065,7 +3026,6 @@ mod tests {
             .add_message::<AuctionMove>()
             // P13：魔法屋两步的两个出口 + 顶栏读的两条凭据（同一格坑的第四遍：
             // 少一条的症状是「一整片按钮没反应」，不是「那一颗没反应」）
-            .add_message::<game_core::prelude::MagicFilterPicked>()
             .add_message::<game_core::prelude::MagicSpellPicked>()
             .add_message::<game_core::prelude::MagicCast>()
             .add_message::<game_core::prelude::MagicBlocked>()
@@ -3708,39 +3668,24 @@ mod tests {
         );
     }
 
-    /// 魔法屋那两步各要自己的窗口，而第二步还多问一句「这场法事是不是我从的那一条条件」。
+    /// 魔法屋那一屏的三道门禁（P13c）：没窗口不能施法、条件换了不能按旧那一屏的按钮、
+    /// 暂停照旧挡一切。
     ///
-    /// 三条门禁都在这一格：没窗口不能选条件（凭空就能施法）、条件那一步不能直接施法
-    /// （跳过条件就没有名单，而法术要落在名单上）、条件换了就不能按旧那一屏的按钮
-    /// （旧名单上的人可能已经不是同一批了）。暂停照旧挡一切。
+    /// P13c 之前这里是五道，多出来的那两道管的是「条件那一步」：玩家先挑条件、再挑法术，
+    /// 于是「还没答条件就没有名单」是派发侧要替规则层挡的事。现在条件由规则层摇出来、
+    /// 与窗口同时出现，那一格在结构上写不出来了 —— 剩下的重点是**按钮上烤的条件必须与
+    /// 窗口挂着的那一条对上**，因为玩家点的可能是重建之前那一帧的旧面板。
     #[test]
-    fn the_witch_s_two_steps_each_need_their_own_window() {
-        // 一、没有任何窗口：两步都发不出去
+    fn the_witch_s_spell_button_needs_its_own_window() {
+        // 一、没有任何窗口：法术发不出去
         let mut h = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
-        h.click(h.magic_girls);
-        h.click(h.magic_jail);
-        assert!(
-            h.seen().magic_filters.is_empty() && h.seen().magic_spells.is_empty(),
-            "没有法事也能选条件、也能施法 —— 凭空就能害人"
-        );
-
-        // 二、第一步挂着：条件发得出去，主语来自窗口而不是按钮
-        let mut h = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
-        let player = h.player;
-        h.offer(player, Pending::Magic);
-        h.click(h.magic_girls);
-        assert_eq!(
-            h.seen().magic_filters,
-            vec![(player, MagicFilter::AllGirls)],
-            "挂着第一步窗口的那位才是主语"
-        );
         h.click(h.magic_jail);
         assert!(
             h.seen().magic_spells.is_empty(),
-            "第一步还没答完就能施法 —— 那份名单是空的"
+            "没有法事也能施法 —— 凭空就能害人"
         );
 
-        // 三、第二步挂着同一条条件：法术发得出去
+        // 二、窗口挂着同一条条件：法术发得出去，主语来自窗口而不是按钮
         let mut h = Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
         let player = h.player;
         h.offer(player, Pending::MagicSpell(MagicFilter::AllGirls));
@@ -3748,10 +3693,10 @@ mod tests {
         assert_eq!(
             h.seen().magic_spells,
             vec![(player, MagicSpell::Jail)],
-            "条件对上就该发出去"
+            "挂着这一屏的那位才是主语"
         );
 
-        // 四、第二步挂着**另一条**条件：那颗按钮属于旧那一屏，不该办成
+        // 三、窗口挂着**另一条**条件：那颗按钮属于旧那一屏，不该办成
         let mut other_cond =
             Harness::new(TurnPhase::WaitDecision, false, PendingDecision::default());
         let caster = other_cond.player;
@@ -3759,17 +3704,17 @@ mod tests {
         other_cond.click(other_cond.magic_jail);
         assert!(
             other_cond.seen().magic_spells.is_empty(),
-            "这场法事筛的是「现金最多」，按下去的却是「女生」那一屏的按钮"
+            "这场法事摇的是「现金最多」，按下去的却是「女生」那一屏的按钮"
         );
 
-        // 五、暂停挡一切：与彩票/百货同一条
+        // 四、暂停挡一切：与彩票/百货同一条
         let mut paused = Harness::new(TurnPhase::WaitDecision, true, PendingDecision::default());
         let waiter = paused.player;
-        paused.offer(waiter, Pending::Magic);
-        paused.click(paused.magic_girls);
+        paused.offer(waiter, Pending::MagicSpell(MagicFilter::AllGirls));
+        paused.click(paused.magic_jail);
         assert!(
-            paused.seen().magic_filters.is_empty(),
-            "暂停时还派发了条件请求"
+            paused.seen().magic_spells.is_empty(),
+            "暂停时还派发了法术请求"
         );
     }
 }

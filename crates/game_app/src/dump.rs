@@ -680,16 +680,20 @@ fn format_jackpot(view: &DumpView) -> String {
     )
 }
 
-/// 魔法屋这一场法事（P13）。
+/// 魔法屋这一场法事（P13c）。
 ///
 /// 没在办的时候也要写一句「没在办」：空栏既可能是「没在办」也可能是「面板没读到」，
 /// 那两种在排查时差一整趟（与 P11c② 那条「两家都开着」同一条理由）。
-/// 草稿里那份名单是**第二步窗口念的、与法术真正落到的同一批人** —— 查「女巫筛出的怎么
-/// 不是我以为的那几个」，这一栏是唯一一处能同时看见条件与名单的地方。
+///
+/// ⚠️ 这一栏是**名单唯一可见的地方**。P13c 把名单从玩家的面板上摘掉了（看得见答案的
+/// 女巫只是查名工具），而规则层的草稿照旧存着它 —— 排查「法术为什么落到这三个人头上」
+/// 仍然只有这一处能同时看见条件与名单。玩家那一屏只看得见条件。
 fn format_magic(view: &DumpView) -> String {
     let Some((filter, found)) = view.magic.draft.as_ref() else {
         return match view.pending.active() {
-            Some((_, Pending::Magic)) => "第一步：等玩家挑一条条件（还没筛人）".to_string(),
+            // 窗口挂着而草稿没了：规则层那句 `warn!` 的画面对照（P13c 之后不该发生 ——
+            // 条件与草稿同生在 `settle_magic_landing`，也同灭于按「离开」那一条）
+            Some((_, Pending::MagicSpell(_))) => "窗口挂着但草稿没了".to_string(),
             _ => "没在办".to_string(),
         };
     };
@@ -698,7 +702,7 @@ fn format_magic(view: &DumpView) -> String {
         .map(|e| who_are(view, *e))
         .collect::<Vec<_>>()
         .join(",");
-    format!("条件「{}」筛出 {} 人：{who}", filter.label(), found.len())
+    format!("摇出「{}」筛出 {} 人：{who}", filter.label(), found.len())
 }
 
 /// 门那一行。它要说的是**此刻谁在答哪一问**，而这三样（谁、哪一问、表上哪一行）

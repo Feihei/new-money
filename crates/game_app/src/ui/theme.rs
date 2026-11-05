@@ -326,10 +326,9 @@ pub mod layout {
     pub const SCENE_LOTTERY: f32 = 760.0;
     pub const SCENE_BAIL: f32 = 760.0;
     pub const SCENE_AUCTION: f32 = 720.0;
-    /// 魔法屋两步各取一档：第一步一行只有「条件按钮 + 几个名字」，640 就够；
-    /// 第二步一行是「法术名 + 一句它干什么」，最长那句要 820 才不换行。
-    /// 共用 820 会让第一步的名单后面空出小半屏
-    pub const SCENE_MAGIC_FILTER: f32 = 640.0;
+    /// 魔法屋一屏（P13c 之后只剩这一档）：一行是「法术名 + 一句它干什么」，
+    /// 最长那句要 820 才不换行。P13c 之前这里还有一档 640 给「挑条件」那一步
+    /// （一行只有条件按钮加几个名字），那一步整块没了
     pub const SCENE_MAGIC_SPELL: f32 = 820.0;
     pub const SCENE_STOCK: f32 = 860.0;
     /// 场景内容的内边距。左右与上下同值：竖向居中之后，上下留白由 flex 分配，

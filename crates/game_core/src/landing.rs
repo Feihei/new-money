@@ -123,9 +123,10 @@ pub enum LandingDomain {
     /// 不需要六句「他是玩家吗」，也就不存在漏写第五句的那种 bug。
     /// 带的是哪一种恶人：四种人的规则在 `villain.rs` 各自那张表上回答同一句「他踩到这一格拿什么」。
     Villain(crate::villain::VillainKind),
-    /// 魔法屋（P13，`magic::settle_magic_landing_system`）：女巫的两步法事，
-    /// 选条件与选法术各占一个 [`Pending`] 变体。与柜台那族同形（窗口而非报价，
-    /// 「离开」才关），但它**有两个回答** —— 原因见 [`Pending::Magic`] 那条注。
+    /// 魔法屋（P13，`magic::settle_magic_landing`）：女巫摇一条条件、玩家盲选一道法术。
+    /// 与柜台那族同形（窗口而非报价，「离开」才关），而 P13c 起**只剩一个回答** ——
+    /// 条件不再由玩家挑（原因写在 [`Pending::MagicSpell`] 那条注里：让玩家挑条件、
+    /// 还把名单写在按钮旁边，玩家就一定能选到对自己有利的那一条）。
     Magic,
     /// 按设计就是什么都不做：路面只是路面，起点刻意不发薪水（PLAN §一）。
     Nothing,
@@ -303,19 +304,16 @@ pub enum Pending {
     /// 请求走 [`crate::msg::RemoteUpgradeRequested`]。判据与扣款全在 `Books::upgrade`
     /// （正路），董事长的「免费升两层」只是同一判据换了价钱与层数（`upgrade_chairman`）。
     RemoteBuild,
-    /// 踩到魔法屋（P13）：女巫的两步法事，这一步选**筛选条件**。
+    /// 魔法屋：女巫摇出的一条条件已经摆在桌上，这一步选**一道法术**（P13 / P13c）。
     ///
-    /// 它是窗口不是报价（对 `Accept`/`Decline` 不认，只认「离开」），但与柜台那几种
-    /// 不同的是它**有两步**：条件答完才开法术那一步（[`Pending::MagicSpell`]）——
-    /// 筛出了谁决定第二步窗口里有什么可念的，一步答两件事会让「选了条件又反悔」
-    /// 变成一条消息里说不清的东西。条件那半的候选由 [`crate::magic::MagicFilter::ALL`] 给，
-    /// 回答走 [`crate::msg::MagicFilterPicked`]。
-    Magic,
-    /// 魔法屋的第二步：条件已经答完、名单已经筛出（P13）。
+    /// P13c 之前这里有两个变体（`Pending::Magic` 答条件 → 本条答法术），而第一步是
+    /// 玩法上的致命伤：面板把 11 条条件各自筛出谁全写在按钮右边，玩家一定能选到
+    /// 对自己有利的那一条。现在条件由 [`magic::settle_magic_landing`](crate::magic::settle_magic_landing)
+    /// 在踩格那一刻摇出来，**名单不给玩家看**，盲选才是博弈（可能害到自己、可能帮了对手）。
     ///
-    /// 带的是**条件**而不是名单：名单在 [`crate::magic::MagicRitual`] 那份草稿里 ——
-    /// 它随这份待决事项同生同灭，但它是「这场法事筛出了谁」的运行时事实，
-    /// UI 与结算都要读它，而 `Pending` 的形状（`Copy`）装不下一个 `Vec`。
+    /// 带的还是**条件**而不是名单：名单在 [`crate::magic::MagicRitual`] 那份草稿里 ——
+    /// 它随这份待决事项同生同灭，是「这场法事筛出了谁」的唯一记录（dump 与结算读它，
+    /// 面板不读），而 `Pending` 的形状（`Copy`）装不下一个 `Vec`。
     /// 回答走 [`crate::msg::MagicSpellPicked`]。
     MagicSpell(crate::magic::MagicFilter),
     /// 被动卡那道门正在问一句「免不免／转给谁」（P13b②）。
@@ -480,11 +478,10 @@ pub fn decision_system(
             | Pending::Minigame(_)
             | Pending::Build(_)
             | Pending::RemoteBuild
-            // 魔法屋（P13）：两步窗口与柜台同族 —— 条件与法术各走自己的意图消息
-            // （`MagicFilterPicked`/`MagicSpellPicked`），这里只认「离开」。
-            // 任一步按离开都把整场法事收掉（`magic_spell_system` 会在第二步施法后清；
-            // 第一步离开时草稿还没建，清窗口就是全部）
-            | Pending::Magic
+            // 魔法屋（P13 / P13c）：与柜台同族 —— 法术走自己的意图消息
+            // （`MagicSpellPicked`），这里只认「离开」。
+            // 按离开就是把整场法事收掉（`magic_spell_system` 在窗口不在时清草稿；
+            // 名单只在草稿里，从来没有「先答一半」那一层）
             | Pending::MagicSpell(_),
             Decision::Acknowledge,
         ) => {}
@@ -496,7 +493,6 @@ pub fn decision_system(
             | Pending::Minigame(_)
             | Pending::Build(_)
             | Pending::RemoteBuild
-            | Pending::Magic
             | Pending::MagicSpell(_),
             Decision::Accept | Decision::Decline,
         ) => return,

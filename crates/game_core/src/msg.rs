@@ -1425,38 +1425,20 @@ pub struct RentRerouted {
 
 // ===== 魔法屋（P13）=====
 
-/// 一位玩家踩到魔法屋，女巫的两步法事开台（P13）。
+/// 一位玩家踩到魔法屋，女巫给出一条**摇出来的**条件（P13 / P13c）。
 ///
-/// 它只是**报到**：条件的候选名单、施法的出口都在窗口里，规则层不预设任何一步。
-/// 与 [`BankVisited`] 同一条形状 —— 面板与 autopilot 读它弹 UI。
+/// 它只是**报到**：条件挂在窗口上（[`Pending::MagicSpell`](crate::landing::Pending::MagicSpell)），
+/// 筛出了谁**不在这里也不在任何消息里** —— 玩家看得见条件名、看不见名单，盲选一道法术，
+/// 后果由 [`MagicCast`] 与 [`MagicBlocked`] 事后揭晓。P13c 之前这里有两条消息
+/// （`MagicFilterPicked`：玩家挑条件；`MagicTargets`：筛出了谁），两条一起退场 ——
+/// 只要面板读得到名单，「博弈」就退化成了查名。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MagicOffered {
     pub player: Entity,
 }
 
-/// 玩家选定了一条**筛选条件**（第一步的回答，P13）。
-///
-/// 这是意图不是结果：条件合不合法、筛出几个人，由 [`crate::magic::magic_filter_system`]
-/// 对着窗口判。与 [`RequestRoll`] 同一条纪律 —— 人、AI、旋钮发同一条。
-#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MagicFilterPicked {
-    pub player: Entity,
-    pub filter: crate::magic::MagicFilter,
-}
-
-/// 女巫按条件筛出了**这些人**（第二步窗口的名单，P13）。
-///
-/// 名单带在消息上而不是让 UI 自己再筛一遍：筛选的口径（并列怎么取、破产者算不算）
-/// 只该有一份答案，而「第二步窗口显示的人」与「法术真正落到的头」必须是同一批。
-/// **空名单也发这一条** —— 那正是「落空」的凭据：窗口当场收掉，第二步不会开。
-#[derive(Message, Debug, Clone, PartialEq)]
-pub struct MagicTargets {
-    pub player: Entity,
-    pub filter: crate::magic::MagicFilter,
-    pub targets: Vec<Entity>,
-}
-
-/// 玩家选定了**一道法术**（第二步的回答，P13）。与 [`MagicFilterPicked`] 同一条纪律。
+/// 玩家选定了**一道法术**（盲选的那一句，P13）。承受者是谁由规则层在落下的那一刻才算，
+/// 请求里只有「哪一道」—— 那正是这一格的玩法。
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MagicSpellPicked {
     pub player: Entity,

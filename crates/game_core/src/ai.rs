@@ -134,16 +134,16 @@ use crate::items::{Inventory, ItemKind};
 use crate::land::LandId;
 use crate::landing::{Pending, PendingDecision};
 use crate::lottery::{Jackpot, LotteryTickets};
-use crate::magic::{MagicFilter, MagicRitual, MagicSpell};
+use crate::magic::MagicSpell;
 use crate::market::{MarketClock, market_halt_now};
 use crate::minigame::GameKind;
 use crate::mortgage::{counter_plots, mortgage_op_allowed, read_facts};
 use crate::msg::{
     AuctionMove, BailRequested, BankOp, BankOpRequested, BidMove, BuildRequested,
-    BuyTicketRequested, Decision, DecisionChosen, MagicFilterPicked, MagicSpellPicked,
-    MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, PlaceItemRequested,
-    PlayCardRequested, RemoteUpgradeRequested, RequestRoll, RequestStay, ShopOpRequested,
-    StockTradeRequested, TradeSide,
+    BuyTicketRequested, Decision, DecisionChosen, MagicSpellPicked, MinigameResult, MortgageOp,
+    MortgageRequested, PassiveAnswer, PassiveMove, PlaceItemRequested, PlayCardRequested,
+    RemoteUpgradeRequested, RequestRoll, RequestStay, ShopOpRequested, StockTradeRequested,
+    TradeSide,
 };
 use crate::occupancy::{MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt, place_denied};
 use crate::passive::{Affair, Ask, Gate};
@@ -588,9 +588,7 @@ pub enum AiMove {
     Build { land: LandId, kind: BuildingKind },
     /// 远程建设柜台：升一块自己的地（P14c④；董事长那一格免费双升由柜台自己判）
     RemoteBuild { land: LandId },
-    /// 魔法屋第一步：挑一个筛选条件（P14d④b）
-    Filter(MagicFilter),
-    /// 魔法屋第二步：在筛出的名单上挑一道法术（P14d④b）
+    /// 魔法屋：盲选一道法术（P14d④b / P13c；条件由规则层摇，没有「挑条件」这一步）
     Cast(MagicSpell),
     /// 百货柜台：买下货架上的这一张（P14d④d）
     Buy(CardId),
@@ -637,10 +635,10 @@ pub fn greedy(about: Pending, rules: &GameRules) -> AiMove {
         Pending::RemoteBuild => AiMove::Decide(Decision::Acknowledge),
         // 服务费收据（P10c）：钱已经扣完，与租金收据同一个回答
         Pending::ServiceNotice(_) => AiMove::Decide(Decision::Acknowledge),
-        // 魔法屋的两步（P13）：**不施法**。这是人类座位那份脚手架的答案 ——
+        // 魔法屋（P13 / P13c）：**不施法**。这是人类座位那份脚手架的答案 ——
         // 它替的人不在键盘前，而法术的后果是坐牢、拍卖、变卖，会替他把世界改掉。
-        // 会算账的那两份在 `AiHand::filter_table` 与 `spell_table`（P14d④b）。
-        Pending::Magic | Pending::MagicSpell(_) => AiMove::Decide(Decision::Acknowledge),
+        // 会算账的那一份在 `AiHand::spell_table`（盲选表，P14d④b + P13c）。
+        Pending::MagicSpell(_) => AiMove::Decide(Decision::Acknowledge),
         // 被动卡那道门（P13b②）：答「不用」，与上面「不施法」、拍卖那一条「不喊价」同一条理由
         Pending::Passive => AiMove::Gate(PassiveMove::Decline),
     }
@@ -666,28 +664,31 @@ fn plot_value(rent_next: i64, price: i64, leverage: f32) -> f32 {
     rent_next as f32 * leverage - price as f32
 }
 
-/// 女巫的十二道法术**对承受者**是好还是坏：`1.0` 纯送、`0.0` 纯害、`0.5` 说不清。
+/// 女巫的十二道法术在**盲选**时各值几分（P13c）。
 ///
-/// 只有方向、没有金额 —— 十二道里没有一把共同的尺（「坐牢 3 天」和「得一张卡」怎么比？
-/// 「强制把卡换成点券」算几成害？）。硬造一个币值只会把自己骗过去：AI 需要的本来就不是
-/// 「哪一道更贵」，而是「这一道该落到谁头上」，而那是 [`AiHand::filter_table`] 与
-/// [`AiHand::spell_table`] 用害意那一个权重回答的。
+/// ⚠️ 这张表**不读名单**，而且永远不许开始读：P13c 之前它读的是「筛出的这批人里谁是我、
+/// 谁是对手」，于是 AI 拿着人类看不见的信息挑法术 —— 人类被迫盲选而电脑从不失手，
+/// 那不是先验差异，是信息不对称。现在两边读到的都一样：一条条件名，别的什么都不知道。
 ///
-/// 三处刻意的中间值：`BankCash` 0.6（现金进存款：防抢，但也取不出来）、`SellCards`／
-/// `SellItems` 0.2（九折／标价强卖 —— 保住了价值却换成了点券）、`TurnBack` 0.2
-/// （改道对他是好是坏，得看他的路，AI 不替他算）。`DrawFate` 0.5 是**中性**：
-/// 三张命运牌的期望不写在任何一个数上，所以它永远得 0 分、永远不上桌。
-fn spell_good_for_target(spell: MagicSpell) -> f32 {
+/// 三档就是「这道法术通常落到谁头上是好事」的方向感，不是币值：十二道里没有一把共同的尺
+/// （「坐牢 3 天」和「得一张卡」怎么比？），硬造一个币值只会把自己骗过去。
+/// `DrawFate`／变卖两道／`Stay`／`TurnBack` 这五道是**中性**：好坏取决于他此刻的牌、
+/// 他的路、他脚下有没有楼 —— 那些都不是盲选该算的账。
+fn blind_weight(spell: MagicSpell, harm: f32) -> f32 {
     match spell {
-        MagicSpell::GainCard | MagicSpell::BuildHere => 1.0,
-        MagicSpell::BankCash => 0.6,
-        MagicSpell::DrawFate => 0.5,
-        MagicSpell::SellCards | MagicSpell::SellItems | MagicSpell::TurnBack => 0.2,
-        MagicSpell::Stay => 0.1,
+        // 利己三道
+        MagicSpell::GainCard | MagicSpell::BuildHere | MagicSpell::BankCash => 1.0 - harm,
+        // 损人四道
         MagicSpell::Jail
         | MagicSpell::Hospital
         | MagicSpell::Demolish
-        | MagicSpell::AuctionHere => 0.0,
+        | MagicSpell::AuctionHere => harm,
+        // 中性五道
+        MagicSpell::DrawFate
+        | MagicSpell::SellCards
+        | MagicSpell::SellItems
+        | MagicSpell::Stay
+        | MagicSpell::TurnBack => 0.35,
     }
 }
 
@@ -799,13 +800,12 @@ pub struct AiHand<'w, 's> {
     /// 走同一条消息，判据全在 `property::build_op_system`／`company::remote_build_system`。
     pub builds: MessageWriter<'w, BuildRequested>,
     pub remote_builds: MessageWriter<'w, RemoteUpgradeRequested>,
-    /// 女巫的两步（P14d④b）：条件与法术。与面板上点的那两颗走同一条消息。
-    pub filters: MessageWriter<'w, MagicFilterPicked>,
+    /// 女巫那一问（P14d④b / P13c）：一道法术。与面板上那颗按钮走同一条消息。
+    /// ⚠️ P13c 删掉了这一包的 `ritual: Res<MagicRitual>` 与 `filters` 那条写侧：
+    /// 名单在施法之前**谁都不该读得到**（包括电脑），而条件不再由谁挑。
+    /// 那张表的牙齿是一条用例（`tests/ai.rs` 里「两份不同名单、同一性格必须挑同一道」），
+    /// 不是类型 —— 所以这一格注释要留着，它是下一个人手痒时唯一会读到的那句话。
     pub casts: MessageWriter<'w, MagicSpellPicked>,
-    /// 这一场法事筛出了谁 —— 第二步要读它，而它与第二步窗口**同生同灭**
-    /// （`Pending::MagicSpell` 那一段的注）。读这一份而不是自己按条件再筛一遍：
-    /// 「窗口里显示的人」与「法术落到的头」在规则层只能有一处答案。
-    pub ritual: Res<'w, MagicRitual>,
     /// 百货的货架与买入那条入口（P14d④d）。货架是资源（全盘一份），判据全在
     /// `shop_op_system` —— 这边只挑「买哪一张」。
     pub shop: Res<'w, ShopStock>,
@@ -1610,59 +1610,20 @@ impl AiHand<'_, '_> {
             })
     }
 
-    /// 女巫的第一步（P14d④b）：挑一个**筛选条件**。
+    /// 女巫那一问（P14d④b / P13c）：**盲选**一道法术。
     ///
-    /// 两个候选各自的最好一面都是满分 —— 「筛出最有钱的那个去害」与「筛出自己拿好处」，
-    /// 所以这一步比较的只是两个权重：害意过半就筛最有钱的，否则筛「走路的人」（自己）。
-    /// 那个「过半」不是新常数，它是 `harm > 1 − harm` 的化简：第二步那张表的权重正是
-    /// 「自己＝`1 − harm`、别人＝`−harm`」这两个数，门槛只是把它们在第一步比一下。
-    ///
-    /// ⚠️ **最有财的可能就是我**：那时第二步读到的名单里只有自己，同一张表会把好的那道
-    /// 挑出来（见 [`Self::spell_table`]）—— 第一步因此不需要回头避让，避让会让「条件」
-    /// 这个词多出一个只有 AI 知道的例外。
-    fn filter_table(&self, profile: &AiProfile) -> Candidates {
+    /// P13c 之前这里是两张表（`filter_table` 挑条件 + `spell_table` 读名单），
+    /// 两张都退场了：条件不再由人挑，而名单在施法之前谁都不该看见 ——
+    /// 包括电脑。分数只出自 [`blind_weight`]（方向 × 害意），加上「离开」那一格保底，
+    /// 于是同一张表在大佬奸手里偏向损人四道、在乖宝宝手里偏向利己三道，
+    /// 而**两边都可能抽到自己**：那正是这一格玩法的全部意思。
+    fn spell_table(&self, profile: &AiProfile) -> Candidates {
         let mut table = Candidates::new();
-        table.add(0.0, AiMove::Decide(Decision::Acknowledge));
-        let filter = if profile.harm > 1.0 - profile.harm {
-            MagicFilter::TopWealth
-        } else {
-            MagicFilter::Walker
-        };
-        table.add(1.0, AiMove::Filter(filter));
-        table
-    }
-
-    /// 女巫的第二步（P14d④b）：在**已经筛出的名单**上挑一道法术。
-    ///
-    /// 十二道里没有一把共同的尺（「坐牢 3 天」和「得一张卡」怎么比？），所以这张表只读
-    /// **方向**：[`spell_good_for_target`] 说这一道对承受者是好还是坏，权重说这个承受者
-    /// 是谁 —— 自己按 `1 − harm`、别人按 `−harm`。于是同一个害意既决定第一步筛谁，
-    /// 也决定这一步挑哪一道：大佬奸把住院落到最有钱的人头上，乖宝宝给自己摸一张卡。
-    ///
-    /// 名单从 [`MagicRitual`] 的草稿读，不自己按条件再筛一遍 —— 那份草稿与第二步窗口
-    /// 同生同灭，而「窗口里显示的人」与「法术落到的头」在规则层只能有一处答案。
-    fn spell_table(&self, subject: Entity, profile: &AiProfile) -> Candidates {
-        let mut table = Candidates::new();
-        table.add(0.0, AiMove::Decide(Decision::Acknowledge));
-        let Some((_filter, targets)) = self.ritual.draft.as_ref() else {
-            return table;
-        };
+        // 「不作法」那一格：0.2 压在中性五道（0.35）之下、极端性格的偏好档之下，
+        // 所以它只在害意恰好均衡的那一位手里才成为候选 —— 长跑里女巫不该是空转的
+        table.add(0.2, AiMove::Decide(Decision::Acknowledge));
         for spell in MagicSpell::ALL {
-            let face = 2.0 * spell_good_for_target(spell) - 1.0;
-            let value: f32 = targets
-                .iter()
-                .map(|t| {
-                    let weight = if *t == subject {
-                        1.0 - profile.harm
-                    } else {
-                        -profile.harm
-                    };
-                    weight * face
-                })
-                .sum();
-            if value > 0.0 {
-                table.add(value, AiMove::Cast(spell));
-            }
+            table.add(blind_weight(spell, profile.harm), AiMove::Cast(spell));
         }
         table
     }
@@ -2277,9 +2238,8 @@ impl AiHand<'_, '_> {
             Pending::Shop => self.shop_table(subject, &profile),
             // 保释（P14d④e）：只有害意低的座位会放人
             Pending::Bail(place) => self.bail_table(subject, &profile, place),
-            // 女巫的两步（P14d④b）：先挑条件，再在筛出的名单上挑法术
-            Pending::Magic => self.filter_table(&profile),
-            Pending::MagicSpell(_) => self.spell_table(subject, &profile),
+            // 女巫那一问（P14d④b / P13c）：盲选一道，不读名单
+            Pending::MagicSpell(_) => self.spell_table(&profile),
             // 被动门那一问（P14c③）：问哪一句、问到谁头上，由门说；AI 只管答那一句。
             // 门没挂到这一问上（或已经换了人）时落到那份「不用」—— 而调用侧还有一道
             // 同一条判据的早退，所以那一句只在判据分叉的帧里才会被写出去。
@@ -2487,15 +2447,8 @@ impl AiHand<'_, '_> {
                 });
                 true
             }
-            // 女巫的两步（P14d④b）：与面板上点的那两颗发同一条消息，判据全在
-            // `magic_filter_system`／`magic_spell_system`（它们认「窗口挂着谁」）。
-            AiMove::Filter(filter) => {
-                self.filters.write(MagicFilterPicked {
-                    player: subject,
-                    filter,
-                });
-                true
-            }
+            // 女巫那一问（P14d④b / P13c）：与面板上那颗法术按钮发同一条消息，
+            // 判据全在 `magic_spell_system`（它认「窗口挂着谁」）。
             AiMove::Cast(spell) => {
                 self.casts.write(MagicSpellPicked {
                     player: subject,

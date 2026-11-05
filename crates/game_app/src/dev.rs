@@ -144,14 +144,16 @@ pub fn install_if_requested(app: &mut App) {
         info!(
             "开发注入已开启（NM_MAGIC）：当前玩家面前摆出魔法屋{}",
             match wanted {
-                MagicWanted::Menu => "第一步（十一道条件）".to_string(),
-                MagicWanted::Filter(filter) => format!("并替他答了条件「{}」", filter.label()),
+                MagicWanted::Auto => "那一屏，条件按权重摇出来".to_string(),
+                MagicWanted::Filter(filter) => {
+                    format!("那一屏，条件钉成「{}」", filter.label())
+                }
             }
         );
     }
     if let Some(wanted) = spell.0 {
         info!(
-            "开发注入已开启（NM_SPELL）：第二步窗口一挂上就替他求一道「{}」",
+            "开发注入已开启（NM_SPELL）：魔法屋窗口一挂上就替他求一道「{}」",
             wanted.0.label()
         );
     }
@@ -523,8 +525,14 @@ struct Injected {
     gate: bool,
 }
 
-fn clear_injected(mut done: ResMut<Injected>) {
+fn clear_injected(
+    mut done: ResMut<Injected>,
+    mut pinned: ResMut<game_core::magic::MagicFilterOverride>,
+) {
     *done = Injected::default();
+    // `NM_MAGIC=girls` 钉的那一条也一起退回：留在资源里等于下一局踩到魔法屋还是它，
+    // 而那一局的随机流已经不是同一串了（跨局残留那类坑的同一条形状）
+    pinned.0 = None;
 }
 
 /// `detain` 要的那三样写打包成一个参数包（八个散装参数会撞 clippy 的 `too_many_arguments`，
@@ -943,11 +951,16 @@ fn force_lottery(
 
 // ===== P13：魔法屋那两步 =====
 
-/// `NM_MAGIC` 的那个值。`menu` = 只把第一步那一屏摆出来（11 条条件各自筛出谁），
-/// 其余是**一条条件**——于是第二步那一屏（12 道法术）开出来。
+/// `NM_MAGIC` 的那个值。`auto` = 让规则层按权重摇一条（拍到的就是玩家实际那一屏）；
+/// 其余是**一条钉住的条件**。
+///
+/// 钉住的那一条**不重摇**，所以「这一条筛出没人」那一格只有这个旋钮进得去 —— 而它必须
+/// 留着：坑 38（谁清窗口谁交还回合）在生产的加权随机下是摇不出来的空集，唯一可达路径
+/// 就是钉一条没人命中的条件。`menu` 是 P13c 之前「停在第一步」的写法，那一屏整块没了，
+/// 现在把它认成 `auto` 而不是报错 —— 老脚本还能跑出图，只是那一屏少了 11 行。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MagicWanted {
-    Menu,
+    Auto,
     Filter(game_core::prelude::MagicFilter),
 }
 
@@ -959,8 +972,8 @@ impl MagicWanted {
         // 大小写先抹平再比：`NM_MAGIC=GIRLS` 与 `NM_MAGIC=girls` 该是同一个旋钮，
         // 而认不出来时工具只会「注入没发生」，截图上看不出任何异常（`nm_god_*` 踩过的那格）
         let raw = raw.trim().to_ascii_lowercase();
-        if raw == "menu" || raw.is_empty() {
-            return Some(Self::Menu);
+        if raw == "auto" || raw == "menu" || raw.is_empty() {
+            return Some(Self::Auto);
         }
         Some(Self::Filter(match raw.as_str() {
             "walker" | "走路" => F::Walker,
@@ -1006,13 +1019,18 @@ impl SpellWanted {
     }
 }
 
-/// `NM_MAGIC=<menu|条件>`：把当前玩家摆到女巫那里。`menu` 停在第一步，
-/// 给一条条件就替他答第一步（截图拍的是**第二步**那一屏：条件 + 名单 + 十二道法术）。
+/// `NM_MAGIC=<auto|条件>`：把当前玩家摆到女巫那里，并当场把那一屏开出来。
+/// P13c 之后这一屏只有**一道**要回答的东西（法术），条件由规则层摇 —— 所以这个旋钮做的
+/// 是「摇」那一半：`auto` 走真的加权随机流，给一条条件就钉住它（钉住的不重摇，见
+/// [`MagicWanted`]）。它同时把钉住的那一条写进 [`MagicFilterOverride`]，于是配
+/// `NM_AUTOROLL` 时玩家**真踩到**魔法屋那一格也是同一条条件。
 ///
-/// **别配 `NM_AUTOROLL`**（坑 37 的形状，实测两种结果）：注入与自动玩家在同一帧各写一次
-/// `NextState`（一个 `WaitDecision`、一个 `Moving`），谁赢由调度次序决定 —— 而次序会变
-/// （`NM_DUMP` 加不加就足以翻面）。输的那一版拍到的是「他滚完路、踩到别人家地、买地模态
-/// 把女巫的窗口顶掉了」，看着像旋钮失效。正经配方是 `NM_SCENE=board` 单独跑：回合机自己
+/// ⚠️ 钉条件与 `NM_AUTOROLL` 同给时，`auto` 那一档才是「玩家实际会看到什么」的对照。
+///
+/// **别配 `NM_AUTOROLL` 拍注入的那一屏**（坑 37 的形状，实测两种结果）：注入与自动玩家在
+/// 同一帧各写一次 `NextState`（一个 `WaitDecision`、一个 `Moving`），谁赢由调度次序决定
+/// —— 而次序会变（`NM_DUMP` 加不加就足以翻面）。输的那一版拍到的是「他滚完路、踩到别人家地、
+/// 买地模态把女巫的窗口顶掉了」，看着像旋钮失效。正经配方是 `NM_SCENE=board` 单独跑：回合机自己
 /// 会停在 `WaitRoll`，那一格没有人滚，窗口就一直挂着。
 #[derive(Resource)]
 struct ForceMagic(Option<MagicWanted>);
@@ -1026,7 +1044,7 @@ impl ForceMagic {
             Some(wanted) => Self(Some(wanted)),
             None => {
                 warn!(
-                    "NM_MAGIC={raw} 不认识，应为 menu 或 \
+                    "NM_MAGIC={raw} 不认识，应为 auto 或 \
                      walker|deposit|girls|boys|bike|car|points|lands|cash|possessed|wealth"
                 );
                 Self(None)
@@ -1035,11 +1053,13 @@ impl ForceMagic {
     }
 }
 
-/// `NM_SPELL=<法术>`：第二步窗口挂着时替他点那道法术。
+/// `NM_SPELL=<法术>`：魔法屋窗口挂着时替他点那道法术。
 ///
-/// 为什么是**第二条**旋钮而不是 `NM_MAGIC=girls:jail` 一条：两步之间隔着一次「筛人」，
-/// 名单由规则层算完才开得出第二步窗口，一条消息说不完那个中间状态（与真玩家的两次点击
-/// 同一形状）。它不认 `WaitRoll` 那道门——发出去的那一刻相位本来就是 `WaitDecision`。
+/// 为什么是**第二条**旋钮而不是 `NM_MAGIC=girls:jail` 一条：P13c 之前两步之间隔着一次
+/// 「筛人」，那条现在还在（名单由规则层算完才开得出窗口），只是**主语换了** —— 以前是
+/// 玩家答完条件、现在是 `settle_magic_landing` 摇完条件。一次注入替玩家办两件事等于
+/// 绕过窗口自己那一条判据（`magic_spell_system` 认的是「窗口挂着的那一场法事」）。
+/// 它不认 `WaitRoll` 那道门 —— 发出去的那一刻相位本来就是 `WaitDecision`。
 #[derive(Resource)]
 struct ForceSpell(Option<SpellWanted>);
 
@@ -1061,12 +1081,11 @@ impl ForceSpell {
     }
 }
 
-/// 两步各自要写的消息 + 要读的窗口。打包（§六 坑 8）。
+/// 注入要读的窗口与要写的消息。打包（§六 坑 8）。
 #[derive(SystemParam)]
 struct MagicInject<'w> {
     order: Res<'w, TurnOrder>,
     pending: ResMut<'w, PendingDecision>,
-    filters: MessageWriter<'w, game_core::prelude::MagicFilterPicked>,
     spells: MessageWriter<'w, game_core::prelude::MagicSpellPicked>,
     done: ResMut<'w, Injected>,
 }
@@ -1074,6 +1093,10 @@ struct MagicInject<'w> {
 fn force_magic(
     force: Res<ForceMagic>,
     mut desk: MagicInject<'_>,
+    mut rng: ResMut<game_core::prelude::Rng>,
+    mut ritual: ResMut<game_core::prelude::MagicRitual>,
+    mut pinned: ResMut<game_core::magic::MagicFilterOverride>,
+    filter_desk: game_core::magic::FilterDesk<'_, '_>,
     mut next: ResMut<NextState<TurnPhase>>,
 ) {
     let (Some(wanted), false) = (force.0, desk.done.magic) else {
@@ -1083,27 +1106,32 @@ fn force_magic(
         return;
     };
     desk.done.magic = true;
-    desk.pending.offer(player, Pending::Magic);
+    let pin = match wanted {
+        MagicWanted::Auto => None,
+        MagicWanted::Filter(filter) => Some(filter),
+    };
+    // 钉住的那一条同时写进资源：P13c 之后「摇条件」这件事住在 `settle_magic_landing` 里，
+    // 而那一格在 `OnEnter(Landed)` —— 注入进不了那条路，但它要拍的是同一条屏。
+    // 于是这里既替玩家摇一次（下面），也把钉住的那一份留给**真踩到那一格**的那一次。
+    pinned.0 = pin;
+    let (filter, found) = game_core::magic::draw_filter(&mut rng, player, &filter_desk, pin);
+    let hits = found.len();
+    ritual.draft = Some((filter, found));
+    desk.pending.offer(player, Pending::MagicSpell(filter));
     next.set(TurnPhase::WaitDecision);
-    if let MagicWanted::Filter(filter) = wanted {
-        // 走真消息：筛谁、开不开得出第二步，全由 `magic_filter_system` 判（空名单那条
-        // 直接收摊 —— 注入替玩家答一条筛不出人的条件，拍到的就该是「女巫什么都没说」）
-        desk.filters
-            .write(game_core::prelude::MagicFilterPicked { player, filter });
-        info!(
-            "注入：{player:?} 站在魔法屋里，条件挑了「{}」",
-            filter.label()
-        );
-    } else {
-        info!("注入：{player:?} 站在魔法屋里，停在第一步");
-    }
+    info!(
+        "注入：{player:?} 站在魔法屋里，{}条件「{}」（筛出 {hits} 人）",
+        if pin.is_some() { "钉住" } else { "摇出" },
+        filter.label()
+    );
 }
 
 fn force_spell(force: Res<ForceSpell>, mut desk: MagicInject<'_>) {
     let (Some(wanted), false) = (force.0, desk.done.spell) else {
         return;
     };
-    // 主语与条件都取自窗口：第一步还没答完时这里什么都没有，等下一帧
+    // 主语取自窗口，而且只在魔法屋那一屏挂着时才发：`force_magic` 与它是两条旋钮两次注入，
+    // 窗口没开出来（装配还没好、相位不对）就等下一帧
     let Some((player, Pending::MagicSpell(_))) = desk.pending.active() else {
         return;
     };
@@ -1635,13 +1663,14 @@ mod tests {
         assert_eq!(GateWanted::parse("blim"), None, "拼错了就该说不认识");
     }
 
-    /// `NM_MAGIC` 认的十一个条件必须真是 `MagicFilter::ALL` 那十一格，一格不漏。
+    /// `NM_MAGIC` 认的十一个条件必须真是 `MagicFilter::ALL` 那十一格，一格不漏；
+    /// 而 `auto`（与旧的 `menu`）是「让规则层自己摇」。
     ///
     /// 这一条的价值在后半句：拼错的旋钮值不崩也不红，只会「注入没发生」，而那张截图
     /// 看起来只是「今天没人踩到魔法屋」—— 与 `nm_god_...`／`nm_minigame_...` 同一种坑，
     /// 而那两次各付过学费。用 `ALL` 的条数反证「表与穷尽表同源」，加第十二条条件时这条会红。
     #[test]
-    fn nm_magic_takes_every_filter_and_menu() {
+    fn nm_magic_takes_every_filter_and_auto() {
         use super::MagicWanted;
         use game_core::prelude::MagicFilter as F;
         for (raw, want) in [
@@ -1668,16 +1697,27 @@ mod tests {
             Some(MagicWanted::Filter(F::AllGirls)),
             "大小写不分是环境变量的常态"
         );
-        assert_eq!(MagicWanted::parse("menu"), Some(MagicWanted::Menu));
+        assert_eq!(MagicWanted::parse("auto"), Some(MagicWanted::Auto));
+        assert_eq!(
+            MagicWanted::parse("menu"),
+            Some(MagicWanted::Auto),
+            "P13c 之前 `menu` 是「停在挑条件那一屏」，那一屏没了，老配方认成「让规则层摇」"
+        );
         assert_eq!(
             MagicWanted::parse(""),
-            Some(MagicWanted::Menu),
-            "只写 `NM_MAGIC=` 的意思是摆第一步"
+            Some(MagicWanted::Auto),
+            "只写 `NM_MAGIC=` 的意思是摆那一屏，而条件本来就该由规则层摇出来"
         );
         assert_eq!(
             MagicWanted::parse("rich"),
             None,
             "认不出来要说「不认识」，不许猜一条条件"
+        );
+        // 旋钮表与穷尽表同源：加第十二条条件时这条会红，而上面那张表不会
+        assert_eq!(
+            F::ALL.len(),
+            11,
+            "`MagicFilter::ALL` 变了条数，`NM_MAGIC` 那张表要跟着长一行"
         );
     }
 

@@ -33,7 +33,7 @@ pub use game_core::prelude::{
     IndemnityPaid, Insured, Inventory, ItemKind, ItemPlaced, ItemThieved, Jackpot, JackpotChanged,
     JackpotWhy, LandBought, LandDamage, LandId, LandStatus, LandTaken, LandUpgraded, LandView,
     LiquidationPlan, Lot, LotteryBought, LotteryDrawn, LotteryTickets, LotteryWon, MagicBlocked,
-    MagicCast, MagicFilter, MagicFilterPicked, MagicSpell, MagicSpellPicked, Market, MarketClock,
+    MagicCast, MagicFilter, MagicFilterOverride, MagicSpell, MagicSpellPicked, Market, MarketClock,
     MinigameResult, MinigameScore, MortgageDone, MortgageOp, MortgageRequested, Mortgaged, Mount,
     MountChanged, MoveCap, MoveCapped, NewsSink, Occupancy, OccupancyAt, OccupancyKind, Owner,
     PassiveAnswer, PassiveCard, PassiveEvent, PassiveMove, PassiveUsed, Pending, PendingDecision,
@@ -115,12 +115,8 @@ pub struct Scores(pub Vec<MinigameResult>);
 #[derive(Resource, Default)]
 pub struct TicketRequests(pub Vec<BuyTicketRequested>);
 
-/// 测试侧的「按魔法屋第一步那一颗条件按钮」（P13）。走队列 → 真消息，于是
-/// 「挂着这一步窗口的人才答得成」「空名单当场收摊」两道门被真走到。
-#[derive(Resource, Default)]
-pub struct MagicFilterRequests(pub Vec<MagicFilterPicked>);
-
-/// 测试侧的「按魔法屋第二步那一颗法术按钮」（P13）。同上一条。
+/// 测试侧的「按魔法屋那一颗法术按钮」（P13c 之后这一屏只剩这一颗）。走队列 → 真消息，
+/// 于是「挂着这一屏的人才答得成」那道门被真走到。
 #[derive(Resource, Default)]
 pub struct MagicSpellRequests(pub Vec<MagicSpellPicked>);
 
@@ -226,9 +222,9 @@ fn auto_answer_system(
         // 远程建设窗口（P10d②）同一条：自动玩家**不升**任何地 —— 日产格一踩到就开窗，
         // 长跑不自动关掉会整片挂在 `WaitDecision`，而升级那条路由 `tests/remote_build.rs` 自己走
         (Pending::RemoteBuild, _) => Decision::Acknowledge,
-        // 魔法屋（P13）两步都按「离开」：自动玩家不施法 —— 法术的后果（坐牢/拍卖）
-        // 会把几十条长跑断言一起搅浑，而施法那条路由 tests/magic.rs 自己走
-        (Pending::Magic | Pending::MagicSpell(_), _) => Decision::Acknowledge,
+        // 魔法屋那一屏按「离开」（P13c 之后只剩一屏）：自动玩家不施法 —— 法术的后果
+        // （坐牢/拍卖）会把几十条长跑断言一起搅浑，而施法那条路由 tests/magic.rs 自己走
+        (Pending::MagicSpell(_), _) => Decision::Acknowledge,
         // 柜台只认「办完」。这里必须显式答一句，否则每一个踩到银行格的回合都会
         // 停在 `WaitDecision`，把所有长跑用例整片挂死 —— 编译器逼这一条写出来。
         // 百货柜台同一条（P3d②）：13 格环上真有一格百货，长跑用例一定会踩到它。
@@ -1270,7 +1266,6 @@ struct Pump<'w> {
     builds: ResMut<'w, BuildRequests>,
     remote_builds: ResMut<'w, RemoteBuildRequests>,
     financings: ResMut<'w, FinancingRequests>,
-    magic_filters: ResMut<'w, MagicFilterRequests>,
     magic_spells: ResMut<'w, MagicSpellRequests>,
     passives: ResMut<'w, PassiveRequests>,
     rolls: MessageWriter<'w, RequestRoll>,
@@ -1289,7 +1284,6 @@ struct Pump<'w> {
     build_writes: MessageWriter<'w, BuildRequested>,
     remote_build_writes: MessageWriter<'w, RemoteUpgradeRequested>,
     financing_writes: MessageWriter<'w, FinancingDrawRequested>,
-    magic_filter_writes: MessageWriter<'w, MagicFilterPicked>,
     magic_spell_writes: MessageWriter<'w, MagicSpellPicked>,
     passive_writes: MessageWriter<'w, PassiveAnswer>,
 }
@@ -1343,9 +1337,6 @@ fn pump_inputs(mut pump: Pump<'_>) {
     for f in pump.financings.0.drain(..) {
         pump.financing_writes.write(f);
     }
-    for f in pump.magic_filters.0.drain(..) {
-        pump.magic_filter_writes.write(f);
-    }
     for s in pump.magic_spells.0.drain(..) {
         pump.magic_spell_writes.write(s);
     }
@@ -1390,7 +1381,6 @@ pub fn boot_on(board: &'static str, setup: GameSetup, rules: GameRules, seed: Ga
         .init_resource::<BuildRequests>()
         .init_resource::<RemoteBuildRequests>()
         .init_resource::<FinancingRequests>()
-        .init_resource::<MagicFilterRequests>()
         .init_resource::<MagicSpellRequests>()
         .init_resource::<DecisionPolicy>()
         .init_resource::<Observed>()
@@ -2558,25 +2548,25 @@ pub fn lottery_ask(app: &mut App, player: Entity, number: u8) {
         .push(BuyTicketRequested { player, number });
 }
 
-/// 替 `player` 按魔法屋**第一步**那颗条件按钮（P13）。与 [`lottery_ask`] 同一条：
-/// 走队列 → 真消息，于是「挂着这一步窗口的人才答得成」「筛出没人就当场收摊、第二步不开」
-/// 两道门被真走到，而不是被测试绕过。
+/// 替 `player` 按魔法屋那一颗法术按钮（P13c 之后这一屏只剩这一颗）。
 ///
-/// 后面要跟一次 `settle`：筛人、写 [`MagicTargets`]、把窗口翻成第二步都发生在
-/// `magic_filter_system` 里。
-pub fn magic_filter_ask(app: &mut App, player: Entity, filter: MagicFilter) {
-    app.world_mut()
-        .resource_mut::<MagicFilterRequests>()
-        .0
-        .push(MagicFilterPicked { player, filter });
-}
-
-/// 替 `player` 按魔法屋**第二步**那颗法术按钮（P13）。同上一条，后面也要跟 `settle`。
+/// 后面要跟一次 `settle`：施法、收尾、交还回合都发生在 `magic_spell_system` 里。
+/// **条件不在这里给**：它由规则层摇，测试要控制它走 [`pin_witch`]。
 pub fn magic_spell_ask(app: &mut App, player: Entity, spell: MagicSpell) {
     app.world_mut()
         .resource_mut::<MagicSpellRequests>()
         .0
         .push(MagicSpellPicked { player, spell });
+}
+
+/// 钉住女巫摇的那一条条件（P13c）。走的正是 `NM_MAGIC=<条件>` 那一格开发接缝
+/// （[`game_core::magic::MagicFilterOverride`]），所以它不是测试绕过规则层，
+/// 而是与真玩家同一条路径 —— 真玩家的这一格由环境变量填。
+///
+/// 为什么测试需要它：条件改成摇出来之后，「这一条筛出谁」这类判据要**并排**看好几条，
+/// 而随机流一次只给一条。传 `None` 退回加权随机（同 `NM_MAGIC=auto`）。
+pub fn pin_witch(app: &mut App, filter: Option<MagicFilter>) {
+    app.insert_resource(MagicFilterOverride(filter));
 }
 
 /// 一次「这一条条件筛出谁」的请求（[`hits`] 的载体）。
@@ -2600,11 +2590,11 @@ fn hits_system(
 }
 
 /// 现读「这一条条件在此刻筛出谁」。**用的是规则层那同一个 `filter_targets`**
-/// （第二步面板显示的名单与法术落到的人共用的就是它），所以测试里没有第二份判据。
+/// （施法真正落到的就是它筛出的那批人），所以测试里没有第二份判据。
 ///
 /// 为什么测试需要它而不只走真窗口：一条判据换一份世界状态就要重启一局，而真窗口一次
-/// 只答得出一个条件（草稿与它同生同灭）。窗口那条路本身由 `magic_filter_ask` 那几条覆盖，
-/// 这里补的是「并排看好几条判据」这一类断言。
+/// 只摇得出一个条件（钉住它走 [`pin_witch`]，且一局只答得出一个）。窗口那条路本身由
+/// `tests/magic.rs` 的 `pick` 那几条覆盖，这里补的是「并排看好几条判据」这一类断言。
 pub fn hits(app: &mut App, filter: MagicFilter, current: Entity) -> Vec<Entity> {
     app.insert_resource(HitsReq(Some((filter, current))));
     app.insert_resource(HitsOut::default());

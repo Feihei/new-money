@@ -133,7 +133,7 @@ pub mod prelude {
         draw_lottery_system, lottery_op_system, settle_lottery_landing,
     };
     pub use crate::magic::{
-        MagicFilter, MagicRitual, MagicSpell, filter_targets, magic_filter_system,
+        MagicFilter, MagicFilterOverride, MagicRitual, MagicSpell, draw_filter, filter_targets,
         magic_spell_system, settle_magic_landing,
     };
     pub use crate::market::{
@@ -157,10 +157,10 @@ pub mod prelude {
         FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GiftGiven, GiftsGiven,
         GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, IndemnityPaid, ItemPlaced,
         ItemThieved, JackpotChanged, JackpotWhy, LandBought, LandTaken, LandUpgraded,
-        LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicFilterPicked,
-        MagicOffered, MagicSpellPicked, MagicTargets, MinigameResult, MinigameScore, MortgageDone,
-        MortgageOp, MortgageRequested, MountChanged, MoveCapped, NewsAudience, NewsFired, NewsHit,
-        NewsNotice, PassiveAnswer, PassiveMove, PassiveUsed, PlaceItemRequested, PlayCardRequested,
+        LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicOffered,
+        MagicSpellPicked, MinigameResult, MinigameScore, MortgageDone, MortgageOp,
+        MortgageRequested, MountChanged, MoveCapped, NewsAudience, NewsFired, NewsHit, NewsNotice,
+        PassiveAnswer, PassiveMove, PassiveUsed, PlaceItemRequested, PlayCardRequested,
         PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported,
         PointsChanged, PointsStolen, PolicyBought, RedEnvelope, RemoteBuildOffered, RemoteDiceUsed,
         RemoteUpgradeRequested, RentDue, RentRerouted, RequestRemoteDice, RequestRoll, RequestStay,
@@ -229,22 +229,22 @@ use prelude::{
     FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GameRules, GameSeed,
     GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, IndemnityPaid,
     ItemPlaced, ItemThieved, JackpotChanged, JsonAssetLoader, LandBought, LandTaken, LandUpgraded,
-    Landing, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicFilterPicked,
-    MagicOffered, MagicSpellPicked, MagicTargets, MarketClock, MinigameResult, MinigameScore,
-    MortgageDone, MortgageRequested, MountChanged, MoveCapped, NewsFired, PassiveAnswer,
-    PassiveUsed, Paused, PendingDecision, PlaceItemRequested, PlayCardRequested, PlayerArrived,
-    PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged, PointsStolen,
-    PolicyBought, RedEnvelope, RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue,
-    RentRerouted, RequestRemoteDice, RequestRoll, RequestStay, ServiceCharged, ShopOpDone,
-    ShopOpRequested, ShopStock, StartCashChoice, StayLifted, StaySkipped, StockPriceChanged,
-    StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped, TollExtorted, TurnEnded,
+    Landing, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicOffered,
+    MagicSpellPicked, MarketClock, MinigameResult, MinigameScore, MortgageDone, MortgageRequested,
+    MountChanged, MoveCapped, NewsFired, PassiveAnswer, PassiveUsed, Paused, PendingDecision,
+    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
+    PlayerDetained, PlayerTeleported, PointsChanged, PointsStolen, PolicyBought, RedEnvelope,
+    RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RentRerouted,
+    RequestRemoteDice, RequestRoll, RequestStay, ServiceCharged, ShopOpDone, ShopOpRequested,
+    ShopStock, StartCashChoice, StayLifted, StaySkipped, StockPriceChanged, StockSet,
+    StockTradeRequested, StockTraded, StockVisited, TileStepped, TollExtorted, TurnEnded,
     TurnPhase, TurnStarted, UpgradeOffered, VillainHired, WalkClock, WalkHalt, WalkHalted,
     WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system, age_suspensions_system,
     auction_hold_system, auction_move_system, bail_op_system, bank_op_system, begin_game_system,
     build_op_system, decision_system, deliver_calendar_events_system, draw_lottery_system,
     expire_land_status_system, financing_system, finish_halt_system, gate_system,
     grant_atm_access_system, hoodlum_toll_system, insurance_claim_system,
-    land_deity_succession_system, lottery_op_system, magic_filter_system, magic_spell_system,
+    land_deity_succession_system, lottery_op_system, magic_spell_system,
     market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system, on_hired_system,
     place_item_system, play_card_system, remote_build_system, resolve_halt_system,
     robber_snatch_system, settle_arcade_landing, settle_god_landing_system,
@@ -298,6 +298,8 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<HolidaySet>()
             .init_resource::<Paused>()
             .init_resource::<crate::magic::MagicRitual>()
+            // 钉条件的那个开发入口（P13c）。正经对局是 `None` —— 条件由 `pick_magic` 子流摇
+            .init_resource::<crate::magic::MagicFilterOverride>()
             .init_resource::<WalkClock>()
             .init_resource::<MarketClock>()
             // AI 的那两条钟（P14）。`AiCadence` 是**配置**：core 的默认是两个 0，真实客户端
@@ -434,10 +436,8 @@ impl Plugin for CoreGamePlugin {
             .add_message::<CardSnatched>()
             .add_message::<TollExtorted>()
             .add_message::<RentRerouted>()
-            // ===== 魔法屋（P13）=====
+            // ===== 魔法屋（P13 / P13c：条件摇出来，名单不上屏）=====
             .add_message::<MagicOffered>()
-            .add_message::<MagicFilterPicked>()
-            .add_message::<MagicTargets>()
             .add_message::<MagicSpellPicked>()
             .add_message::<MagicCast>()
             .add_message::<MagicBlocked>()
@@ -673,12 +673,11 @@ impl Plugin for CoreGamePlugin {
                     remote_build_system
                         .run_if(resource_exists::<ActiveBoard>)
                         .run_if(not_paused),
-                    // 魔法屋的两步回答（P13）：条件与法术各一条意图消息，规则层判窗口
-                    // 与主语。两条都带 CardSink（里面是 Books），所以接在同一条 chain 的尾部
-                    // —— 与保释/柜台那族同一条纪律：谁先办都不改结果，只是不能并行借同一份账本。
-                    magic_filter_system
-                        .run_if(resource_exists::<ActiveBoard>)
-                        .run_if(not_paused),
+                    // 魔法屋施法那一步（P13 / P13c）：带 `CardSink`（里面是 `Books`），
+                    // 所以接在同一条 chain 的尾部 —— 与保释/柜台那族同一条纪律：
+                    // 谁先办都不改结果，只是不能并行借同一份账本。
+                    // **摇条件不在这里**：那一句在踩格那一刻的 `settle_magic_landing`
+                    // （`OnEnter(TurnPhase::Landed)` 那条链），P13c 起没有「答条件」这一步了。
                     magic_spell_system
                         .run_if(resource_exists::<ActiveBoard>)
                         .run_if(not_paused),

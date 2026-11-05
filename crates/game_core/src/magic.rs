@@ -1,4 +1,4 @@
-//! 魔法屋（P13）：女巫的两步法事 —— 先筛出**条件**命中的人，再施**一道法术**。
+//! 魔法屋（P13 / P13c）：女巫给一条**摇出来的**条件，玩家盲选一道法术。
 //!
 //! 一句话的形状：这是「效果动词库」的第三个用户（命运、新闻之外），但它与那两位
 //! 分享的不是**代码**而是**出口** —— 十二种法术没有一种自己发明机制，全部借既有
@@ -20,9 +20,19 @@
 //! 大衰神加倍的也是厄运，而女巫的法术不是厄运 —— 免疫矩阵里
 //! 「身上有大福神／大衰神」那两格的期望都是**照常生效、照 3 天**。
 //!
-//! 两步窗口：[`crate::landing::Pending::Magic`]（选条件）→ [`crate::landing::Pending::MagicSpell`]
-//! （施法）。筛出的人在 [`MagicRitual`] 那份草稿里，随窗口同生同灭 —— 玩家在第一步
-//! 之后反悔的唯一方式是按「离开」，没有任何一条路「跳过条件直接施法」。
+//! ⚠️ **P13c（11-05）把两步缩成一步，改的是玩法而不是排版**：原来第一步让玩家从 11 条
+//! 条件里挑、并把每条条件筛出谁写在按钮右边，于是「女巫」退化成一个查名工具 ——
+//! 玩家永远能选到对自己有利的那一条。4 代是**条件由规则层摇**、**筛出谁不告诉玩家**，
+//! 玩家盲选一道法术：可能害到自己，也可能帮了对手。换来的形状：
+//! - 踩格那一刻 [`draw_filter`] 摇条件、筛人、写草稿，窗口直接开在
+//!   [`crate::landing::Pending::MagicSpell`]；没有「选条件」这一步，也就没有
+//!   `Pending::Magic`、`MagicFilterPicked`、`magic_filter_system`。
+//! - 名单在施法**之前**只活在 [`MagicRitual`] 里（dump 面板读得到 —— 那是开发工具，
+//!   不是给玩家的第二块屏）。揭晓交给 [`MagicCast`](crate::msg::MagicCast) 与
+//!   [`MagicBlocked`](crate::msg::MagicBlocked)，而**不是**一条提前发出来的名单。
+//! - 摇到此刻筛不出任何人的条件就**重摇**（[`DRAW_TRIES`]）。收敛性的唯一依据是
+//!   [`MagicFilter::Walker`] 恒等于施法者自己 —— 以后谁把那一格从权重表里删掉，
+//!   重摇就可能变成空转，所以 `DRAW_TRIES` 是一个会响的上限而不是一句注释。
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -31,9 +41,10 @@ use crate::board::TileIndex;
 use crate::deck::{CardId, CardSink};
 use crate::land::LandId;
 use crate::landing::{Landed, Landing, LandingDomain, Pending, PendingDecision};
-use crate::msg::{MagicFilterPicked, MagicOffered, MagicSpellPicked, MagicTargets};
+use crate::msg::{MagicOffered, MagicSpellPicked};
 use crate::passive::{GateDesk, Job, Step, Tail, submit};
 use crate::player::{Gender, Mount, PlayerId};
+use crate::rng::Rng;
 use crate::settle::Books;
 use crate::turn::TurnPhase;
 use crate::world::ActiveBoard;
@@ -168,7 +179,7 @@ impl MagicSpell {
         }
     }
 
-    /// 这一条落到人头上是什么。第二步那一屏一排十二颗按钮，只有名字的话玩家点不下去 ——
+    /// 这一条落到人头上是什么。法术那一屏一排十二颗按钮，只有名字的话玩家点不下去 ——
     /// 与卡面 `desc` 同一条分工：文案在规则层，面板只念。
     pub const fn desc(self) -> &'static str {
         match self {
@@ -192,23 +203,134 @@ impl MagicSpell {
 /// 这里的天数在这张表上 —— 两处各是各的唯一口径。
 pub const MAGIC_DAYS: u32 = 3;
 
-/// 一场法事的草稿：第一步选定的条件与它筛出的人。
+/// 摇条件的权重（P13c）。**「走路的人」降权**：它恒等于施法者自己（见
+/// [`filter_targets`] 那一格），留它是为了「偶尔真抽到自己」那一格荒诞感，
+/// 但它不该与其他条等权 —— 那会让自我惩罚的概率约 1/11，而 1/21 才是拍板的数。
+///
+/// 表序就是累计区间序，所以这张表**必须与 [`MagicFilter::ALL`] 同宽同集**
+/// （有一条用例逐条比对，少一格就红 —— 漏一条不会编译失败，因为两边都是穷尽 `match`
+/// 但枚举没变，症状只会是那条条件永远摇不出来）。
+pub const FILTER_WEIGHTS: [(MagicFilter, u32); 11] = [
+    (MagicFilter::Walker, 1),
+    (MagicFilter::TopDeposit, 2),
+    (MagicFilter::AllGirls, 2),
+    (MagicFilter::AllBoys, 2),
+    (MagicFilter::OnBike, 2),
+    (MagicFilter::OnCar, 2),
+    (MagicFilter::TopPoints, 2),
+    (MagicFilter::TopLands, 2),
+    (MagicFilter::TopCash, 2),
+    (MagicFilter::Possessed, 2),
+    (MagicFilter::TopWealth, 2),
+];
+
+/// 权重总和（1 + 10×2 = 21）。抽数落在 `1..=TOTAL_WEIGHT`，按累计区间选人。
+pub const TOTAL_WEIGHT: u32 = 21;
+
+/// 重摇的上限。**逻辑上碰不到**：[`MagicFilter::Walker`] 恒筛出施法者自己，
+/// 所以循环最坏也只多转一圈。写这个数是为了让「以后有人把走路的人从权重表里删掉」
+/// 变成一次**落空**（回到调用侧那条空名单收尾）而不是**一局卡死在 while 里**。
+const DRAW_TRIES: u32 = 32;
+
+/// 开发/测试用的条件钉（`NM_MAGIC=<条件>`）—— 与 [`crate::calendar::EpochOverride`]
+/// 同一条形状：表现层读环境变量、规则层只读这份资源。
+///
+/// ⚠️ **钉住的那一条跳过重摇**，这不是图方便：坑 38 那条「空名单也必须把回合交出去」
+/// 在生产路径上已经走不到了（摇到空就重摇），而它必须留一条可达的路 ——
+/// `NM_MAGIC=onbike`（没人骑车时）就是那条路。
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MagicFilterOverride(pub Option<MagicFilter>);
+
+/// 按 [`FILTER_WEIGHTS`] 抽一条条件（不看筛得出谁，那一句在 [`draw_filter`]）。
+///
+/// 抽数是**累计区间**而不是逐条掷硬币：一条流上一次取数就定完 11 格，
+/// 「这一局施过几次法」不会改变命运牌是谁（`pick_magic` 子流存在的理由）。
+pub fn weighted_filter(rng: &mut Rng) -> MagicFilter {
+    let roll = rng.pick_magic(1..=TOTAL_WEIGHT);
+    let mut acc = 0;
+    for (filter, weight) in FILTER_WEIGHTS {
+        acc += weight;
+        if roll <= acc {
+            return filter;
+        }
+    }
+    // 走到这里说明 `TOTAL_WEIGHT` 与那张表漂了（抽数落在所有区间之外）。
+    // 静默返回第一条就是替玩家改结果，所以宁可当场喊 —— 这条喊了就是缺陷报告。
+    warn!("魔法屋的权重表与总和 {TOTAL_WEIGHT} 不一致，回落到第一条条件");
+    FILTER_WEIGHTS[0].0
+}
+
+/// 摇一条**此刻筛得出人**的条件（P13c 的「重摇到有人」）。
+///
+/// 每一试都从 `pick_magic` 子流取一次数，所以同一种子跑出同一个序列 ——
+/// 重摇不是「抹掉一次随机」，它本身就消耗随机。
+///
+/// `override` 非空时**直接用那一条、不重摇**（见 [`MagicFilterOverride`] 那段：
+/// 那是坑 38 那条落空收尾唯一可达的路）。
+pub fn draw_filter(
+    rng: &mut Rng,
+    current: Entity,
+    desk: &FilterDesk,
+    pinned: Option<MagicFilter>,
+) -> (MagicFilter, Vec<Entity>) {
+    if let Some(filter) = pinned {
+        return (filter, filter_targets(filter, current, desk));
+    }
+    for _ in 0..DRAW_TRIES {
+        let filter = weighted_filter(rng);
+        let found = filter_targets(filter, current, desk);
+        if !found.is_empty() {
+            return (filter, found);
+        }
+    }
+    // 32 次都筛不出人：把最后一次的结果交回去，调用侧那条空名单收尾分支接住它
+    // （**而不是**在这里替玩家挑一条「一定有人」的条件 —— 那等于替他施法）
+    let filter = weighted_filter(rng);
+    (filter, filter_targets(filter, current, desk))
+}
+
+/// 一场法事的草稿：**摇出来的**条件与它筛出的人。
 ///
 /// 与 [`crate::landing::PendingDecision`] 同生同灭（施法完成或离场即清），但它是
 /// **资源**而不是 Pending 的字段 —— `Pending` 是 `Copy` 的枚举，装不下一个 `Vec`，
-/// 而「筛出了谁」是 UI 第二步窗口与施法结算都要读的同一份事实，存两处迟早漂。
+/// 而「筛出了谁」是施法结算要读的事实，存两处迟早漂。
+/// ⚠️ P13c 起这份名单**不再上屏**（面板只念条件名）；施法前读得到它的只有 dump 面板
+/// 与测试 —— 那是开发工具，不是给玩家的第二块屏。
 #[derive(Resource, Debug, Default, Clone)]
 pub struct MagicRitual {
     pub draft: Option<(MagicFilter, Vec<Entity>)>,
 }
 
-/// 踩格那一段：把两步窗口的第一步挂上。排在保释之后（链尾），
-/// 理由与游乐场、彩票那两条同一条 —— 柜台永远最后问。
-pub fn settle_magic_landing(
-    landing: Res<Landing>,
-    mut pending: ResMut<PendingDecision>,
-    mut offered: MessageWriter<MagicOffered>,
-) {
+/// 踩格那一段要碰的七样，收成一个参数包（§六 坑 8：撞了 `too_many_arguments` 就打包，
+/// 而不是挂 `#[allow]` —— 七个散装参数本身就是要被吃掉的那个信号）。
+///
+/// ⚠️ `rng` 与 `filter` 并存靠的是「`FilterDesk` 里的行情是**只读查询**」这一条：它原来带
+/// 的是 `Market`（里面揣着 `ResMut<Rng>`），两条同在一个 system 里就是参数建立期撞车
+/// （§6.1 坑 33 的资源版，`GateDesk` 那条注写的是同一件事）。
+#[derive(SystemParam)]
+pub struct WitchDesk<'w, 's> {
+    pub filter: FilterDesk<'w, 's>,
+    pub pending: ResMut<'w, PendingDecision>,
+    pub ritual: ResMut<'w, MagicRitual>,
+    pub order: Res<'w, crate::turn::TurnOrder>,
+    pub rng: ResMut<'w, Rng>,
+    pub pinned: Res<'w, MagicFilterOverride>,
+    pub offered: MessageWriter<'w, MagicOffered>,
+}
+
+/// 踩格那一段：**当场摇条件、筛人、把法术那一屏挂上**（P13c 起没有「选条件」这一步了）。
+/// 排在保释之后（链尾），理由与游乐场、彩票那两条同一条 —— 柜台永远最后问。
+///
+/// 名单进 [`MagicRitual`] 的草稿而**不上屏**：玩家看得见的是条件名（它就挂在
+/// [`Pending::MagicSpell`] 上），看不见筛出了谁 —— 这正是这一格的全部玩法
+/// （「财产最多」可能就是我）。草稿随窗口同生同灭，施法那一步消耗它。
+///
+/// ⚠️ 这一条**不交还回合**：窗口挂上了，交还是答法术那一侧的活
+/// （[`magic_spell_system`] → [`finish_witch`]）。摇到空名单在生产路径上不会发生
+/// （[`draw_filter`] 会重摇），只有 `NM_MAGIC=<没人命中的条件>` 钉住时才走得到 ——
+/// 而那一格照样开窗口、照样由施法那一步收尾，坑 38 那句「谁清窗口谁交回合」因此
+/// 仍然有一条可达的路可验。
+pub fn settle_magic_landing(landing: Res<Landing>, mut desk: WitchDesk<'_, '_>) {
     let Some(Landed {
         player,
         domain: LandingDomain::Magic,
@@ -217,25 +339,52 @@ pub fn settle_magic_landing(
     else {
         return;
     };
-    pending.offer(player, Pending::Magic);
-    offered.write(MagicOffered { player });
+    // 「走路的人」按 `order.current()` 算 —— 与施法那一步读的是同一句
+    let current = desk.order.current().unwrap_or(player);
+    let pinned = desk.pinned.0;
+    let (filter, found) = draw_filter(&mut desk.rng, current, &desk.filter, pinned);
+    desk.ritual.draft = Some((filter, found));
+    desk.pending.offer(player, Pending::MagicSpell(filter));
+    desk.offered.write(MagicOffered { player });
 }
 
 /// 筛条件的全部工具。名字来源与位置读数都在这一包里 —— 11 条判据共享同一份
 /// 「谁是场上玩家」的读数，散到 11 个函数参数上就把 clippy 的上限撞穿了。
+///
+/// ⚠️ **持股现价走一条只读查询，不借 [`crate::market::Market`]**（P13c）：那个参数包里
+/// 握着 `ResMut<Rng>`，而摇条件要的正是同一条 `Rng` —— 一个 system 里两条可变借用
+/// 会在参数建立期直接撞成 B0001（§6.1 坑 33 的资源版，`ai.rs` 那句「不借 Market」
+/// 写的是同一件事）。这里要的只是「此刻多少钱」，读侧查询就够了。
 #[derive(SystemParam)]
 pub struct FilterDesk<'w, 's> {
     pub books: Books<'w, 's>,
-    /// 持股现价从这里读（`Market::price`）：价格的写侧在行情那一侧，
-    /// 两个参数包并存本来就是 `trade_request_system` 的形状。
-    pub market: crate::market::Market<'w, 's>,
+    prices: Query<
+        'w,
+        's,
+        (
+            &'static crate::stock::StockId,
+            &'static crate::stock::StockPrice,
+        ),
+    >,
     faces: Query<'w, 's, (Entity, &'static PlayerId, &'static Gender)>,
     mounts: Query<'w, 's, &'static Mount>,
     possessions: Query<'w, 's, &'static crate::gods::Possession>,
 }
 
-/// 按条件筛人。**这里只有一个口径**：第二步窗口显示的名单与法术落到的头
-/// 必须是同一批 —— 所以两个系统都调它，而不是一个筛一个猜。
+impl FilterDesk<'_, '_> {
+    /// 某只股的现价。查不到按 `None`（那只股不在盘上 —— 与 `Market::price` 同一条答案，
+    /// 两处各读各的会变成两套行情）。
+    pub fn price_of(&self, id: &crate::stock::StockId) -> Option<f32> {
+        self.prices
+            .iter()
+            .find(|(stock, _)| *stock == id)
+            .map(|(_, price)| price.0)
+    }
+}
+
+/// 按条件筛人。**这里只有一个口径**：摇条件那条路（[`draw_filter`]）与钉条件那条路
+/// 调的是同一句，而「这一条筛出谁」从此只有一个读者（施法结算）—— P13c 之前面板也调它
+/// 把名单画出来，那正是「玩家一定能选到对自己有利的」的成因，已经退回去了。
 ///
 /// 「最多」那一族并列取**回合序第一个**（`faces` 的迭代序）：永远有答案，
 /// 没有并列抽签 —— 那会把一次取随机数的副作用塞进一条纯判据里。
@@ -318,66 +467,11 @@ fn wealth_of(desk: &FilterDesk, who: &Entity) -> i64 {
     for land in desk.books.owned_lands(*who) {
         worth += desk.books.market_value(land).unwrap_or(0);
     }
-    // 持股现值：清单从账本出、现价从行情出（`Market::price`）
+    // 持股现值：清单从账本出、现价从行情出（`FilterDesk::price_of` 那条只读查询）
     for (id, shares) in desk.books.stock_holdings_of(*who) {
-        worth += (desk.market.price(&id).unwrap_or(0.0) as i64) * (shares as i64);
+        worth += (desk.price_of(&id).unwrap_or(0.0) as i64) * (shares as i64);
     }
     worth
-}
-
-/// 第一步的回答：条件落地、筛人、开第二步窗口。
-///
-/// 窗口挂着 [`crate::landing::Pending::Magic`] 且主语对才受理 —— 与 `bail_op_system`
-/// 同一条门禁形状。**空名单直接落空**：第二步没有可念的对象，把玩家摆到一排
-/// 「点不着任何人的法术」前面，比现在就收摊更糟。
-///
-/// 落空那一条**自己交还回合**（`next.set(TurnEnd)`）而不是只 `pending.clear()`：
-/// 交还回合 normally 是 `decision_system` 的活，而它只在「有人答了一句」时才动回合机 ——
-/// 这一步没人答话（面板上那颗按钮本来就是灰的，规则层却必须假设有人能把它送进来），
-/// 于是只清窗口的写法会把回合机永久停在 `WaitDecision`，且不报错、只是不动了。
-/// 这与 [`crate::landing::close_landing_system`] 那句「问一句 `Auction::holds_turn`」
-/// 是同一条坑的另一种形状：**谁清窗口，谁就得负责把回合交出去**。
-///
-/// 两处可能同帧写 `NextState` 的只有 `decision_system`，而它一进「窗口没了」就返回，
-/// 且两条路写的都是同一个 `TurnEnd` —— 所以这里不需要赌次序（§6.1 坑 37）。
-pub fn magic_filter_system(
-    mut ritual: ResMut<MagicRitual>,
-    mut pending: ResMut<PendingDecision>,
-    order: Res<crate::turn::TurnOrder>,
-    mut next: ResMut<NextState<crate::turn::TurnPhase>>,
-    mut picks: MessageReader<MagicFilterPicked>,
-    mut targets: MessageWriter<MagicTargets>,
-    desk: FilterDesk,
-) {
-    let Some((asked, Pending::Magic)) = pending.active() else {
-        return;
-    };
-    let Some(current) = order.current() else {
-        return;
-    };
-    let mut answer = None;
-    for p in picks.read() {
-        if p.player == asked {
-            answer = Some(p.filter);
-        }
-    }
-    let Some(filter) = answer else {
-        return;
-    };
-    let found = filter_targets(filter, current, &desk);
-    targets.write(MagicTargets {
-        player: asked,
-        filter,
-        targets: found.clone(),
-    });
-    if found.is_empty() {
-        // 落空也是一次完成的法事：窗口收掉，回合照常往下走
-        pending.clear();
-        next.set(crate::turn::TurnPhase::TurnEnd);
-        return;
-    }
-    ritual.draft = Some((filter, found));
-    pending.offer(asked, Pending::MagicSpell(filter));
 }
 
 /// 施法那一步：把这道法术**整份交给那道门**，然后收掉自己的窗口。
@@ -388,7 +482,7 @@ pub fn magic_filter_system(
 /// 参数建立期直接撞成 B0001（坑 33 的资源版）。
 pub fn magic_spell_system(mut desk: GateDesk, mut picks: MessageReader<MagicSpellPicked>) {
     let Some((asked, Pending::MagicSpell(_))) = desk.pending.active() else {
-        // 草稿与第二步窗口**同生同灭**：玩家按「离开」时 `decision_system` 只收窗口，
+        // 草稿与法术窗口**同生同灭**：玩家按「离开」时 `decision_system` 只收窗口，
         // 而「这场法事筛出了谁」是资源里的东西 —— 不收它就会留下一份过期名单，
         // dump 与面板都读得到它，且回主菜单那一帧也没有任何东西替它清账（坑 22/25 同族）
         if desk.ritual.draft.is_some() {
@@ -406,7 +500,7 @@ pub fn magic_spell_system(mut desk: GateDesk, mut picks: MessageReader<MagicSpel
         return;
     };
     let Some((_filter, wanted)) = desk.ritual.draft.clone() else {
-        // 草稿与窗口分叉了（不该发生 —— 两步同生同灭）。窗口照关，法术不施：
+        // 草稿与窗口分叉了（不该发生 —— 两者同生同灭）。窗口照关，法术不施：
         // 宁可落空，也不把一个查不到名单的窗口留给下一位。交还回合与上面那条纪律同一条：
         // **谁清窗口谁交回合**，这里也一样不能只 `clear`
         warn!("魔法屋的草稿没了，法术落空");
@@ -423,8 +517,10 @@ pub fn magic_spell_system(mut desk: GateDesk, mut picks: MessageReader<MagicSpel
     desk.pending.clear();
     let mut waiting = wanted;
     if waiting.is_empty() {
-        // 第一步已经把空名单挡成落空了（`magic_filter_system`），这一格走不到。
-        // 写出来是为了让「一场没人可施的法事」也有一个凭据上的答案：空名单、空阻塞
+        // 生产路径摇不出空名单（`draw_filter` 会重摇），这一格只有
+        // `NM_MAGIC=<没人命中的条件>` 钉住时才走得到 —— 而它**必须留着**：
+        // 坑 38 那条「空名单也得把回合交出去」从此只有这一条可达的路。
+        // 落空仍然是一次有凭据的法事：空名单、空阻塞、`MagicCast` 照发、回合交还照走。
         finish_witch(&mut desk, asked, spell, Vec::new(), Vec::new());
         return;
     }

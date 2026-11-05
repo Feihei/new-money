@@ -34,9 +34,9 @@ use game_core::prelude::{
     ActiveBoard, Affair, Affliction, AiCadence, AiClock, AiProfile, Ask, Auction, BuildingKind,
     CardAim, Charge, ChargeKind, Controller, Detention, DetentionPlace, Facility, GameRules,
     GameSeed, GameSession, GameSetup, Gate, Gavel, Gender, Heading, Institution, ItemKind, Jackpot,
-    Job, LandId, LandStatus, LotteryTickets, Mount, MoveCap, OccupancyKind, PLAYER_COLORS, Paused,
-    Pending, PendingDecision, PlayerSetup, PriceHistory, StaySentence, StockId, StockPrice,
-    StockTradeRequested, Tail, Term, Timed, TurnPhase, Villain,
+    Job, LandId, LandStatus, LotteryTickets, MagicFilter, MagicRitual, Mount, MoveCap,
+    OccupancyKind, PLAYER_COLORS, Paused, Pending, PendingDecision, PlayerSetup, PriceHistory,
+    StaySentence, StockId, StockPrice, StockTradeRequested, Tail, Term, Timed, TurnPhase, Villain,
 };
 use game_core::rng::Rng;
 
@@ -1971,26 +1971,38 @@ fn the_goody_walks_away_when_the_price_passes_what_the_land_is_worth() {
     );
 }
 
-// ============================ P14d④b：魔法屋 ============================
+// ============================ P14d④b / P13c：魔法屋 ============================
 //
-// 两步各问一句话：先挑条件、再挑法术。害意那一个权重同时决定两件事 ——
-// 过半就筛最有钱的（害人），不过半就筛自己（自赠）；而在第二步的表上，
-// 自己按 `1 − harm` 计、别人按 `−harm` 计，于是同一张表在两档性格手里挑出相反的两道。
+// **盲选**：条件由规则层摇，AI 与玩家一样看不见名单。所以害意那一个权重只决定一件事 ——
+// 「这一道对承受者是好事还是坏事」：过半挑损人那四道，不过半挑送东西那三道。
+// 旧的那句「害意过半就筛最有钱的、不过半就筛自己」随 `filter_table` 一起退场了；
+// `AiHand` 从此连 `MagicRitual` 都不带 —— 读不到名单是**类型上的**，而下面三条把它验成数字。
+
+/// 把女巫那一屏挂上，并把草稿填成「这条条件此刻筛出谁」—— 与摇完之后的世界同形。
+///
+/// P13c 之前这里是 `ask(seat, Pending::Magic)`（AI 自己挑条件、规则层替它筛人、再把窗口
+/// 翻成第二步）。现在条件不是它能答的那一句，而 `magic_spell_system` 读的是草稿 —— 不填
+/// 就只会走「草稿没了」那条落空分支。名单用 [`common::hits`] 现读，就是规则层那同一个口径。
+fn witch_screen(app: &mut App, seat: Entity, filter: MagicFilter) {
+    let found = hits(app, filter, seat);
+    app.world_mut().resource_mut::<MagicRitual>().draft = Some((filter, found));
+    ask(app, seat, Pending::MagicSpell(filter));
+}
 
 #[test]
-fn the_shark_points_the_witch_at_the_richest_one() {
+fn the_shark_casts_the_lockup_on_the_list() {
     let (mut app, seat) = solo_ai(AiProfile::SHARK);
     let human = roster(&mut app)[0].0;
-    // 真人比他有钱：`TopWealth` 该筛出真人，而不是他自己
+    // 真人比他有钱：钉「财产最多」，名单就是真人那一位
     set_cash(&mut app, human, 30_000);
     set_cash(&mut app, seat, 20_000);
     let hand_before = hand_of(&app, seat).len();
-    ask(&mut app, seat, Pending::Magic);
+    witch_screen(&mut app, seat, MagicFilter::TopWealth);
     settle(&mut app, 8);
 
     assert!(
         app.world().entity(human).get::<Detention>().is_some(),
-        "大佬奸该把「关起来」落到最有钱的那位头上"
+        "大佬奸该把「关起来」落到名单上那位头上"
     );
     assert_eq!(
         hand_of(&app, seat).len(),
@@ -2000,22 +2012,62 @@ fn the_shark_points_the_witch_at_the_richest_one() {
 }
 
 #[test]
-fn the_goody_asks_the_witch_for_a_card_for_himself() {
+fn the_goody_asks_the_witch_for_a_card_even_when_it_lands_on_a_rival() {
     let (mut app, seat) = solo_ai(AiProfile::GOODY);
     let human = roster(&mut app)[0].0;
     set_cash(&mut app, human, 30_000);
-    let hand_before = hand_of(&app, seat).len();
-    ask(&mut app, seat, Pending::Magic);
+    let mine_before = hand_of(&app, seat).len();
+    let theirs_before = hand_of(&app, human).len();
+    // 名单里**没有他** —— 旧代码会改挑一条筛出自己的条件，现在他只能盲选
+    witch_screen(&mut app, seat, MagicFilter::TopWealth);
     settle(&mut app, 8);
 
     assert_eq!(
         hand_of(&app, seat).len(),
-        hand_before + 1,
-        "乖宝宝该把条件筛到自己身上，再挑一道给自己的"
+        mine_before,
+        "他手里没多出一张：那道「得一张卡」没落在他头上"
+    );
+    assert_eq!(
+        hand_of(&app, human).len(),
+        theirs_before + 1,
+        "乖宝宝照样挑那道「得一张卡」，而这一回落到了对手头上 —— 这就是盲选的代价"
     );
     assert!(
         app.world().entity(human).get::<Detention>().is_none(),
         "他不该把任何坏事落到别人头上"
+    );
+}
+
+/// AI **不读名单**那一句的牙齿：同一档性格、两份相反的名单，挑出的必须是同一道法术。
+///
+/// 旧代码读得到名单（`filter_table` 筛谁 + 第二步按承受者算分），于是「大佬奸永远筛得出
+/// 最有钱的那位、永远不会把自己关起来」—— 那不是判据，那是查名。P13c 之后钉「走路的人」
+/// （名单恒等于施法者自己），他挑的还得是那道「坐牢」，结果是**他自己**被关 3 回合。
+#[test]
+fn the_shark_jails_himself_when_the_witch_points_at_him() {
+    let (mut app, seat) = solo_ai(AiProfile::SHARK);
+    let human = roster(&mut app)[0].0;
+    set_cash(&mut app, human, 30_000);
+    set_cash(&mut app, seat, 20_000);
+    witch_screen(&mut app, seat, MagicFilter::Walker);
+    settle(&mut app, 8);
+
+    assert!(
+        app.world().entity(seat).get::<Detention>().is_some(),
+        "名单里只有他自己，而他挑的还是那道「关起来」—— 读得到名单就不会这样"
+    );
+    assert_eq!(
+        app.world()
+            .entity(seat)
+            .get::<Detention>()
+            .expect("刚落网")
+            .term,
+        Term::Turns(game_core::magic::MAGIC_DAYS),
+        "判的是女巫那三天，不是免罪那一条路"
+    );
+    assert!(
+        app.world().entity(human).get::<Detention>().is_none(),
+        "最有钱的那位这回没挨着：他没读名单"
     );
 }
 
