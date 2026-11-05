@@ -116,28 +116,32 @@ fn ihdr_size(head: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
-/// 诨名 → sprite 键。表序同时是「名字对不上时按座位领人」的领人顺序。
+/// 诨名 → sprite 键 + **语音目录**。表序同时是「名字对不上时按座位领人」的领人顺序。
 ///
 /// 十六位 = `CHARACTERS.md` §五 首发十二人 + 隐藏位沈万三 + §六 三位已烘出来的候补。
 /// 演示盘的默认阵容（姬百年／范一文）就在这份表里，名字与脸一一对上；表里查不到的
 /// 名字（测试夹具、P14 之后临时摆上来的对手）才走按座位那一支。
-const ROSTER: [(&str, &str); 16] = [
-    ("姬百年", "jibainian"),
-    ("莱息", "laixi"),
-    ("玛租", "mazu"),
-    ("贺兰山", "helanshan"),
-    ("温久枝", "wenjiuzhi"),
-    ("范一文", "fanyiwen"),
-    ("多吉", "duoji"),
-    ("阿香", "axiang"),
-    ("陆仁佳", "lvrenjia"),
-    ("塔萝", "taluo"),
-    ("索元", "suoyuan"),
-    ("滑铁卢", "huatielu"),
-    ("沈万三", "shenwansan"),
-    ("包太太", "baotai"),
-    ("雷当", "leidang"),
-    ("葛守田", "geshoutian"),
+///
+/// 第三列是语音素材的目录名（`audio/voice/<列>/`）。它与 sprite 键**不是同一套拼写**
+/// （`a-xiang` vs `axiang`），是按音节重新断过的，所以另起一列而不是加个前缀算出来；
+/// 空串 = 这一位没有录音（隐藏位与三位候补），静默是设计而不是缺素材。
+const ROSTER: [(&str, &str, &str); 16] = [
+    ("姬百年", "jibainian", "ji-bainian"),
+    ("莱息", "laixi", "lai-xi"),
+    ("玛租", "mazu", "ma-zu"),
+    ("贺兰山", "helanshan", "he-lanshan"),
+    ("温久枝", "wenjiuzhi", "wen-jiuzhi"),
+    ("范一文", "fanyiwen", "fan-yiwen"),
+    ("多吉", "duoji", "duoji"),
+    ("阿香", "axiang", "a-xiang"),
+    ("陆仁佳", "lvrenjia", "lu-renjia"),
+    ("塔萝", "taluo", "ta-luo"),
+    ("索元", "suoyuan", "suo-yuan"),
+    ("滑铁卢", "huatielu", "hua-tielu"),
+    ("沈万三", "shenwansan", ""),
+    ("包太太", "baotai", ""),
+    ("雷当", "leidang", ""),
+    ("葛守田", "geshoutian", ""),
 ];
 
 /// 这一位该用哪条待机横条（`sprite/<键>.png`）。
@@ -162,7 +166,7 @@ pub fn strips_for(name: &str, seat: usize) -> Option<Strips> {
 /// 盘上缺某几条时往后顺延一位 —— 少一条素材不该让某一颗棋子独自退回球；但**名字查得到
 /// 而文件缺**时宁可退回球，也不换一张脸：那会把「温久枝」画成「姬百年」，而棋盘上没人看得出。
 fn resolve_key(name: &str, seat: usize) -> Option<&'static str> {
-    let known = ROSTER.iter().any(|(who, _)| *who == name);
+    let known = ROSTER.iter().any(|(who, ..)| *who == name);
     if known {
         // 名单里的人只认自己那张脸：待机条缺就退回球，不顺延到隔壁那张
         let key = sprite_key(name, seat);
@@ -178,8 +182,8 @@ fn resolve_key(name: &str, seat: usize) -> Option<&'static str> {
 fn sprite_key(name: &str, seat: usize) -> &'static str {
     ROSTER
         .iter()
-        .find(|(who, _)| *who == name)
-        .map_or(ROSTER[seat % ROSTER.len()].1, |(_, key)| *key)
+        .find(|(who, ..)| *who == name)
+        .map_or(ROSTER[seat % ROSTER.len()].1, |(_, key, _)| *key)
 }
 
 /// 名字 → 角色键。sprite 横条与归属标志物共用这一套键。
@@ -188,12 +192,27 @@ fn sprite_key(name: &str, seat: usize) -> &'static str {
 /// 领错一张脸至少还是「一个人」，领错一件道具等于在别人的地上插了你的手杖 ——
 /// 那是给玩家的一条假信息，比没有标记更糟。
 pub fn prop_key(name: &str) -> Option<&'static str> {
-    ROSTER.iter().find(|(who, _)| *who == name).map(|(_, k)| *k)
+    ROSTER
+        .iter()
+        .find(|(who, ..)| *who == name)
+        .map(|(_, k, _)| *k)
+}
+
+/// 名字 → 语音目录键（`audio/voice/<键>/`）。
+///
+/// 查不到（无名座位、测试夹具）与没有录音（隐藏位与三位候补）都是 `None`：静默是设计，
+/// 不 `warn!` —— 每局每件事喊一遍会把日志刷满，而这条判据本来就允许「说不出话的人」。
+pub fn voice_key(name: &str) -> Option<&'static str> {
+    ROSTER
+        .iter()
+        .find(|(who, ..)| *who == name)
+        .map(|(_, _, voice)| *voice)
+        .filter(|voice| !voice.is_empty())
 }
 
 /// 全表角色键，装载器按它逐键问盘上有没有。
 pub fn roster_keys() -> impl Iterator<Item = &'static str> {
-    ROSTER.iter().map(|(_, key)| *key)
+    ROSTER.iter().map(|(_, key, _)| *key)
 }
 
 /// 归属标志物：`prop/<键>.png`（本体）与 `prop/<键>_edge.png`（归属色蒙版）。
@@ -304,6 +323,26 @@ mod tests {
     #[test]
     fn the_seat_wraps_instead_of_running_off_the_table() {
         assert_eq!(sprite_key("无名", ROSTER.len()), sprite_key("无名", 0));
+    }
+
+    /// 十二位有录音、四位没有；语音目录的拼写与 sprite 键不是同一套（`a-xiang` vs `axiang`）。
+    #[test]
+    fn only_the_twelve_voiced_characters_have_a_voice_directory() {
+        let voiced: Vec<&str> = ROSTER
+            .iter()
+            .filter_map(|(who, ..)| voice_key(who))
+            .collect();
+        assert_eq!(voiced.len(), 12, "有录音的该是十二位：{voiced:?}");
+        assert_eq!(voice_key("阿香"), Some("a-xiang"));
+        assert_eq!(voice_key("陆仁佳"), Some("lu-renjia"));
+        assert_eq!(voice_key("姬百年"), Some("ji-bainian"));
+        // 隐藏位与三位候补没有录音：静默是设计
+        assert_eq!(voice_key("沈万三"), None);
+        assert_eq!(voice_key("包太太"), None);
+        // 表里查不到的名字（测试夹具、临时对手）也是静默，而不是按座位领一个别人的嗓子
+        assert_eq!(voice_key("甲"), None);
+        // `Some("")` 这种半截答案不许漏出来 —— 它会拼出一个目录级的路径
+        assert!(voiced.iter().all(|key| !key.is_empty()));
     }
 
     #[test]
