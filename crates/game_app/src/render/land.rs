@@ -19,10 +19,14 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
 use game_core::prelude::{
     ActiveBoard, BuildingLevel, GameRules, LandId, LandType, Owner, PlayerColor, PlayerId,
+    PlayerName,
 };
 
 use super::board::lay_flat;
-use super::{BuildingModels, GroundArt, Rendered, darkened, dim, flat, palette, photo, plated};
+use super::{
+    BuildingModels, GroundArt, PropArt, Rendered, billboard_rot, darkened, dim, flat, palette,
+    photo, plated,
+};
 
 /// 描边外壳沿法线外扩的距离（**模型单位**）。进对局再乘 `DWELL_SCALE`，所以五级楼的
 /// 描边一样粗（1.7 倍后约 0.04 世界单位，`CAM_SIZE=8` 下约 3–4 像素）。
@@ -45,6 +49,15 @@ pub(crate) struct LandVisual {
     outline_mat: Option<Handle<StandardMaterial>>,
     /// `bodies` 是场景根（模型）而不是方体。同步时两者对等级的解释不同。
     scenic: bool,
+    /// 空地上那件归属标志物的两张贴屏四边形：本体与归属色蒙版。
+    /// 与建筑一样**一次摆好、只切可见性**，摆不摆由 `sync_buildings` 定。
+    prop_body: Entity,
+    prop_edge: Entity,
+    /// 标志物的两张材质（一块地一份：换主人只换贴图与一个颜色）。
+    prop_body_mat: Handle<StandardMaterial>,
+    prop_edge_mat: Handle<StandardMaterial>,
+    /// 现在贴的是谁的图。`None` = 这块地没有标志物（没主人／已盖楼／这位没素材）。
+    prop_key: Option<&'static str>,
 }
 
 /// 挂在描边场景根上：等实例化完成，把它所有图元都换成纯色描边材质。
@@ -128,6 +141,12 @@ pub(crate) fn attach_land_visuals(
     lands: Query<(Entity, &LandId)>,
 ) {
     let b = &active.def;
+    let props = art.props.len();
+    if props == 0 {
+        info!("归属标志物：盘上没有 prop/*.png，空地的归属退回粉笔框 + 色块");
+    } else {
+        info!("归属标志物：{props} 件（缺图的角色在空地上不摆）");
+    }
     // 地面是哪一版，地块底座就跟着哪一版：无缝版里地块只是「道路旁多出来的一块草地」，
     // 边界靠粉笔框说；盒子版里它还是那块街色纸卡。
     let seamless = art.units.table().is_some();
@@ -135,6 +154,19 @@ pub(crate) fn attach_land_visuals(
     let chalk_quad = chalk_pair
         .map(|_| meshes.add(Rectangle::new(b.cell_size, b.cell_size)))
         .clone();
+    // 归属标志物的四边形：与棋子同一套做法，把底边烘进顶点 —— 实体位置就是「它站在哪儿」。
+    // 素材是 128²、物件底边对齐格底，所以四边形取正方形，贴图一比一落上去。
+    let prop_mesh = {
+        let mut mesh = Mesh::from(Rectangle::new(dim::PROP_H, dim::PROP_H));
+        if let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+        {
+            for p in positions.iter_mut() {
+                p[1] += dim::PROP_H / 2.0;
+            }
+        }
+        meshes.add(mesh)
+    };
     for (entity, id) in &lands {
         // `BoardDef::validate` 保证土地有定义且坐标在网格内；拿不到就是数据错，不画即可
         let (Some(def), Some(center)) = (b.land(id.0), b.land_world_pos(id.0)) else {
@@ -255,12 +287,57 @@ pub(crate) fn attach_land_visuals(
             }
             (slabs, Vec::new(), Some(owner_mat), None)
         };
+        // 空地的归属标志物：本体 + 归属色蒙版两张。一开始都藏着 —— 摆不摆由
+        // `sync_buildings` 按「有主人 + 还是空地 + 这位角色有素材」决定。
+        // 蒙版那张沿远离相机方向退一点：两张同位置会 z 打架。
+        let prop_rot = billboard_rot();
+        // 摆在地块**近角**而不是正中：Lv1 的模型是一栋小房子，摆正中会站到屋顶上。
+        // 位移沿「相机方向在地面上的投影」，也就是屏幕往下那条线，于是它总在房子前面。
+        let toward_cam = Vec3::new(dim::CAM_OFFSET.x, 0.0, dim::CAM_OFFSET.z).normalize();
+        let prop_base = Vec3::new(center.x, dim::PROP_BASE, center.z)
+            + toward_cam * (footprint * dim::PROP_AHEAD);
+        let prop_body_mat = mats.add(StandardMaterial {
+            unlit: true,
+            alpha_mode: AlphaMode::Mask(0.5),
+            cull_mode: None,
+            ..default()
+        });
+        let prop_edge_mat = mats.add(StandardMaterial {
+            unlit: true,
+            alpha_mode: AlphaMode::Mask(0.5),
+            cull_mode: None,
+            ..default()
+        });
+        let prop_body = commands
+            .spawn((
+                Mesh3d(prop_mesh.clone()),
+                MeshMaterial3d(prop_body_mat.clone()),
+                Transform::from_translation(prop_base).with_rotation(prop_rot),
+                Visibility::Hidden,
+                Rendered,
+            ))
+            .id();
+        let prop_edge = commands
+            .spawn((
+                Mesh3d(prop_mesh.clone()),
+                MeshMaterial3d(prop_edge_mat.clone()),
+                Transform::from_translation(prop_base - prop_rot * Vec3::Z * dim::PROP_EDGE_BACK)
+                    .with_rotation(prop_rot),
+                Visibility::Hidden,
+                Rendered,
+            ))
+            .id();
         commands.entity(entity).insert(LandVisual {
             bodies,
             outlines,
             owner_mat,
             outline_mat,
             scenic,
+            prop_body,
+            prop_edge,
+            prop_body_mat,
+            prop_edge_mat,
+            prop_key: None,
         });
     }
 }
@@ -288,18 +365,20 @@ pub(crate) fn spawn_building_light(mut commands: Commands, models: Res<BuildingM
 /// 归属与等级是唯一的真相来源，这里只做变化驱动的同步（`Ref<T>` 变化检测，不轮询）。
 pub(crate) fn sync_buildings(
     mut commands: Commands,
-    lands: Query<(Ref<Owner>, Ref<BuildingLevel>, &LandVisual)>,
-    players: Query<(&PlayerId, &PlayerColor)>,
+    mut lands: Query<(Ref<Owner>, Ref<BuildingLevel>, &mut LandVisual)>,
+    players: Query<(&PlayerId, &PlayerColor, &PlayerName)>,
+    props: Res<PropArt>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
-    for (owner, level, visual) in &lands {
+    for (owner, level, mut visual) in &mut lands {
         if !owner.is_changed() && !level.is_changed() {
             continue;
         }
         // 归属色来自玩家实体，而不是按 PlayerId 取模 —— 阵容颜色是 `GameSetup` 定的事实
-        let owned = owner
+        let who = owner
             .0
-            .and_then(|pid| players.iter().find(|(p, _)| **p == pid).map(|(_, c)| *c));
+            .and_then(|pid| players.iter().find(|(p, _, _)| **p == pid));
+        let owned = who.map(|(_, c, _)| *c);
         // 方体路径：整摞方体共用一个材质，换主人＝改这一个颜色
         if let Some(handle) = &visual.owner_mat
             && let Some(mut mat) = mats.get_mut(handle)
@@ -340,6 +419,40 @@ pub(crate) fn sync_buildings(
                     });
             }
         }
+
+        // 空地的归属标志物：只在**还是空地**（Lv1）时露出来。楼一盖起来，描边已经在说
+        // 归属，两处同时摆等于说两遍，而且楼会把那件道具吃掉一半。
+        // 「这位有没有素材」也在这里判 —— 查不到就不摆，不按座位借别人的道具（那是假信息）。
+        let want = who
+            .and_then(|(_, _, name)| crate::art::prop_key(&name.0))
+            .filter(|key| level.0 <= 1 && props.get(key).is_some());
+        if want != visual.prop_key {
+            if let Some(key) = want
+                && let Some((body, edge)) = props.get(key)
+            {
+                for (handle, image) in [
+                    (visual.prop_body_mat.clone(), body),
+                    (visual.prop_edge_mat.clone(), edge),
+                ] {
+                    if let Some(mut mat) = mats.get_mut(&handle) {
+                        mat.base_color_texture = Some(image.clone());
+                    }
+                }
+            }
+            visual.prop_key = want;
+        }
+        // 蒙版就是归属色本身（图是纯白 alpha 环，`base_color` 一染就成）
+        if let Some(mut mat) = mats.get_mut(&visual.prop_edge_mat) {
+            mat.base_color =
+                owned.map_or(Color::WHITE, |PlayerColor([r, g, b])| Color::srgb(r, g, b));
+        }
+        let prop_vis = if visual.prop_key.is_some() {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        commands.entity(visual.prop_body).try_insert(prop_vis);
+        commands.entity(visual.prop_edge).try_insert(prop_vis);
     }
 }
 

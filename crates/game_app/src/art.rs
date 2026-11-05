@@ -71,6 +71,30 @@ fn sprite_key(name: &str, seat: usize) -> &'static str {
         .map_or(ROSTER[seat % ROSTER.len()].1, |(_, key)| *key)
 }
 
+/// 名字 → 角色键。sprite 横条与归属标志物共用这一套键。
+///
+/// ⚠️ 与 [`strip_for`] 的兜底**不一样**：这里查不到就是查不到，不按座位换人。
+/// 领错一张脸至少还是「一个人」，领错一件道具等于在别人的地上插了你的手杖 ——
+/// 那是给玩家的一条假信息，比没有标记更糟。
+pub fn prop_key(name: &str) -> Option<&'static str> {
+    ROSTER.iter().find(|(who, _)| *who == name).map(|(_, k)| *k)
+}
+
+/// 全表角色键，装载器按它逐键问盘上有没有。
+pub fn roster_keys() -> impl Iterator<Item = &'static str> {
+    ROSTER.iter().map(|(_, key)| *key)
+}
+
+/// 归属标志物：`prop/<键>.png`（本体）与 `prop/<键>_edge.png`（归属色蒙版）。
+///
+/// **成套才上**：只有本体没有蒙版时，那块地看上去只是「地上放了个东西」，而不是
+/// 「这是谁的地」—— 归属色正是这层素材存在的全部理由，缺一张就两张都不给。
+pub fn prop(key: &str) -> Option<(String, String)> {
+    let body = on_disk(&format!("prop/{key}.png"))?;
+    let edge = on_disk(&format!("prop/{key}_edge.png"))?;
+    Some((body, edge))
+}
+
 /// 卡面（`cards/<卡 id>.png`，带剪纸边框的整张竖图）。
 pub fn card_face(id: &str) -> Option<String> {
     on_disk(&format!("cards/{id}.png"))

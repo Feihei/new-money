@@ -151,6 +151,38 @@ impl DiscIcons {
     }
 }
 
+/// 空地上的归属标志物（`prop/<角色键>.png` + 同键 `_edge.png`），按**角色键**存。
+///
+/// 两张图一起进：本体是那件道具，蒙版是它的轮廓环，运行时把环染成归属色 ——
+/// 与住宅楼的描边同一条通道（换主人只改一个材质）。缺任意一张的那位不进来，
+/// 那块地就退回原来的「粉笔框 + 色块」，不响也不 panic（素材不入库，别的机器上这是常态）。
+#[derive(Resource, Clone, Default)]
+pub(crate) struct PropArt {
+    sheets: std::collections::HashMap<&'static str, (Handle<Image>, Handle<Image>)>,
+}
+
+impl PropArt {
+    pub fn load(server: &AssetServer) -> Self {
+        Self {
+            sheets: crate::art::roster_keys()
+                .filter_map(|k| {
+                    crate::art::prop(k)
+                        .map(|(body, edge)| (k, (server.load(body), server.load(edge))))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&(Handle<Image>, Handle<Image>)> {
+        self.sheets.get(key)
+    }
+
+    /// 一张都没装上 —— 别的机器上这是常态（`assets/prop/` 不入库），不是错误。
+    pub fn len(&self) -> usize {
+        self.sheets.len()
+    }
+}
+
 /// 住宅五级建筑模型（`model/dwell_L1..L5.glb`，下标 = 等级 − 1）。
 ///
 /// **成套才上**：缺任意一级就整块退回方体 —— 半套素材摆出来会是「Lv2 是一栋房子、
@@ -170,6 +202,9 @@ pub(crate) struct GroundArt<'w> {
     pub units: Res<'w, RoadTiles>,
     pub chalk: Res<'w, Chalk>,
     pub models: Res<'w, BuildingModels>,
+    /// 空地上的归属标志物。并进这个包而不是单开一个参数：`attach_land_visuals` 的参数
+    /// 已经顶到 clippy 的 7 个上限（见上面那段注释）。
+    pub props: Res<'w, PropArt>,
 }
 
 /// 表现层的两组 system。守门条件挂在**集合**上而不是逐个 system 上：
@@ -198,6 +233,7 @@ impl Plugin for RenderPlugin {
         app.insert_resource(RoadTiles::load_all(&server));
         app.insert_resource(Chalk::load(&server));
         app.insert_resource(DiscIcons::load(&server));
+        app.insert_resource(PropArt::load(&server));
         // 五级齐了才装；缺一级就整块退回方体（见 `BuildingModels` 的注释）
         let levels = (1..=5)
             .map(crate::art::dwell_model)
@@ -235,7 +271,6 @@ impl Plugin for RenderPlugin {
                     .in_set(RenderSet::Boot),
                 (
                     token::animate_tokens,
-                    token::animate_sprites,
                     dice::spawn_dice_visuals,
                     dice::animate_dice_visuals,
                     land::sync_buildings,
@@ -286,6 +321,18 @@ pub mod dim {
     pub const CHALK_LIFT: f32 = 0.01;
     pub const SLAB_H: f32 = 0.4;
     pub const SLAB_GAP: f32 = 0.12;
+    /// 空地上的归属标志物（`assets/prop/<键>.png`）：一张贴屏四边形的边长。
+    /// 素材是 128²、物件底边对齐格底，所以四边形取正方形即可，不必按每件的宽高比另算。
+    /// 0.85 世界单位在 `CAM_SIZE=8` 下约 85px —— 比棋子（140px）矮一档，读作「放在地上的东西」。
+    pub const PROP_H: f32 = 0.85;
+    /// 标志物落在地块顶面上。**Lv1 的模型其实是一栋小房子**（不是空地），所以它不能摆在
+    /// 地块正中 —— 那会站到屋顶上去；沿「朝向相机」的水平方向挪到地块近角，站在房子前面。
+    /// 倍数乘的是地块边长：1×1 挪 0.96、2×2 挪 1.92，都刚好落在粉笔框里。
+    pub const PROP_AHEAD: f32 = 0.48;
+    pub const PROP_BASE: f32 = PLOT_H + 0.02;
+    /// 蒙版那张四边形**沿远离相机的方向**退这么多：两张同位置会 z 打架（花屏）。
+    /// 0.012 世界单位在 `CAM_SIZE=8` 下约 1 像素，肉眼看不出偏移。
+    pub const PROP_EDGE_BACK: f32 = 0.012;
     pub const PLOT_SCALE: f32 = 0.96;
     pub const BUILD_SCALE: f32 = 0.84;
     /// 住宅模型（`dwell_L1..L5.glb`）的缩放。生成时墙体外皮 0.362、原点在脚底、
@@ -309,8 +356,14 @@ pub mod dim {
     /// 脚底。球的 `TOKEN_REST_Y` 是**球心**（半径 0.5 → 触点 0.3），而人要从脚底长出来，
     /// 两者差的那 0.6 就是「站在地上」与「浮在地上」的差别
     pub const TOKEN_FEET_Y: f32 = 0.2;
-    /// 横条放帧的帧率。`AutoNoVsync` 下按帧计数会跑到看不清，所以按墙钟（见 `token`）
+    /// 待机横条放帧的帧率。`AutoNoVsync` 下按帧计数会跑到看不清，所以按墙钟（见 `token`）。
+    /// **只管待机**：在动的那两条按「格」走钟，见下面两个数
     pub const SPRITE_FPS: f32 = 8.0;
+    /// 步行横条一个循环跨几格。两条腿一个循环（左右各迈一次），所以是 2 而不是 1：
+    /// 按 1 算就是把整条循环塞进 0.18s，腿快成缝纫机
+    pub const WALK_STEPS: f32 = 2.0;
+    /// 载具横条一个循环跨几格。轮子那几条只有 4 帧（辐条相位），一步走完一圈正好
+    pub const WHEEL_STEPS: f32 = 1.0;
     /// 入狱/出狱/瞬移的位移时长（`player_token.gd:55,65`）
     pub const PARK_SECS: f32 = 0.4;
     /// 格名浮在格子上方的高度（`tile_view.gd:151`）
