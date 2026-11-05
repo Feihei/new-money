@@ -411,6 +411,65 @@ pub enum UiAction {
     Practice(GameKind),
 }
 
+/// 一颗按钮该放哪一声。**穷尽表**（没有 `_`）：新加一个动作必须当场表态，
+/// 而它默认会落到「普通点击」里 —— 那是玩家唯一听不出对错的一种，也是唯一一种
+/// 「漏了也看不出来」的，所以漏一个变体就该编译失败。
+///
+/// 三档的划法：**关闭／放弃／返回**是 `Cancel`；**掏钱／推进一局／改设置**是 `Confirm`；
+/// 换一档选项、点格子这类纯浏览是 `Click`。
+fn action_sound(action: &UiAction) -> crate::audio::UiSound {
+    use crate::audio::UiSound;
+    match action {
+        UiAction::Decide(Decision::Accept)
+        | UiAction::NewGame
+        | UiAction::LoadGame
+        | UiAction::SaveGame
+        | UiAction::Quit
+        | UiAction::StartMatch
+        | UiAction::Roll
+        | UiAction::RollWith(_)
+        | UiAction::UseRemoteDice { .. }
+        | UiAction::PlaceItem { .. }
+        | UiAction::PlayCard { .. }
+        | UiAction::BankOp { .. }
+        | UiAction::Trade { .. }
+        | UiAction::ShopOp { .. }
+        | UiAction::MortgageOp { .. }
+        | UiAction::Bail { .. }
+        | UiAction::Build { .. }
+        | UiAction::RemoteBuild { .. }
+        | UiAction::Financing { .. }
+        | UiAction::BuyTicket(_)
+        | UiAction::Bid(_)
+        | UiAction::Gate(_)
+        | UiAction::MagicSpell(..)
+        | UiAction::ArcadeCollect
+        | UiAction::ArcadeReplay
+        | UiAction::Practice(_) => UiSound::Confirm,
+        UiAction::Decide(Decision::Decline | Decision::Acknowledge)
+        | UiAction::BackToMenu
+        | UiAction::CloseInfo
+        | UiAction::TogglePause
+        | UiAction::ToggleSettings
+        | UiAction::ToggleMatchSetup
+        | UiAction::ToggleAtm
+        | UiAction::ToggleStock
+        | UiAction::ToggleHand
+        | UiAction::ToggleItems
+        | UiAction::ToggleArcadeChoice
+        | UiAction::ArcadeQuit
+        | UiAction::ArcadeLeave => UiSound::Cancel,
+        UiAction::SetBoard(_)
+        | UiAction::SetStartCash(_)
+        | UiAction::SetWalkSpeed(_)
+        | UiAction::ToggleCharacter(_)
+        | UiAction::SetHuman(_)
+        | UiAction::ToggleDebugPanel
+        | UiAction::Pop { .. }
+        | UiAction::Dig { .. } => UiSound::Click,
+    }
+}
+
 /// 存在即禁用：着色变灰，且点击不派发。对应 Godot 的 `button.disabled = true`。
 #[derive(Component, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Disabled;
@@ -920,6 +979,9 @@ struct Sends<'w> {
     /// 还没答法术」那个中间状态在结构上消失了，只剩「挑一道法术」
     magic_spells: MessageWriter<'w, MagicSpellPicked>,
     exit: MessageWriter<'w, AppExit>,
+    /// UI 四声（P16a④）。**按钮不碰音频模块**：它只写「该放哪一声」这一个愿望，
+    /// 播不播、多大声由 `audio` 说了算（`NM_AUDIO=0` 时消息还在、日志照记）
+    sounds: MessageWriter<'w, crate::audio::UiSoundRequest>,
 }
 
 /// 只动 UI 自己状态的那几个开关。
@@ -1010,11 +1072,18 @@ fn dispatch_ui_actions(
             continue;
         };
         if widgets.disabled.get(entity).is_ok() {
+            // 灰按钮也给一声：理由仍由那颗按钮自己写，声音只负责「你点到的是个哑的」
+            sends
+                .sounds
+                .write(crate::audio::UiSoundRequest(crate::audio::UiSound::Error));
             continue;
         }
         let Ok(action) = widgets.actions.get(entity) else {
             continue;
         };
+        sends
+            .sounds
+            .write(crate::audio::UiSoundRequest(action_sound(action)));
         // 休市与停牌都只挡股市（P2b / P11c②）。银行派发不看这一条 —— 柜台全年开，
         // 它自己的那条停摆只挡「借」，就在下面那一格里问
         let market_open = gate
@@ -1801,6 +1870,9 @@ mod tests {
                 // P9：拍卖台那两颗按钮共用这一条出口（漏了它 = 派发这个 system 建不出来，
                 // 于是上面那一整片按钮全死，而不是只死拍卖那两颗）
                 .add_message::<AuctionMove>()
+                // P16a④：按钮那四声的出口。同一条坑的第五遍 —— 派发现在多了一个
+                // `MessageWriter`，少注册它整片按钮都不灵
+                .add_message::<crate::audio::UiSoundRequest>()
                 // P13c：魔法屋那一颗法术按钮的出口。同一条坑的第四遍 —— 少注册一条不是
                 // 「那颗按钮不灵」，而是整片按钮都不灵，所以写在这里而不是写在用例里
                 .add_message::<game_core::prelude::MagicSpellPicked>()
@@ -2987,6 +3059,8 @@ mod tests {
             .init_resource::<GameRules>()
             .init_resource::<HolidaySet>()
             .add_message::<PointerClick>()
+            // P16a④：按钮四声的出口（同一条坑的第五遍：少注册一条，整片按钮都不灵）
+            .add_message::<crate::audio::UiSoundRequest>()
             .add_message::<RequestRoll>()
             .add_message::<RequestStay>()
             .add_message::<DecisionChosen>()
@@ -3716,5 +3790,30 @@ mod tests {
             paused.seen().magic_spells.is_empty(),
             "暂停时还派发了法术请求"
         );
+    }
+
+    /// 按钮三档声音：掏钱／推进一局是「确认」，关闭／放弃／返回是「取消」，
+    /// 换一档选项这类纯浏览是普通点击。穷尽表保证「新加一个动作会编译失败」，
+    /// 这条用例钉的是**分类的方向**（把 `BackToMenu` 划进确认也一样编译得过）。
+    #[test]
+    fn the_button_sounds_are_confirm_cancel_and_click() {
+        use crate::audio::UiSound;
+        assert_eq!(
+            action_sound(&UiAction::Decide(Decision::Accept)),
+            UiSound::Confirm
+        );
+        assert_eq!(
+            action_sound(&UiAction::Decide(Decision::Decline)),
+            UiSound::Cancel
+        );
+        assert_eq!(
+            action_sound(&UiAction::Decide(Decision::Acknowledge)),
+            UiSound::Cancel
+        );
+        assert_eq!(action_sound(&UiAction::StartMatch), UiSound::Confirm);
+        assert_eq!(action_sound(&UiAction::BackToMenu), UiSound::Cancel);
+        assert_eq!(action_sound(&UiAction::CloseInfo), UiSound::Cancel);
+        assert_eq!(action_sound(&UiAction::SetBoard(0)), UiSound::Click);
+        assert_eq!(action_sound(&UiAction::Pop { slot: 3 }), UiSound::Click);
     }
 }

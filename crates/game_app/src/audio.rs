@@ -28,11 +28,11 @@ use bevy::{
     },
 };
 use game_core::prelude::{
-    ActiveBoard, AuctionWon, BankOpDone, CardDrawn, CardKind, CardPlayed, CashChanged,
+    ActiveBoard, AuctionWon, BankOpDone, CardDrawn, CardKind, CardPlayed, CashChanged, DiceRolled,
     EffectOutcome, FacilityBuilt, FinancingDrawn, FinancingRecalled, GameOver, GameSession,
     ItemKind, ItemPlaced, LandBought, LandId, LandUpgraded, LotteryBought, MortgageDone, Owner,
-    Paused, Pending, PendingDecision, PlayerBankrupt, PlayerDetained, PlayerId, PlayerName,
-    RentDue, StockTraded, TurnOrder, TurnPhase, TurnStarted,
+    Paused, Pending, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId,
+    PlayerName, RentDue, StockTraded, TurnOrder, TurnPhase, TurnStarted,
 };
 
 use crate::scene::Scene;
@@ -497,6 +497,39 @@ fn duck_bgm(bgm: Res<Bgm>, paused: Res<Paused>, live: Query<(&AudioSink, &BgmTag
 // 队列元素带**事件主语**的回合序与子序，排完序再进队；当前那条播完（`Despawn`）才轮到下一条。
 // 点击打断一次只丢一条 —— 一条点击消息配一次 `take()`。
 
+/// UI 那一层要放的四声。派发侧只认这个枚举，路径与音量都留在本模块 ——
+/// 按钮不该知道 `.ogg` 在哪。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiSound {
+    /// 任何**可用**按钮的底噪
+    Click,
+    /// 接受／确认类：买地、开始对局、存取档、柜台里那几笔
+    Confirm,
+    /// 放弃／关闭／返回类
+    Cancel,
+    /// 点到禁用按钮：给一声，理由仍由那颗灰按钮自己写
+    Error,
+}
+
+/// UI 想放的一声。写成消息而不是直接调本模块：派发侧只写愿望，
+/// `NM_AUDIO=0` 时要不要出声由这里说了算（消息还在，日志照记）。
+#[derive(bevy::prelude::Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiSoundRequest(pub UiSound);
+
+impl UiSound {
+    fn file(self) -> &'static str {
+        match self {
+            UiSound::Click => "ui_click_soft",
+            UiSound::Confirm => "ui_confirm_soft",
+            UiSound::Cancel => "ui_cancel_soft",
+            UiSound::Error => "ui_error_soft",
+        }
+    }
+}
+
+/// 音效总线的默认增益（拍板 75%；UI 素材峰值 −6 dBFS，比 BGM 高一大截）。
+const SFX_GAIN: f32 = 0.75;
+
 /// 十五个语音事件：文件名（去 `.ogg`）与日志键同字面量。`CHARACTERS-dialogue.md` §三
 /// 那张触发矩阵是这里的地基，改口径先改那张表。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -655,12 +688,12 @@ fn cash_voices(
     out
 }
 
-/// 一帧里所有与语音有关的消息，一次读齐。
+/// 一帧里所有与声音有关的消息，一次读齐（语音与音效各取所需，两条 system 各有一份游标）。
 ///
 /// 打包是房规（§六 坑 8）：光「静默族」就九条 reader，而它们存在的理由只有一句
 /// 「这些钱已经在别处说过了」—— 散在参数表里就没人记得住为什么要有它们。
 #[derive(bevy::ecs::system::SystemParam)]
-struct VoiceInbox<'w, 's> {
+struct AudioInbox<'w, 's> {
     order: Option<Res<'w, TurnOrder>>,
     session: Option<Res<'w, GameSession>>,
     board: Option<Res<'w, ActiveBoard>>,
@@ -676,6 +709,9 @@ struct VoiceInbox<'w, 's> {
     bankrupt: MessageReader<'w, 's, PlayerBankrupt>,
     over: MessageReader<'w, 's, GameOver>,
     started: MessageReader<'w, 's, TurnStarted>,
+    rolled: MessageReader<'w, 's, DiceRolled>,
+    bailed: MessageReader<'w, 's, PlayerBailed>,
+    ui: MessageReader<'w, 's, UiSoundRequest>,
     // 静默族：这些流水同帧都有更专门的那一声，或者根本不该出声
     bank: MessageReader<'w, 's, BankOpDone>,
     traded: MessageReader<'w, 's, StockTraded>,
@@ -691,12 +727,14 @@ struct VoiceInbox<'w, 's> {
 /// 这一帧的事件 → 队列。排序键是 `(事件主语的回合序, 子序)`，走稳定排序，于是
 /// 「同帧发射序」就是入列顺序 —— 不需要再记一个序号。
 fn collect_voice(
-    mut inbox: VoiceInbox<'_, '_>,
+    mut inbox: AudioInbox<'_, '_>,
     mut queue: ResMut<VoiceQueue>,
     cfg: Res<AudioConfig>,
     mut commands: Commands,
     live: Query<Entity, With<VoiceLine>>,
 ) {
+    // 先读这一份（它借走整个 `inbox`），再拿那些只借用某几个字段的局部引用
+    let (silent, purchases) = cash_context(&mut inbox);
     let order = inbox.order.as_ref();
     let players = &inbox.players;
     let seat_of = |who: Entity| -> usize {
@@ -715,42 +753,6 @@ fn collect_voice(
             sub,
         });
     };
-
-    // 买地这一条有两种用法（静默 + 聚街），所以先落一份 —— `MessageReader` 读一次就到底，
-    // 两处各 `read()` 一遍的话第二遍一条都读不到，而症状恰好是「买地不静音」或
-    // 「聚街永远不响」二选一（第一次实现就漏了静默那一半）
-    let purchases: Vec<LandBought> = inbox.bought.read().copied().collect();
-    let mut silent: std::collections::HashSet<Entity> = std::collections::HashSet::new();
-    for bought in &purchases {
-        silent.insert(bought.player);
-    }
-    for done in inbox.bank.read() {
-        silent.insert(done.player);
-    }
-    for trade in inbox.traded.read() {
-        silent.insert(trade.player);
-    }
-    for done in inbox.mortgage.read() {
-        silent.insert(done.player);
-    }
-    for drawn in inbox.financing.read() {
-        silent.insert(drawn.chairman);
-    }
-    for recalled in inbox.recalled.read() {
-        silent.insert(recalled.player);
-    }
-    for up in inbox.upgraded.read() {
-        silent.insert(up.player);
-    }
-    for built in inbox.built.read() {
-        silent.insert(built.player);
-    }
-    for bought in inbox.lottery.read() {
-        silent.insert(bought.player);
-    }
-    for won in inbox.auction.read() {
-        silent.insert(won.player);
-    }
 
     // 命运：得/失都接管同一个人这一帧的现金语音
     let mut fates: Vec<(Entity, VoiceEvent)> = Vec::new();
@@ -924,6 +926,136 @@ fn line_up(
         pending.push_back(*cue);
     }
     dropped
+}
+
+/// 这一帧里哪些人的现金「已经在别处说过了」，以及买地那几条（聚街还要用）。
+///
+/// 九条流水 + 买地：它们同帧都有一条更专门的凭据（银行回执、成交流水、收据），
+/// 或者根本不该出声（买地那一笔是「换资产」不是「丢钱」）。语音与音效**共用这一份判断** ——
+/// 两处各写一遍的话，迟早会出现「语音不吭声而音效在响」。
+fn cash_context(
+    inbox: &mut AudioInbox<'_, '_>,
+) -> (std::collections::HashSet<Entity>, Vec<LandBought>) {
+    // 买地有两种用法（静默 + 聚街），所以先落一份 —— `MessageReader` 读一次就到底，
+    // 两处各 `read()` 一遍的话第二遍一条都读不到，而症状恰好是「买地不静音」或
+    // 「聚街永远不响」二选一（第一次实现就漏了静默那一半）
+    let purchases: Vec<LandBought> = inbox.bought.read().copied().collect();
+    let mut quiet: std::collections::HashSet<Entity> = std::collections::HashSet::new();
+    for bought in &purchases {
+        quiet.insert(bought.player);
+    }
+    for done in inbox.bank.read() {
+        quiet.insert(done.player);
+    }
+    for trade in inbox.traded.read() {
+        quiet.insert(trade.player);
+    }
+    for done in inbox.mortgage.read() {
+        quiet.insert(done.player);
+    }
+    for drawn in inbox.financing.read() {
+        quiet.insert(drawn.chairman);
+    }
+    for recalled in inbox.recalled.read() {
+        quiet.insert(recalled.player);
+    }
+    for up in inbox.upgraded.read() {
+        quiet.insert(up.player);
+    }
+    for built in inbox.built.read() {
+        quiet.insert(built.player);
+    }
+    for bought in inbox.lottery.read() {
+        quiet.insert(bought.player);
+    }
+    for won in inbox.auction.read() {
+        quiet.insert(won.player);
+    }
+    (quiet, purchases)
+}
+
+/// 事件音效：一帧里同一键最多一条（`keys` 去重），播完自清（`Despawn`）。
+///
+/// 与语音分两条 system 而不是合一条：音效**不排队**也不打断，它要的是「这一下有个响」；
+/// 语音要的是「一次只说一句」。把两种时序塞进同一个函数，两边都会被对方的规矩绑住。
+fn collect_sfx(
+    mut inbox: AudioInbox<'_, '_>,
+    cfg: Res<AudioConfig>,
+    server: Res<AssetServer>,
+    mut commands: Commands,
+) {
+    let keys = sfx_for_frame(&mut inbox);
+    if keys.is_empty() {
+        return;
+    }
+    if cfg.log {
+        info!("audio: sfx {}", keys.join(" + "));
+    }
+    if !cfg.playback {
+        return;
+    }
+    for key in keys {
+        commands.spawn((
+            AudioPlayer::new(server.load(format!("audio/sfx/{key}.ogg"))),
+            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(SFX_GAIN)),
+        ));
+    }
+}
+
+/// 这一帧该放的音效键（同帧同键只留一条）。读消息的那一半单独成函数，
+/// 测试才能在无音频设备的机器上把「该放哪几条」钉住 —— 与 `cash_voices` 同一条理由。
+fn sfx_for_frame(inbox: &mut AudioInbox<'_, '_>) -> Vec<&'static str> {
+    let (quiet, purchases) = cash_context(inbox);
+    let mut keys: Vec<&'static str> = Vec::new();
+    let mut want = |key: &'static str| {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    };
+
+    // `read()` 要**读干净**：只取一条的话剩下的会留到下一帧再响一次（同一掷两下，听得出）
+    if inbox.rolled.read().count() > 0 {
+        want("dice_roll");
+    }
+    for changed in inbox.cash.read() {
+        if changed.delta == 0 || quiet.contains(&changed.player) {
+            continue;
+        }
+        want(if changed.delta > 0 {
+            "coin_gain"
+        } else {
+            "coin_loss"
+        });
+    }
+    for _ in inbox.played.read() {
+        want("card_play");
+    }
+    for _ in inbox.placed.read() {
+        want("item_place");
+    }
+    if inbox.detained.read().count() > 0 || inbox.bailed.read().count() > 0 {
+        want("jail");
+    }
+    for drawn in inbox.drawn.read() {
+        if drawn.card.kind == CardKind::Fate {
+            want("fate");
+        }
+    }
+    for done in &purchases {
+        let Ok((_, id)) = inbox.players.get(done.player) else {
+            continue;
+        };
+        if reaches_three(inbox.board.as_deref(), &inbox.owners, *id, done.land) {
+            want("monopoly");
+        }
+    }
+    if inbox.bankrupt.read().count() > 0 {
+        want("bankrupt");
+    }
+    for asked in inbox.ui.read() {
+        want(asked.0.file());
+    }
+    keys
 }
 
 /// 买家在这一刻是不是**刚凑齐同一条街的第三块**。
@@ -1204,6 +1336,7 @@ impl Plugin for AudioPlugin {
             if cfg.log { "开" } else { "关" }
         );
         app.insert_resource(cfg)
+            .add_message::<UiSoundRequest>()
             .init_resource::<Bgm>()
             .init_resource::<VoiceQueue>()
             .insert_resource(Selftest {
@@ -1222,6 +1355,8 @@ impl Plugin for AudioPlugin {
                 Update,
                 (skip_voice_on_click, collect_voice, advance_voice).chain(),
             )
+            // 音效自己不排队：它只在这一帧读一遍、去重、放
+            .add_systems(Update, collect_sfx)
             .add_systems(Update, run_selftest);
     }
 }
@@ -1708,6 +1843,9 @@ mod tests {
             .add_message::<FacilityBuilt>()
             .add_message::<LotteryBought>()
             .add_message::<AuctionWon>()
+            .add_message::<DiceRolled>()
+            .add_message::<PlayerBailed>()
+            .add_message::<UiSoundRequest>()
             .add_systems(Update, collect_voice);
         app
     }
@@ -1785,6 +1923,93 @@ mod tests {
                 (payer, VoiceEvent::CashBigLoss, 1),
             ],
             "收款方该先说，付款方后说"
+        );
+    }
+
+    #[derive(Resource, Default)]
+    struct Captured(Vec<&'static str>);
+
+    fn capture_sfx(mut inbox: AudioInbox<'_, '_>, mut out: ResMut<Captured>) {
+        out.0 = sfx_for_frame(&mut inbox);
+    }
+
+    /// 同一帧两掷只响一下；两笔进账也只响一下（同键合并），出账另算一条。
+    /// 顺序就是表里的顺序（骰子在前）。
+    #[test]
+    fn a_dice_roll_sounds_once_and_coins_split_by_direction() {
+        let mut app = voice_app();
+        app.init_resource::<Captured>()
+            .add_systems(Update, capture_sfx);
+        let who = speaker(&mut app, "姬百年", 0);
+        for _ in 0..2 {
+            app.world_mut()
+                .resource_mut::<Messages<DiceRolled>>()
+                .write(DiceRolled {
+                    player: who,
+                    steps: 5,
+                    dice: 1,
+                    faces: [5, 0, 0],
+                    from: game_core::prelude::TileIndex(0),
+                    to: game_core::prelude::TileIndex(5),
+                });
+        }
+        for delta in [3000, 4000, -5000] {
+            app.world_mut()
+                .resource_mut::<Messages<CashChanged>>()
+                .write(CashChanged {
+                    player: who,
+                    delta,
+                    balance: 0,
+                });
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<Captured>().0,
+            vec!["dice_roll", "coin_gain", "coin_loss"],
+            "同帧同键该合并成一条"
+        );
+    }
+
+    /// 买地那一笔同帧也有 CashChanged，但它不是「丢钱」，不给金币声（与语音同源）。
+    #[test]
+    fn a_purchase_makes_no_coin_noise() {
+        let mut app = voice_app();
+        app.init_resource::<Captured>()
+            .add_systems(Update, capture_sfx);
+        let buyer = speaker(&mut app, "姬百年", 0);
+        app.world_mut()
+            .resource_mut::<Messages<CashChanged>>()
+            .write(CashChanged {
+                player: buyer,
+                delta: -16_500,
+                balance: 0,
+            });
+        app.world_mut()
+            .resource_mut::<Messages<LandBought>>()
+            .write(LandBought {
+                player: buyer,
+                land: LandId(24),
+                price: 16_500,
+            });
+        app.update();
+        assert!(app.world().resource::<Captured>().0.is_empty());
+    }
+
+    /// UI 四声走消息：派发侧写什么，这一帧就放什么（没有按钮的「点击」也照放）。
+    #[test]
+    fn the_ui_requests_are_played_verbatim() {
+        let mut app = voice_app();
+        app.init_resource::<Captured>()
+            .add_systems(Update, capture_sfx);
+        for sound in [UiSound::Error, UiSound::Confirm] {
+            app.world_mut()
+                .resource_mut::<Messages<UiSoundRequest>>()
+                .write(UiSoundRequest(sound));
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<Captured>().0,
+            vec!["ui_error_soft", "ui_confirm_soft"]
         );
     }
 
