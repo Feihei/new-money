@@ -112,7 +112,7 @@ pub enum NewsScope {
     /// 脚下那一格通常**不是**地（新闻中心自己就是道路格），所以往环上找最近的一块，
     /// 同距时按他面朝的方向决胜，与请神符同一条键（[`crate::board::BoardDef::nearest_land`]）。
     ///
-    /// **范围（整街 / 3×3 / 全图）不住在这里，住在动词里**：`CardEffect::LandStatus{area}`
+    /// **范围（整街 / 前后各一格 / 全图）不住在这里，住在动词里**：`CardEffect::LandStatus{area}`
     /// 与 `Damage{area}` 各自带那一格，这一档只给中心。两处各写一份迟早会分叉，
     /// 而「全场拆房」那种写法里的「全场」是地不是人 —— 它该写成 `Around` + `area: whole`。
     Around,
@@ -964,7 +964,7 @@ mod tests {
         // - 人档拒：点名一位玩家 + 拍卖 = 「新闻替他挑了一块公有地」，那种挑法没人按过按钮
         // - 筛过的人档也拒：`EveryoneIf` 的答案是「几个人」，不是「几块地」
         let auction = || CardEffect::Auction {
-            area: crate::plot::PlotArea::Box { side: 3 },
+            area: crate::plot::PlotArea::Nearby { span: 1 },
         };
         let right = NewsSet(vec![news(
             "news_public",
@@ -1120,7 +1120,7 @@ mod tests {
             },
             CardEffect::Damage {
                 depth: crate::damage::LandDamage::Clear { seize: true },
-                area: PlotArea::Box { side: 3 },
+                area: PlotArea::Nearby { span: 1 },
             },
             CardEffect::BuyLand,
             CardEffect::Reverse,
@@ -1129,7 +1129,7 @@ mod tests {
             CardEffect::SummonGod,
             CardEffect::BanishGod,
             CardEffect::Auction {
-                area: PlotArea::Box { side: 3 },
+                area: PlotArea::Nearby { span: 1 },
             },
             CardEffect::Suspend {
                 what: crate::institution::Institution::StockMarket,

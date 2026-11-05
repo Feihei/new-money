@@ -11,9 +11,9 @@
 use std::f32::consts::PI;
 
 use bevy::prelude::*;
-use game_core::prelude::{ActiveBoard, DiceRolled};
+use game_core::prelude::DiceRolled;
 
-use super::{Rendered, token::TokenVisual};
+use super::{Rendered, geom::BoardGeom, token::TokenVisual};
 
 /// 骰身边长（世界单位）。一格 2.0，棋子球半径 0.5 —— 0.62 的骰子在跟随取景下
 /// 一眼能数清点数，又不至于盖住整格。
@@ -160,7 +160,7 @@ fn pip_flatten(face: u32) -> Vec3 {
 /// 每人每回合只会有一次掷骰，所以这里不做去重。
 pub(crate) fn spawn_dice_visuals(
     mut commands: Commands,
-    active: Res<ActiveBoard>,
+    geom: Res<BoardGeom>,
     mut rolled: MessageReader<DiceRolled>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -170,10 +170,9 @@ pub(crate) fn spawn_dice_visuals(
     for m in rolled.read() {
         let assets = cache.get_or_insert_with(|| DiceAssets::load(&mut meshes, &mut mats));
         let count = m.dice.clamp(1, 3) as usize;
-        let fallback = active
-            .def
-            .tile_world_pos(m.from.0 as i64)
-            .map(|at| Vec3::new(at.x, DICE_Y, at.z))
+        let fallback = geom
+            .tile(m.from.0 as usize)
+            .map(|at| Vec3::new(at.at.x, DICE_Y, at.at.z))
             .unwrap_or(Vec3::new(0.0, DICE_Y, 0.0));
         for i in 0..count {
             let face = m.faces[i].clamp(1, 6);

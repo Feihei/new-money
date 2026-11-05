@@ -12,7 +12,7 @@
 use bevy::prelude::*;
 use game_core::prelude::ActiveBoard;
 
-use super::{DevFont, Rendered, dim};
+use super::{DevFont, Rendered, dim, geom::BoardGeom};
 
 /// 一个格名标签：它在世界里的锚点（投影每帧重算，rig 一动标签就跟动）。
 #[derive(Component)]
@@ -24,6 +24,7 @@ pub(crate) fn spawn_tile_labels(
     mut commands: Commands,
     active: Res<ActiveBoard>,
     font: Res<DevFont>,
+    geom: Res<BoardGeom>,
 ) {
     let b = &active.def;
     for t in &b.tiles {
@@ -31,7 +32,7 @@ pub(crate) fn spawn_tile_labels(
         spawn_label(
             &mut commands,
             &font.0,
-            b.world_pos(t.col, t.row),
+            geom.at(t.col, t.row).at,
             format!("{} {}", t.id, t.name),
         );
         if let Some(branch) = &t.branch {
@@ -40,7 +41,7 @@ pub(crate) fn spawn_tile_labels(
                 spawn_label(
                     &mut commands,
                     &font.0,
-                    b.world_pos(bt.col, bt.row),
+                    geom.at(bt.col, bt.row).at,
                     bt.name.clone(),
                 );
             }

@@ -5,7 +5,7 @@
 //! prototype 的地块对照（`assets/data/boards/prototype.json`）：
 //! 0 南京路(col2 row0, brown) / 1 汉口路(col3 row0, brown) / 2 外滩商业区(col6 row2, **2×2**, orange) /
 //! 3 徐家汇(col4 row5, red) / 4 王府井(col2 row5, yellow) / 5 西单(col0 row2, yellow)。
-//! 挑这几块做用例正合适：0↔1 相邻（`Box(3)` 打得着、`Street` 也打得着，但理由不同）、
+//! 挑这几块做用例正合适：0↔1 在环上相邻（`Nearby{1}` 打得着、`Street` 也打得着，但理由不同）、
 //! 4↔5 同路段却隔半张棋盘（只有 `Street` 打得着）、2 是唯一那块 2×2。
 
 mod common;
@@ -89,16 +89,16 @@ fn a_missile_dents_the_neighbourhood_and_nothing_else() {
         &mut app,
         LandId(0),
         LandDamage::Degrade { levels: 1 },
-        PlotArea::Box { side: 3 },
+        PlotArea::Nearby { span: 1 },
     );
-    assert_eq!(tally.hit, 2, "0 的 3×3 只罩得住紧挨着的 1：{tally:?}");
+    assert_eq!(tally.hit, 2, "0 的前后一格恰好只有 1：{tally:?}");
     assert_eq!(plot_state(&mut app, 0), (Some(0), 1, false));
     assert_eq!(plot_state(&mut app, 1), (Some(0), 1, false));
     // 中心的这块**没有**被夺走：`Degrade` 那一支压根没有 `seize` 这个开关
     assert_eq!(
         plot_state(&mut app, 5),
         (Some(0), 2, false),
-        "隔两格的西单不该被 3×3 扫到"
+        "环上隔四格的西单不该被前后一格扫到"
     );
     assert_eq!(
         plot_state(&mut app, 2),
@@ -127,17 +127,17 @@ fn street_follows_the_group_not_the_geometry() {
         "别人的那一块照样拆 —— 拆的是路段，不是「我的地产」"
     );
 
-    // 对照：同一个中心的 3×3 只打得到自己，两者不是一回事
+    // 对照：同一个中心的「前后各一格」只打得到自己，两者不是一回事
     own(&mut app, 4, Some(0), 5, false);
     own(&mut app, 5, Some(1), 5, false);
     let near = run_damage(
         &mut app,
         LandId(4),
         LandDamage::Clear { seize: false },
-        PlotArea::Box { side: 3 },
+        PlotArea::Nearby { span: 1 },
     );
     assert_eq!(near.hit, 1, "4 与 5 不同段但也不相邻");
-    assert_eq!(plot_state(&mut app, 5).1, 5, "3×3 不该碰孤零零的那一块");
+    assert_eq!(plot_state(&mut app, 5).1, 5, "前后一格不该碰孤零零的那一块");
 }
 
 #[test]

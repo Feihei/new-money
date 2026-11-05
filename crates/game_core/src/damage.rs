@@ -6,13 +6,13 @@
 //! ```text
 //! LandDamage::Degrade { levels }   降 N 层 —— 结构上没有 `seize` 这个开关
 //! LandDamage::Clear   { seize }    归零 —— 要不要连地一起收，是这一支唯一的位
-//! × PlotArea::One | Box{side} | Street | Whole   （范围在 [`crate::plot`]，P3c 起卡与损害共用）
+//! × PlotArea::One | Nearby{span} | Street | Whole   （范围在 [`crate::plot`]，P3c 起卡与损害共用）
 //! ```
 //!
 //! 于是「降层还夺地」那个不该存在的格子**压根表达不出来**（地都收了还留层做什么）。
-//! 三个合法组合各有硬出处：`Degrade`（飞弹 3×3 降一级、恶魔所经降一级）、
+//! 三个合法组合各有硬出处：`Degrade`（飞弹降一级、恶魔所经降一级）、
 //! `Clear{seize:false}`（怪兽卡一栋、恶魔卡整路段、工程车所经之地）、
-//! `Clear{seize:true}`（命运#4 强制征收一栋、核子飞弹 9×9～全图）。
+//! `Clear{seize:true}`（命运#4 强制征收一栋、原子弹～全图）。
 //!
 //! **为什么值得单独一份**：P3 的怪兽卡与恶魔卡、P5 的飞弹／核子飞弹／定时炸弹、
 //! P10 的工程车、P11 的外星人与山洪，全都在「选一个组合 + 选一个范围」。
@@ -30,7 +30,7 @@ use crate::plot::PlotArea;
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LandDamage {
     /// 降 `levels` 层，**永不动所有权**。0 级空地不会被降成负数（`saturating_sub`）。
-    /// 出处：飞弹「威力 3×3、房屋下降一级」；恶魔附身「所经降一级（空地不拆）」。
+    /// 出处：飞弹「房屋下降一级」；恶魔附身「所经降一级（空地不拆）」。
     Degrade { levels: u8 },
     /// 建筑归零。`seize = true` 时土地也收回（`Owner` 归 `None`、抵押一并摘掉）。
     /// `false` = 只拆房子，地还是他的 —— 怪兽卡那一档。
@@ -44,19 +44,19 @@ impl LandDamage {
     }
 
     /// 夺地时要不要**顺带清掉这条格上的临时状态**（P5 的路障/地雷/定时炸弹、
-    /// P6 的神明附身、点券箱）。PLAN §七 的拍板：**只有 `Box(3)` 及以上才清**。
+    /// P6 的神明附身、点券箱）。PLAN §七 的拍板：**只有比单块更宽的范围才清**。
     ///
-    /// 理由不是「核子飞弹原文说神与物品全部消失」，而是那句话更可能是**范围**带来的、
+    /// 理由不是「原子弹原文说神与物品全部消失」，而是那句话更可能是**范围**带来的、
     /// 不是**夺地**带来的。若单块夺地也清，命运#4「强制征收」就变成一次隐性清场 ——
     /// 玩家身上的神没了、路上的路障没了，而他只看见「一块地变成了无主」，
     /// 那是最难查的一类投诉。
     ///
-    /// 今天还没有 occupancy 与 possession（P5/P6），这一句先把裁决写在这儿，
-    /// 那两条落地时读它，而不是各自重新决定一次。
+    /// 11-05 起范围按环上格数算（[`PlotArea::Nearby`]），「更宽」就是 `span >= 1`
+    /// （前后各一格起）。`Nearby { span: 0 }` 与 `One` 同判。
     pub fn sweeps_tile_state(&self, area: PlotArea) -> bool {
         let wide = match area {
             PlotArea::One | PlotArea::Street => false,
-            PlotArea::Box { side } => side >= 3,
+            PlotArea::Nearby { span } => span >= 1,
             PlotArea::Whole => true,
         };
         self.seizes() && wide
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn only_a_wide_seize_sweeps_the_tile_state() {
-        // PLAN §七 那条拍板：夺地 + `Box(3)` 及以上才顺带清 occupancy/附身
+        // PLAN §七 那条拍板：夺地 + 比单块更宽的范围才顺带清 occupancy/附身
         let seize = LandDamage::Clear { seize: true };
         let keep = LandDamage::Clear { seize: false };
         let drop = LandDamage::Degrade { levels: 1 };
@@ -148,14 +148,14 @@ mod tests {
                 "单块夺地不该隐性清场：{area:?}"
             );
         }
-        for area in [PlotArea::Box { side: 3 }, PlotArea::Whole] {
+        for area in [PlotArea::Nearby { span: 1 }, PlotArea::Whole] {
             assert!(seize.sweeps_tile_state(area), "{area:?} 这一档要清");
             assert!(!keep.sweeps_tile_state(area), "不夺地就什么都不清");
             assert!(!drop.sweeps_tile_state(area), "降层不动归属，更不清状态");
         }
         assert!(
-            !seize.sweeps_tile_state(PlotArea::Box { side: 1 }),
-            "1×1 就是单块，跟 One 同判"
+            !seize.sweeps_tile_state(PlotArea::Nearby { span: 0 }),
+            "0 步就是当格，跟 One 同判"
         );
     }
 }

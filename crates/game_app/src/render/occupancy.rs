@@ -8,9 +8,9 @@
 //! 分得开。表现层只读 `Occupancy`，不向 core 发任何推进消息。
 
 use bevy::prelude::*;
-use game_core::prelude::{ActiveBoard, BoardDef, God, Occupancy, OccupancyAt, OccupancyKind};
+use game_core::prelude::{God, Occupancy, OccupancyAt, OccupancyKind};
 
-use super::{Rendered, flat, token::TokenVisual};
+use super::{Rendered, flat, geom::BoardGeom, token::TokenVisual};
 
 /// 一枚图标对应的规则实体。改 `Occupancy` 的位置（炸弹被捡起/转让）时，
 /// 这里跟着换锚点；实体被 despawn（宝箱打开、地雷踩掉）时，这里跟着消失。
@@ -73,14 +73,14 @@ fn icon_mesh(meshes: &mut Assets<Mesh>, kind: OccupancyKind) -> Handle<Mesh> {
 
 /// 这枚图标此刻的世界坐标。`None` = 暂时画不出来（棋盘上没有那一格、携带者不在）。
 fn anchor(
-    def: &BoardDef,
+    geom: &BoardGeom,
     occ: &Occupancy,
     tokens: &Query<(&TokenVisual, &Transform)>,
 ) -> Option<Vec3> {
     match occ.at {
-        OccupancyAt::OnTile(tile) => def
-            .tile_world_pos(tile.0 as i64)
-            .map(|at| Vec3::new(at.x, icon_y(occ.kind), at.z)),
+        OccupancyAt::OnTile(tile) => geom
+            .tile(tile.0 as usize)
+            .map(|at| Vec3::new(at.at.x, icon_y(occ.kind), at.at.z)),
         // 携带中的炸弹浮在棋子上方：它已经不是路上的一格了，再画在格心会骗人
         OccupancyAt::Carried { by, .. } => tokens
             .iter()
@@ -95,7 +95,7 @@ fn anchor(
 /// 放置物只有个位数，每帧线性扫一遍比维护一份索引便宜（ADR-002 §3 也明确不要第二份索引）。
 pub(crate) fn sync_occupancy_visuals(
     mut commands: Commands,
-    active: Res<ActiveBoard>,
+    geom: Res<BoardGeom>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     occupancies: Query<(Entity, &Occupancy)>,
@@ -107,8 +107,6 @@ pub(crate) fn sync_occupancy_visuals(
     >,
     tokens: Query<(&TokenVisual, &Transform)>,
 ) {
-    let def = &active.def;
-
     // 先清：规则实体没了（踩掉/捡走/爆掉），图标跟着走
     for (visual_entity, visual, _, _) in &shown {
         if occupancies.get(visual.occupancy).is_err() {
@@ -121,7 +119,7 @@ pub(crate) fn sync_occupancy_visuals(
         if shown.iter().any(|(_, v, _, _)| v.occupancy == occ_entity) {
             continue;
         }
-        let Some(at) = anchor(def, occ, &tokens) else {
+        let Some(at) = anchor(&geom, occ, &tokens) else {
             // 棋盘上还没有那一格（数据错）或携带者还不在：这一帧不画，下一帧再试。
             // 不在这里 panic —— 表现层不该因为一个找不到的格号把整局干掉
             continue;
@@ -142,7 +140,7 @@ pub(crate) fn sync_occupancy_visuals(
         let Ok((_, occ)) = occupancies.get(visual.occupancy) else {
             continue;
         };
-        match anchor(def, occ, &tokens) {
+        match anchor(&geom, occ, &tokens) {
             Some(at) => {
                 transform.translation = at;
                 *visibility = Visibility::Inherited;

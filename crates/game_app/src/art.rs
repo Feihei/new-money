@@ -24,6 +24,98 @@ fn on_disk(rel: &str) -> Option<String> {
     enabled().then(|| asset_root().join(rel).is_file().then(|| rel.to_owned()))?
 }
 
+/// 同一个人的四种姿态，各是一条横条。
+///
+/// `Stand` 就是现有那批 1024×128 的待机条，**文件名不带后缀** —— 已经烘出来的二十几条不用改名。
+/// 其余三条各带一个后缀，而盘上没有是正常状态：素材不入库，而这一轮管线只跑到待机。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pose {
+    Stand,
+    Walk,
+    Bike,
+    Car,
+}
+
+impl Pose {
+    /// 横条后缀，与 [`Pose::FRAMES`] 同序。
+    const SUFFIX: [&'static str; 4] = ["", "_walk", "_bike", "_car"];
+    /// 表序 == [`Pose::index`]，`render::token` 那个 `[Option<Track>; 4]` 靠它对齐。
+    pub const ALL: [Pose; 4] = [Pose::Stand, Pose::Walk, Pose::Bike, Pose::Car];
+    /// 一条横条切几帧。
+    ///
+    /// 这是**设计常量而不是素材自述**：PNG 只说得出总宽，说不出「分成几格」，
+    /// 而 cell 宽 = 总宽 / 帧数。bake 那边按这个数出宽度，代码这边按它切 uv ——
+    /// 两边唯一的耦合就是这两个数，写进文件头比写进 JSON 更难悄悄跑掉。
+    const FRAMES: [usize; 4] = [8, 8, 4, 4];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn frames(self) -> usize {
+        Self::FRAMES[self.index()]
+    }
+
+    fn path(self, key: &str) -> String {
+        format!("sprite/{key}{}.png", Self::SUFFIX[self.index()])
+    }
+}
+
+/// 一个人身上那四条横条在盘上的路径。`stand` 是唯一的必需项 ——
+/// 缺它整个返回值是 `None`（这颗棋子退回球），缺其余三条只是那一种姿态退回站立。
+pub struct Strips {
+    pub stand: String,
+    pub walk: Option<String>,
+    pub bike: Option<String>,
+    pub car: Option<String>,
+}
+
+impl Strips {
+    /// 按姿态取路径；`Stand` 之外缺条就 `None`，降级由调用方决定。
+    pub fn get(&self, pose: Pose) -> Option<&str> {
+        let p = match pose {
+            Pose::Stand => Some(&self.stand),
+            Pose::Walk => self.walk.as_ref(),
+            Pose::Bike => self.bike.as_ref(),
+            Pose::Car => self.car.as_ref(),
+        };
+        p.map(String::as_str)
+    }
+}
+
+/// 一条横条的 cell 像素尺寸：总宽按帧数平分，总高就是一格的高。
+///
+/// 待机是 128×128（正方形，与从前一样）；载具那条会算出 192×128 —— 车身比人宽，
+/// 而**人不能因为上了车就变矮**，所以多出来的是横向而不是缩放，见 `render::token` 的 quad。
+pub fn cell(size: (u32, u32), frames: usize) -> Option<(f32, f32)> {
+    let (w, h) = size;
+    let frames = frames.max(1) as f32;
+    (w > 0 && h > 0).then(|| (w as f32 / frames, h as f32))
+}
+
+/// 横条文件的像素尺寸：只读 IHDR 那 24 个字节，不解码像素。
+/// 读不到就 `None`，调用方按方形 cell 退 —— 与其余闸门同一条纪律，一声不响。
+pub fn png_size(rel: &str) -> Option<(u32, u32)> {
+    let mut head = [0u8; 24];
+    let mut file = std::fs::File::open(asset_root().join(rel)).ok()?;
+    std::io::Read::read_exact(&mut file, &mut head).ok()?;
+    ihdr_size(&head)
+}
+
+/// PNG 头 24 字节 → 宽高。块布局是「签名 8 + 长度 4 + 类型 4 + 宽 4 + 高 4」，
+/// 所以宽高在 16 与 20 —— 按「签名之后就是 IHDR」去数会差 4 格，而差的那 4 格读出来
+/// 是一个看着很合理的数（长度字段恒为 13）。
+fn ihdr_size(head: &[u8]) -> Option<(u32, u32)> {
+    const SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let h = head.get(..24)?;
+    if h[..8] != SIG || h[12..16] != *b"IHDR" {
+        return None;
+    }
+    let w = u32::from_be_bytes(h[16..20].try_into().unwrap());
+    let h = u32::from_be_bytes(h[20..24].try_into().unwrap());
+    Some((w, h))
+}
+
 /// 诨名 → sprite 键。表序同时是「名字对不上时按座位领人」的领人顺序。
 ///
 /// 十六位 = `CHARACTERS.md` §五 首发十二人 + 隐藏位沈万三 + §六 三位已烘出来的候补。
@@ -48,18 +140,37 @@ const ROSTER: [(&str, &str); 16] = [
     ("葛守田", "geshoutian"),
 ];
 
-/// 这一位该用哪条横条（`sprite/<键>.png`，八帧 128×128）。
-///
-/// `seat` 只在名字查不到时用来分人，保证同桌两位不会领到同一张脸。盘上缺某几条时
-/// 往后顺延一位 —— 少一条素材不该让某一颗棋子独自退回球；但**名字查得到而文件缺**时
-/// 宁可退回球，也不换一张脸：那会把「温久枝」画成「姬百年」，而棋盘上没人看得出。
+/// 这一位该用哪条待机横条（`sprite/<键>.png`）。
 pub fn strip_for(name: &str, seat: usize) -> Option<String> {
-    if let Some((_, key)) = ROSTER.iter().find(|(who, _)| *who == name) {
-        return on_disk(&format!("sprite/{key}.png"));
+    resolve_key(name, seat).map(|key| Pose::Stand.path(key))
+}
+
+/// 这一位的四条横条，逐条问盘。键与 [`strip_for`] 同一条解析，所以「名字查得到而待机缺」
+/// 仍然是整颗退回球 —— 不会出现「有步行条却没有脸」那种半套人。
+pub fn strips_for(name: &str, seat: usize) -> Option<Strips> {
+    let key = resolve_key(name, seat)?;
+    let probe = |pose: Pose| on_disk(&pose.path(key));
+    Some(Strips {
+        stand: Pose::Stand.path(key),
+        walk: probe(Pose::Walk),
+        bike: probe(Pose::Bike),
+        car: probe(Pose::Car),
+    })
+}
+
+/// 键的解析：`seat` 只在名字查不到时用来分人，保证同桌两位不会领到同一张脸。
+/// 盘上缺某几条时往后顺延一位 —— 少一条素材不该让某一颗棋子独自退回球；但**名字查得到
+/// 而文件缺**时宁可退回球，也不换一张脸：那会把「温久枝」画成「姬百年」，而棋盘上没人看得出。
+fn resolve_key(name: &str, seat: usize) -> Option<&'static str> {
+    let known = ROSTER.iter().any(|(who, _)| *who == name);
+    if known {
+        // 名单里的人只认自己那张脸：待机条缺就退回球，不顺延到隔壁那张
+        let key = sprite_key(name, seat);
+        return on_disk(&Pose::Stand.path(key)).map(|_| key);
     }
     (0..ROSTER.len())
         .map(|k| sprite_key(name, seat + k))
-        .find_map(|key| on_disk(&format!("sprite/{key}.png")))
+        .find(|key| on_disk(&Pose::Stand.path(key)).is_some())
 }
 
 /// 名字 → 横条键。不碰盘，所以能单测（`assets/sprite/` 不入库，「盘上有没有」在别的
@@ -129,20 +240,13 @@ pub fn board_plate() -> Option<String> {
     on_disk("textures/board/plate.png")
 }
 
-/// 棋盘地面（`textures/board/ground.png`，满幅无缝纸面，给环内环外那些空格）。
-pub fn board_ground() -> Option<String> {
-    on_disk("textures/board/ground.png")
-}
-
-/// 道路单元图（`textures/road/units/<键>.png`，256²，俯视平面：直路／直角／丁字／断头／斜路／45° 弯）。
-/// 与 `board_plate` 不同一条纪律：那一张是「缺一块少一块」的皮肤，这六张是**一套接边表**，
-/// 缺哪张路面就在那一格断缝，所以成套才上 —— 判据在 `render::RoadTiles::table`。
+/// 道路单元图（`textures/road/units/<键>.png`，256²，俯视平面）。街面只用 `straight_orth`
+/// 这一张，每格按街道朝向转 —— 斜街与直街用同一张图，没有第二套接边词汇表。
 pub fn road_unit(key: &str) -> Option<String> {
     on_disk(&format!("textures/road/units/{key}.png"))
 }
 
-/// 单元图之外那大片草坪（`textures/road/grass.png`）。草坪均值与六张单元图里的草是同一个数
-/// (116,135,61)，这是「无缝」唯一的前提。
+/// 整盘垫底的草坪（`textures/road/grass.png`，无缝）。每格 UV 各自 0..1 平铺。
 pub fn road_grass() -> Option<String> {
     on_disk("textures/road/grass.png")
 }
@@ -200,5 +304,46 @@ mod tests {
     #[test]
     fn the_seat_wraps_instead_of_running_off_the_table() {
         assert_eq!(sprite_key("无名", ROSTER.len()), sprite_key("无名", 0));
+    }
+
+    #[test]
+    fn the_moving_poses_hang_off_the_same_key_as_the_face() {
+        // 待机条不带后缀：已经烘出来的那二十几条不改名
+        assert_eq!(Pose::Stand.path("jibainian"), "sprite/jibainian.png");
+        assert_eq!(Pose::Walk.path("jibainian"), "sprite/jibainian_walk.png");
+        assert_eq!(Pose::Car.path("jibainian"), "sprite/jibainian_car.png");
+    }
+
+    #[test]
+    fn the_pose_table_indexes_itself() {
+        // `[Option<Track>; 4]` 按 `index()` 取，而 `ALL` 是装配那一头写的表序。
+        // 两者一错开，症状是「步行放的是汽车那几帧」——画面会动，没人看得出是串了。
+        for (i, pose) in Pose::ALL.iter().enumerate() {
+            assert_eq!(pose.index(), i);
+        }
+    }
+
+    #[test]
+    fn a_wider_cell_is_wider_and_not_shorter() {
+        // 载具条 768×128 切四帧：一格 192 宽、128 高 —— 车身横向溢出，人的身高一个像素不挪
+        assert_eq!(cell((768, 128), Pose::Car.frames()), Some((192.0, 128.0)));
+        assert_eq!(
+            cell((1024, 128), Pose::Stand.frames()),
+            Some((128.0, 128.0))
+        );
+    }
+
+    #[test]
+    fn a_header_that_is_not_a_png_has_no_size() {
+        let mut head = [0u8; 24];
+        head[..8].copy_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+        head[12..16].copy_from_slice(b"IHDR");
+        head[16..20].copy_from_slice(&768u32.to_be_bytes());
+        head[20..24].copy_from_slice(&128u32.to_be_bytes());
+        assert_eq!(ihdr_size(&head), Some((768, 128)));
+        // 签名对、块名不对（比如把调色板块当头）→ 没有尺寸，而不是读出隔壁块的数
+        head[12..16].copy_from_slice(b"PLTE");
+        assert_eq!(ihdr_size(&head), None);
+        assert_eq!(ihdr_size(&[0u8; 23]), None);
     }
 }

@@ -2,8 +2,9 @@
 //! 类型、归属、等级、租金表与地价。
 //!
 //! 三条与既有约定咬合的设计：
-//! - 命中测试用 `MeshPickingPlugin` 且 `require_markers = true`，只有道路格地板带
-//!   [`TilePick`]，所以点建筑、点棋子、点空白都不会误开卡。
+//! - 命中测试走**坐标点表**：`BoardGeom` 里存着主环与支线每一格的世界坐标，点击射线打到
+//!   地面那一层再找最近的一格。不给每格铺一块不可见地皮，也不必让地面几何带着拾取标记 ——
+//!   折线版的地面是「一张草地 + 一圈会转弯的街面」，本来就没有「一格一块」这回事。
 //! - 卡片不铺全屏遮罩：它挂在右上角，可以边看边点别格，换格时整块重建。
 //! - 内容全部从 `ActiveBoard` + 组件现算。实体上只留 `(col, row)` 这一对坐标，
 //!   格名/类型/绑定的土地都回 `BoardDef` 查（§4.2「拓扑查询走 BoardDef」，不复制第二份真相）。
@@ -17,7 +18,7 @@ use game_core::prelude::{
 use super::skin::Skins;
 use super::theme::{col, layout, size};
 use super::{BoardUi, ButtonSpec, UiAction, border_color, building_label, button, info_row, label};
-use crate::render::{DevFont, TilePick, palette};
+use crate::render::{DevFont, dim, geom::BoardGeom, palette};
 
 /// 现在看的是哪一格（网格坐标，含死胡同格）。`None` = 没有详情卡。
 #[derive(Resource, Default)]
@@ -66,21 +67,37 @@ pub(crate) struct TileView {
 #[derive(Component)]
 pub(crate) struct TileCard(pub(crate) TileView);
 
-/// 点中一块带 [`TilePick`] 的地板，就把它记成当前格。
+/// 点中地面就把它记成当前格：屏幕坐标 → 地面那一层 → 最近的一个命中点。
 ///
-/// 与按钮派发是两条独立的 `MessageReader<PointerClick>`：各自读完自己的那份缓冲，
-/// 顺序无关 —— 这里只认「命中的实体是不是地板」，点到的若是 UI 就查不到组件、自然跳过。
+/// 与按钮派发是两条独立的 `MessageReader<PointerClick>`：各自读完自己的那份缓冲，顺序无关
+/// —— 点在 UI 上就直接跳过（按钮自己会处理），点空处则什么也不做。
 pub(crate) fn pick_tile(
     mut clicks: MessageReader<PointerClick>,
-    picks: Query<&TilePick>,
+    cameras: Query<(&Camera, &GlobalTransform)>,
+    geom: Res<BoardGeom>,
+    nodes: Query<&Node>,
     mut selected: ResMut<SelectedTile>,
 ) {
     for click in clicks.read() {
         if click.button != PointerButton::Primary {
             continue;
         }
-        if let Ok(pick) = picks.get(click.entity) {
-            selected.0 = Some((pick.col, pick.row));
+        if nodes.get(click.entity).is_ok() {
+            continue;
+        }
+        let Some((camera, camera_at)) = cameras.iter().next() else {
+            continue;
+        };
+        let Ok(ray) = camera.viewport_to_world(camera_at, click.pointer.position) else {
+            continue;
+        };
+        // 正交等轴测的射线永远斜着落向地面，`direction.y` 不会趋零
+        let t = (dim::TILE_Y - ray.origin.y) / ray.direction.y;
+        if !t.is_finite() {
+            continue;
+        }
+        if let Some(cell) = geom.nearest_cell(ray.origin + *ray.direction * t) {
+            selected.0 = Some(cell);
         }
     }
 }

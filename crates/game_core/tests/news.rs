@@ -308,7 +308,7 @@ fn pin_calendar(app: &mut App) {
 /// **只认 P0 播出去的那一条**：长跑里乙也会走路，她踩到新闻中心同样会抽中 `want`，
 /// 而她的锚点、她的现金与这条用例要问的那件事无关 —— 不筛主语，用例就会停在错误的那一播上。
 ///
-/// `rearm` 不是保险，是**必要**：中间那一播可能正是一条天灾（山洪的 3×3 罩得住王府井），
+/// `rearm` 不是保险，是**必要**：中间那一播可能正是一条天灾（山洪的「前后各一格」罩得住王府井），
 /// 不重摆地块，最后那一播读到的就是上一播留下的残局 —— 症状是「seized 少了 1」，
 /// 而它跟被测的那条规则一点关系都没有。
 fn walk_until_rearmed(
@@ -1124,7 +1124,7 @@ fn the_anchor_is_the_ground_under_the_broadcaster_not_the_tile_itself() {
     assert_eq!(center, "L2", "他脚下那一格就是那块地，锚点该是它：{line}");
     assert!(
         lands.iter().any(|l| l == "L2"),
-        "3×3 以脚下为中心，中心那块必在清单里：{line}"
+        "范围以脚下为中心，中心那块必在清单里：{line}"
     );
     assert_eq!(plot_state(&mut app, 2).1, 0, "楼该被拆平：{line}");
     assert_cash_audit(&mut app, START);

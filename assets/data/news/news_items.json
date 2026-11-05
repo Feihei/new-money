@@ -30,9 +30,9 @@
 	{
 		"id": "news_005",
 		"title": "山洪爆发土地流失",
-		"desc": "播报者脚下这一带（3×3）的房屋与土地一起没了",
+		"desc": "播报者脚下这一带（前后各一格）的房屋与土地一起没了",
 		"scope": "around",
-		"effects": [{"action": "damage", "depth": {"clear": {"seize": true}}, "area": {"box": {"side": 3}}}]
+		"effects": [{"action": "damage", "depth": {"clear": {"seize": true}}, "area": {"nearby": {"span": 1}}}]
 	},
 	{
 		"id": "news_006",

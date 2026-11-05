@@ -3,7 +3,7 @@
 //! 五条验收各有一组用例（PLAN §四 P5 的右列）：
 //! 1. 放路障 → 下一个人被卡（含放置者自己）；
 //! 2. 踩地雷 → 住院 3 天，放置者自己踩也炸；
-//! 3. 定时炸弹附身 → 走满 38 步爆 → 3×3 全住院 5 天且那一圈建筑各降 1 级、所有权不动
+//! 3. 定时炸弹附身 → 走满 38 步爆 → 当格全住院 5 天且当格建筑降 1 级、所有权不动
 //!    → 相遇时可传给别人；
 //! 4. 开车撞飞恶犬（步行则被咬）；
 //! 5. 身上有乌龟计时的人，掷 5 点也只前进 1 格、而 `DiceRolled.steps` 仍是 5。
@@ -278,14 +278,16 @@ fn a_carried_bomb_moves_to_the_player_it_meets_and_keeps_its_counter() {
 }
 
 #[test]
-fn a_bomb_blast_hurts_the_ring_and_degrades_buildings_without_seizing_them() {
+fn a_bomb_blast_hurts_only_its_own_tile_and_keeps_the_deed() {
     let (mut app, p0) = ready_on(0, 2, DecisionPolicy::DeclineAll);
     let p1 = other_of(&mut app, p0);
     clear_occupancies(&mut app);
-    // 爆心会落在 1 号格；3×3 覆盖南京路 (2,0) 与汉口路 (3,0)
+    // 爆心会落在 1 号格；当格只打绑在 1 号格上的南京路 (2,0)，
+    // 而汉口路 (3,0) 绑在隔壁 2 号格上，不该被降
     own(&mut app, 0, Some(0), 2, false);
     own(&mut app, 1, Some(1), 3, false);
-    place(&mut app, p1, 2);
+    // p1 与炸弹站同一格（多人同格是允许的）—— 「当格全住院」的那个「全」
+    place(&mut app, p1, 1);
     set_mount(&mut app, p0, game_core::prelude::Mount::Car);
     carry_bomb(&mut app, p0, 1);
 
@@ -303,13 +305,13 @@ fn a_bomb_blast_hurts_the_ring_and_degrades_buildings_without_seizing_them() {
         "爆炸之后剩余步数一步都不走：{ev:?}"
     );
     for player in [p0, p1] {
-        let held = detain_of(&app, player).expect("3×3 里的人都要住院");
+        let held = detain_of(&app, player).expect("站在爆心那格的人要住院");
         assert_eq!(
             (held.place, held.term),
             (DetentionPlace::Hospital, Term::Turns(5))
         );
     }
-    // 一圈建筑各降 1 级，所有权一动不动
+    // 当格建筑降 1 级，所有权一动不动；隔壁那条街一点没碰
     assert_eq!(
         plot_state(&mut app, 0),
         (Some(0), 1, false),
@@ -317,8 +319,8 @@ fn a_bomb_blast_hurts_the_ring_and_degrades_buildings_without_seizing_them() {
     );
     assert_eq!(
         plot_state(&mut app, 1),
-        (Some(1), 2, false),
-        "汉口路 3→2，还是 P1 的"
+        (Some(1), 3, false),
+        "汉口路绑在隔壁一格，不该被降（11-05：定时炸弹只打当格）"
     );
     assert!(
         ledger(&app).contains(&"Mount(P0,步行)".to_string()),

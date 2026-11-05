@@ -176,7 +176,7 @@ pub mod prelude {
         BOMB_HOSPITAL_DAYS, BOMB_STEPS, HaltCause, MINE_HOSPITAL_DAYS, Occupancy, OccupancyAt,
         OccupancyKind, PlaceDeny, STARTING_CHESTS, Trigger, WalkHalt, finish_halt_system,
         first_roadblock, place, place_denied, place_item_system, resolve_halt_system,
-        settle_landing_occupancy_system, spawn_starting_chests, trigger_of, within_chebyshev,
+        settle_landing_occupancy_system, spawn_starting_chests, trigger_of, within_steps,
     };
     pub use crate::passive::{
         Affair, Ask, Gate, GateDesk, Job, PassiveEvent, Step, Tail, affair_of_card,

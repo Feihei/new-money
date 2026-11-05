@@ -46,7 +46,7 @@ pub enum TurnPhase {
     Walking,
     /// 走步被道路放置物中断（P5）。**不是 `Landed`**：中断的那一格不结算静态格型，
     /// 也没有 `PlayerArrived`。`occupancy::resolve_halt_system` 在这里应用后果
-    /// （住院、炸弹的 3×3 降层），随后直接收尾到 `TurnEnd`。
+    /// （住院、炸弹的当格降层），随后直接收尾到 `TurnEnd`。
     Halted,
     /// 落格结算的分派点。B3 在此接地产/卡牌/银行，目前所有格子都无结算。
     Landed,

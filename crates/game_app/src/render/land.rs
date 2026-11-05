@@ -18,11 +18,10 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
 use game_core::prelude::{
-    ActiveBoard, BuildingLevel, GameRules, LandId, LandType, Owner, PlayerColor, PlayerId,
-    PlayerName,
+    BuildingLevel, GameRules, LandId, LandType, Owner, PlayerColor, PlayerId, PlayerName,
 };
 
-use super::board::lay_flat;
+use super::geom::BoardRead;
 use super::{
     BuildingModels, GroundArt, PropArt, Rendered, billboard_rot, darkened, dim, flat, palette,
     photo, plated,
@@ -133,24 +132,22 @@ impl OutlineMeshes {
 /// 给每块地铺底座与建筑。
 pub(crate) fn attach_land_visuals(
     mut commands: Commands,
-    active: Res<ActiveBoard>,
+    board: BoardRead<'_>,
     rules: Res<GameRules>,
     art: GroundArt<'_>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
     lands: Query<(Entity, &LandId)>,
 ) {
-    let b = &active.def;
+    let b = &board.active.def;
     let props = art.props.len();
     if props == 0 {
         info!("归属标志物：盘上没有 prop/*.png，空地的归属退回粉笔框 + 色块");
     } else {
         info!("归属标志物：{props} 件（缺图的角色在空地上不摆）");
     }
-    // 地面是哪一版，地块底座就跟着哪一版：无缝版里地块只是「道路旁多出来的一块草地」，
-    // 边界靠粉笔框说；盒子版里它还是那块街色纸卡。
-    let seamless = art.units.table().is_some();
-    let chalk_pair = seamless.then(|| art.chalk.pair()).flatten();
+    // 地块只是「道路旁多出来的一块草地」，边界靠粉笔框说；草坪素材缺了才退回街色纸卡。
+    let chalk_pair = art.chalk.pair();
     let chalk_quad = chalk_pair
         .map(|_| meshes.add(Rectangle::new(b.cell_size, b.cell_size)))
         .clone();
@@ -169,13 +166,16 @@ pub(crate) fn attach_land_visuals(
     };
     for (entity, id) in &lands {
         // `BoardDef::validate` 保证土地有定义且坐标在网格内；拿不到就是数据错，不画即可
-        let (Some(def), Some(center)) = (b.land(id.0), b.land_world_pos(id.0)) else {
+        let (Some(def), Some(frame)) = (b.land(id.0), board.geom.land(id.0)) else {
             continue;
         };
-        let footprint = b.cell_size * def.size as f32;
-        let base_mat = match (&art.units.grass, seamless) {
-            (Some(grass), true) => photo(&mut mats, grass, false),
-            _ => plated(
+        // 位置与朝向都从几何那一份读：折线版里地块不再踩在格子上，而是紧贴它绑的那条街
+        let center = frame.at;
+        let footprint = frame.side;
+        let plot_rot = Quat::from_rotation_y(frame.yaw);
+        let base_mat = match &art.units.grass {
+            Some(grass) => photo(&mut mats, grass, false),
+            None => plated(
                 &mut mats,
                 darkened(
                     def.group
@@ -194,14 +194,14 @@ pub(crate) fn attach_land_visuals(
                 footprint * dim::PLOT_SCALE,
             ))),
             MeshMaterial3d(base_mat),
-            Transform::from_xyz(center.x, dim::PLOT_H / 2.0, center.z),
+            Transform::from_xyz(center.x, dim::PLOT_H / 2.0, center.z).with_rotation(plot_rot),
             Rendered,
         ));
 
         // 粉笔框：1×1 一整张方框；2×2 用四张角片各转一档，拼出的是一整圈**外框**
         // （中间那道缝不该有线）。`size >= 3` 只有四角有线、边上是空的 —— 三张盘都只有 1 与 2，
         // 真要用大地块得先补一张「直边」角片。
-        if let (Some((frame, corner)), Some(quad)) = (chalk_pair, &chalk_quad) {
+        if let (Some((frame_img, corner)), Some(quad)) = (chalk_pair, &chalk_quad) {
             let y = dim::PLOT_H + dim::CHALK_LIFT;
             let last = def.size as u32 - 1;
             // (格偏移, 档位)：档位是这张角片要绕世界 Y 顺时针转几个 90°
@@ -211,14 +211,20 @@ pub(crate) fn attach_land_visuals(
                 ((0, last), 3.0),
                 ((last, last), 2.0),
             ];
-            let piece = if def.size == 1 { frame } else { corner };
+            let piece = if def.size == 1 { frame_img } else { corner };
+            // 角片的位置在**地块自己的坐标系**里算：折线版里整块地随街转，四角跟着转
+            let half = (def.size.max(1) as f32 - 1.0) / 2.0;
             for ((dc, dr), rot) in corners {
-                let pos = b.world_pos(def.col + dc, def.row + dr);
+                let local = Vec3::new(dc as f32 - half, 0.0, dr as f32 - half) * b.cell_size;
+                let pos = center + plot_rot * local;
+                let yaw = frame.yaw - rot * std::f32::consts::FRAC_PI_2;
                 commands.spawn((
                     Mesh3d(quad.clone()),
                     MeshMaterial3d(photo(&mut mats, piece, true)),
-                    Transform::from_xyz(pos.x, y, pos.z)
-                        .with_rotation(lay_flat(rot, std::f32::consts::FRAC_PI_2)),
+                    Transform::from_xyz(pos.x, y, pos.z).with_rotation(
+                        Quat::from_rotation_y(yaw)
+                            * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+                    ),
                     Rendered,
                 ));
             }
@@ -241,7 +247,7 @@ pub(crate) fn attach_land_visuals(
             let mut outlines = Vec::with_capacity(art.models.levels.len());
             for handle in &art.models.levels {
                 let at = Transform::from_xyz(center.x, dim::PLOT_H, center.z)
-                    .with_rotation(dim::dwell_upright());
+                    .with_rotation(plot_rot * dim::dwell_upright());
                 bodies.push(
                     commands
                         .spawn((
@@ -278,7 +284,7 @@ pub(crate) fn attach_land_visuals(
                     .spawn((
                         Mesh3d(meshes.add(Cuboid::new(w, dim::SLAB_H, w))),
                         MeshMaterial3d(owner_mat.clone()),
-                        Transform::from_xyz(center.x, y, center.z),
+                        Transform::from_xyz(center.x, y, center.z).with_rotation(plot_rot),
                         Visibility::Hidden,
                         Rendered,
                     ))

@@ -426,7 +426,7 @@ pub struct WalkHalt {
     pub last: Option<WalkHalted>,
 }
 
-/// 停下之后应用后果：住院、炸弹的 3×3 降层与全圈住院。
+/// 停下之后应用后果：住院、炸弹的当格降层与当格伤人。
 ///
 /// **不结算脚下那一格**（不买地、不收租、不抽卡）：中断不是到站，那条分派根本不该跑。
 /// 这里也不碰 `TokenPosition` 之外的位置状态 —— 走步循环已经把逻辑位置改回停下的那一格。
@@ -465,10 +465,10 @@ pub fn resolve_halt_system(
             );
         }
         HaltCause::TimeBomb => {
-            // 3×3 的命中集合先算完：`def` 是 `books.active` 的借用，不能与 `damage_lands`
+            // 当格的命中集合先算完：`def` 是 `books.active` 的借用，不能与 `damage_lands`
             // 的可变借用同时活着
-            let lands = plot::lands_around_tile(def, stop.tile, 3);
-            // 爆心 3×3 里的**每一个还没出局的行动者**（P12 起含受雇的恶人：他从雷区走出来
+            let lands = plot::lands_around_tile(def, stop.tile, 0);
+            // 爆心这一格上的**每一个还没出局的行动者**（P12 起含受雇的恶人：他从雷区走出来
             // 却没事，等于告诉玩家「恶人不怕炸弹」，而那不是任何一条规则说过的话）
             let victims: Vec<Entity> = movers
                 .iter()
@@ -476,12 +476,12 @@ pub fn resolve_halt_system(
                     bankrupt.is_none()
                         && positions
                             .get(*entity)
-                            .map(|p| within_chebyshev(def, stop.tile, p.tile, 1))
+                            .map(|p| within_steps(def, stop.tile, p.tile, 0))
                             .unwrap_or(false)
                 })
                 .map(|(entity, _)| entity)
                 .collect();
-            // 3×3 降 1 级、保所有权（PLAN §七 拍板）
+            // 当格降 1 级、保所有权（PLAN §七 拍板；11-05 起范围按环上格数，定时炸弹＝当格）
             books.damage_lands(&lands, LandDamage::Degrade { levels: 1 });
             // 含携带者。已经在拘留中的人交给 `detain`
             // 的「更久的那一张赢」，这里不另写分支。
@@ -526,7 +526,7 @@ pub fn finish_halt_system(mut next: ResMut<NextState<TurnPhase>>) {
     next.set(TurnPhase::TurnEnd);
 }
 
-/// 把一个人送进医院并留凭据。抽出来是因为炸弹的 3×3 要对一圈人各做一次，
+/// 把一个人送进医院并留凭据。抽出来是因为炸弹可能同时对几个人各做一次，
 /// 而「接入点 + 死胡同格 + 更久的那张赢」只能由 `landing::detain` 那一处算。
 ///
 /// `days` 是**玩家**那一份的住院天数；挨这一下的是恶人时它换成「回笼等保释」，
@@ -563,13 +563,16 @@ fn detain_and_report(
     });
 }
 
-/// 两格在网格上的切比雪夫距离是否 ≤ `radius`。炸弹的 3×3 按格算，不按地块算
-/// （ADR-002 §8：`Books::damage` 只吃地块集合，所以「以格为中心圈哪些地」在 `plot` 里另算）。
-pub fn within_chebyshev(def: &BoardDef, a: TileIndex, b: TileIndex, radius: u32) -> bool {
-    let (Some(a), Some(b)) = (def.tile(a.0 as i64), def.tile(b.0 as i64)) else {
+/// 两格在**主环上**相隔几步（闭环，取更近的那一边）。
+///
+/// 攻击范围一律按格数算，不按网格距离（11-05 拍板）：路是线性的，斜街上「正前方
+/// 那一格」在网格上是对角，用切比雪夫会把它算成相邻、却把另一侧的格子算得更远。
+pub fn within_steps(def: &BoardDef, a: TileIndex, b: TileIndex, radius: u32) -> bool {
+    let n = def.tiles.len();
+    if a.0 as usize >= n || b.0 as usize >= n {
         return false;
-    };
-    a.col.abs_diff(b.col) <= radius && a.row.abs_diff(b.row) <= radius
+    }
+    plot::ring_steps(n, a.0 as usize, b.0 as usize) <= radius
 }
 
 /// 这一格上有没有「经过即停」的东西。走步循环用它判路障截断与地雷/恶犬。
@@ -676,14 +679,17 @@ mod tests {
     }
 
     #[test]
-    fn chebyshev_box_is_a_grid_not_a_ring_distance() {
-        let b = board();
-        // 6 号 (5,2) 与 7 号 (5,3) 相邻；与 2 号 (3,1) 距离 2，不在 3×3 里
-        assert!(within_chebyshev(&b, TileIndex(6), TileIndex(7), 1));
-        assert!(within_chebyshev(&b, TileIndex(6), TileIndex(6), 1));
-        assert!(!within_chebyshev(&b, TileIndex(6), TileIndex(2), 1));
-        // 环上的距离与此无关：18 号 (0,1) 与 0 号 (1,1) 相邻，13 号 (1,4) 不相邻
-        assert!(within_chebyshev(&b, TileIndex(18), TileIndex(0), 1));
-        assert!(!within_chebyshev(&b, TileIndex(18), TileIndex(13), 1));
+    fn range_is_counted_along_the_ring_not_across_the_grid() {
+        let b = board(); // prototype：主环 21 格
+        // 沿环一步就是相邻：6→7 是，6→2 不是（环上隔 4 格）
+        assert!(within_steps(&b, TileIndex(6), TileIndex(7), 1));
+        assert!(within_steps(&b, TileIndex(6), TileIndex(6), 1));
+        assert!(!within_steps(&b, TileIndex(6), TileIndex(2), 1));
+        // 18 号 (0,1) 与 0 号 (1,1) 在网格上挨着，环上却要绕过 19、20 两格才到 ——
+        // 网格距离算错的那一版会把它们判成 1 步
+        assert!(!within_steps(&b, TileIndex(18), TileIndex(0), 1));
+        assert!(within_steps(&b, TileIndex(18), TileIndex(0), 3));
+        // 越界格不凭空圈地（`BoardDef::tile` 会回绕，这里不能读它）
+        assert!(!within_steps(&b, TileIndex(99), TileIndex(0), 9));
     }
 }

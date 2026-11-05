@@ -1,277 +1,19 @@
-//! 静态棋盘几何：无缝地面密铺 + 路面（含对角段）+ 道路格地板（盒子版）。
+//! 静态棋盘几何：三层地面 + 支线尽端建筑。
 //!
-//! 对应 Godot `board.gd:206-302`（`_build_board` / `_build_roads` / `_render_filler_tiles`）。
+//! 第一层是一张铺满全盘的草地（每格 UV 各自 0..1，整块一次 draw）；第二层是街面，
+//! 每格一张按街道朝向转过的直路图 —— 相邻两格中心距正好等于方图边长，所以它们边对边
+//! 咬合成一条连续街带，与直街斜街无关；第三层是转角与三岔处的沥青圆盘，盖住方图
+//! 盖不住的那道缝。
+//!
 //! 土地的底座与建筑不在这里 —— 它们挂在 Land 实体上（[`super::land`]），因为要随归属与等级变。
-//!
-//! 「同一条街的格子怎么认出来」靠的是**空间**：地块只出现在直线上的一段连续格子里，
-//! 段与段之间隔着非地块格（银行／命运／公园…）。原先为此在道路格上画了一条同色组标记条
-//! （Godot `tile_view.gd:114-160`），11-04 撤除 —— 数据核对过，两张真盘的每一条街
-//! 本来就是一段连续格子（taiwan 16 街＝16 段、china 20 街＝20 段，无混段无拆段），
-//! 色条不提供任何信息，只提供一层与无缝地面打架的几何。
-
-use std::collections::{HashMap, HashSet};
+//! 位置与朝向全部来自 [`BoardGeom`]（等步长折线，见 [`super::geom`]），不读
+//! `BoardDef::world_pos`：网格只剩「方向」这一件事。
 
 use bevy::prelude::*;
-use game_core::board::{BoardDef, TileDef};
+use game_core::board::BoardDef;
 use game_core::prelude::ActiveBoard;
 
-use super::{
-    BoardPaper, GroundArt, Rendered, TilePick, darkened, dim, flat, palette, photo, plated,
-    yaw_to_face,
-};
-
-/// 一格贴哪个道路单元。词汇表就是 `assets/textures/road/units/` 那七张图，每张接哪几边
-/// 由 `.tmp/road_compositor.cjs` 的 `UNITS` 折线定义 —— 是画之前就定好的，不是画完再猜的。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Unit {
-    /// 草坪：道路不经过的格子（地块足迹、棋盘外圈）
-    Grass,
-    /// 直路 `straight_orth`
-    Straight,
-    /// 直角弯 `turn_90`
-    Corner,
-    /// 丁字 `junction_t`（支线从主环拐出去那一格）
-    Junction,
-    /// 断头路 `endpoint`（支线尽头）
-    DeadEnd,
-    /// 斜直路 `straight_diag`
-    Diag,
-    /// 45° 缓弯 `turn_45`
-    Bend45,
-    /// 135° 急折返 `turn_135`（11-04 补的那张：prototype 上有 7 处，原先路面在那儿断一截）
-    Bend135,
-}
-
-impl Unit {
-    /// 材质表下标。与 `RoadTiles::table` 的配对表同源，改这里要一起改那张表。
-    pub(crate) fn index(self) -> usize {
-        match self {
-            Unit::Grass => 0,
-            Unit::Straight => 1,
-            Unit::Corner => 2,
-            Unit::Junction => 3,
-            Unit::DeadEnd => 4,
-            Unit::Diag => 5,
-            Unit::Bend45 => 6,
-            Unit::Bend135 => 7,
-        }
-    }
-}
-
-/// 一格该贴的单元与档位。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct GroundTile {
-    pub unit: Unit,
-    /// 这张图转几档，每档 **45°、俯视顺时针**（`N→NE→E→…`）。正交类只会拿到偶数档。
-    pub rot: u8,
-}
-
-/// 八个方向，**顺时针**编号。编号顺序就是「转一档」的方向，所以旋转 = 位左移。
-///
-/// `N = -row`、`E = +col` —— 由 `BoardDef::world_pos` 是 `(col, 0, row)`
-/// （core `board.rs:460`）与「贴图 v=0 在图的顶边」推出来。符号反了不会报错，
-/// 只会让所有路都拐向镜像方向。
-mod dir {
-    pub const N: u8 = 0;
-    pub const NE: u8 = 1;
-    pub const E: u8 = 2;
-    pub const SE: u8 = 3;
-    pub const S: u8 = 4;
-    pub const SW: u8 = 5;
-    pub const W: u8 = 6;
-    pub const NW: u8 = 7;
-
-    pub const fn bit(d: u8) -> u8 {
-        1 << d
-    }
-}
-
-/// 俯视顺时针转一档（八个方向 = 一个 `u8` 的八个位，转一档就是循环左移一位）。
-fn turn_cw(mask: u8) -> u8 {
-    mask.rotate_left(1)
-}
-
-fn rotate_n(mask: u8, n: u8) -> u8 {
-    (0..n).fold(mask, |m, _| turn_cw(m))
-}
-
-/// 邻格在哪个方向（一位掩码）。同格与跨了两格以上的都不算邻接，返回 0 = 不接任何边。
-///
-/// 这道闸不是洁癖：`signum` 会把「同方向隔两格」折成同一个方向，数据写错时它不会
-/// 报「认不出来」，而是安静地贴上一张接不上缝的图 —— 症状是路面断一截。
-fn dir_toward(from: (i64, i64), to: (i64, i64)) -> u8 {
-    let (dc, dr) = (to.0 - from.0, to.1 - from.1);
-    if dc.abs().max(dr.abs()) != 1 {
-        return 0;
-    }
-    let d = match (dc.signum(), dr.signum()) {
-        (1, 0) => dir::E,
-        (1, -1) => dir::NE,
-        (0, -1) => dir::N,
-        (-1, -1) => dir::NW,
-        (-1, 0) => dir::W,
-        (-1, 1) => dir::SW,
-        (0, 1) => dir::S,
-        (1, 1) => dir::SE,
-        _ => return 0,
-    };
-    dir::bit(d)
-}
-
-/// 每格的接边集合。主环给两侧；支线在环格上多出第三侧（那就是丁字），
-/// 支线尽头只剩一侧（断头）。只有道路格会进这张表。
-pub(crate) fn road_sides(b: &BoardDef) -> HashMap<(u32, u32), u8> {
-    let xy = |t: &TileDef| (t.col as i64, t.row as i64);
-    let mut out: HashMap<(u32, u32), u8> = HashMap::new();
-    let n = b.tiles.len();
-    for i in 0..n {
-        let t = &b.tiles[i];
-        let mut mask = 0;
-        for j in [if i == 0 { n - 1 } else { i - 1 }, (i + 1) % n] {
-            mask |= dir_toward(xy(t), xy(&b.tiles[j]));
-        }
-        let branch = t.branch.as_ref();
-        if let Some(first) = branch.and_then(|br| br.tiles.first()) {
-            mask |= dir_toward(xy(t), xy(first));
-        }
-        *out.entry((t.col, t.row)).or_default() |= mask;
-        let Some(br) = branch else { continue };
-        let mut prev = xy(t);
-        for (k, bt) in br.tiles.iter().enumerate() {
-            // 支线自己那一串：朝来路一侧，若有后路再加一侧；尽头那一格就只剩一侧
-            let mut m = dir_toward(xy(bt), prev);
-            if let Some(next) = br.tiles.get(k + 1) {
-                m |= dir_toward(xy(bt), xy(next));
-            }
-            prev = xy(bt);
-            *out.entry((bt.col, bt.row)).or_default() |= m;
-        }
-    }
-    out
-}
-
-/// 每个单元的原始接边（图上量的）与允许的档位。
-///
-/// 正交类只转 90° 的整数倍：转 45° 会画出一条不接边的斜带，而 `straight_diag` 转 45°
-/// 恰好等于 `straight_orth` 转 90° —— 两个单元抢同一格时先表先得会选错图。
-/// 各单元的两侧夹角互不相同（对顶 180°／90°／135°／45°、单边、三边），所以这张表没有歧义，
-/// `tests::no_two_units_claim_the_same_edges` 钉着它。
-const CATALOG: [(Unit, u8, &[u8]); 7] = [
-    (Unit::DeadEnd, dir::bit(dir::W), &[0, 1, 2, 3, 4, 5, 6, 7]),
-    (Unit::Straight, dir::bit(dir::W) | dir::bit(dir::E), &[0, 2]),
-    (Unit::Diag, dir::bit(dir::NW) | dir::bit(dir::SE), &[0, 2]),
-    (
-        Unit::Corner,
-        dir::bit(dir::N) | dir::bit(dir::W),
-        &[0, 2, 4, 6],
-    ),
-    (
-        Unit::Junction,
-        dir::bit(dir::N) | dir::bit(dir::W) | dir::bit(dir::E),
-        &[0, 2, 4, 6],
-    ),
-    (
-        Unit::Bend45,
-        dir::bit(dir::W) | dir::bit(dir::NE),
-        &[0, 1, 2, 3, 4, 5, 6, 7],
-    ),
-    (
-        Unit::Bend135,
-        dir::bit(dir::W) | dir::bit(dir::NW),
-        &[0, 1, 2, 3, 4, 5, 6, 7],
-    ),
-];
-
-/// 接边集合 → 单元与档位。认不出来就是 `None`：那一格退回草地，比硬凑一张接不上缝的图
-/// 诚实（四岔路口、跨了两格以上的邻接都是这种）。
-pub(crate) fn tile_for(mask: u8) -> Option<(Unit, u8)> {
-    if mask == 0 {
-        return None;
-    }
-    CATALOG.into_iter().find_map(|(unit, canon, rots)| {
-        rots.iter()
-            .find(|&&r| rotate_n(canon, r) == mask)
-            .map(|&r| (unit, r))
-    })
-}
-
-/// 全盘每一格贴什么，下标 `row * grid_cols + col`。
-pub(crate) fn ground_map(b: &BoardDef) -> Vec<GroundTile> {
-    let sides = road_sides(b);
-    let grass = GroundTile {
-        unit: Unit::Grass,
-        rot: 0,
-    };
-    let mut map = vec![grass; (b.grid_cols * b.grid_rows) as usize];
-    for (row, line) in map.chunks_mut(b.grid_cols as usize).enumerate() {
-        for (col, cell) in line.iter_mut().enumerate() {
-            let Some(&mask) = sides.get(&(col as u32, row as u32)) else {
-                continue;
-            };
-            if let Some((unit, rot)) = tile_for(mask) {
-                *cell = GroundTile { unit, rot };
-            }
-        }
-    }
-    map
-}
-
-/// 把一张方形贴图平铺在地面上：先躺平（图的顶边朝 `-row`），再绕世界 Y 转 `steps` 档、
-/// 每档 `step` 弧度。顺序换过来就是绕**已躺平的**轴转，整盘会歪着贴。
-pub(crate) fn lay_flat(steps: f32, step: f32) -> Quat {
-    Quat::from_rotation_y(-steps * step) * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)
-}
-
-/// 无缝版地面：一格一张贴图，路面在图里，不再单独铺盒子。
-///
-/// 材质只有八份（草 + 七张单元），网格只有一份 —— 盒子版是每格一个 `Cuboid` mesh
-/// 加一个自己的材质，784 格就是 784 份。
-fn spawn_ground_tiles(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    b: &BoardDef,
-    table: &[(Unit, &Handle<Image>)],
-) -> usize {
-    // 单元图是不透明的，用 `plated()` 的 Mask 判据没意义（那里是给纸卡的透明角准备的）。
-    // 表序就是 `Unit::index()` 序 —— 这一句是唯一的耦合点，配对表写错立刻红在这里，
-    // 而不是「某一种路口永远贴成另一种样子」（那要盯着棋盘看半天才发现）。
-    debug_assert!(
-        table
-            .iter()
-            .enumerate()
-            .all(|(i, (unit, _))| unit.index() == i),
-        "道路单元表的下标与 `Unit::index()` 不同源：{table:?}"
-    );
-    let by_unit: Vec<Handle<StandardMaterial>> = table
-        .iter()
-        .map(|(_, img)| photo(mats, img, false))
-        .collect();
-    let quad = meshes.add(Rectangle::new(b.cell_size, b.cell_size));
-    let sides = road_sides(b);
-    let mut spawned = 0;
-    for (index, cell) in ground_map(b).iter().enumerate() {
-        let (c, r) = (
-            (index % b.grid_cols as usize) as u32,
-            (index / b.grid_cols as usize) as u32,
-        );
-        let handle = by_unit[cell.unit.index()].clone();
-        let pos = b.world_pos(c, r);
-        let rot = lay_flat(cell.rot as f32, std::f32::consts::FRAC_PI_4);
-        let mut spawn = commands.spawn((
-            Mesh3d(quad.clone()),
-            MeshMaterial3d(handle),
-            Transform::from_xyz(pos.x, dim::TILE_Y, pos.z).with_rotation(rot),
-            Rendered,
-        ));
-        // 点格详情卡认的还是道路格那一格：`TilePick` + `Pickable` 成对出现，缺一个就是「点了没反应」
-        if sides.contains_key(&(c, r)) {
-            spawn.insert((TilePick { col: c, row: r }, Pickable::default()));
-        }
-        spawned += 1;
-    }
-    spawned
-}
+use super::{GroundArt, Rendered, darkened, dim, flat, geom::BoardGeom, palette, photo};
 
 /// 一次性铺好不会变的几何。之后只有土地建筑与棋子会动。
 ///
@@ -281,129 +23,143 @@ pub(crate) fn spawn_board_geometry(
     mut commands: Commands,
     active: Res<ActiveBoard>,
     art: GroundArt<'_>,
+    geom: Res<BoardGeom>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     let b = &active.def;
-    let odd = spawn_branch_buildings(&mut commands, &mut meshes, &mut mats, b);
-    match art.units.table() {
-        Some(table) => {
-            let tiles = spawn_ground_tiles(&mut commands, &mut meshes, &mut mats, b, &table);
-            info!("棋盘几何（无缝）：地面 {tiles} 格 / 支线尽端建筑 {odd} 座");
-        }
-        None => {
-            let roads = spawn_roads(&mut commands, &mut meshes, &mut mats, b);
-            let floors = spawn_tile_floors(&mut commands, &mut meshes, &mut mats, b, &art.paper);
-            let filler = spawn_ground(&mut commands, &mut meshes, &mut mats, b, &art.paper);
-            info!(
-                "棋盘几何（盒子）：路面 {roads} 段 / 道路格地板 {floors} 块 / 地面密铺 {filler} 块 \
-                 / 支线尽端建筑 {odd} 座（土地视觉挂在 Land 实体上）"
-            );
-        }
-    }
+    let odd = spawn_branch_buildings(&mut commands, &mut meshes, &mut mats, b, &geom);
+    // 草地是**点击的唯一落点** —— 整盘只有这一块是可拾取的网格，于是「点在 UI 上」与
+    // 「点在地面上」各有明确结果，也不必给每格铺一块不可见地皮
+    // （见 `ui::tile_info::pick_tile`：射线打到这一层，再按 `geom.picks` 找最近的一格）。
+    let grass = match &art.units.grass {
+        Some(img) => photo(&mut mats, img, false),
+        None => flat(&mut mats, palette::FILLER_A),
+    };
+    commands.spawn((
+        Mesh3d(tiled_plate(
+            &mut meshes,
+            geom.plate.cols,
+            geom.plate.rows,
+            b.cell_size,
+        )),
+        MeshMaterial3d(grass),
+        Transform::from_xyz(geom.plate.at.x, dim::TILE_Y - 0.02, geom.plate.at.z),
+        Pickable::default(),
+        Rendered,
+    ));
+    let tiles = spawn_street_ground(&mut commands, &mut meshes, &mut mats, b, &geom, &art);
+    info!("棋盘几何：街面 {tiles} 格 / 支线尽端建筑 {odd} 座");
 }
 
-/// 路面：主环相邻格之间（含末→首）+ 每条分支从接入点铺到死胡同。
-/// 对应 `board.gd:219-234` —— 分支也是路，不铺的话死胡同看着像悬空的一块。
-fn spawn_roads(
+/// 街面二三层：一格一张按街道朝向转过的直路图，转角与三岔处再盖一块沥青圆盘。
+fn spawn_street_ground(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     mats: &mut Assets<StandardMaterial>,
     b: &BoardDef,
+    geom: &BoardGeom,
+    art: &GroundArt<'_>,
 ) -> usize {
-    let mut segments = 0;
-    let next = |i: usize| (i + 1) % b.tiles.len();
-    for i in 0..b.tiles.len() {
-        segments += road_between(
-            commands,
-            meshes,
-            mats,
-            b,
-            b.world_pos(b.tiles[i].col, b.tiles[i].row),
-            b.world_pos(b.tiles[next(i)].col, b.tiles[next(i)].row),
-        );
+    let quad = meshes.add(Rectangle::new(b.cell_size, b.cell_size));
+    // 素材不齐时（别的机器上是正常状态，AGENTS.md 硬约束 8）退回纯色，形状照样成立
+    let road = match &art.units.straight {
+        Some(img) => photo(mats, img, false),
+        None => flat(mats, palette::ROAD),
+    };
+    // L1 街面：一格一张按街道朝向转过的直路图。咬合由几何保证（相邻两格中心距正好
+    // 等于方图边长），所以不需要接边词汇表；转角格那一点溢出由 L2 的圆盘盖住。
+    let mut spawned = 0;
+    for (i, _) in b.tiles.iter().enumerate() {
+        let Some(frame) = geom.tile(i) else {
+            continue;
+        };
+        spawned += street_quad(commands, &quad, &road, frame, dim::TILE_Y);
     }
     for t in &b.tiles {
         let Some(branch) = &t.branch else { continue };
-        let mut prev = b.world_pos(t.col, t.row);
         for bt in &branch.tiles {
-            let cur = b.world_pos(bt.col, bt.row);
-            segments += road_between(commands, meshes, mats, b, prev, cur);
-            prev = cur;
+            let frame = geom.at(bt.col, bt.row);
+            spawned += street_quad(commands, &quad, &road, frame, dim::TILE_Y);
         }
     }
-    segments
-}
-
-fn road_between(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    b: &BoardDef,
-    a: Vec3,
-    c: Vec3,
-) -> usize {
-    let delta = c - a;
-    let len = delta.xz().length();
-    if len <= f32::EPSILON {
-        return 0;
+    // L2 转角盘：转角格那张方图按角平分线转，沥青带与前后两段都**接不上**（两段的开口
+    // 是两条斜线，而逐格贴图不能裁），贴图层面无解 —— 盖一块沥青圆盘。
+    //
+    // 半径按「两条带子外沿的交点」算：`(W/2) / sin(转角/2)`，W = 0.5 格。45° 转角要
+    // 0.65 格、90° 要 0.71 格，取 0.75 格把两种转角都盖住；再大就盖到邻格的沥青上、
+    // 读成一个广场（当前两张盘的转角都是 45°，90° 是给将来的盘留的）。
+    // 三岔的接入点也铺：支线多半从侧面插进来，同一个接不上边的问题。
+    let disc = meshes.add(Circle::new(b.cell_size * 0.75));
+    let disc_mat = flat(mats, palette::ASPHALT);
+    for (i, t) in b.tiles.iter().enumerate() {
+        let Some(frame) = geom.tile(i) else {
+            continue;
+        };
+        if !frame.bend && t.branch.is_none() {
+            continue;
+        }
+        commands.spawn((
+            Mesh3d(disc.clone()),
+            MeshMaterial3d(disc_mat.clone()),
+            Transform::from_xyz(frame.at.x, dim::TILE_Y + 0.02, frame.at.z)
+                .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+            Rendered,
+        ));
     }
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(len, dim::ROAD_H, b.cell_size * dim::ROAD_W))),
-        MeshMaterial3d(flat(mats, palette::ROAD)),
-        // 局部 +X 对齐到路段方向：正交段与对角段同一条公式（Godot `board.gd:248`）
-        Transform::from_xyz((a.x + c.x) / 2.0, dim::ROAD_H / 2.0, (a.z + c.z) / 2.0)
-            .with_rotation(Quat::from_rotation_y(yaw_to_face(delta))),
-        Rendered,
-    ));
-    1
+    spawned
 }
 
-/// 每个道路格（含分支死胡同格）一块整格地板，颜色按格子类型压暗（`tile_view.gd:92-96`）。
-/// 同色组标记条只画在主环格上：分支格按 schema 不写 `id`（serde 默认成 0），
-/// 拿它的 `id` 去查绑定会查到 0 号格的地，是假数据。
-fn spawn_tile_floors(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    b: &BoardDef,
-    paper: &BoardPaper,
-) -> usize {
-    let mut blocks = 0;
-    for t in &b.tiles {
-        blocks += tile_floor(commands, meshes, mats, b, t, paper);
-        if let Some(branch) = &t.branch {
-            for bt in &branch.tiles {
-                blocks += tile_floor(commands, meshes, mats, b, bt, paper);
-            }
+/// 一张铺满整盘的草地：`cols × rows` 个格子拼成的单块网格，每格 UV 各自 0..1。
+///
+/// 不这么做就得在材质上开 Repeat 采样器 —— `StandardMaterial` 没有采样器那一格，
+/// 只能改共享的 `Image`。每格独立 UV 既不动素材，也只剩一次 draw。
+fn tiled_plate(meshes: &mut Assets<Mesh>, cols: u32, rows: u32, cell: f32) -> Handle<Mesh> {
+    let (w, h) = (cols as f32 * cell, rows as f32 * cell);
+    let n = (cols * rows) as usize;
+    let mut positions = Vec::with_capacity(n * 4);
+    let mut uvs = Vec::with_capacity(n * 4);
+    let mut indices = Vec::with_capacity(n * 6);
+    for r in 0..rows {
+        for c in 0..cols {
+            let x0 = c as f32 * cell - w / 2.0;
+            let z0 = r as f32 * cell - h / 2.0;
+            let (x1, z1) = (x0 + cell, z0 + cell);
+            let base = positions.len() as u32;
+            // 绕序朝 +Y：从上方看是逆时针，法线才朝上（反面会被剔掉，地面就成了洞）
+            positions.extend([[x0, 0.0, z0], [x0, 0.0, z1], [x1, 0.0, z1], [x1, 0.0, z0]]);
+            uvs.extend([[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]);
+            indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
-    blocks
+    let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
+    let mut mesh = Mesh::new(
+        bevy::render::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(bevy::mesh::Indices::U32(indices));
+    meshes.add(mesh)
 }
 
-fn tile_floor(
+fn street_quad(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    b: &BoardDef,
-    t: &TileDef,
-    paper: &BoardPaper,
+    quad: &Handle<Mesh>,
+    mat: &Handle<StandardMaterial>,
+    frame: super::geom::Frame,
+    y: f32,
 ) -> usize {
-    let pos = b.world_pos(t.col, t.row);
+    // 转角那格按角平分线转，方图与前后两格各重叠一小块：同层就是 z 打架，
+    // 抬高一档让它稳定压在上面，缝的形状才读得出来
+    let y = y + f32::from(frame.bend) * 0.01;
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(b.cell_size, dim::FLOOR_H, b.cell_size))),
-        MeshMaterial3d(plated(
-            mats,
-            darkened(palette::tile(t.kind), 0.5),
-            &paper.plate,
-        )),
-        Transform::from_xyz(pos.x, dim::FLOOR_Y, pos.z),
-        // 点格详情卡的命中目标：`TilePick` + `Pickable` 成对出现，缺一个就是「点了没反应」
-        TilePick {
-            col: t.col,
-            row: t.row,
-        },
-        Pickable::default(),
+        Mesh3d(quad.clone()),
+        MeshMaterial3d(mat.clone()),
+        Transform::from_xyz(frame.at.x, y, frame.at.z).with_rotation(
+            Quat::from_rotation_y(frame.yaw) * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        ),
         Rendered,
     ));
     1
@@ -411,13 +167,14 @@ fn tile_floor(
 
 /// 死胡同尽端的建筑（P2c）：监狱与医院在支线尽头各有一座楼，棋子被关进去时停在这里。
 ///
-/// 它不挂 `TilePick`：点格详情卡认的是主环接入点，死胡同的楼只是「人停在这里」的视觉。
+/// 它不参与拾取：点格详情卡认的是主环接入点，死胡同的楼只是「人停在这里」的视觉。
 /// 高度比路面高一截，等轴测下才读得出「这条路尽头有栋房子」，否则与一格地板没区别。
 fn spawn_branch_buildings(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     mats: &mut Assets<StandardMaterial>,
     b: &BoardDef,
+    geom: &BoardGeom,
 ) -> usize {
     let mut built = 0;
     for t in &b.tiles {
@@ -425,7 +182,7 @@ fn spawn_branch_buildings(
         let Some(end) = branch.tiles.last() else {
             continue;
         };
-        let pos = b.world_pos(end.col, end.row);
+        let pos = geom.at(end.col, end.row).at;
         let h = b.cell_size * 1.6;
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::new(b.cell_size * 0.78, h, b.cell_size * 0.78))),
@@ -438,252 +195,139 @@ fn spawn_branch_buildings(
     built
 }
 
-/// 网格里既不是道路格、也不是分支格、也不在土地足迹内的空格，用双色地面补齐
-/// （`board.gd:264-302`）。少了这一步，棋盘外圈是空的背景色，等轴测下看着像纸片。
-fn spawn_ground(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<StandardMaterial>,
-    b: &BoardDef,
-    paper: &BoardPaper,
-) -> usize {
-    let mut occupied: HashSet<(u32, u32)> = HashSet::new();
-    for t in &b.tiles {
-        occupied.insert((t.col, t.row));
-        if let Some(branch) = &t.branch {
-            for bt in &branch.tiles {
-                occupied.insert((bt.col, bt.row));
-            }
-        }
-    }
-    // 土地跳过整块 size×size 足迹，否则 2x2 商业的下半会被地面块盖住（Godot 同注释）
-    for l in &b.lands {
-        for dc in 0..l.size as u32 {
-            for dr in 0..l.size as u32 {
-                occupied.insert((l.col + dc, l.row + dr));
-            }
-        }
-    }
-
-    let mut blocks = 0;
-    for row in 0..b.grid_rows {
-        for col in 0..b.grid_cols {
-            if occupied.contains(&(col, row)) {
-                continue;
-            }
-            let pos = b.world_pos(col, row);
-            let checker = if (col + row) % 2 == 0 {
-                palette::FILLER_A
-            } else {
-                palette::FILLER_B
-            };
-            commands.spawn((
-                Mesh3d(meshes.add(Cuboid::new(b.cell_size, dim::FLOOR_H, b.cell_size))),
-                MeshMaterial3d(plated(mats, checker, &paper.ground)),
-                Transform::from_xyz(pos.x, dim::FLOOR_Y, pos.z),
-                Rendered,
-            ));
-            blocks += 1;
-        }
-    }
-    blocks
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::RoadTiles;
+    use crate::render::geom;
 
     fn board(which: &str) -> BoardDef {
         let text = match which {
             "taiwan" => include_str!("../../../../assets/data/boards/taiwan.json"),
             "china" => include_str!("../../../../assets/data/boards/china.json"),
-            "prototype" => include_str!("../../../../assets/data/boards/prototype.json"),
             _ => unreachable!(),
         };
         serde_json::from_str(text).unwrap_or_else(|e| panic!("{which} 解析失败：{e}"))
     }
 
-    /// `(草地, 直路, 直角, 丁字, 断头, 斜直, 45°弯, 135°折返)`
-    fn census(b: &BoardDef) -> [usize; 8] {
-        let mut c = [0usize; 8];
-        for t in ground_map(b) {
-            c[t.unit.index()] += 1;
-        }
-        c
-    }
-
-    // 下面几组数是 11-04 用一份独立实现（python，同一套接边表）在同一张盘上数出来的。
-    // 改道路拓扑（加斜路、加支线）要连这几行一起改。八角形主环没有 90° 直角与 135°
-    // 折返：四边是直路、四个角是 45° 斜街，街角与斜街接边都是 Bend45。
-    #[test]
-    fn taiwan_is_covered_by_straights_diagonals_and_45_bends() {
-        let c = census(&board("taiwan"));
-        assert_eq!(
-            c,
-            [1046, 86, 0, 2, 2, 12, 8, 0],
-            "草地/直/直角/丁字/断头/斜/45/135"
-        );
+    fn shipped() -> [(&'static str, BoardDef); 2] {
+        [("taiwan", board("taiwan")), ("china", board("china"))]
     }
 
     #[test]
-    fn china_is_covered_by_straights_diagonals_and_45_bends() {
-        let c = census(&board("china"));
-        assert_eq!(c, [2059, 114, 0, 2, 2, 24, 8, 0]);
-    }
-
-    #[test]
-    fn every_road_cell_on_the_two_shipped_boards_is_recognisable() {
-        // 认不出接边的格子会静默退回草地，症状是「路面断一截」而不是报错。
-        // 这条判据的牙在下面 `the_missing_vocabulary...` 里：同一张 prototype 上它就不为空。
-        for which in ["taiwan", "china"] {
-            let sides = road_sides(&board(which));
+    fn both_shipped_boards_close_their_ring() {
+        // 折线没有闭合约束：环尾再走一步回不到第一格时，那道缝会在棋盘上留一个缺口。
+        // 真盘是对称的八角形，缝应当就是 0 —— 报非零说明数据里的环不是「等步长闭合」的。
+        for (name, b) in shipped() {
+            let g = geom::build(&b);
+            assert_eq!(g.ring_len(), b.tiles.len(), "{name} 主环格数对不上");
             assert!(
-                !sides.is_empty(),
-                "{which} 一个道路格都没分类出来，分类器根本没跑"
-            );
-            let unrecognised: Vec<_> = sides
-                .iter()
-                .filter(|(_, mask)| tile_for(**mask).is_none())
-                .map(|(cell, mask)| (*cell, *mask))
-                .collect();
-            assert!(
-                unrecognised.is_empty(),
-                "{which} 有接边认不出来：{unrecognised:?}"
+                g.closure_gap < b.cell_size * 0.01,
+                "{name} 的环没闭合：缝 {:.3}（一格 {:.3}）",
+                g.closure_gap,
+                b.cell_size
             );
         }
     }
 
-    /// 演示盘（`prototype.json`，进不了窗口，只有测试读它）上还缺三种形状。
-    /// 这条不是「已知会失败」，是把缺的词汇钉成一张清单：将来真盘加斜向岔口时，
-    /// 要么补图、要么改这张表，总之不许让它静默变成一块草地。
     #[test]
-    fn the_missing_vocabulary_is_a_known_list_not_a_surprise() {
-        let sides = road_sides(&board("prototype"));
-        let mut missing: Vec<u8> = sides
-            .values()
-            .filter(|m| tile_for(**m).is_none())
-            .copied()
-            .collect();
-        missing.sort_unstable();
-        let shown = missing
-            .iter()
-            .map(|m| format!("{m:08b}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        // 两个「斜臂丁字」（两条正交臂 + 一条斜臂）与一个「斜对斜的直角弯」
-        let want = [
-            dir::bit(dir::NE) | dir::bit(dir::E) | dir::bit(dir::W),
-            dir::bit(dir::N) | dir::bit(dir::SE) | dir::bit(dir::W),
-            dir::bit(dir::SW) | dir::bit(dir::NW),
-        ];
-        assert_eq!(missing, want, "prototype 上认不出的接边集合变了：{shown}");
-    }
-
-    #[test]
-    fn the_material_table_is_ordered_by_unit_index() {
-        // `spawn_ground_tiles` 按下标取材质，而配对表在 `RoadTiles::table` 里手写顺序。
-        // 两处不同源的症状是「某一种路口永远贴成另一种样子」——不会报错，只会看着不对
-        let some = || Some(Handle::default());
-        let tiles = RoadTiles {
-            grass: some(),
-            straight: some(),
-            corner: some(),
-            junction: some(),
-            dead_end: some(),
-            diag: some(),
-            bend45: some(),
-            bend135: some(),
-        };
-        let table = tiles.table().expect("八张齐全就该成套");
-        assert_eq!(table.len(), 8);
-        for (i, (unit, _)) in table.iter().enumerate() {
-            assert_eq!(unit.index(), i, "第 {i} 位是 {unit:?}，与 `index()` 不同源");
-        }
-    }
-
-    #[test]
-    fn no_two_units_claim_the_same_edges() {
-        // 词汇表有歧义时先表先得会静默选错图 —— 症状是某一种路口永远贴成另一种样子
-        let mut claimed: HashMap<u8, Unit> = HashMap::new();
-        for (unit, canon, rots) in CATALOG {
-            for &r in rots {
-                let mask = rotate_n(canon, r);
-                if let Some(prev) = claimed.insert(mask, unit) {
-                    assert_eq!(
-                        prev, unit,
-                        "接边 {mask:08b} 被 {prev:?} 与 {unit:?} 同时认领"
-                    );
-                }
+    fn the_ring_advances_exactly_one_cell_per_step() {
+        // 斜街两格的中心距必须与直街一样是 `cell_size`：差这一步，方块就永远咬不齐，
+        // 而画面上的症状只是「斜街看着有点碎」。
+        for (name, b) in shipped() {
+            let g = geom::build(&b);
+            for i in 1..g.ring_len() {
+                let (here, prev) = (g.tile(i).unwrap(), g.tile(i - 1).unwrap());
+                let d = here.at.distance(prev.at);
+                assert!(
+                    (d - b.cell_size).abs() < 1e-3,
+                    "{name} 第 {i} 格与前一格相距 {d:.3}，应为 {:.3}",
+                    b.cell_size
+                );
             }
         }
     }
 
     #[test]
-    fn each_rotation_lands_on_the_direction_the_ring_needs() {
-        let b = dir::bit;
-        let cases = [
-            (b(dir::W) | b(dir::E), (Unit::Straight, 0)),
-            (b(dir::N) | b(dir::S), (Unit::Straight, 2)),
-            (b(dir::NW) | b(dir::SE), (Unit::Diag, 0)),
-            (b(dir::NE) | b(dir::SW), (Unit::Diag, 2)),
-            (b(dir::N) | b(dir::W), (Unit::Corner, 0)),
-            (b(dir::E) | b(dir::N), (Unit::Corner, 2)),
-            (b(dir::S) | b(dir::E), (Unit::Corner, 4)),
-            (b(dir::W) | b(dir::S), (Unit::Corner, 6)),
-            (b(dir::W), (Unit::DeadEnd, 0)),
-            (b(dir::N), (Unit::DeadEnd, 2)),
-            (b(dir::SE), (Unit::DeadEnd, 5)),
-            (b(dir::N) | b(dir::W) | b(dir::E), (Unit::Junction, 0)),
-            (b(dir::E) | b(dir::S) | b(dir::N), (Unit::Junction, 2)),
-            // 45° 缓弯与 135° 急折返只差在两条臂的夹角上：135° 与 45°
-            (b(dir::W) | b(dir::NE), (Unit::Bend45, 0)),
-            (b(dir::W) | b(dir::NW), (Unit::Bend135, 0)),
-            // 两臂夹角 135° 是缓弯那一族，夹角 45° 才是急折返 —— 差一个档位判据就反了
-            (b(dir::NE) | b(dir::S), (Unit::Bend45, 3)),
-            (b(dir::N) | b(dir::NE), (Unit::Bend135, 2)),
-        ];
-        for (mask, want) in cases {
-            assert_eq!(
-                tile_for(mask),
-                Some(want),
-                "接边 {mask:08b} 该转成 {want:?}"
-            );
+    fn neighbouring_plots_are_one_cell_apart_and_never_overlap() {
+        // 咬合成立时，同一条街上相邻两块地的中心正好差一格；一旦「往外退多少」算错，
+        // 它们就会压在一起，而画面上的症状只是「某条街少了一块地」。
+        for (name, b) in shipped() {
+            let g = geom::build(&b);
+            assert_eq!(g.overlapping_lands, 0, "{name} 有地块压叠");
+            assert_eq!(g.side_ambiguous, 0, "{name} 有地块读不出街的哪一侧");
+            let mut compared = 0usize;
+            for i in 0..b.tiles.len() {
+                let (a, c) = (&b.tiles[i], &b.tiles[(i + 1) % b.tiles.len()]);
+                let (Some(ia), Some(ic)) = (a.land_id, c.land_id) else {
+                    continue;
+                };
+                if ia == ic {
+                    continue;
+                }
+                let (Some(fa), Some(fc)) = (g.land(ia), g.land(ic)) else {
+                    panic!("{name} 地块 {ia}/{ic} 没有几何");
+                };
+                // 只比同一条街的两个 1×1 邻块：转角两边的两块地分属两条街，而 2×2 的
+                // 商业地绑两格、中心本来就退得更远
+                let (Some(da), Some(dc)) = (b.land(ia), b.land(ic)) else {
+                    panic!("{name} 地块 {ia}/{ic} 没有定义");
+                };
+                if da.group != dc.group || da.size != 1 || dc.size != 1 {
+                    continue;
+                }
+                let d = fa.at.distance(fc.at);
+                compared += 1;
+                assert!(
+                    (d - b.cell_size).abs() < 1e-2,
+                    "{name} 第 {i} 格的两块地相距 {d:.3}，应为 {:.3}",
+                    b.cell_size
+                );
+            }
+            // 判据不能空跑：过滤条件写宽了会让这条测试一条都没比就绿
+            assert!(compared >= 50, "{name} 只比了 {compared} 对邻块");
         }
     }
 
     #[test]
-    fn a_four_way_cross_is_not_in_the_vocabulary() {
-        // 四岔路口没有对应的图：宁可乐成草地，也不硬凑一张接不上缝的
-        assert_eq!(
-            tile_for(dir::bit(dir::N) | dir::bit(dir::E) | dir::bit(dir::S) | dir::bit(dir::W)),
-            None
-        );
-        assert_eq!(tile_for(0), None);
+    fn every_ring_and_branch_cell_is_a_hit_point() {
+        // 点击命中走这张坐标表：漏一格就是「那一格点不动」，多点一格就是两格争同一个点。
+        for (name, b) in shipped() {
+            let g = geom::build(&b);
+            let branches: usize = b
+                .tiles
+                .iter()
+                .map(|t| t.branch.as_ref().map_or(0, |br| br.tiles.len()))
+                .sum();
+            assert_eq!(
+                g.picks.len(),
+                b.tiles.len() + branches,
+                "{name} 命中点数不对"
+            );
+            for (i, t) in b.tiles.iter().enumerate() {
+                let here = g.tile(i).expect("环上每一格都该有姿态").at;
+                let hit = g
+                    .nearest_cell(here)
+                    .unwrap_or_else(|| panic!("{name} 第 {i} 格自己点不中"));
+                assert_eq!(hit, (t.col, t.row), "{name} 第 {i} 格点中的是别处");
+            }
+        }
     }
 
     #[test]
-    fn the_ground_map_addresses_by_row_then_col() {
-        // `ground_map` 的下标是 `row * grid_cols + col`，摆错一格就是整盘错位而不报错
-        let b = board("taiwan");
-        let map = ground_map(&b);
-        assert_eq!(map.len(), (b.grid_cols * b.grid_rows) as usize);
-        let jail = b
-            .tiles
-            .iter()
-            .find(|t| t.branch.is_some())
-            .expect("台湾盘应有监狱/医院两条支线");
-        let index = (jail.row * b.grid_cols + jail.col) as usize;
-        assert_eq!(map[index].unit, Unit::Junction);
-    }
-
-    #[test]
-    fn a_diagonal_neighbour_is_a_direction_not_a_failure() {
-        // 旧的四边模型把斜向邻格判成「认不出来」；八方向里它是合法的一条臂
-        assert_eq!(dir_toward((0, 0), (1, -1)), dir::bit(dir::NE));
-        assert_eq!(dir_toward((0, 0), (-1, 1)), dir::bit(dir::SW));
-        // 同格与跨两格都不是邻接：不接任何边
-        assert_eq!(dir_toward((0, 0), (0, 0)), 0);
-        assert_eq!(dir_toward((0, 0), (2, 0)), 0);
+    fn the_street_stays_on_the_grass_plate() {
+        // 街面若累积漂到草地之外，等轴测下就是一条悬在背景色上的路。
+        for (name, b) in shipped() {
+            let g = geom::build(&b);
+            let half = Vec2::new(g.plate.cols as f32, g.plate.rows as f32) * b.cell_size * 0.5;
+            for i in 0..g.ring_len() {
+                let frame = g.tile(i).unwrap();
+                let (dx, dz) = (frame.at.x - g.plate.at.x, frame.at.z - g.plate.at.z);
+                assert!(
+                    dx.abs() <= half.x + b.cell_size * 0.5
+                        && dz.abs() <= half.y + b.cell_size * 0.5,
+                    "{name} 第 {i} 格跑到草地外：( {dx:.1}, {dz:.1} )，草地半宽 {half:?}"
+                );
+            }
+        }
     }
 }

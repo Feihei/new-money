@@ -9,6 +9,7 @@ pub mod board;
 pub mod camera;
 pub mod dice;
 pub mod disc;
+pub mod geom;
 pub mod labels;
 pub mod land;
 pub mod occupancy;
@@ -24,23 +25,12 @@ use game_core::prelude::ActiveBoard;
 #[derive(Component)]
 pub struct Rendered;
 
-/// 一块可点的道路格地板：它的网格坐标。
-///
-/// 只带坐标、不带格名与类型 —— 那些由 `BoardDef::tile_at_grid` 现查（§4.2）。
-/// 只有地板挂它，加上 `MeshPickingSettings::require_markers = true`，
-/// 于是点建筑、点棋子都不会误开详情卡。
-#[derive(Component)]
-pub struct TilePick {
-    pub col: u32,
-    pub row: u32,
-}
-
 /// 开发期 CJK 字体句柄。`assets/font/dev_*` 是本地开发副本（不入库，见 AGENTS.md 硬约束 7），
 /// Bevy 没有 Godot 那套内建中文回退，不显式指定字体就是豆腐块（§六 坑 2）。
 #[derive(Resource)]
 pub struct DevFont(pub Handle<Font>);
 
-/// 棋盘地面的两张纸。`RenderPlugin::build` 里只拿句柄不解码 —— 与 `ui::skin::Skins` 同一条：
+/// 棋盘格子的素面纸卡。`RenderPlugin::build` 里只拿句柄不解码 —— 与 `ui::skin::Skins` 同一条：
 /// 盘上没有就是 `None`，那一块几何退回现在的纯色方块。
 ///
 /// 配色**不在这里**：`base_color` 仍由 `palette` 出，纸只出形（圆角、切边线、纸纹）。
@@ -49,60 +39,24 @@ pub struct DevFont(pub Handle<Font>);
 pub struct BoardPaper {
     /// 格子素面纸卡（圆角，四角真透明）
     pub plate: Option<Handle<Image>>,
-    /// 地面满幅纸纹（不透明，给环内环外那些空格）
-    pub ground: Option<Handle<Image>>,
 }
 
-/// 道路单元那套接边图。**成套才上**：缺任意一张就整块退回盒子版。
+/// 地面的两张图：草坪（整盘一层）与直路（每格一张，按街道朝向转）。
 ///
-/// 理由与 `board_plate` 那条相反：纸卡是皮肤，少一张只是那一格没花纹；单元图是拼图，
-/// 少一张就在那一格断出一条没有沥青的口子，而「路面偶尔断一截」比「全是盒子」难查得多。
+/// 各自独立退回：草坪缺了整盘用纯色垫底，街面缺了用纯色方块 —— 形状由几何保证，
+/// 素材只决定花纹（素材不入库，别的机器上这是常态，AGENTS.md 硬约束 8）。
 #[derive(Resource, Clone)]
 pub struct RoadTiles {
     pub grass: Option<Handle<Image>>,
     pub straight: Option<Handle<Image>>,
-    pub corner: Option<Handle<Image>>,
-    pub junction: Option<Handle<Image>>,
-    pub dead_end: Option<Handle<Image>>,
-    pub diag: Option<Handle<Image>>,
-    pub bend45: Option<Handle<Image>>,
-    pub bend135: Option<Handle<Image>>,
 }
 
 impl RoadTiles {
-    fn load(server: &AssetServer, key: &str) -> Option<Handle<Image>> {
-        crate::art::road_unit(key).map(|path| server.load(path))
-    }
-
     pub fn load_all(server: &AssetServer) -> Self {
         Self {
             grass: crate::art::road_grass().map(|path| server.load(path)),
-            straight: Self::load(server, "straight_orth"),
-            corner: Self::load(server, "turn_90"),
-            junction: Self::load(server, "junction_t"),
-            dead_end: Self::load(server, "endpoint"),
-            diag: Self::load(server, "straight_diag"),
-            bend45: Self::load(server, "turn_45"),
-            bend135: Self::load(server, "turn_135"),
+            straight: crate::art::road_unit("straight_orth").map(|path| server.load(path)),
         }
-    }
-
-    /// 单元 → 图。八格全在才返回，顺序与 `Unit::index()` 无关（按 `Unit` 配对，不按下标）。
-    pub fn table(&self) -> Option<Vec<(board::Unit, &Handle<Image>)>> {
-        let pairs: [(board::Unit, &Option<Handle<Image>>); 8] = [
-            (board::Unit::Grass, &self.grass),
-            (board::Unit::Straight, &self.straight),
-            (board::Unit::Corner, &self.corner),
-            (board::Unit::Junction, &self.junction),
-            (board::Unit::DeadEnd, &self.dead_end),
-            (board::Unit::Diag, &self.diag),
-            (board::Unit::Bend45, &self.bend45),
-            (board::Unit::Bend135, &self.bend135),
-        ];
-        pairs
-            .into_iter()
-            .map(|(unit, img)| Some((unit, img.as_ref()?)))
-            .collect()
     }
 }
 
@@ -186,7 +140,7 @@ impl PropArt {
 /// 住宅五级建筑模型（`model/dwell_L1..L5.glb`，下标 = 等级 − 1）。
 ///
 /// **成套才上**：缺任意一级就整块退回方体 —— 半套素材摆出来会是「Lv2 是一栋房子、
-/// Lv3 是一摞盒子」，而那种画面查起来比全是盒子难得多（与 `RoadTiles` 同一条纪律）。
+/// Lv3 是一摞盒子」，而那种画面查起来比全是盒子难得多（与 `Chalk` 同一条纪律）。
 /// 素材不入库（AGENTS.md 硬约束 8），所以空表在别的机器上是正常状态，不是错误。
 #[derive(Resource, Clone, Default)]
 pub struct BuildingModels {
@@ -228,9 +182,11 @@ impl Plugin for RenderPlugin {
         let server = app.world_mut().resource::<AssetServer>().clone();
         app.insert_resource(BoardPaper {
             plate: crate::art::board_plate().map(|p| server.load(p)),
-            ground: crate::art::board_ground().map(|p| server.load(p)),
         });
         app.insert_resource(RoadTiles::load_all(&server));
+        // 几何先占一个空的：`build_board_geom` 就地填它，所以资源必须一直在（否则读它的
+        // system 整批报「Resource does not exist」），而空表只意味着「还没推」
+        app.init_resource::<geom::BoardGeom>();
         app.insert_resource(Chalk::load(&server));
         app.insert_resource(DiscIcons::load(&server));
         app.insert_resource(PropArt::load(&server));
@@ -259,6 +215,7 @@ impl Plugin for RenderPlugin {
         app.add_systems(
             Update,
             (
+                geom::build_board_geom,
                 (
                     board::spawn_board_geometry,
                     disc::spawn_disc_markers,
@@ -286,6 +243,8 @@ impl Plugin for RenderPlugin {
         // `begin_game_system` 在同一批 `Commands` 里插 `ActiveBoard` 并 spawn 土地/玩家实体，
         // 所以「棋盘就位」与「`LandId`/`PlayerId` 是新加的」必然同帧成立 ——
         // 一个守门条件就够，不必每个 system 各自 `Local<bool>`。
+        // 上面那条 `build_board_geom` 故意**不在任何守门条件里**：同一个 `resource_added`
+        // 挂到两个集合上会互相吃掉 change tick，详见 [`geom::build_board_geom`]。
         app.configure_sets(
             Update,
             (
@@ -303,11 +262,8 @@ pub mod dim {
     /// 道路格地板：整格密铺（`tile_view.gd:94,97`）
     pub const FLOOR_H: f32 = 0.25;
     pub const FLOOR_Y: f32 = -0.1;
-    /// 无缝版地面所在的高度 —— 就是盒子版地板的顶面，换地面模型不该挪动任何别的东西
+    /// 街面与草地所在的高度 —— 就是地板顶面，换地面模型不该挪动任何别的东西
     pub const TILE_Y: f32 = FLOOR_Y + FLOOR_H / 2.0;
-    /// 路面（`board.gd:244` 高 0.12、`board.gd:253` 宽 = 格边长 × 0.5）
-    pub const ROAD_H: f32 = 0.12;
-    pub const ROAD_W: f32 = 0.5;
     /// 特殊格薄饼（[`super::disc`]）：半径与厚度按 `cell_size` 的倍数给。
     /// 撤了同色组色条之后，「这一格不是地」全靠这块饼说出来，所以它要明显小于格、
     /// 又明显高于地面 —— 0.4 是格边长的八成直径，留出一圈草边读得出「摆在草地上」。
@@ -364,6 +320,9 @@ pub mod dim {
     pub const WALK_STEPS: f32 = 2.0;
     /// 载具横条一个循环跨几格。轮子那几条只有 4 帧（辐条相位），一步走完一圈正好
     pub const WHEEL_STEPS: f32 = 1.0;
+    /// 纸片朝左↔朝右翻一整趟（+1 → -1）的时长。转向卡那个「纸片反转」就是这个速度；
+    /// 快了看不出翻面，慢了拐角处的朝向追不上脚步
+    pub const FLIP_SECS: f32 = 0.15;
     /// 入狱/出狱/瞬移的位移时长（`player_token.gd:55,65`）
     pub const PARK_SECS: f32 = 0.4;
     /// 格名浮在格子上方的高度（`tile_view.gd:151`）
@@ -386,9 +345,14 @@ pub mod palette {
     pub const SKY: Color = Color::srgb(0.6, 0.6, 0.7);
     /// `board.gd:258` 的路面
     pub const ROAD: Color = Color::srgb(0.28, 0.28, 0.32);
-    /// `board.gd:298-300` 的双色地面（读起来像草地/地皮）
+    /// 沥青均值：从 `assets/textures/road/units/straight_orth.png` 的沥青带量出来的
+    /// （中线 v=0.5 那条是白的，所以量的是 v∈0.2..0.4 那一带）。转角盘用它。
+    ///
+    /// 为什么不贴图：把那张图的沥青块放大到 1.5 格，噪声会粗到像一块脏抹布（试过一版）；
+    /// 而 `ROAD` 偏蓝、与照片差一档。这个值是两者之间的折中，改它要连截图一起看。
+    pub const ASPHALT: Color = Color::srgb(0.31, 0.305, 0.30);
+    /// 草地垫底的纯色（素材缺失时用它，读起来像草地/地皮）
     pub const FILLER_A: Color = Color::srgb(0.34, 0.42, 0.3);
-    pub const FILLER_B: Color = Color::srgb(0.3, 0.38, 0.27);
 
     /// `tile_view.gd:11-25` 的 `TYPE_COLORS`
     pub fn tile(kind: TileKind) -> Color {

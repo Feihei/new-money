@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use game_core::board::TileKind;
 use game_core::prelude::ActiveBoard;
 
-use super::{DiscIcons, Rendered, darkened, dim, flat, palette, photo};
+use super::{DiscIcons, Rendered, darkened, dim, flat, geom::BoardGeom, palette, photo};
 
 /// 十六个键，与 [`disc_key`] 一一对应。`DiscIcons::load` 按它逐键问盘上有没有。
 ///
@@ -84,6 +84,7 @@ pub(crate) fn spawn_disc_markers(
     mut commands: Commands,
     active: Res<ActiveBoard>,
     discs: Res<DiscIcons>,
+    geom: Res<BoardGeom>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -99,7 +100,7 @@ pub(crate) fn spawn_disc_markers(
         let Some(key) = disc_key(t.kind) else {
             continue;
         };
-        let pos = b.world_pos(t.col, t.row);
+        let pos = geom.at(t.col, t.row).at;
         commands.spawn((
             Mesh3d(side.clone()),
             MeshMaterial3d(flat(&mut mats, darkened(palette::tile(t.kind), 0.35))),

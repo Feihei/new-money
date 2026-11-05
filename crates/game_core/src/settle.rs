@@ -756,7 +756,7 @@ impl<'w, 's> Books<'w, 's> {
     }
 
     /// 对**一组地块**打同一拳。P5 的定时炸弹走这一条：它的爆心是道路格，
-    /// 3×3 要按网格算（`plot::lands_around_tile`），算完仍然只把地块集合交给账本 ——
+    /// 范围要按环上格数算（`plot::lands_around_tile`），算完仍然只把地块集合交给账本 ——
     /// 范围算术只有一份，`damage` 与炸弹共用同一段写组件。
     pub fn damage_lands(&mut self, lands: &[LandId], depth: LandDamage) -> DamageTally {
         let mut tally = DamageTally::default();

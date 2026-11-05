@@ -367,6 +367,8 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 40. **`const` 不是「一块静态内存」——它每次被引用都会重新实例化**（P15a 踩的，与 Bevy 无关，但它是这条坑清单里最容易让「身份」静默失真的一个）。`snapshot::KNOWN_DOMAIN_LISTS` 起初写作 `const KNOWN_DOMAIN_LISTS: &[&[ChargeDomain]]`，而 `Scope::Domains` 要的是 `&'static [ChargeDomain]` —— 从 `const` 里取出来的那个 `&'static` 指向**每个引用点各自的一份内联副本**。于是「读档把切片换回那张表」在指针层根本不成立：`std::ptr::eq` 为假，每次读档都退回一条 `Box::leak` 出来的切片（内容相等，现金流与画面全看不出来，只有那条**专门比对指针**的用例抓得住）。改成 `static` 才是唯一一份内存。判据：**凡是要把某块内存的地址当身份用（回指、去重、`ptr::eq`、`&'static` 的原地复用），定义处必须 `static`；`const` 只配给值。**
 41. **运行条件与参数校验不在同一时刻 —— `resource_exists` 守门的 system 会和同一帧的 `Commands::remove_resource` 抢**（P2c-c 真鼠标点「返回主菜单」踩出来的，必崩 exit 101）。`clear_match` 原本在 `Update` 里收资源，而拍卖那两条 system 不挂相位、只挂 `resource_exists::<ActiveBoard>`：Bevy 先跑运行条件（那一刻棋盘还在），随后一个自动 `apply_deferred` 把 `clear_match` 的删除落地，等参数建立时 `GameSession` 已经没了 —— `Parameter 'AuctionDesk::books' failed validation: Resource does not exist`。**它和坑 29 不是同一条**：29 是「停机器与收机器同帧」，这一条是「条件与建参数同帧但不同瞬间」——把条件写成 `resource_exists::<X>` **不等于安全**，条件只是**读得早**；相位门在 `Update` 里同样挡不住（条件本身读得早），`PreUpdate` 那条（坑 39）也绕不开。修法：把收尸挪到 **`Last`**，删除落在两帧之间 —— 这一帧所有 `Update` system 都看得见棋盘，下一帧全都看不见，没有中间态。判据：**凡 `Commands` 删的是别人参数要的资源，删除必须发生在所有可能读它的调度之后**（或显式 `ApplyDeferred` 之后再排它）。复现：`tools/mouse_smoke.ps1 -Route post -Click '2.0:640,235;3.0:640,448;10.0:1195,39'`（开一局、等世界起来、点返回主菜单）。
 42. **`Overflow::clip()` 的父节点会把所有后代一起挡在命中测试之外 —— 画面照画、点击全空**（P16c 选角色世界地图踩出来的）。地图框为了圆角写了 `overflow: Overflow::clip()`，头像卡片是它的子节点：截图里十二张卡片清清楚楚，`PointerClick` 却连一张都命不中（症状与「按钮是死的」完全一样，而 `NM_SHOT` 还会照常截出「一切正常」）。它和坑 34 是同一属性的两面：34 说「不写 clip 孩子会画出去」，这一条说「写了 clip 孩子就点不到」—— 两件事都不报错。修法：**把裁剪收窄到只包住需要裁的那一层**（底图单独套一个 `overflow: clip()` 的绝对定位壳，卡片仍是地图框的直接子节点、排在裁剪壳之后）。判据：凡一个容器同时要「裁某个孩子」与「让另一个孩子可点」，裁剪必须下沉到那个孩子的包装层，**不能写在共同祖先上**。
+43. **`.chain()` 只保证不并行，不在链的节点之间 flush `Commands`**（11-05 棋盘几何换折线版踩出来的）。`render::geom` 是给其余每条渲染 system 提供坐标的资源，所以它必须排在同一帧的 `Boot`/`Live` 之前；写成 `build_board_geom.pipe(apply_deferred).before(..)` 那种「靠链插 flush」的形状在 0.20 不成立 —— 命令要等帧末，同帧的九条 system 全报 `Parameter 'Res<BoardGeom>' failed validation`。修法：**资源就地写**（`ResMut<BoardGeom>` 直接改），根本不产生命令。
+44. **同一个 `resource_added::<T>` 条件挂到两个调度集合上，只有先求值的那个能跑**。它是「条件」不是「事件」：求值一次就消费掉那一帧的 change tick，后一个集合看到的已经是「不新」。症状是整块渲染什么都不做、日志里一条记录都没有（连失败都数不出来）。修法：**条件只挂一处**，其余用 `resource_exists` 或干脆不挂、在 system 内部判空（`Option<Res<ActiveBoard>>`）。
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；
@@ -383,6 +385,7 @@ B5 之后这条判据升级为「**每个界面都必须有一条不依赖鼠标
 |---|---|---|
 | `NM_SHOT=<路径>` / `NM_SHOT_AT=<秒>` | 截图并自行退出 / 推迟截图时刻 | 见第 5、10 条 |
 | `NM_CAM_SIZE=<秒>` | 相机取景边长（`0` = 整盘） | §7.1 要求两个值都可配 |
+| `NM_CAM_AT=<格号>` | 相机钉在主环第 n 格（同时停掉跟随） | 斜街与转角是看几何对不对的地方，跟着棋子走撞不到那一格（11-05 换折线几何时加的） |
 | `NM_SCENE=board` | 跳过主菜单直接开局 | 菜单→对局的流转要能分别拍 |
 | `NM_SEED=<十进制>` | 钉死对局种子 | 几百回合后崩一次，换种子就换一种死法，查无可查 |
 | `NM_AUTOROLL=1` | 自动玩家：自动掷骰 + 接受报价 | 「打完一局」的验收不能靠人点几百次。⚠️ **P14a 之后它的职责缩了一半**：它只替**人类座位**按按钮，AI 座位由规则层自己答（分界是 `Controller` 这一个组件）。所以这条旋钮现在的含义是「长跑测的是真 AI」，而不是「所有人都不动手」 |
@@ -434,6 +437,14 @@ B5 之后这条判据升级为「**每个界面都必须有一条不依赖鼠标
 - 世界坐标：`world(col,row) = (col*cell_size, 0, row*cell_size)`，`cell_size` 来自 JSON（ADR-001 §"网格→世界"）。**这条在 Rust 里就是 `BoardDef::world_pos()` 一个纯函数**，与渲染无关，可在 core 里单测。
 - 材质：全 unshaded，无光照依赖 → Bevy 侧用 `Unlit2d` 或 `StandardMaterial{unlit:true}`，`ClearColor` 对应源 `Environment background_color=Color(0.6,0.6,0.7)`（`board.gd:179-188`）。Z 遮挡由深度缓冲处理，和 Godot 一致，无额外工作。
 - ADR-001 的渲染约束要照搬：道路必须**可见**、建筑画在**土地格**（环路外侧）而不是道路格、道路格只画路面+组色条（`board-data-schema.md` §行为规则 6）。
+
+> **11-05 换版：地面三层，坐标走等步长折线。** 上面那条「逐段路面薄盒 + 每格薄盒地板」的做法在斜街上是锯齿的 —— 根因不是朝向，而是间距：网格上斜向邻格中心距是 √2·格，而方块边长只有一格，于是斜街永远差一条缝。现在 `render/geom.rs` 的 `BoardGeom` 按「前一格 + `cell_size` × 该段八邻方向」铺开主环（支线同一条规则），斜街与直街的中心距一样是一格，方块绕自身 Y 转角平分线后**边对边咬合**；两张真盘的环闭合缝都是 0.000（`render/board.rs` 的 `both_shipped_boards_close_their_ring` 钉着），网格只剩「方向」与 `validate` 的判据，规则层一行没改。范围也一样：`PlotArea::Box` 换成按主环步数的 `Nearby { span }`（PLAN §四・二十二）。
+>
+> 地面因此分三层：**L0** 一张铺满全盘的草地（单 mesh，每格 UV 各自 0..1，一次 draw）；**L1** 每格一张 `straight_orth` 按该格朝向转（直街斜街同一张图，不再有接边词汇表）；**L2** 转角与三岔接入点一块沥青圆盘（半径 0.75 格：45° 转角需 0.65、90° 需 0.71，再大就读成广场）。L2 存在的原因是 L1 的方图按角平分线转，与前后两段的开口必然对不上，而逐格贴图不能裁。
+>
+> 地块的姿态也从绑定格推：中心 = 绑定格锚点 + 外法线 ×（半条街 + 半个足迹），朝外那一侧由「足迹中心 − 锚点」在网格上与街道法线的点积**读出来**（不是另写一张偏移表）。粉笔框与底座都跟着 `yaw` 转，所以斜街上的地是正的。
+>
+> 点击命中改成**坐标表**：整盘只有草地这一块 `Pickable` 网格，射线打到 `TILE_Y` 平面后按 `BoardGeom::picks`（主环 + 支线每一个角色可能站的格）找 `0.75 格` 内最近的那一点（`ui::tile_info::pick_tile`）。不再给每格铺一块不可见地皮，也不再有 `TilePick` 组件。
 
 ### 7.2 UI（源 `scripts/ui/` + `board.gd` 里 `_build_ui`）
 需要重建的清单（按 Godot 结构逐条对应）：

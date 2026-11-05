@@ -57,9 +57,11 @@ fn main() {
     app.insert_resource(settings)
         // 规则层的 Plugin 在表现层注册：验证「无渲染 bevy 子集 + 完整 bevy」能共存于同一 App
         .add_plugins(CoreGamePlugin)
-        // 网格命中测试：点格详情卡要能点到 3D 地板。默认会 raycast **所有**网格，
+        // 网格命中测试：点格详情卡要能点到 3D 地面。默认会 raycast **所有**网格，
         // 建筑与棋子都会被点中；`require_markers = true` 把它改成显式登记 ——
-        // 只有带 `Pickable` 的地板 + 标了 `MeshPickingCamera` 的相机会参与
+        // 只有带 `Pickable` 的草地底板 + 标了 `MeshPickingCamera` 的相机会参与，
+        // 于是「点在地面上」与「点在 UI 上」各有明确结果（落点怎么换算成格子见
+        // `ui::tile_info::pick_tile`：射线打到地面层，再按 `BoardGeom::picks` 找最近一格）
         .add_plugins(MeshPickingPlugin)
         .insert_resource(MeshPickingSettings {
             require_markers: true,
