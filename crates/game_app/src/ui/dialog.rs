@@ -11,6 +11,7 @@
 //! 一定先清空再挂上下一个，所以每次报价都是一整块新面板，没有「忘了刷新」的余地。
 
 use bevy::ecs::system::SystemParam;
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, Ask, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Blocker, Books,
@@ -880,6 +881,40 @@ fn loan_room(books: &Books, player: Entity) -> i64 {
     books.max_loan(player)
 }
 
+/// 全屏场景的滚动视口（[`frame`] 的整屏分支）：`Overflow::clip_y` 在它身上，
+/// [`SceneContent`] 是它唯一的孩子。
+#[derive(Component)]
+pub(crate) struct SceneViewport;
+
+/// 全屏场景的内容列，竖向 auto margin 挂在它身上（见 [`frame`] 那段注释）。
+#[derive(Component)]
+pub(crate) struct SceneContent;
+
+/// 全屏场景的滚轮。0.20 只有滚动的布局那一半 —— `ScrollPosition` 会重排子节点、
+/// 越界值 layout 会在「布局变化使其失效」时兜底，但没有任何输入去改它（PLAN 的 P6e
+/// 记过这笔账）：滚轮读数换算成逻辑像素写回，越界在这一处夹紧。
+pub(crate) fn scroll_scene(
+    mut wheel: MessageReader<MouseWheel>,
+    mut views: Query<(&ComputedNode, &mut ScrollPosition), With<SceneViewport>>,
+) {
+    if wheel.is_empty() {
+        return;
+    }
+    let delta: f32 = wheel
+        .read()
+        .map(|e| match e.unit {
+            MouseScrollUnit::Line => e.y * 40.0,
+            MouseScrollUnit::Pixel => e.y,
+        })
+        .sum();
+    wheel.clear();
+    for (node, mut scroll) in &mut views {
+        // `size`/`content_size` 是物理像素，`ScrollPosition` 是逻辑像素
+        let max = ((node.content_size.y - node.size.y) * node.inverse_scale_factor).max(0.0);
+        scroll.y = (scroll.y - delta).clamp(0.0, max);
+    }
+}
+
 /// 这些待决事项值得一整个场景，而不是一块弹窗：银行、百货、彩票、保释（医院/监狱）、
 /// 拍卖、魔法屋两步。它们要么要摆很多行、要么本身就是「一个地点」。
 fn wants_full_scene(pending: &Pending) -> bool {
@@ -921,6 +956,11 @@ fn frame(
 ) -> Entity {
     // 全屏场景：不铺弹窗边框与皮肤。整屏铺不透明的 `MENU_BG`（顶栏与 HUD 都盖住），
     // 内容列按场景宽度竖向居中 —— 靠上铺开会让 200 行以内的内容全堆在画面上半截。
+    //
+    // 居中不放在视口的 `justify_content` 上：内容比屏高时居中会让溢出朝**两端**走，
+    // 标题顶出上沿、「办完」顶出下沿，这一屏就再也退不出去了（P16c-2 实报）。
+    // 改成内容列挂竖向 auto margin —— flexbox 的规矩是自由空间为负时 auto 归零，
+    // 于是「塞得下就居中、塞不下就顶对齐」，溢出只朝下走，滚下去就够得着。
     if wants_full_scene(&key.1) {
         return commands
             .spawn((
@@ -933,7 +973,6 @@ fn frame(
                     width: Val::Percent(100.0),
                     height: Val::Percent(100.0),
                     flex_direction: FlexDirection::Column,
-                    justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
                     padding: UiRect::all(Val::Px(layout::SCENE_PAD)),
                     ..default()
@@ -943,14 +982,39 @@ fn frame(
             ))
             .with_children(|screen| {
                 screen
-                    .spawn(Node {
-                        width: Val::Px(scene_width(&key.1)),
-                        flex_direction: FlexDirection::Column,
-                        align_items: AlignItems::Stretch,
-                        row_gap: Val::Px(10.0),
-                        ..default()
-                    })
-                    .with_children(|p| body(p));
+                    .spawn((
+                        SceneViewport,
+                        Node {
+                            width: Val::Px(scene_width(&key.1)),
+                            height: Val::Percent(100.0),
+                            flex_direction: FlexDirection::Column,
+                            // 0.20 的滚动只有布局那一半：`OverflowAxis::Scroll` 才会让
+                            // `ScrollPosition` 重排子节点（`clip_y` 只裁不滚，实测各滚各的）、
+                            // 滚轮那一半在 [`scroll_scene`] 里自己接
+                            overflow: Overflow::scroll_y(),
+                            ..default()
+                        },
+                        ScrollPosition::DEFAULT,
+                    ))
+                    .with_children(|p| {
+                        p.spawn((
+                            SceneContent,
+                            Node {
+                                margin: UiRect::new(
+                                    Val::Px(0.0),
+                                    Val::Px(0.0),
+                                    Val::Auto,
+                                    Val::Auto,
+                                ),
+                                width: Val::Percent(100.0),
+                                flex_direction: FlexDirection::Column,
+                                align_items: AlignItems::Stretch,
+                                row_gap: Val::Px(10.0),
+                                ..default()
+                            },
+                        ))
+                        .with_children(|p| body(p));
+                    });
             })
             .id();
     }

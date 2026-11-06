@@ -108,6 +108,8 @@ impl Plugin for UiPlugin {
                         dialog::remember_company.in_set(UiSet::Live),
                         dialog::force_decision.in_set(UiSet::Live),
                         dialog::sync_modal.in_set(UiSet::Live),
+                        // 全屏场景的滚轮（银行/百货那批内容超高时「办完」要滚得到）
+                        dialog::scroll_scene.in_set(UiSet::Live),
                         finance::sync_atm_panel.in_set(UiSet::Live),
                         finance::sync_stock_panel.in_set(UiSet::Live),
                         hand::sync_hand_panel.in_set(UiSet::Live),
