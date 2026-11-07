@@ -195,7 +195,7 @@ impl ForceDetention {
     }
 }
 
-/// `NM_BAIL=<jail|hospital>`：把**另一位**玩家关进去，并在当前玩家面前挂出保释窗口。
+/// `NM_BAIL=<jail|hospital|away>`：把**另一位**玩家关进去，并在当前玩家面前挂出保释窗口。
 ///
 /// 与 `NM_DETAIN` 同一条理由：保释窗口的正经入口是「别人恰好踩到接入点」，而那一掷
 /// 由骰子说了算 —— 截图脚本押不住。它只写「有人被关着 + 窗口摆出来」这两件事，
@@ -211,8 +211,9 @@ impl ForceBail {
         let place = match raw.trim() {
             "jail" => DetentionPlace::Jail,
             "hospital" => DetentionPlace::Hospital,
+            "away" => DetentionPlace::Away,
             other => {
-                warn!("NM_BAIL={other} 不认识，应为 jail|hospital");
+                warn!("NM_BAIL={other} 不认识，应为 jail|hospital|away");
                 return Self(None);
             }
         };

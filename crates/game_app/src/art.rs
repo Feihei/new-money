@@ -247,6 +247,13 @@ pub fn ui_skin(key: &str) -> Option<String> {
     on_disk(&format!("ui/skin_{key}.webp"))
 }
 
+/// 整屏场景的地点底图（`ui/bg_<键>.png`，1920×1088 剪纸插画）。键见
+/// `ui::skin::SceneBgs::pick`：银行/百货/监狱/医院/码头各一张；彩票/拍卖/魔法屋
+/// 还没有自己的地点图，盘上没有就是 `None`，那一屏退回深色底（同一条闸门）。
+pub fn scene_bg(key: &str) -> Option<String> {
+    on_disk(&format!("ui/bg_{key}.png"))
+}
+
 /// 选角色那一屏的剪纸世界地图（`ui/world_map.png`，2:1）。盘上没有时设置页
 /// 仍按同一套锚点摆头像，只是背景退回素色纸面（与其余素材同一条闸门）。
 pub fn world_map() -> Option<String> {

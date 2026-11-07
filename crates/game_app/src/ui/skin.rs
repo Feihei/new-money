@@ -16,7 +16,7 @@
 
 use bevy::prelude::*;
 use bevy::sprite::SliceScaleMode;
-use game_core::prelude::Pending;
+use game_core::prelude::{DetentionPlace, Pending};
 
 use crate::art;
 use crate::render::DevFont;
@@ -55,6 +55,46 @@ pub struct Skins {
     pub bail: Skin,
     /// 常驻浮层（ATM / 证券 / 手牌 / 道具）
     pub float: Skin,
+    /// 整屏场景的地点底图（与九宫格底板是两类素材：这一类铺满整屏，不切片）
+    pub scenes: SceneBgs,
+}
+
+/// 地点底图句柄（`ui/bg_<键>.png`）。整屏场景铺在内容列后面当「到了这个地方」；
+/// 没有自己地点图的屏（彩票/拍卖/魔法屋）与素材总开关关掉时是 `None`，退回深色底。
+#[derive(Clone, Debug, Default)]
+pub struct SceneBgs {
+    pub bank: Option<Handle<Image>>,
+    pub shop: Option<Handle<Image>>,
+    pub jail: Option<Handle<Image>>,
+    pub hospital: Option<Handle<Image>>,
+    /// 出国旅游那张拘留不在棋盘上，地点图是码头而不是某扇门
+    pub travel: Option<Handle<Image>>,
+}
+
+impl SceneBgs {
+    fn load(server: &AssetServer) -> Self {
+        Self {
+            bank: art::scene_bg("bank").map(|path| server.load(path)),
+            shop: art::scene_bg("shop").map(|path| server.load(path)),
+            jail: art::scene_bg("jail").map(|path| server.load(path)),
+            hospital: art::scene_bg("hospital").map(|path| server.load(path)),
+            travel: art::scene_bg("travel").map(|path| server.load(path)),
+        }
+    }
+
+    /// 保释按去处各认各的门；其余整屏场景里只有银行与百货今天有地点图。
+    /// 新增整屏场景先过 `dialog::wants_full_scene` 那张穷尽表，再来这里领图。
+    pub fn pick(&self, about: &Pending) -> Option<&Handle<Image>> {
+        match about {
+            Pending::BankTeller => self.bank.as_ref(),
+            Pending::Shop => self.shop.as_ref(),
+            Pending::Bail(DetentionPlace::Jail) => self.jail.as_ref(),
+            Pending::Bail(DetentionPlace::Hospital) => self.hospital.as_ref(),
+            Pending::Bail(DetentionPlace::Away) => self.travel.as_ref(),
+            Pending::Lottery | Pending::Auction | Pending::MagicSpell(_) => None,
+            _ => None,
+        }
+    }
 }
 
 impl Skins {
@@ -81,7 +121,14 @@ impl Skins {
             lottery: Self::load(server, "panel_lottery", [94.0, 88.0, 88.0, 108.0], 0.55),
             bail: Self::load(server, "panel_bail", [44.0, 34.0, 42.0, 60.0], 0.60),
             float: Self::load(server, "panel_float", [56.0, 42.0, 58.0, 40.0], 0.70),
+            scenes: SceneBgs::load(server),
         }
+    }
+
+    /// 这个整屏场景铺哪张地点底图。`None` = 这个地点还没有图（或总开关关着），
+    /// 调用方保持深色底与原来的浅色字。
+    pub fn scene_bg(&self, about: &Pending) -> Option<Handle<Image>> {
+        self.scenes.pick(about).cloned()
     }
 
     /// 这个待决事项该用哪块底板。拍卖/彩票/保释各有专属，其余全走通用模态——
@@ -183,6 +230,7 @@ mod tests {
             lottery: bare([50.0, 60.0, 70.0, 80.0]),
             bail: bare([90.0, 100.0, 110.0, 120.0]),
             float: bare([130.0, 140.0, 150.0, 160.0]),
+            scenes: SceneBgs::default(),
         }
     }
 
@@ -235,5 +283,35 @@ mod tests {
         assert_eq!(skins.pick(&Pending::Lottery).slice[0], 50.0);
         // 没有专属底板的那几屏继续共用通用模态
         assert_eq!(skins.pick(&Pending::Shop).slice[0], 1.0);
+    }
+
+    #[test]
+    fn each_doorstep_art_only_lights_up_its_own_scene() {
+        let bgs = SceneBgs {
+            jail: Some(Handle::default()),
+            ..Default::default()
+        };
+        assert!(bgs.pick(&Pending::Bail(DetentionPlace::Jail)).is_some());
+        assert!(bgs.pick(&Pending::Bail(DetentionPlace::Hospital)).is_none());
+        assert!(bgs.pick(&Pending::Bail(DetentionPlace::Away)).is_none());
+        assert!(bgs.pick(&Pending::BankTeller).is_none());
+        let bgs = SceneBgs {
+            bank: Some(Handle::default()),
+            ..Default::default()
+        };
+        assert!(bgs.pick(&Pending::BankTeller).is_some());
+        assert!(bgs.pick(&Pending::Shop).is_none());
+        // 没有地点图的三屏：别的图齐了也保持深色底，不借别人的门脸
+        let bgs = SceneBgs {
+            shop: Some(Handle::default()),
+            hospital: Some(Handle::default()),
+            travel: Some(Handle::default()),
+            ..Default::default()
+        };
+        assert!(bgs.pick(&Pending::Bail(DetentionPlace::Hospital)).is_some());
+        assert!(bgs.pick(&Pending::Bail(DetentionPlace::Away)).is_some());
+        assert!(bgs.pick(&Pending::Shop).is_some());
+        assert!(bgs.pick(&Pending::Lottery).is_none());
+        assert!(bgs.pick(&Pending::Auction).is_none());
     }
 }

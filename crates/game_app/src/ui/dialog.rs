@@ -954,14 +954,17 @@ fn frame(
     accent: Color,
     body: impl FnOnce(&mut ChildSpawnerCommands),
 ) -> Entity {
-    // 全屏场景：不铺弹窗边框与皮肤。整屏铺不透明的 `MENU_BG`（顶栏与 HUD 都盖住），
-    // 内容列按场景宽度竖向居中 —— 靠上铺开会让 200 行以内的内容全堆在画面上半截。
+    // 全屏场景：不铺弹窗边框与皮肤。有地点底图就整屏铺图（「到了这个地方」），
+    // 内容列垫不透明深色单据保住浅色字的对比度；没图整屏铺不透明的 `MENU_BG`
+    // （顶栏与 HUD 都盖住）。内容列按场景宽度竖向居中 —— 靠上铺开会让 200 行
+    // 以内的内容全堆在画面上半截。
     //
     // 居中不放在视口的 `justify_content` 上：内容比屏高时居中会让溢出朝**两端**走，
     // 标题顶出上沿、「办完」顶出下沿，这一屏就再也退不出去了（P16c-2 实报）。
     // 改成内容列挂竖向 auto margin —— flexbox 的规矩是自由空间为负时 auto 归零，
     // 于是「塞得下就居中、塞不下就顶对齐」，溢出只朝下走，滚下去就够得着。
     if wants_full_scene(&key.1) {
+        let bg = skins.scene_bg(&key.1);
         return commands
             .spawn((
                 BoardUi,
@@ -981,6 +984,29 @@ fn frame(
                 ZIndex(3),
             ))
             .with_children(|screen| {
+                // 地点底图铺满整屏再居中放大一档（与主菜单同一条铺法：Stretch +
+                // 绝对定位压在最底；放大理由见 `layout::SCENE_BG_ZOOM`）。
+                // 图还在解码的第一帧露出的是根节点那块 MENU_BG，不会闪白
+                if let Some(bg) = &bg {
+                    let edge = Val::Percent((1.0 - layout::SCENE_BG_ZOOM) * 50.0);
+                    let span = Val::Percent(layout::SCENE_BG_ZOOM * 100.0);
+                    screen.spawn((
+                        ImageNode {
+                            image: bg.clone(),
+                            image_mode: NodeImageMode::Stretch,
+                            ..default()
+                        },
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: edge,
+                            top: edge,
+                            width: span,
+                            height: span,
+                            ..default()
+                        },
+                        ZIndex(-1),
+                    ));
+                }
                 screen
                     .spawn((
                         SceneViewport,
@@ -1010,8 +1036,26 @@ fn frame(
                                 flex_direction: FlexDirection::Column,
                                 align_items: AlignItems::Stretch,
                                 row_gap: Val::Px(10.0),
+                                // 白纸底的地点图上浅色字读不出，内容列垫一块不透明
+                                // 深色单据（半透明试过：线性混合下白纸透一成就把底抬到
+                                // 中灰，键列那档灰字对比度掉到 2:1）；没图的屏保持原样
+                                padding: UiRect::all(Val::Px(if bg.is_some() {
+                                    layout::SCENE_DOC_PAD
+                                } else {
+                                    0.0
+                                })),
+                                border_radius: BorderRadius::all(Val::Px(if bg.is_some() {
+                                    layout::PANEL_RADIUS
+                                } else {
+                                    0.0
+                                })),
                                 ..default()
                             },
+                            BackgroundColor(if bg.is_some() {
+                                col::MENU_BG
+                            } else {
+                                Color::NONE
+                            }),
                         ))
                         .with_children(|p| body(p));
                     });
