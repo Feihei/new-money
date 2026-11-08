@@ -17,8 +17,8 @@ use crate::landing::PendingDecision;
 use crate::market::Market;
 use crate::msg::{
     DetentionLifted, DetentionSkipped, DiceRolled, GameOver, MoveCapped, RemoteDiceUsed,
-    RequestRemoteDice, RequestRoll, RequestStay, StayLifted, StaySkipped, TurnEnded, TurnStarted,
-    WalkStarted,
+    RequestRemoteDice, RequestRoll, RequestSkip, RequestStay, StayLifted, StaySkipped, TurnEnded,
+    TurnStarted, WalkStarted,
 };
 use crate::occupancy::Occupancy;
 use crate::player::{
@@ -40,6 +40,10 @@ pub enum TurnPhase {
     Boot,
     TurnStart,
     WaitRoll,
+    /// 掷骰过场（P16b）：骰子翻滚 + 点数停留，由 [`BeatClock`] 计时，走完进入
+    /// 掷骰时写下的出口（通常是 `Walking`）。`dice_beat = 0` 时根本不进这一相位 ——
+    /// headless 测试与无人值守长跑一帧不多。玩家可单击跳过（[`RequestSkip`]）。
+    Rolling,
     /// 逐格行走：`WalkClock` 驱动 `WalkQueue`，每格一条 `TileStepped`
     /// （`walk_step_system`，见 §4.6 的所有权红线）。`walk_step_interval = 0`
     /// 时一帧走完，与 B2b 的瞬时落格行为等价。
@@ -52,6 +56,10 @@ pub enum TurnPhase {
     Landed,
     /// 等待玩家决策（买地/升级/确认租金/读卡）。生产者随 B3 的买地流程出现。
     WaitDecision,
+    /// 摆放过场（P16b）：买地/升级**答成**之后、交还回合之前，给标志物落下动画
+    /// 与音效留的一拍，由 [`BeatClock`] 计时。`place_beat = 0` 时不进这一相位；
+    /// 拒绝购买、付不起、收据已阅都不来这里 —— 没有东西摆下去，就没有什么要看的。
+    Placing,
     TurnEnd,
     Over,
 }
@@ -196,6 +204,90 @@ pub struct Paused(pub bool);
 /// `run_if` 条件：没按下暂停才让回合机的 system 跑。
 pub fn not_paused(paused: Res<Paused>) -> bool {
     !paused.0
+}
+
+/// 表现层全局闸（P16b）：台词在播时，回合机真的停住 —— 走步停在半格、下一位等着、
+/// 掷骰按钮灰掉。规则层只读，写的是输入侧（`game_app` 的音频导演在 `First` 写它）。
+///
+/// 与 [`Paused`] 同一个形状，也不违反 §4.6 的红线：它说的是「现在不许推进」，
+/// 不是「推进到下一步」。何时松闸由表现层决定，松闸之后的推进仍由规则层的钟来做。
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PerformanceHold(pub bool);
+
+/// `run_if` 条件：表现层没按住时才让回合机的 system 跑。
+pub fn not_held(hold: Res<PerformanceHold>) -> bool {
+    !hold.0
+}
+
+/// `run_if` 条件：此刻在过场相位里（掷骰翻滚／摆放标志物）。
+pub fn in_beat(phase: Res<State<TurnPhase>>) -> bool {
+    matches!(phase.get(), TurnPhase::Rolling | TurnPhase::Placing)
+}
+
+/// 拍子钟：这一拍已经过了几秒、走完该去哪个相位。
+///
+/// 与 [`WalkClock`](crate::walk::WalkClock) 同一个模式：规则层拥有步时，表现层只读
+/// 这份钟去对齐动画；要测节奏就直接改写 `elapsed`。`exit` 由进相位的那一处写下
+/// （[`apply_plan`]／`landing::decision_system`），钟走完由 [`finish_beat_system`]
+/// 直接去那里 —— 「这一拍走完去哪」由开拍的人决定，钟自己不猜。
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct BeatClock {
+    pub elapsed: f32,
+    pub exit: TurnPhase,
+}
+
+impl Default for BeatClock {
+    fn default() -> Self {
+        Self {
+            elapsed: 0.0,
+            exit: TurnPhase::TurnEnd,
+        }
+    }
+}
+
+/// 拍子钟的推进者：挂在 `First`、只在过场相位里跑（与
+/// [`advance_walk_clock_system`](crate::walk::advance_walk_clock_system) 同一个位置）。
+pub fn advance_beat_clock_system(time: Res<Time>, mut clock: ResMut<BeatClock>) {
+    clock.elapsed += time.delta_secs();
+}
+
+/// 拍子的自然出口：钟走到规则给的时长，就去进相位时写下的那个出口。
+pub fn finish_beat_system(
+    phase: Res<State<TurnPhase>>,
+    rules: Res<crate::rules::GameRules>,
+    clock: Res<BeatClock>,
+    mut next: ResMut<NextState<TurnPhase>>,
+) {
+    let dur = match phase.get() {
+        TurnPhase::Rolling => rules.dice_beat,
+        TurnPhase::Placing => rules.place_beat,
+        _ => return,
+    };
+    if clock.elapsed >= dur {
+        next.set(clock.exit);
+    }
+}
+
+/// 玩家单击跳过这一拍（P16b）：只认当前回合玩家、只在过场相位里被受理，
+/// 受理之后直接去出口 —— 不改变任何规则结果。与 [`finish_beat_system`] 写同一个
+/// `NextState`，所以两者必须 `.chain()`（并行元组里两处写谁赢没人保证，坑 37）。
+pub fn skip_beat_system(
+    order: Res<TurnOrder>,
+    clock: Res<BeatClock>,
+    mut requests: MessageReader<RequestSkip>,
+    mut next: ResMut<NextState<TurnPhase>>,
+) {
+    let Some(current) = order.current() else {
+        return;
+    };
+    // 全部读完再判断：短路会让没读完的请求下一帧再受理一次
+    let mut asked = false;
+    for r in requests.read() {
+        asked |= r.player == current;
+    }
+    if asked {
+        next.set(clock.exit);
+    }
 }
 
 /// `begin_turn_system` 的出口消息打包（六个 `MessageWriter` 参数比挂 `#[allow]` 好读）。
@@ -504,6 +596,10 @@ pub struct RollWriters<'w, 's> {
     rolled: MessageWriter<'w, DiceRolled>,
     started: MessageWriter<'w, WalkStarted>,
     capped: MessageWriter<'w, MoveCapped>,
+    /// 拍子钟与它的时长（P16b）：掷骰过场要不要放、放多久，由这两样说了算。
+    /// 放进参数包而不是给 `apply_plan` 加两个参数 —— 房规（§六 坑 8）。
+    beat: ResMut<'w, BeatClock>,
+    rules: Res<'w, crate::rules::GameRules>,
 }
 
 /// 掷骰这条入口要读的玩家状态。名字是为了躲 clippy 的 `type_complexity` ——
@@ -611,6 +707,7 @@ pub fn roll_dice_system(
             player: current,
             faces,
             dice,
+            tumble: true,
         },
         &mut last,
     );
@@ -643,12 +740,15 @@ struct WalkTarget<'a> {
     from: crate::board::TileIndex,
 }
 
-/// 这一掷的来处：谁摇的、每颗骰子的面、几颗。打包成一份是为了让 `apply_plan`
-/// 的参数表只留下真正分开的输入（clippy 的 7 个参数上限也是同一件事的提醒）。
+/// 这一掷的来处：谁摇的、每颗骰子的面、几颗、有没有「摇」这个动作。打包成一份是为了让
+/// `apply_plan` 的参数表只留下真正分开的输入（clippy 的 7 个参数上限也是同一件事的提醒）。
 struct RollFaces {
     player: Entity,
     faces: [u32; 3],
     dice: u32,
+    /// 这条入口有没有骰子翻滚的过程（P16b）。遥控骰子是「选一个数」，没有可看的翻滚 ——
+    /// 它直接进 `Walking`，不给过场。
+    tumble: bool,
 }
 
 /// 把一份 [`crate::walk::WalkPlan`] 落到玩家身上，并留三条凭据。掷骰与遥控骰子共用，
@@ -681,6 +781,7 @@ fn apply_plan(
         faces: roll.faces,
         from,
         to: plan.rolled_to,
+        tumble: roll.tumble,
     });
     writers.started.write(WalkStarted {
         player: roll.player,
@@ -689,11 +790,20 @@ fn apply_plan(
         to: plan.to,
     });
     // 步数为 0（理论不可达：骰子 ≥1）也必须能出 Walking，否则状态机会卡死
-    next.set(if target.queue.path.is_empty() {
+    let exit = if target.queue.path.is_empty() {
         TurnPhase::Landed
     } else {
         TurnPhase::Walking
-    });
+    };
+    // 掷骰过场（P16b）：先让骰子落定、停一小会儿，再开走。`dice_beat = 0` 时根本不进
+    // 这一相位 —— headless 测试与无人值守长跑的行为与改动前一帧不差。
+    if roll.tumble && writers.rules.dice_beat > 0.0 {
+        writers.beat.elapsed = 0.0;
+        writers.beat.exit = exit;
+        next.set(TurnPhase::Rolling);
+    } else {
+        next.set(exit);
+    }
 }
 
 /// 乌龟计时扣一格：写到 0 就摘组件，并留一条 [`MoveCapped`]。
@@ -811,6 +921,7 @@ pub fn remote_dice_system(
             player: current,
             faces: [steps, 0, 0],
             dice: 1,
+            tumble: false,
         },
         &mut last,
     );

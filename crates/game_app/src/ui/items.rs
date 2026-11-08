@@ -11,8 +11,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, Heading, Inventory, ItemKind, Mount, MoveCap, Occupancy, OccupancyAt, Paused,
-    PendingDecision, PlayerId, StaySentence, TileIndex, TokenPosition, TurnOrder, TurnPhase,
-    place_denied,
+    PendingDecision, PerformanceHold, PlayerId, StaySentence, TileIndex, TokenPosition, TurnOrder,
+    TurnPhase, place_denied,
 };
 
 use super::skin::Skins;
@@ -63,6 +63,8 @@ pub(crate) struct ItemsView<'w, 's> {
     pending: Res<'w, PendingDecision>,
     phase: Res<'w, State<TurnPhase>>,
     order: Option<Res<'w, TurnOrder>>,
+    /// 台词闸（P16b）：有一句在念时，放置按钮灰着（规则层同样拒）
+    hold: Res<'w, PerformanceHold>,
     board: Option<Res<'w, ActiveBoard>>,
     players: Query<'w, 's, ItemPlayer>,
     occupancies: Query<'w, 's, &'static Occupancy>,
@@ -107,7 +109,8 @@ pub(crate) fn sync_items_panel(
         return;
     }
     let player = view.order.as_ref().and_then(|o| o.current());
-    let playable = player.is_some() && can_play(*view.phase.get(), &view.paused, &view.pending);
+    let playable =
+        player.is_some() && can_play(*view.phase.get(), &view.paused, &view.pending, &view.hold);
     let row = player.and_then(|p| view.players.get(p).ok());
     let held = row.map(|r| r.5.clone()).unwrap_or_default();
     let mount = row.map(|r| *r.4).unwrap_or(Mount::Foot);

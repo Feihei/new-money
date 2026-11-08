@@ -47,6 +47,16 @@ pub struct RequestStay {
     pub player: Entity,
 }
 
+/// 请求「跳过这一拍」：把当前正在播的过场（掷骰翻滚／摆放标志物）立刻推进到它的出口。
+///
+/// 这是**玩家意图**而不是推进回合的消息 —— 它只在过场相位（`Rolling`/`Placing`）里
+/// 被受理，且只认当前回合玩家；受理之后相位直接跳到 [`crate::turn::BeatClock::exit`]，不改变任何
+/// 规则结果。表现层单击鼠标打断动画/台词时发这一条（P16b）。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestSkip {
+    pub player: Entity,
+}
+
 /// 骰子结果。`from`/`to` 一起带上，省掉监听方再去查一次移动前的位置。
 ///
 /// `faces` 是**每一颗骰子的面**（1..=6），只有前 `dice` 个有效 —— 表现层要摆出
@@ -63,6 +73,11 @@ pub struct DiceRolled {
     pub faces: [u32; 3],
     pub from: TileIndex,
     pub to: TileIndex,
+    /// 这一条是「摇」出来的吗（P16b）。遥控骰子不是：它没有翻滚过程，也不进 `Rolling`
+    /// 过场。表现层靠这一位决定摆不摆骰子 —— 光看相位不行：它与写这条消息的 system
+    /// 同在 `Update`，谁先跑没人保证（同一帧写、同一帧读得到），按相位判会在快的那一侧
+    /// 把骰子整颗漏掉。
+    pub tumble: bool,
 }
 
 /// 行走开始：`roll_dice_system` 定好路径后发，携带本次移动的完整意图。

@@ -30,8 +30,9 @@ use crate::card::CardKind;
 use crate::land::LandId;
 use crate::msg::{Decision, DecisionChosen, LandBought, LandUpgraded};
 use crate::player::{Detention, DetentionPlace, Term, TokenPosition, Walker};
+use crate::rules::GameRules;
 use crate::settle::Books;
-use crate::turn::{TurnOrder, TurnPhase};
+use crate::turn::{BeatClock, TurnOrder, TurnPhase};
 use crate::world::ActiveBoard;
 
 /// 本帧落格的结算目标。
@@ -404,27 +405,35 @@ pub struct DecisionView<'w> {
     landing: Res<'w, Landing>,
 }
 
+/// `decision_system` 的输入与出口（P16b 从七个散装参数打成一包，房规 §六 坑 8）：
+/// 被回答的窗口、回答与两条成交凭据、摆放过场的时长与钟、下一步相位。
+///
+/// `rules` 与 [`Books::rules`] 是同一条只读资源 —— 两处并肩读它不撞借用，
+/// 而「摆放过场多久」与「买地算多少钱」读的确实是同一份规则。
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct DecisionDesk<'w, 's> {
+    pending: ResMut<'w, PendingDecision>,
+    answers: MessageReader<'w, 's, DecisionChosen>,
+    bought: MessageWriter<'w, LandBought>,
+    upgraded: MessageWriter<'w, LandUpgraded>,
+    rules: Res<'w, GameRules>,
+    beat: ResMut<'w, BeatClock>,
+    next: ResMut<'w, NextState<TurnPhase>>,
+}
+
 /// 执行玩家的回答。只在 `WaitDecision` 里跑，且只认「被挂着的那位」的回答。
 ///
 /// Godot 的六个方法（`confirm_buy`/`cancel_buy`/`confirm_upgrade`/`cancel_upgrade`/
 /// `dismiss_rent_notice`/`dismiss_card`）在这里塌成一条消息 + 一份状态：
 /// 语义由 `Pending` 决定，消息只带意图，所以「阶段不对却执行买地」不可能发生。
-pub fn decision_system(
-    mut books: Books,
-    mut pending: ResMut<PendingDecision>,
-    view: DecisionView<'_>,
-    mut answers: MessageReader<DecisionChosen>,
-    mut bought: MessageWriter<LandBought>,
-    mut upgraded: MessageWriter<LandUpgraded>,
-    mut next: ResMut<NextState<TurnPhase>>,
-) {
-    let Some((asked, about)) = pending.active() else {
+pub fn decision_system(mut books: Books, view: DecisionView<'_>, mut desk: DecisionDesk<'_, '_>) {
+    let Some((asked, about)) = desk.pending.active() else {
         return;
     };
     // 全部读完再决定：`any()`/`find()` 会短路，没读完的回答下一帧又被读出来，
     // 于是同一个报价可能被答两次
     let mut answer = None;
-    for a in answers.read() {
+    for a in desk.answers.read() {
         if a.player == asked {
             answer = Some(a.action);
         }
@@ -433,14 +442,18 @@ pub fn decision_system(
         return;
     };
     // 先读再动：下面那条保释后置问只属于落脚，而这个标记会被 `clear` 抹掉
-    let from_landing = pending.from_landing;
+    let from_landing = desk.pending.from_landing;
 
+    // 「这一答真的摆下了一块地吗」（P16b）：只有它才配拿摆放过场 ——
+    // 拒绝、付不起、收据已阅都是空手离开
+    let mut placed = false;
     match (about, action) {
         (Pending::Buy(land), Decision::Accept) => {
             // 钱不够时 `buy` 返回 None —— 与 Godot 的 `confirm_buy` 一样：报价已经给过，
             // 付不起就什么也不发生，回合照常结束（是否该亮「买得起」由 UI 判）
             if let Some(price) = books.buy(asked, land) {
-                bought.write(LandBought {
+                placed = true;
+                desk.bought.write(LandBought {
                     player: asked,
                     land,
                     price,
@@ -449,7 +462,8 @@ pub fn decision_system(
         }
         (Pending::Upgrade(land), Decision::Accept) => {
             if let Some(new_level) = books.upgrade(asked, land) {
-                upgraded.write(LandUpgraded {
+                placed = true;
+                desk.upgraded.write(LandUpgraded {
                     player: asked,
                     land,
                     new_level,
@@ -531,12 +545,20 @@ pub fn decision_system(
             .and_then(|l| crate::bail::branch_place(&books.active.def, l.tile))
         && crate::bail::someone_held(&books, place)
     {
-        pending.offer(asked, Pending::Bail(place));
+        desk.pending.offer(asked, Pending::Bail(place));
         return;
     }
 
-    pending.clear();
-    next.set(TurnPhase::TurnEnd);
+    desk.pending.clear();
+    // 摆放过场（P16b）：答成之后先让标志物落下、音效响完，再交还回合。
+    // `place_beat = 0` 时不进这一相位 —— headless 测试与无人值守长跑一帧不多。
+    if placed && desk.rules.place_beat > 0.0 {
+        desk.beat.elapsed = 0.0;
+        desk.beat.exit = TurnPhase::TurnEnd;
+        desk.next.set(TurnPhase::Placing);
+    } else {
+        desk.next.set(TurnPhase::TurnEnd);
+    }
 }
 
 /// 把人送进某一处「不在牌桌上」的状态（P4）。返回的是**他此刻真正被扣住的那一条**

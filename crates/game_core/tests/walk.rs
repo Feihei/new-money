@@ -176,6 +176,10 @@ fn paced_walking_steps_once_per_interval() {
         GameSetup::default(),
         GameRules {
             walk_step_interval: 0.18,
+            // P16b：这条只测迈步节奏，掷骰过场关掉（开着就会先进 Rolling，
+            // 而这里的拍子是手改 `WalkClock` 推进的）
+            dice_beat: 0.0,
+            place_beat: 0.0,
             ..Default::default()
         },
         seed_with_first_roll(3),

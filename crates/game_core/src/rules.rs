@@ -16,6 +16,19 @@ pub struct GameRules {
     /// `0` = 跳过动画，一帧走完 —— headless 测试与「动画速度」设置都归到这条路径
     /// （B2c 验收：interval=0 时与 B2b 的瞬时落格行为等价）。
     pub walk_step_interval: f32,
+    /// 掷骰过场的时长（秒，P16b）：骰子翻滚 + 点数停留，走完才进入 `Walking`。
+    ///
+    /// 与 [`walk_step_interval`] 同一条口径：`0` = 不进 `Rolling` 相位、掷骰当帧直接
+    /// 开始走 —— headless 测试（[`Self::instant`]）与无人值守长跑因此一帧不多。
+    /// 1.3 与表现层骰子动画的现有长度对齐（翻滚 0.75 + 停留 0.55，见 `render/dice.rs`）；
+    /// 改这一个数时那边的动画时长跟着 [`crate::turn::BeatClock`] 走，不再各写一份。
+    pub dice_beat: f32,
+    /// 摆放过场的时长（秒，P16b）：买地/升级**答成**之后、交还回合之前，给标志物
+    /// 落下动画与音效留的一段。`0` = 不进 `Placing` 相位，答成当帧直接收尾。
+    ///
+    /// 只有「答成了」才进这一拍：拒绝购买、付不起、收据已阅都不过场 ——
+    /// 没有东西摆下去，就没有什么要看的。
+    pub place_beat: f32,
     /// 建筑等级上限（`property_system.gd:113` 的 `level >= 6`）。
     pub max_building_level: u8,
     /// 涨价卡期间的租金倍数（PLAN §三「抵消对」那行的「整街 5 天加倍」）。
@@ -170,6 +183,8 @@ impl Default for GameRules {
         Self {
             start_cash: 20_000,
             walk_step_interval: 0.18,
+            dice_beat: 1.3,
+            place_beat: 0.8,
             max_building_level: 5,
             hike_rent_multiplier: 2,
             drop_rent_divisor: 2,
@@ -208,6 +223,8 @@ impl GameRules {
     pub fn instant() -> Self {
         Self {
             walk_step_interval: 0.0,
+            dice_beat: 0.0,
+            place_beat: 0.0,
             ..Self::default()
         }
     }

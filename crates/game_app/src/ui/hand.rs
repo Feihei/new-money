@@ -13,9 +13,9 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, Bankrupt, Books, CardAim, CardDef, CardEffect, CardGained, CardId, CardKind,
     CardTarget, GameRules, God, Hand, Heading, LandId, NO_GOD_ON_THE_ROAD, NO_GOD_TO_BANISH,
-    Occupancy, OccupancyKind, PASSIVE_WORD, Paused, PendingDecision, PlayerId, PlayerName,
-    Possession, Shelf, TokenPosition, TurnOrder, TurnPhase, acquire_denied_word, banishable,
-    deal_to, god_refuses_banish, is_passive, nearest_god, resists,
+    Occupancy, OccupancyKind, PASSIVE_WORD, Paused, PendingDecision, PerformanceHold, PlayerId,
+    PlayerName, Possession, Shelf, TokenPosition, TurnOrder, TurnPhase, acquire_denied_word,
+    banishable, deal_to, god_refuses_banish, is_passive, nearest_god, resists,
 };
 
 use super::theme::{col, layout, size};
@@ -126,6 +126,8 @@ pub(crate) struct HandView<'w, 's> {
     pending: Res<'w, PendingDecision>,
     phase: Res<'w, State<TurnPhase>>,
     order: Option<Res<'w, TurnOrder>>,
+    /// 台词闸（P16b）：有一句在念时，出牌按钮灰着（规则层同样拒）
+    hold: Res<'w, PerformanceHold>,
     shelf: Shelf<'w>,
     /// 地块类卡的候选要按棋盘定义出名字，而棋盘是**可选**资源：菜单态没有它，
     /// 这块面板那时也不该在（`UiSet::Live` 的门挡着），拿不到时按「没有地」画
@@ -420,7 +422,8 @@ pub(crate) fn sync_hand_panel(
     }
     let player = view.order.as_ref().and_then(|o| o.current());
     let playable = player.is_some_and(|p| {
-        can_play(*view.phase.get(), &view.paused, &view.pending) && same_actor(p, &view.pending)
+        can_play(*view.phase.get(), &view.paused, &view.pending, &view.hold)
+            && same_actor(p, &view.pending)
     });
     // 迭代顺序是生成顺序，而断言与截图不该依赖它：按名字排（同证券按 id 排）
     let mut opponents: Vec<(Entity, String)> = view

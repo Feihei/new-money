@@ -18,7 +18,8 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
 use game_core::prelude::{
-    BuildingLevel, GameRules, LandId, LandType, Owner, PlayerColor, PlayerId, PlayerName,
+    BuildingLevel, GameRules, LandId, LandType, Owner, PerformanceHold, PlayerColor, PlayerId,
+    PlayerName, TurnPhase,
 };
 
 use super::geom::BoardRead;
@@ -33,6 +34,22 @@ use super::{
 /// 不能用「把场景整体放大一点」来代替：放大是按原点算的，楼顶离原点远、描边就比侧面粗
 /// 好几倍，高楼的顶边会变成一圈厚红边。
 const OUTLINE_INFLATE: f32 = 0.024;
+
+/// 标志物落下动画的起点高度（世界单位，P16b）。约半格多一点 —— 看得出「从上面落下来」，
+/// 又不至于飞出取景。落下时长就是规则层的 `place_beat`。
+const PROP_DROP_H: f32 = 1.1;
+
+/// 标志物正在落下（P16b）。挂在**两张四边形各自身上**而不是 `LandVisual` 上：
+/// 它们各有各的落点（蒙版那张退后一点），而动画只碰 `Transform`。
+#[derive(Component)]
+pub(crate) struct PropDrop {
+    /// 停稳时的位置。
+    base: Vec3,
+    age: f32,
+    /// 是否已经见过 `Placing`。挂上它的那一帧相位可能还没转移过来（`NextState` 下一帧
+    /// 才生效），那不算「过场已经结束」—— 少了这一位，动画会在第一帧就被就地收掉。
+    seen_placing: bool,
+}
 
 /// 挂在 Land 实体上（Land 实体本身没有 `Transform`，建筑都是各自摆好世界坐标的独立实体）。
 #[derive(Component)]
@@ -57,6 +74,12 @@ pub(crate) struct LandVisual {
     prop_edge_mat: Handle<StandardMaterial>,
     /// 现在贴的是谁的图。`None` = 这块地没有标志物（没主人／已盖楼／这位没素材）。
     prop_key: Option<&'static str>,
+    /// 标志物两张四边形停稳时的位置（P16b 落下动画的落点；蒙版那张退后一点，所以两份）。
+    prop_body_base: Vec3,
+    prop_edge_base: Vec3,
+    /// 这张地块的视觉是否已经同步过一次。**首帧同步不播落下动画**：读档进来时
+    /// 75 块地一起从天上掉下来不是过场，是一场雨。
+    synced_once: bool,
 }
 
 /// 挂在描边场景根上：等实例化完成，把它所有图元都换成纯色描边材质。
@@ -321,12 +344,12 @@ pub(crate) fn attach_land_visuals(
                 Rendered,
             ))
             .id();
+        let prop_edge_base = prop_base - prop_rot * Vec3::Z * dim::PROP_EDGE_BACK;
         let prop_edge = commands
             .spawn((
                 Mesh3d(prop_mesh.clone()),
                 MeshMaterial3d(prop_edge_mat.clone()),
-                Transform::from_translation(prop_base - prop_rot * Vec3::Z * dim::PROP_EDGE_BACK)
-                    .with_rotation(prop_rot),
+                Transform::from_translation(prop_edge_base).with_rotation(prop_rot),
                 Visibility::Hidden,
                 Rendered,
             ))
@@ -342,6 +365,9 @@ pub(crate) fn attach_land_visuals(
             prop_body_mat,
             prop_edge_mat,
             prop_key: None,
+            prop_body_base: prop_base,
+            prop_edge_base,
+            synced_once: false,
         });
     }
 }
@@ -378,6 +404,9 @@ pub(crate) fn sync_buildings(
         if !owner.is_changed() && !level.is_changed() {
             continue;
         }
+        // 首帧这次同步只摆状态、不播动画（读档时的「一场雨」见 `synced_once` 的注）
+        let first = !visual.synced_once;
+        visual.synced_once = true;
         // 归属色来自玩家实体，而不是按 PlayerId 取模 —— 阵容颜色是 `GameSetup` 定的事实
         let who = owner
             .0
@@ -443,6 +472,26 @@ pub(crate) fn sync_buildings(
                     }
                 }
             }
+            // 元素真的换了（从没有到有、或换了主人）→ 播一次落下动画。首帧那次例外。
+            // 落下的起点在这里就写好，免得动画系统晚一帧才把它抬起来、中间闪一格平地。
+            if !first && want.is_some() {
+                let rot = billboard_rot();
+                for (entity, base) in [
+                    (visual.prop_body, visual.prop_body_base),
+                    (visual.prop_edge, visual.prop_edge_base),
+                ] {
+                    commands.entity(entity).try_insert((
+                        PropDrop {
+                            base,
+                            age: 0.0,
+                            seen_placing: false,
+                        },
+                        Transform::from_translation(base + Vec3::Y * PROP_DROP_H)
+                            .with_rotation(rot)
+                            .with_scale(Vec3::splat(1.12)),
+                    ));
+                }
+            }
             visual.prop_key = want;
         }
         // 蒙版就是归属色本身（图是纯白 alpha 环，`base_color` 一染就成）
@@ -457,6 +506,42 @@ pub(crate) fn sync_buildings(
         };
         commands.entity(visual.prop_body).try_insert(prop_vis);
         commands.entity(visual.prop_edge).try_insert(prop_vis);
+    }
+}
+
+/// 标志物落下（P16b）：从 [`PROP_DROP_H`] 高处落下、末段收住，`place_beat` 秒内停稳。
+///
+/// 钟在本地推进、不读 `BeatClock`：挂上它是在「归属真的变了」那一帧，与 `Placing` 的
+/// 起点可能差一帧，本地年龄对这点错位不敏感。两件事仍然对齐：时长读的就是
+/// `GameRules::place_beat`（与过场同一份），台词闸按住时 `dt` 记 0（与走步、骰子
+/// 同一条口径：表现层全局停）。相位离开 `Placing`（自然走完或单击跳过）→ 立刻停在落点上。
+pub(crate) fn animate_prop_drops(
+    mut commands: Commands,
+    time: Res<Time>,
+    phase: Res<State<TurnPhase>>,
+    hold: Res<PerformanceHold>,
+    rules: Res<GameRules>,
+    mut props: Query<(Entity, &mut PropDrop, &mut Transform)>,
+) {
+    let dt = if hold.0 { 0.0 } else { time.delta_secs() };
+    let dur = rules.place_beat.max(0.05);
+    let live = phase.get() == &TurnPhase::Placing;
+    for (entity, mut drop, mut tr) in &mut props {
+        if live {
+            drop.seen_placing = true;
+        }
+        drop.age += dt;
+        let t = (drop.age / dur).clamp(0.0, 1.0);
+        // 三次缓出：落得先快后慢，停住时不再有速度
+        let eased = 1.0 - (1.0 - t).powi(3);
+        let lift = (1.0 - eased) * PROP_DROP_H;
+        tr.translation = drop.base + Vec3::Y * lift;
+        tr.scale = Vec3::splat(1.0 + 0.12 * (1.0 - eased));
+        if (drop.seen_placing && !live) || t >= 1.0 {
+            tr.translation = drop.base;
+            tr.scale = Vec3::ONE;
+            commands.entity(entity).remove::<PropDrop>();
+        }
     }
 }
 
@@ -495,5 +580,72 @@ pub(crate) fn paint_outline_meshes(
             }
         }
         patch.patched = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::state::app::StatesPlugin;
+
+    /// P16b 的标志物落下：时长内抬起、到点回到落点并自己摘掉组件。
+    ///
+    /// 两半都断言：只断言「摘掉了」的话，把 `translation` 写成乱数也是绿的；
+    /// 只断言「抬起来了」的话，动画永远不会停 —— 而那块地会一直悬在半空。
+    #[test]
+    fn a_prop_drop_rises_then_settles_and_frees_itself() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(StatesPlugin)
+            .init_state::<TurnPhase>()
+            .init_resource::<PerformanceHold>()
+            .init_resource::<GameRules>()
+            .add_systems(Update, animate_prop_drops);
+        // 相位留在 `Boot`（`live == false`）：本地年龄照样推进，这正是「读档后没进过场
+        // 也要把动画收尾」那条退路
+        let base = Vec3::new(1.0, 0.3, 2.0);
+
+        let falling = app
+            .world_mut()
+            .spawn((
+                PropDrop {
+                    base,
+                    age: 0.0,
+                    seen_placing: false,
+                },
+                Transform::from_xyz(0.0, 0.0, 0.0),
+            ))
+            .id();
+        app.update();
+        let at = app
+            .world()
+            .entity(falling)
+            .get::<Transform>()
+            .expect("还在落")
+            .translation;
+        assert!(
+            (at.y - (base.y + PROP_DROP_H)).abs() < 1e-2,
+            "刚挂上时该在起点高处：{at:?}"
+        );
+        assert!(app.world().entity(falling).get::<PropDrop>().is_some());
+
+        // 时间到头：回到落点、摘掉组件
+        app.world_mut()
+            .entity_mut(falling)
+            .get_mut::<PropDrop>()
+            .expect("还在落")
+            .age = 99.0;
+        app.update();
+        let at = app
+            .world()
+            .entity(falling)
+            .get::<Transform>()
+            .expect("实体还在，只是不再动")
+            .translation;
+        assert_eq!(at, base, "落定时该正好在停稳的位置");
+        assert!(
+            app.world().entity(falling).get::<PropDrop>().is_none(),
+            "动画结束要自己摘掉组件"
+        );
     }
 }

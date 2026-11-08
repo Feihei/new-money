@@ -231,6 +231,10 @@ impl Plugin for RenderPlugin {
                     dice::spawn_dice_visuals,
                     dice::animate_dice_visuals,
                     land::sync_buildings,
+                    // 标志物落下（P16b）。`chain` 不 flush `Commands`（坑 43），所以
+                    // `sync_buildings` 这一帧挂上的 `PropDrop` 下一帧才被它看见 —— 动画的
+                    // 起点位置由 sync 自己那一条 `Transform` 写好，所以中间那一帧不会闪平地
+                    land::animate_prop_drops,
                     land::paint_outline_meshes,
                     occupancy::sync_occupancy_visuals,
                     camera::follow_current_token,

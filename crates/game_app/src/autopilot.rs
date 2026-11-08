@@ -30,7 +30,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::ai::AiHand;
 use game_core::prelude::{
-    Controller, RequestRoll, RequestStay, StaySentence, TurnOrder, TurnPhase, greedy,
+    Controller, GameRules, RequestRoll, RequestStay, StaySentence, TurnOrder, TurnPhase, greedy,
 };
 
 pub struct AutopilotPlugin;
@@ -60,6 +60,14 @@ impl Plugin for AutopilotPlugin {
             return;
         }
         info!("自动玩家已开启（NM_AUTOROLL）：只替人类座位按按钮，AI 座位自己答");
+        // 长跑不停机（P16b）：两段过场拍子归零。眼睛不在这场里，而每一掷等 1.3 秒
+        // 会把几百回合拖成十几分钟 —— 这与 `NM_AUTOGAP=0` 是同一条口径的开发旋钮。
+        // 台词闸那条在 `audio.rs` 里另判（`AudioConfig::hold` 见到 NM_AUTOROLL 就不按）。
+        {
+            let mut rules = app.world_mut().resource_mut::<GameRules>();
+            rules.dice_beat = 0.0;
+            rules.place_beat = 0.0;
+        }
         app.insert_resource(AutoGap::from_env());
         let roll_only = auto_roll.run_if(in_state(TurnPhase::WaitRoll));
         // `NM_AUTODECISION=0` 只掷骰不回答：回合会停在第一个 `WaitDecision`，

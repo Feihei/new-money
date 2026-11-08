@@ -163,10 +163,11 @@ pub mod prelude {
         PassiveAnswer, PassiveMove, PassiveUsed, PlaceItemRequested, PlayCardRequested,
         PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported,
         PointsChanged, PointsStolen, PolicyBought, RedEnvelope, RemoteBuildOffered, RemoteDiceUsed,
-        RemoteUpgradeRequested, RentDue, RentRerouted, RequestRemoteDice, RequestRoll, RequestStay,
-        ServiceCharged, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped, StockPriceChanged,
-        StockTradeRequested, StockTraded, StockVisited, TileStepped, TollExtorted, TradeSide,
-        TurnEnded, TurnStarted, UpgradeOffered, VillainHired, WalkHalted, WalkStarted,
+        RemoteUpgradeRequested, RentDue, RentRerouted, RequestRemoteDice, RequestRoll, RequestSkip,
+        RequestStay, ServiceCharged, ShopOpDone, ShopOpRequested, StayLifted, StaySkipped,
+        StockPriceChanged, StockTradeRequested, StockTraded, StockVisited, TileStepped,
+        TollExtorted, TradeSide, TurnEnded, TurnStarted, UpgradeOffered, VillainHired, WalkHalted,
+        WalkStarted,
     };
     pub use crate::news::{
         FieldFilter, NewsDef, NewsId, NewsScope, NewsSet, NewsSink, PlayerPick, find_id, fire_news,
@@ -206,7 +207,11 @@ pub mod prelude {
     };
     pub use crate::status::{LandStatus, Timed, expire_land_status_system};
     pub use crate::stock::{PriceHistory, StockDef, StockHoldings, StockId, StockPrice, StockSet};
-    pub use crate::turn::{GameSession, LastRoll, Paused, TurnOrder, TurnPhase, not_paused};
+    pub use crate::turn::{
+        BeatClock, GameSession, LastRoll, Paused, PerformanceHold, TurnOrder, TurnPhase,
+        advance_beat_clock_system, finish_beat_system, in_beat, not_held, not_paused,
+        skip_beat_system,
+    };
     pub use crate::villain::{
         Hired, Villain, VillainKind, custody_of, has_door, hoodlum_toll_system, on_hired_system,
         robber_snatch_system, spawn_caged_villains, thief_deliver_system, villain_rotation_system,
@@ -235,9 +240,9 @@ use prelude::{
     PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
     PlayerDetained, PlayerTeleported, PointsChanged, PointsStolen, PolicyBought, RedEnvelope,
     RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RentRerouted,
-    RequestRemoteDice, RequestRoll, RequestStay, ServiceCharged, ShopOpDone, ShopOpRequested,
-    ShopStock, StartCashChoice, StayLifted, StaySkipped, StockPriceChanged, StockSet,
-    StockTradeRequested, StockTraded, StockVisited, TileStepped, TollExtorted, TurnEnded,
+    RequestRemoteDice, RequestRoll, RequestSkip, RequestStay, ServiceCharged, ShopOpDone,
+    ShopOpRequested, ShopStock, StartCashChoice, StayLifted, StaySkipped, StockPriceChanged,
+    StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped, TollExtorted, TurnEnded,
     TurnPhase, TurnStarted, UpgradeOffered, VillainHired, WalkClock, WalkHalt, WalkHalted,
     WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system, age_suspensions_system,
     auction_hold_system, auction_move_system, bail_op_system, bank_op_system, begin_game_system,
@@ -253,8 +258,10 @@ use prelude::{
     walk_effect_system, walk_step_system, wander_gods_system,
 };
 use turn::{
-    LastRoll, begin_turn_system, end_turn_system, game_over_system, not_paused, remote_dice_system,
-    roll_dice_system, take_stay_system, update_price_index_system,
+    BeatClock, LastRoll, PerformanceHold, advance_beat_clock_system, begin_turn_system,
+    end_turn_system, finish_beat_system, game_over_system, in_beat, not_held, not_paused,
+    remote_dice_system, roll_dice_system, skip_beat_system, take_stay_system,
+    update_price_index_system,
 };
 use world::CoreSet;
 
@@ -301,6 +308,10 @@ impl Plugin for CoreGamePlugin {
             // 钉条件的那个开发入口（P13c）。正经对局是 `None` —— 条件由 `pick_magic` 子流摇
             .init_resource::<crate::magic::MagicFilterOverride>()
             .init_resource::<WalkClock>()
+            // 过场拍子钟与表现层全局闸（P16b）。两者都常驻；拍子钟的 `exit` 在进相位时
+            // 被覆盖，闸门默认开着（`false`）—— 没有音频模块时行为与改动前一致
+            .init_resource::<BeatClock>()
+            .init_resource::<PerformanceHold>()
             .init_resource::<MarketClock>()
             // AI 的那两条钟（P14）。`AiCadence` 是**配置**：core 的默认是两个 0，真实客户端
             // 在启动时换成 0.5..=1.5（无头测试里 `Time::elapsed_secs()` 不前进，任何正数都会
@@ -333,6 +344,8 @@ impl Plugin for CoreGamePlugin {
             .add_message::<TurnStarted>()
             .add_message::<RequestRoll>()
             .add_message::<RequestStay>()
+            // 过场跳过（P16b）：表现层单击写它，`skip_beat_system` 只在过场相位里认
+            .add_message::<RequestSkip>()
             .add_message::<DiceRolled>()
             .add_message::<WalkStarted>()
             .add_message::<TileStepped>()
@@ -513,21 +526,29 @@ impl Plugin for CoreGamePlugin {
                 (
                     roll_dice_system
                         .run_if(in_state(TurnPhase::WaitRoll))
-                        .run_if(not_paused),
+                        .run_if(not_paused)
+                        // 台词在播时不许掷骰（P16b）：闸门先于回合推进，
+                        // 按钮在表现层同样灰掉 —— 这一句是规则层的最后一道
+                        .run_if(not_held),
                     // 停留（P4④）：与掷骰同一个窗口、同一条资格，只认当前回合玩家
                     take_stay_system
                         .run_if(in_state(TurnPhase::WaitRoll))
-                        .run_if(not_paused),
+                        .run_if(not_paused)
+                        .run_if(not_held),
                     // 恶人的回合（P12a）：与玩家、AI 发**同一条意图**（`RequestRoll`/`RequestStay`），
                     // 所以它与上面两条同一个窗口、同一个闸门。它排在两条之后没有语义 ——
                     // 消息要到下一帧才投递（坑 12），这里的位置只是为了读的时候一眼看出
                     // 「掷骰、停留、恶人自发意图」是同一个窗口的三个入口
                     villain_turn_system
                         .run_if(in_state(TurnPhase::WaitRoll))
-                        .run_if(not_paused),
+                        .run_if(not_paused)
+                        .run_if(not_held),
                     walk_step_system
                         .run_if(in_state(TurnPhase::Walking))
-                        .run_if(not_paused),
+                        .run_if(not_paused)
+                        // 全局闸的落点（P16b）：台词在播，棋子就停在半格上，
+                        // 钟在 First 里也不走 —— 两处一起停，谁也不追谁
+                        .run_if(not_held),
                     // 成绩结算（P7）与 `decision_system` 同一条窗口、同一份账本（都带 `Books`），
                     // 所以显式 `chain` 而不是并排放进元组：两条并行会直接撞成调度期借用冲突。
                     // 彩票柜台也在这条链上（P8）：它同样带 `Books`，并行会撞成调度期借用冲突。
@@ -568,7 +589,12 @@ impl Plugin for CoreGamePlugin {
                     // `resource_exists::<ActiveBoard>`（三条都带 `Books`，装配之前那个资源还没有，
                     // 与 `land_deity_succession_system` 同一条理由）。
                     (
-                        play_card_system.run_if(in_state(TurnPhase::WaitRoll)),
+                        play_card_system
+                            .run_if(in_state(TurnPhase::WaitRoll))
+                            // 出牌会推进/押住回合，与掷骰同一类动作 —— 台词在播时不受理。
+                            // 拍卖与门**不挂**这一道：它们每帧只吃一个动作，消息只活两帧，
+                            // 闸住就会把玩家的点击吞掉（P16b）
+                            .run_if(not_held),
                         auction_move_system,
                         auction_hold_system,
                         gate_system.run_if(in_state(TurnPhase::WaitDecision)),
@@ -579,17 +605,20 @@ impl Plugin for CoreGamePlugin {
                     // 证券交易的窗口就是「还没掷骰」这一段，与掷骰同态、同闸门
                     trade_request_system
                         .run_if(in_state(TurnPhase::WaitRoll))
-                        .run_if(not_paused),
+                        .run_if(not_paused)
+                        .run_if(not_held),
                     // 放置道具与掷骰同一个窗口：路障要挡的是「接下来这几步」，所以
                     // 必须在我自己走之前放下去（ADR-002 §4）
                     place_item_system
                         .run_if(in_state(TurnPhase::WaitRoll))
-                        .run_if(not_paused),
+                        .run_if(not_paused)
+                        .run_if(not_held),
                     // 遥控骰子：与掷骰互斥地决定这一回合走几格。谁先受理由消息定，
                     // 同一帧两条时规则层各认各的窗口，不改回合状态
                     remote_dice_system
                         .run_if(in_state(TurnPhase::WaitRoll))
-                        .run_if(not_paused),
+                        .run_if(not_paused)
+                        .run_if(not_held),
                 ),
             )
             // ATM 资格与银行操作不挂状态：玩家可能在行走途中、也可能在落格之后按。
@@ -684,12 +713,20 @@ impl Plugin for CoreGamePlugin {
                 )
                     .chain(),
             )
-            // 时钟在 First 推进、Update 消费：同帧内先累计、后定步
+            // 时钟在 First 推进、Update 消费：同帧内先累计、后定步。
+            // 两台钟都挂 `not_held`（P16b）：台词在播时，走步与过场一起停住
             .add_systems(
                 First,
-                advance_walk_clock_system
-                    .run_if(in_state(TurnPhase::Walking))
-                    .run_if(not_paused),
+                (
+                    advance_walk_clock_system
+                        .run_if(in_state(TurnPhase::Walking))
+                        .run_if(not_paused)
+                        .run_if(not_held),
+                    advance_beat_clock_system
+                        .run_if(in_beat)
+                        .run_if(not_paused)
+                        .run_if(not_held),
+                ),
             )
             // 落格流水线：解释一次格子 → 六个域各自结算 → 由 pending 决定去哪一阶段。
             // 顺序写成显式 chain：域的先后决定同帧消息的次序，靠隐式冲突排序说出来不算数。
@@ -774,18 +811,22 @@ impl Plugin for CoreGamePlugin {
                 OnEnter(TurnPhase::Halted),
                 (resolve_halt_system, finish_halt_system).chain(),
             )
-            // 回合结束 = 一天过去：行情 tick 与回合轮转同批、互不冲突（动的组件不相交），
-            // 所以不排顺序 —— 谁先跑都不改结果。后面两跳都读「今天几号」，而 tick 就是
-            // 在行情那一步推进的，所以必须排在它后面：
-            // 月末结息（改余额）→ 物价指数（分子里有余额）。
+            // 回合结束 = 一天过去：行情 tick、限时状态与冻结/结息这一串一天一跳的事都留在这里。
+            // 后面几跳读「今天几号」，而日期来自行情钟（`MarketClock.tick`），所以必须在
+            // tick 之后：月末结息（改余额）→ 物价指数（分子里有余额）。
+            //
+            // ⚠️ `end_turn_system` 与 `villain_rotation_system` **不在这一组里**（P16b 搬走了）：
+            // 它们要能**等**（台词在播时轮转不许提前开下一位），而 `OnEnter` 不能被 `run_if`
+            // 拦住 —— 转移那一帧条件为假，这个 OnEnter 就永远错过了。所以它们去 `Update`
+            // 里按 `in_state(TurnEnd)` 跑，帧数不变（OnEnter 在同一帧的转移期跑、
+            // `Update` 紧随其后），而闸门真的能挡住它们。
             .add_systems(
                 OnEnter(TurnPhase::TurnEnd),
                 (
                     (
-                        end_turn_system,
                         market_tick_on_turn_end_system,
                         // 限时状态（涨价 / 查封）与日历同一个节拍过一天：「5 天」必须是
-                        // 五天，不能是「五个行情 tick 加半个回合」。动的组件与上面两条
+                        // 五天，不能是「五个行情 tick 加半个回合」。动的组件与上面一条
                         // 都不相交，所以放进这组并行元组里，谁先跑都不改结果
                         expire_land_status_system,
                     ),
@@ -795,11 +836,6 @@ impl Plugin for CoreGamePlugin {
                     // ② 次序有语义：必须在 tick **之后**减，否则「停牌 1 天」在当天
                     // tick 之前就成了 0，那一天照常开盘 —— 少挡的正是它要挡的那一天
                     age_suspensions_system,
-                    // 恶人与轮转的那道同步（P12a）。**必须排在 `end_turn_system` 之后**：
-                    // 那条刚把游标推到下一位，这一条才摘掉用完回合的那一位 —— 反过来写，
-                    // 摘除会把游标一起往前带，症状是有人的回合凭空被跳过一次。
-                    // 与坑 36/37 同一条纪律：这种顺序只能由 `chain` 的元素位置说出来。
-                    villain_rotation_system,
                     // 神明过一天：先各自挪一格，再补刷到名额。这两条都要 `&mut Rng`，
                     // 而上面那一组里的行情 tick 也要 —— 所以它们自己成一阶段，
                     // 不能塞进那个并行元组（调度期直接撞成借用冲突）
@@ -813,6 +849,30 @@ impl Plugin for CoreGamePlugin {
                     update_price_index_system,
                 )
                     .chain(),
+            )
+            // 回合轮转 + 恶人同步（P16b 从 `OnEnter(TurnEnd)` 搬到 `Update`）。
+            // 两处闸门的理由见上面那条注；`chain` 保住原来那一句：
+            // **`villain_rotation_system` 必须排在 `end_turn_system` 之后** ——
+            // 前者刚把游标推到下一位，后者才摘掉用完回合的那一位。
+            .add_systems(
+                Update,
+                (end_turn_system, villain_rotation_system)
+                    .chain()
+                    .run_if(in_state(TurnPhase::TurnEnd))
+                    .run_if(not_paused)
+                    .run_if(not_held),
+            )
+            // 过场相位（P16b）：自然收尾与单击跳过共写一个 `NextState`，所以显式 `chain`。
+            // **跳过不挂 `not_held`** —— 玩家单击的意思正是「别等了、往下走」，
+            // 而台词队列的中断由表现层同一击自己办。
+            .add_systems(
+                Update,
+                (
+                    skip_beat_system.run_if(not_paused),
+                    finish_beat_system.run_if(not_paused).run_if(not_held),
+                )
+                    .chain()
+                    .run_if(in_beat),
             )
             .add_systems(OnEnter(TurnPhase::Over), game_over_system)
             // ===== AI 玩家（P14a）=====
@@ -839,7 +899,10 @@ impl Plugin for CoreGamePlugin {
                     ai::ai_roll_system
                         .run_if(resource_exists::<ActiveBoard>)
                         .run_if(in_state(TurnPhase::WaitRoll))
-                        .run_if(not_paused),
+                        .run_if(not_paused)
+                        // 台词在播时 AI 也不许抢先掷骰（P16b）—— 闸门对电脑一视同仁，
+                        // 否则「人类听台词、电脑已经跑完三步」正是这次要修的那个并发
+                        .run_if(not_held),
                     ai::ai_answer_system
                         .run_if(resource_exists::<ActiveBoard>)
                         .run_if(in_state(TurnPhase::WaitDecision))

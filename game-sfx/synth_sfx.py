@@ -238,6 +238,15 @@ def make_game():
     x += place_at(n, sine(58, 0.42, 8) * 0.8, 0.52)
     files["bankrupt"] = fade_edges(x)
 
+    # land_place：地契/标志物砸在自家地上（P16b）。比 `item_place` 重一档：
+    # 身子一沉（更低更长的闷响）+ 旗杆一记轻金属音。两条分开的理由是场合 ——
+    # 道具放在**路上**，这一声落在**自家地上**，而买地/升级的过场里它是唯一的声音
+    n = int(SR * 0.34)
+    x = place_at(n, sine(118, 0.16, 24, harmonic=1.0, h_level=0.35) * 0.9, 0.00)
+    x += place_at(n, noise_burst(0.018, 3200, gain=0.55, seed=81), 0.01)
+    x += place_at(n, bell(880, 0.10, 30) * 0.35, 0.05)
+    files["land_place"] = fade_edges(x)
+
     return files
 
 print("--- game (P16a) ---")

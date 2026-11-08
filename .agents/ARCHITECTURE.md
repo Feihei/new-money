@@ -243,6 +243,21 @@ Godot 端把这件事做成了"逻辑等渲染"（`turn_manager.gd:219` 等 `boa
 
 这是本方案里唯一一处需要你在实施时守住的红线：**render 永远不向 core 发"推进回合"的消息**。
 
+> **P16b 延长（11-08）：过场相位与「表现层全局闸」**。两段「看得见的等待」进了规则层：
+> 掷骰翻滚 `Rolling`、摆放标志物 `Placing`，各由 `GameRules::dice_beat`/`place_beat` 计时，
+> `BeatClock{elapsed, exit}` 与 `WalkClock` 同一个模式（`First` 推进、headless 直接改写
+> `elapsed`、`GameRules::instant()` 下两个值都是 0 → 相位根本不进，几百条旧用例一帧不多）。
+> 红线的延长只有一句话：**表现层可以写 `PerformanceHold`**（与 `Paused` 同形 —— 说的是
+> 「现在不许推进」而不是「推进到下一步」），规则层只读。台词队列非空时
+> `audio::hold_for_voice` 在 `First` 写它，`not_held` 把掷骰／出牌／证券／道具／AI 掷骰／
+> 走步／过场收尾／回合轮转一起按住；模态回答与拍卖/被动卡那道门**不闸**（消息只活两帧，
+> 闸住就会把玩家的点击吞掉）。单击跳过走的是**玩家意图** `RequestSkip`（规则层只认当前
+> 回合玩家、只在过场相位受理），不是表现层直接改相位。因为 `OnEnter` 不能被 `run_if` 拦住
+> （转移那一帧条件为假就永远错过），`end_turn_system`／`villain_rotation_system` 从
+> `OnEnter(TurnEnd)` 搬到 `Update(in_state(TurnEnd))` —— 帧数不变（`OnEnter` 在转移期跑、
+> `Update` 紧随其后），而闸门真的挡得住。`NM_AUTOROLL` 把两个过场时长归零、台词闸不装；
+> `NM_AUDIO=0` 时闸门恒开，行为与没有音频模块时逐帧一致。
+
 > **B2c 落地（10-14）**：`WalkQueue` 最终形态是 `{path, done, from}` 而不是本节的 `{path, elapsed}` —— 耗时累计归全局 `WalkClock`（行走互斥，同一时刻至多一人在走），队列只记「已迈几步」的绝对进度，`walk_step_system` 每帧把 `floor(elapsed/interval)` 与 `done` 的差补齐。`advance_walk_clock_system` 挂 `First`、只在 `Walking` 态推进（帧间真实 Δt）；headless 测试没有真实时间流逝，一律 `GameRules::instant()`（interval=0 → 一帧走完，与 B2b 逐字等价），要测节奏就直接改写 `WalkClock.elapsed`。另核实：`bevy_time` 是 bevy_internal 的**非可选依赖**（0.20 的 `bevy` 门面没有同名 feature），`game_core` 不用加 feature 就有 `Res<Time>`。
 
 ---
@@ -375,6 +390,7 @@ Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直
 47. **`App` 上没有 `disable::<T>()`**（P16a 起手踩的）。运行时不装某个内建插件只有一条路：先拿 `let mut plugins = DefaultPlugins…`，在 `add_plugins` **之前**调 `PluginGroupBuilder::disable::<bevy::audio::AudioPlugin>()`。装下去之后没有卸载 API —— 所以 `NM_AUDIO=0` 必须是启动期的一次判断，不是运行中能翻的开关（同 P15c「调试面板下次启动生效」）。
 48. **`MessageReader` 的游标是「读到哪」而不是「读过没有」，`read().next()` 只消费一条、剩下的下一帧还会再触发**（P16a 音效去重时踩的：一次掷骰的 `DiceRolled` 被读出两条，骰子音下一帧又响一次）。判「这一帧有没有这类消息」要用 `read().count() > 0` 把它排干（或 `for .. in reader.read()` 走完）；同理同一帧两处 `read()` 只有第一处拿得到东西 —— 要两处用就先收进 `Vec`，别各读一遍。落地在 `audio.rs::cash_context` / `sfx_for_frame`。
 49. **`ScrollPosition` 只在 `overflow` 那条轴是 `OverflowAxis::Scroll` 时才生效，`clip_y` 只裁不滚**（P16c-2 实报「银行柜台内容顶出视口、办完够不着」时实测：往挂 `clip_y` 的节点写 `ScrollPosition`，布局照算、画面纹丝不动 —— 0.20.0 `layout/mod.rs:476` 按轴检查 `== OverflowAxis::Scroll`，其余一律当 0）。另外三件事一起记：① 0.20 的 UI 滚动**只有布局那一半**，没有任何输入去改 `ScrollPosition`，滚轮 system 要自己写（PLAN 的 P6e 记过这笔账）；② `ComputedNode::size`/`content_size` 是**物理像素**而 `ScrollPosition` 是**逻辑像素**，夹紧前要乘 `inverse_scale_factor`；③ 居中别写在滚动容器的 `justify_content` 上 —— 内容比屏高时溢出朝两端走、两端都够不着，改在内容列挂竖向 auto margin（自由空间为负时 auto 归零：塞得下居中、塞不下顶对齐）。落地在 `dialog.rs::frame` 整屏分支与 `scroll_scene`。
+50. **同帧写的消息，读者可能先于写者跑 —— 拿「当前相位」给这条消息做门禁会静默漏掉**（P16b 的骰子视觉实跑踩到：`DiceRolled` 与 `roll_dice_system` 同在 `Update`，渲染那条 `spawn_dice_visuals` 若恰好排在掷骰之前，同一帧就读到了这条消息，而相位要到下一帧 `StateTransition` 才变成 `Rolling`；按相位判 → 整颗骰子不画，日志一句不报，看上去像「骰子素材没了」）。判据：**同一帧的消息就该用消息自带的语义位做门禁**（这里加 `DiceRolled::tumble`），相位判断只用于跨帧的事实；反过来，若非要按相位，就得把读者排到写者之后并接受晚一帧 —— 而「同帧读得到」正是很多输入泵依赖的性质（坑 12 的另一面：写者在前、读者在后时是**同帧**可见的）。
 
 **agent 自查画面的办法（已落地，比请人肉眼验收可靠）**：0.20 内置 `bevy::render::view::screenshot::{Screenshot, save_to_disk}`，
 `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))` 即出一帧 PNG；

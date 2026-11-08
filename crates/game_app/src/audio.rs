@@ -1,8 +1,10 @@
 //! 音频（P16a）：BGM 的场景机与世界播放列表。
 //!
 //! 分层红线照旧：规则层不知道有声音这东西。这一模块**只读**世界状态（在哪一屏、开着
-//! 哪扇窗口、按没按暂停），一个字都不写回去 —— 于是 `NM_AUDIO=0` 把 bevy 的 `AudioPlugin`
-//! 整个不装之后，游戏行为一个字节都不变（截图与无人值守冒烟走的正是这条路）。
+//! 哪扇窗口、按没按暂停），唯一的例外是 P16b 的全局闸 [`hold_for_voice`]：它写 core 的
+//! `PerformanceHold`，说的是「台词在念，现在别推进」而不是「推进到下一步」—— 与 `Paused`
+//! 同一个形状，也是 §4.6 那条红线的延长而不是破例。`NM_AUDIO=0` 把 bevy 的 `AudioPlugin`
+//! 整个不装之后，闸门恒开，游戏行为一个字节都不变（截图与无人值守冒烟走的正是这条路）。
 //!
 //! 三条槽而不是一个「当前曲目」：
 //! - **世界**那一格是播放列表（[`WORLD_LIST`]）：每首 `Once`，放完换下一首，走完从头再来。
@@ -24,16 +26,17 @@ use bevy::{
     ecs::change_detection::DetectChanges,
     prelude::{
         App, AssetServer, AudioPlayer, AudioSink, AudioSinkPlayback, Commands, Component, Entity,
-        IntoScheduleConfigs, MessageReader, OnEnter, PlaybackSettings, Plugin, PointerButton,
-        PointerClick, Query, Res, ResMut, Resource, State, Time, Update, With, debug, info, warn,
+        First, IntoScheduleConfigs, MessageReader, OnEnter, PlaybackSettings, Plugin,
+        PointerButton, PointerClick, Query, Res, ResMut, Resource, State, Time, Update, With,
+        debug, info, warn,
     },
 };
 use game_core::prelude::{
     ActiveBoard, AuctionWon, BankOpDone, CardDrawn, CardKind, CardPlayed, CashChanged, DiceRolled,
     EffectOutcome, FacilityBuilt, FinancingDrawn, FinancingRecalled, GameOver, GameSession,
     ItemKind, ItemPlaced, LandBought, LandId, LandUpgraded, LotteryBought, MortgageDone, Owner,
-    Paused, Pending, PendingDecision, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerId,
-    PlayerName, RentDue, StockTraded, TurnOrder, TurnPhase, TurnStarted,
+    Paused, Pending, PendingDecision, PerformanceHold, PlayerBailed, PlayerBankrupt,
+    PlayerDetained, PlayerId, PlayerName, RentDue, StockTraded, TurnOrder, TurnPhase, TurnStarted,
 };
 
 use crate::scene::Scene;
@@ -316,17 +319,43 @@ struct AudioConfig {
     /// 装不装真出声：`NM_AUDIO=0` 时主入口连 bevy 的 `AudioPlugin` 都不装，
     /// 本模块也算意图、也记日志，但一个实体都不起。
     playback: bool,
+    /// 台词能不能把回合机按住（P16b 的全局闸，见 [`hold_for_voice`]）。
+    /// `NM_AUDIO=0` 与 `NM_AUTOROLL=1` 时为假 —— 前者的队列根本没有「在播」这回事，
+    /// 后者是长跑，等台词会把几百回合拖成十几分钟。
+    hold: bool,
     /// 每一首换曲、每一次暂停各记一行。
     log: bool,
 }
 
 impl AudioConfig {
     fn from_env() -> Self {
+        let playback = playback_on(env::var("NM_AUDIO").ok().as_deref());
         Self {
-            playback: playback_on(env::var("NM_AUDIO").ok().as_deref()),
+            playback,
+            hold: playback && env::var_os("NM_AUTOROLL").is_none(),
             log: log_on(env::var("NM_AUDIO_LOG").ok().as_deref()),
         }
     }
+}
+
+/// 全局闸（P16b）：台词队列里还有东西要念，就把回合机按住。
+///
+/// 写的是 core 的 [`PerformanceHold`] —— 规则层只读它，表现层只写它。这不是 §4.6 红线的
+/// 破例，是同一条红线的延长：它说的是「现在别推进」，不是「推进到下一步」，与 `Paused`
+/// 同一个形状（谁按的谁松，松闸之后的推进仍由规则层的钟来做）。
+///
+/// 挂在 `First`：它必须在 `PreUpdate` 的 `ai_roll_system` 与 `Update` 的掷骰/走步之前
+/// 写好，否则第一条台词要晚一帧才按得住 —— 而那一帧正是「骰子还在翻、人已经走了」。
+///
+/// `NM_AUDIO_SELFTEST` 也不闸：自检的队列是验听用的，它不是剧情。
+fn hold_for_voice(
+    cfg: Res<AudioConfig>,
+    queue: Res<VoiceQueue>,
+    selftest: Res<Selftest>,
+    mut hold: ResMut<PerformanceHold>,
+) {
+    let playing = queue.current.is_some() || !queue.pending.is_empty();
+    hold.0 = cfg.hold && !selftest.on && playing;
 }
 
 /// `NM_AUDIO=0` 关出声。**只有字面的 `0` 关**：静音是看得见的损失，而旋钮名拼错一个字母
@@ -764,7 +793,7 @@ fn collect_voice(
     live: Query<Entity, With<VoiceLine>>,
 ) {
     // 先读这一份（它借走整个 `inbox`），再拿那些只借用某几个字段的局部引用
-    let (silent, purchases) = cash_context(&mut inbox);
+    let (silent, purchases, _) = cash_context(&mut inbox);
     let order = inbox.order.as_ref();
     let players = &inbox.players;
     let seat_of = |who: Entity| -> usize {
@@ -965,7 +994,7 @@ fn line_up(
 /// 两处各写一遍的话，迟早会出现「语音不吭声而音效在响」。
 fn cash_context(
     inbox: &mut AudioInbox<'_, '_>,
-) -> (std::collections::HashSet<Entity>, Vec<LandBought>) {
+) -> (std::collections::HashSet<Entity>, Vec<LandBought>, bool) {
     // 买地有两种用法（静默 + 聚街），所以先落一份 —— `MessageReader` 读一次就到底，
     // 两处各 `read()` 一遍的话第二遍一条都读不到，而症状恰好是「买地不静音」或
     // 「聚街永远不响」二选一（第一次实现就漏了静默那一半）
@@ -989,8 +1018,12 @@ fn cash_context(
     for recalled in inbox.recalled.read() {
         quiet.insert(recalled.player);
     }
+    // 升级也算「东西落下去」（P16b 的摆放音效与它同步）：顺手记一个布尔，
+    // 因为这条 reader 读完就到底，`sfx_for_frame` 不能再去读第二遍
+    let mut placed = !purchases.is_empty();
     for up in inbox.upgraded.read() {
         quiet.insert(up.player);
+        placed = true;
     }
     for built in inbox.built.read() {
         quiet.insert(built.player);
@@ -1001,7 +1034,7 @@ fn cash_context(
     for won in inbox.auction.read() {
         quiet.insert(won.player);
     }
-    (quiet, purchases)
+    (quiet, purchases, placed)
 }
 
 /// 事件音效：一帧里同一键最多一条（`keys` 去重），播完自清（`Despawn`）。
@@ -1037,7 +1070,7 @@ fn collect_sfx(
 /// 这一帧该放的音效键（同帧同键只留一条）。读消息的那一半单独成函数，
 /// 测试才能在无音频设备的机器上把「该放哪几条」钉住 —— 与 `cash_voices` 同一条理由。
 fn sfx_for_frame(inbox: &mut AudioInbox<'_, '_>) -> Vec<&'static str> {
-    let (quiet, purchases) = cash_context(inbox);
+    let (quiet, purchases, placed) = cash_context(inbox);
     let mut keys: Vec<&'static str> = Vec::new();
     let mut want = |key: &'static str| {
         if !keys.contains(&key) {
@@ -1064,6 +1097,11 @@ fn sfx_for_frame(inbox: &mut AudioInbox<'_, '_>) -> Vec<&'static str> {
     }
     for _ in inbox.placed.read() {
         want("item_place");
+    }
+    // 摆放标志物（P16b）：买地与升级同一声。它与 `item_place` 分开 ——
+    // 那一声是道具放在**路上**，这一声是地契/楼落在**自家地上**
+    if placed {
+        want("land_place");
     }
     if inbox.detained.read().count() > 0 || inbox.bailed.read().count() > 0 {
         want("jail");
@@ -1175,7 +1213,7 @@ fn advance_voice(
 }
 
 /// 主键点一下打断一句。**一次点击只打断一条**：循环里 `break`，于是同一次点击
-/// 不会顺着把下一条也掐掉（下一条由 `advance_voice` 在同一帧起出来）。
+/// 不会顺着把下一条也掐掉（下一条由下一帧 `First` 里的 `advance_voice` 起出来）。
 fn skip_voice_on_click(
     mut clicks: MessageReader<PointerClick>,
     mut commands: Commands,
@@ -1212,14 +1250,16 @@ fn clear_voice(
     }
 }
 
-/// 盘上的九条通用音效（`game-sfx/synth_sfx.py` 的 `make_game` 那一批）与四条 UI 音。
+/// 盘上的十条通用音效（`game-sfx/synth_sfx.py` 的 `make_game` 那一批）与四条 UI 音。
 /// 键名与文件名同字面量；`ui_hover_soft` 与 crisp 那套**刻意不在这张表里**（今晚不接）。
-const SFX_FILES: [&str; 9] = [
+const SFX_FILES: [&str; 10] = [
     "dice_roll",
     "coin_gain",
     "coin_loss",
     "card_play",
     "item_place",
+    // 摆放标志物（P16b）：买地/升级的过场里那一声「地契砸下来」
+    "land_place",
     "jail",
     "fate",
     "monopoly",
@@ -1232,7 +1272,7 @@ const UI_FILES: [&str; 4] = [
     "ui_error_soft",
 ];
 
-/// `NM_AUDIO_SELFTEST=1`：开局把整套素材各放一遍（十五句语音 + 九条音效 + 四条 UI），
+/// `NM_AUDIO_SELFTEST=1`：开局把整套素材各放一遍（十五句语音 + 十条音效 + 四条 UI），
 /// 一句一行日志。给无人值守验收与将来试听用；只在 `Scene::Board` 生效 —— 菜单上
 /// 还没有玩家，挑不出嗓子。
 #[derive(Resource, Default)]
@@ -1386,11 +1426,18 @@ impl Plugin for AudioPlugin {
                 Update,
                 (aim_bgm, retire_finished_world, play_bgm, duck_bgm).chain(),
             )
-            // 点击先掐当前那条，再收本帧的新事件，最后起下一条
+            // 语音导演排在 **First**（P16b）：收事件 → 起下一句 → 写全局闸。
+            // 闸必须赶在 `PreUpdate` 的 AI 与 `Update` 的掷骰/走步之前写好，否则第一条
+            // 台词要晚一帧才按得住 —— 而那一帧正是「骰子还在翻、人已经走了」。
+            // 这里读的消息是上一帧写的（消息活两帧），不会丢。
             .add_systems(
-                Update,
-                (skip_voice_on_click, collect_voice, advance_voice).chain(),
+                First,
+                (collect_voice, advance_voice, hold_for_voice).chain(),
             )
+            // 单击打断留在 `Update`：它读的 `PointerClick` 是 UI 这一帧才写的。
+            // 下一句由下一帧最前面的 `advance_voice` 起出来，闸门在那一帧重新判 ——
+            // 于是「跳过」与「台词串行」不矛盾：跳过只是让当前这句立刻结束。
+            .add_systems(Update, skip_voice_on_click)
             // 音效自己不排队：它只在这一帧读一遍、去重、放
             .add_systems(Update, collect_sfx)
             // 音量档位改了就把正在响的那几条按到新增益上（只在 `Settings` 变的那一帧动手）
@@ -1671,6 +1718,7 @@ mod tests {
             .insert_resource(StockPanelOpen(false))
             .insert_resource(AudioConfig {
                 playback: false,
+                hold: false,
                 log: false,
             })
             .add_systems(Update, aim_bgm);
@@ -1860,6 +1908,7 @@ mod tests {
             .init_resource::<VoiceQueue>()
             .insert_resource(AudioConfig {
                 playback: false,
+                hold: false,
                 log: false,
             })
             .add_message::<CashChanged>()
@@ -1964,6 +2013,65 @@ mod tests {
         );
     }
 
+    /// P16b 的接线：队列非空 → 闸门落下；念完 → 松开。
+    ///
+    /// 两半缺一不可：只断言「按下」的话，把闸门写成恒真也是绿的；而恒真的闸正好是
+    /// 那种「整局静默停住、画面还在动」的失效。第三段钉长跑与静音那两条路 ——
+    /// 它们也走这条 system，只是 `hold: false` 时队列里有东西也不许按。
+    #[test]
+    fn a_pending_line_holds_the_turn_machine_and_releases_it_when_done() {
+        fn wired(hold: bool) -> App {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .init_resource::<VoiceQueue>()
+                .init_resource::<PerformanceHold>()
+                .init_resource::<Selftest>()
+                .insert_resource(AudioConfig {
+                    playback: true,
+                    hold,
+                    log: false,
+                })
+                .add_systems(First, hold_for_voice);
+            app
+        }
+        let cue = VoiceCue {
+            player: Entity::PLACEHOLDER,
+            event: VoiceEvent::CashBigGain,
+            seat: 0,
+            sub: 0,
+        };
+
+        let mut app = wired(true);
+        app.world_mut()
+            .resource_mut::<VoiceQueue>()
+            .pending
+            .push_back(cue);
+        app.update();
+        assert!(
+            app.world().resource::<PerformanceHold>().0,
+            "还有一句要念，回合机该停住"
+        );
+
+        app.world_mut().resource_mut::<VoiceQueue>().pending.clear();
+        app.update();
+        assert!(
+            !app.world().resource::<PerformanceHold>().0,
+            "念完了就该松闸"
+        );
+
+        // NM_AUTOROLL / NM_AUDIO=0 那两条路：队列有东西也不按
+        let mut app = wired(false);
+        app.world_mut()
+            .resource_mut::<VoiceQueue>()
+            .pending
+            .push_back(cue);
+        app.update();
+        assert!(
+            !app.world().resource::<PerformanceHold>().0,
+            "长跑与静音模式不该被台词闸住"
+        );
+    }
+
     #[derive(Resource, Default)]
     struct Captured(Vec<&'static str>);
 
@@ -1989,6 +2097,7 @@ mod tests {
                     faces: [5, 0, 0],
                     from: game_core::prelude::TileIndex(0),
                     to: game_core::prelude::TileIndex(5),
+                    tumble: true,
                 });
         }
         for delta in [3000, 4000, -5000] {
@@ -2008,7 +2117,8 @@ mod tests {
         );
     }
 
-    /// 买地那一笔同帧也有 CashChanged，但它不是「丢钱」，不给金币声（与语音同源）。
+    /// 买地那一笔同帧也有 CashChanged，但它不是「丢钱」，不给金币声（与语音同源）；
+    /// P16b 起它给的是 `land_place` —— 标志物砸在自家地上那一声，与落下动画同步。
     #[test]
     fn a_purchase_makes_no_coin_noise() {
         let mut app = voice_app();
@@ -2030,7 +2140,11 @@ mod tests {
                 price: 16_500,
             });
         app.update();
-        assert!(app.world().resource::<Captured>().0.is_empty());
+        assert_eq!(
+            app.world().resource::<Captured>().0,
+            vec!["land_place"],
+            "买地只该有摆放那一声，不该有金币声"
+        );
     }
 
     /// UI 四声走消息：派发侧写什么，这一帧就放什么（没有按钮的「点击」也照放）。

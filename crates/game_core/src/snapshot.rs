@@ -55,7 +55,11 @@ use crate::world::{ActiveBoard, Gameplay};
 ///
 /// **2（P2c）**：加了 `board`。旧档是演示盘的，换默认盘之后读进台湾盘会把 0..=5 号地的
 /// 归属套到基隆/台北头上 —— 版本号直接拒掉整份档，比「读进去之后名字全错」干净。
-pub const SAVE_VERSION: u32 = 2;
+///
+/// **3（P16b）**：`rules` 多了 `dice_beat`/`place_beat` 两个过场时长。读档本身只会落到
+/// `WaitRoll`（`Snapshot` 只在掷骰前允许存），两项过场从不相遇，所以 `BeatClock`/
+/// `PerformanceHold` 都不进快照 —— 但旧档里那条 `rules` 反序列化不出来，照样按版本拒。
+pub const SAVE_VERSION: u32 = 3;
 
 /// 一个行动者在快照里的**稳定身份**。
 ///

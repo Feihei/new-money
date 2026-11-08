@@ -19,10 +19,11 @@ use game_core::prelude::{
     GodExit, GodLeft, GodPossessed, IndemnityPaid, Institution, ItemPlaced, ItemThieved, LandId,
     LandTaken, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicSpell,
     MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience,
-    NewsFired, NewsScope, PassiveUsed, Paused, PendingDecision, PlayerBailed, PlayerBankrupt,
-    PlayerName, PointsChanged, PointsStolen, PolicyBought, RemoteDiceUsed, RentRerouted,
-    ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited,
-    TileIndex, TollExtorted, TradeSide, TurnOrder, TurnPhase, VillainHired, WalkHalted,
+    NewsFired, NewsScope, PassiveUsed, Paused, PendingDecision, PerformanceHold, PlayerBailed,
+    PlayerBankrupt, PlayerName, PointsChanged, PointsStolen, PolicyBought, RemoteDiceUsed,
+    RentRerouted, ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded,
+    StockVisited, TileIndex, TollExtorted, TradeSide, TurnOrder, TurnPhase, VillainHired,
+    WalkHalted,
 };
 
 use super::dialog::describe;
@@ -195,6 +196,8 @@ pub(crate) struct TurnView<'w, 's> {
     /// 电脑座位自己会掷，玩家真正想知道的是「现在轮到谁在想」—— 而
     /// `AiProfile.who` 的第二处上屏也在这里（第一处是 HUD 那张玩家卡）
     controllers: Query<'w, 's, &'static Controller>,
+    /// 台词闸（P16b）：有一句在念时，掷骰按钮灰着 —— 与派发侧读同一个资源
+    hold: Res<'w, PerformanceHold>,
 }
 
 /// 一颗按钮此刻该不该亮。三颗按钮三种判据，都从这里出，
@@ -206,7 +209,7 @@ pub(crate) struct TurnView<'w, 's> {
 fn button_allowed(action: &UiAction, turn: &TurnView) -> bool {
     let phase = *turn.phase.get();
     match action {
-        UiAction::Roll => can_roll(phase, &turn.paused, &turn.pending),
+        UiAction::Roll => can_roll(phase, &turn.paused, &turn.pending, &turn.hold),
         // ATM：卡在手上一路都开着，唯一挡它的是暂停与别人家的模态（模态的遮罩本来也压着）
         UiAction::ToggleAtm => {
             !turn.paused.0
@@ -447,10 +450,12 @@ fn phase_name(phase: TurnPhase) -> String {
         TurnPhase::Boot => "准备中",
         TurnPhase::TurnStart => "回合开始",
         TurnPhase::WaitRoll => "等待掷骰",
+        TurnPhase::Rolling => "掷骰中",
         TurnPhase::Walking => "行走中",
         TurnPhase::Halted => "行走中断",
         TurnPhase::Landed => "落格结算",
         TurnPhase::WaitDecision => "等待决策",
+        TurnPhase::Placing => "放置中",
         TurnPhase::TurnEnd => "回合结束",
         TurnPhase::Over => "游戏结束",
     };
@@ -1615,6 +1620,8 @@ mod tests {
             .insert_resource(MarketClock::default())
             .insert_resource(GameRules::default())
             .insert_resource(AtmAccess::default())
+            // P16b：顶栏的「掷骰」现在读台词闸 —— 少这一格顶栏刷新整条不跑
+            .init_resource::<PerformanceHold>()
             .add_systems(Update, refresh_top_bar);
 
         let player = app.world_mut().spawn(PlayerId(0)).id();

@@ -26,7 +26,7 @@
   （接哪一套是 `audio.rs` 那张表里的一格，换它只改那一个后缀）。
 - 音频文件本身**不入库**（`assets/*` 整目录 gitignore）；脚本入库即保住可复现性。
 
-### 对局九条（P16a，键名就是 `audio.rs` 里读的那个文件名）
+### 对局十条（P16a 九条 + P16b 的 `land_place`，键名就是 `audio.rs` 里读的那个文件名）
 
 | 脚本产物 | 用途 | 形状（verify 段的 segments 就是它） |
 |---|---|---|
@@ -35,6 +35,7 @@
 | `coin_loss.wav` | 出账 | 同一族的下行变体，低一档（0.34s / 3 段）—— 不另立第九个事件 |
 | `card_play.wav` | 出卡 | 两记由暗到亮的噪声扫 + 一记轻弹（0.26s / 2 段） |
 | `item_place.wav` | 放道具 | 木质落桌：190Hz 闷响带板子共振（0.10s / 1 段） |
+| `land_place.wav` | 摆标志物（买地/升级过场） | 比落桌更重：118Hz 一沉 + 旗杆一记 880Hz 轻金属音（0.34s / 1 段） |
 | `jail.wav` | 入狱／保释 | 低频一闷 + 三记铁栏震颤（0.52s / 5 段） |
 | `fate.wav` | 命运 | 一记钟，神秘感来自**不成整数比**的三支分音（0.55s / 1 段） |
 | `monopoly.wav` | 聚街 | 三音上行 + 第四音收在长余韵上（0.76s / 4 段） |
@@ -46,14 +47,15 @@
 
 `audio.rs` 只认上表**键名**，所以逐条换素材不牵动接线：
 
-- **对局九条全部接上**：`dice_roll`（`DiceRolled`）、`coin_gain`/`coin_loss`（`CashChanged` 按方向）、
-  `card_play`（`CardPlayed`）、`item_place`（`ItemPlaced`）、`jail`（`PlayerDetained`/`PlayerBailed`）、
+- **对局十条全部接上**：`dice_roll`（`DiceRolled`）、`coin_gain`/`coin_loss`（`CashChanged` 按方向）、
+  `card_play`（`CardPlayed`）、`item_place`（`ItemPlaced`）、`land_place`（`LandBought`/`LandUpgraded`，
+  P16b 与标志物落下动画同步）、`jail`（`PlayerDetained`/`PlayerBailed`）、
   `fate`（抽到 `CardKind::Fate`）、`monopoly`（买下那条街第 3 块）、`bankrupt`（`PlayerBankrupt`）。
   同一帧同一个键只放一条。
 - **UI 只接了 soft 四声**：`ui_click_soft` / `ui_confirm_soft` / `ui_cancel_soft` / `ui_error_soft`
   （`UiAction` 47 变体穷尽分类，禁用按钮发 error）。**`ui_hover_*` 与 crisp 那套都没接** ——
   hover 音是刻意不做，crisp 等有人真听过再决定。
-- **试听**：`NM_AUDIO_SELFTEST=1` 开局把 15 句语音 + 9 条音效 + 4 条 UI 逐条放一遍，
+- **试听**：`NM_AUDIO_SELFTEST=1` 开局把 15 句语音 + 10 条音效 + 4 条 UI 逐条放一遍，
   `NM_AUDIO_LOG=1` 每条打一行。这是「素材好不好听」的入口，不需要走一局。
 
 ## 重跑

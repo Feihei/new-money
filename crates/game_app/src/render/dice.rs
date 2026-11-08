@@ -7,11 +7,16 @@
 //! 时间线归 `render` 自己，**不推进逻辑**（§4.6）：core 在掷骰那一帧就已经把人送去终点，
 //! 骰子只是跟着棋子的视觉位置滚一小会儿。落点读的是 `TokenVisual` 的插值结果而不是
 //! `TokenPosition`，所以棋子走远时骰子也跟得住 —— 而镜头跟的是棋子，骰子因此始终在画面里。
+//!
+//! P16b 起这条时间线**跟着 core 的拍子走**：`Rolling` 相位与它那颗 [`BeatClock`] 才是
+//! 「骰子还在翻、人还不许走」的真相，动画只读 `beat.elapsed` 与 `GameRules::dice_beat`
+//! —— 台词闸按住时钟，骰子就停在半空；单击跳过 → 相位离开 `Rolling` → 骰子立刻收走。
+//! `dice_beat = 0`（headless／长跑）根本不进这一相位，于是这里一颗都不摆。
 
 use std::f32::consts::PI;
 
 use bevy::prelude::*;
-use game_core::prelude::DiceRolled;
+use game_core::prelude::{BeatClock, DiceRolled, GameRules, TurnPhase};
 
 use super::{Rendered, geom::BoardGeom, token::TokenVisual};
 
@@ -24,12 +29,12 @@ const DICE_Y: f32 = 4.0;
 /// 多颗骰子沿屏幕横向排开。正交等轴测相机在 (1,2,1) 方向看向原点，
 /// 屏幕右方向在世界里就是 `(1, 0, -1)`。
 const DICE_SPACING: f32 = 0.82;
-/// 甩起的高度与滚动时长（秒）。龟速玩家走一格 0.18s，六步约 1.08s，骰子先落地。
+/// 甩起的高度（世界单位）。龟速玩家走一格 0.18s，六步约 1.08s，骰子先落地。
 const DICE_TOSS: f32 = 0.65;
-const TUMBLE_SECS: f32 = 0.75;
-/// 停住之后留多久再收（足够看清点数）。
-const HOLD_SECS: f32 = 0.55;
-/// 收尾缩小的时长。
+/// 翻滚占总时长的比例。总时长由规则层给（`GameRules::dice_beat`），这里只保留旧的
+/// 0.75 / (0.75 + 0.55) 那个手感 —— 翻滚结束之后到总时长之间就是「点数停住」那一段。
+const TUMBLE_SHARE: f32 = 0.75 / 1.3;
+/// 收尾缩小的时长（秒）。固定值：它是「消失」的手感，不是拍子的一部分。
 const FADE_SECS: f32 = 0.24;
 /// 滚动的总圈数（弧度）。前半段快、末段平滑收住。
 const SPIN_ANGLE: f32 = 6.0 * PI;
@@ -45,8 +50,6 @@ pub(crate) struct DiceVisual {
     player: Entity,
     /// 停住时的朝向（让结果面朝上）。
     rest: Quat,
-    /// 已经过的秒数。
-    age: f32,
     /// 多颗骰子时的横向错位。
     spread: Vec3,
     /// 找不到棋子时的备用落点（掷骰前的那一格 + 高度）。
@@ -161,6 +164,7 @@ fn pip_flatten(face: u32) -> Vec3 {
 pub(crate) fn spawn_dice_visuals(
     mut commands: Commands,
     geom: Res<BoardGeom>,
+    rules: Res<GameRules>,
     mut rolled: MessageReader<DiceRolled>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
@@ -168,6 +172,12 @@ pub(crate) fn spawn_dice_visuals(
 ) {
     let right = Vec3::new(1.0, 0.0, -1.0).normalize();
     for m in rolled.read() {
+        // 遥控骰子没有「摇」这个动作，`dice_beat = 0`（长跑）根本没有过场 —— 两种都不摆。
+        // 判据读消息上的 `tumble` 而不是当前相位：这条消息与掷骰 system 同在 `Update`，
+        // 同一帧里谁先跑没人保证，按相位判会在「骰子先跑」的那一侧整颗漏掉（实测踩到）。
+        if !m.tumble || rules.dice_beat <= 0.0 {
+            continue;
+        }
         let assets = cache.get_or_insert_with(|| DiceAssets::load(&mut meshes, &mut mats));
         let count = m.dice.clamp(1, 3) as usize;
         let fallback = geom
@@ -184,7 +194,6 @@ pub(crate) fn spawn_dice_visuals(
                     DiceVisual {
                         player: m.player,
                         rest,
-                        age: 0.0,
                         spread,
                         fallback,
                     },
@@ -214,14 +223,23 @@ pub(crate) fn spawn_dice_visuals(
 /// 逐帧滚动、收住、消失。锚点读棋子的视觉位置，所以镜头跟着棋子走时骰子也在画面里。
 pub(crate) fn animate_dice_visuals(
     mut commands: Commands,
-    time: Res<Time>,
+    phase: Res<State<TurnPhase>>,
+    beat: Res<BeatClock>,
+    rules: Res<GameRules>,
     tokens: Query<(&TokenVisual, &GlobalTransform)>,
-    mut dice: Query<(Entity, &mut DiceVisual, &mut Transform)>,
+    mut dice: Query<(Entity, &DiceVisual, &mut Transform)>,
 ) {
-    let dt = time.delta_secs();
-    for (entity, mut visual, mut tr) in &mut dice {
-        visual.age += dt;
-        let u = (visual.age / TUMBLE_SECS).min(1.0);
+    let total = rules.dice_beat.max(0.0);
+    let tumble = (total * TUMBLE_SHARE).max(1e-3);
+    // 相位一离开 `Rolling`（自然走完或玩家单击跳过），骰子立刻收走 —— 它不属于走路
+    let leaving = phase.get() != &TurnPhase::Rolling;
+    for (entity, visual, mut tr) in &mut dice {
+        let age = beat.elapsed;
+        if leaving || age >= total {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let u = (age / tumble).min(1.0);
         let anchor = tokens
             .iter()
             .find(|(token, _)| token.player == visual.player)
@@ -235,11 +253,10 @@ pub(crate) fn animate_dice_visuals(
             Vec3::new(0.35, 0.55, 0.75).normalize(),
             SPIN_ANGLE * (1.0 - u).powi(2),
         ) * visual.rest;
-        let fade = ((TUMBLE_SECS + HOLD_SECS - visual.age) / FADE_SECS).clamp(0.0, 1.0);
+        // 收尾那一段缩小；`total` 很小时按比例缩，免得「还没看清就没了」
+        let fade_span = FADE_SECS.min(total * 0.5).max(1e-3);
+        let fade = ((total - age) / fade_span).clamp(0.0, 1.0);
         tr.scale = Vec3::splat(fade);
-        if visual.age >= TUMBLE_SECS + HOLD_SECS {
-            commands.entity(entity).despawn();
-        }
     }
 }
 

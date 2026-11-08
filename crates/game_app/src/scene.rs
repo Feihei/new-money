@@ -9,9 +9,9 @@
 
 use bevy::prelude::*;
 use game_core::prelude::{
-    ActiveBoard, ArcadeDeal, AtmAccess, CompanyLedgers, CoreSet, Corrections, CouponBoxes,
-    GameSession, Gameplay, Gate, Landing, LastRoll, MarketClock, PendingDecision, Rng, TurnOrder,
-    TurnPhase, WalkClock, WalkHalt,
+    ActiveBoard, ArcadeDeal, AtmAccess, BeatClock, CompanyLedgers, CoreSet, Corrections,
+    CouponBoxes, GameSession, Gameplay, Gate, Landing, LastRoll, MarketClock, PendingDecision,
+    PerformanceHold, Rng, TurnOrder, TurnPhase, WalkClock, WalkHalt,
 };
 
 use crate::ui::BoardUi;
@@ -206,6 +206,11 @@ fn clear_match(
     commands.insert_resource(LastRoll::default());
     commands.insert_resource(WalkHalt::default());
     commands.insert_resource(AtmAccess::default());
+    // 过场拍子与台词闸（P16b）：上一局最后那一拍可能停在半路（`exit` 指着 `Walking`），
+    // 而闸门可能因为「回菜单那一刻正好有一句在念」停在 `true`。两样都是这一局的状态，
+    // 新局必须从默认值起 —— 否则新局第一掷会先跳一个不存在的过场、或者干脆不肯掷骰
+    commands.insert_resource(BeatClock::default());
+    commands.insert_resource(PerformanceHold::default());
     info!("清场：回收 {count} 个规则层实体，回合机已停在 Boot");
 }
 

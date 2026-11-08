@@ -33,10 +33,11 @@ use game_core::prelude::{
     Decision, DecisionChosen, FinancingDrawRequested, GameKind, GameSeed, GameSession, GameSetup,
     Halt, HolidaySet, Institution, ItemKind, LandId, MagicFilter, MagicSpell, MagicSpellPicked,
     MarketClock, MinigameResult, MortgageOp, MortgageRequested, PassiveAnswer, PassiveMove, Paused,
-    Pending, PendingDecision, PlaceItemRequested, PlayCardRequested, RemoteUpgradeRequested,
-    RequestRemoteDice, RequestRoll, RequestStay, START_CASH_TIERS, SaveRequest, ShopOpRequested,
-    StartCashChoice, StartMode, StaySentence, StockId, StockTradeRequested, TileIndex, TradeSide,
-    TurnOrder, TurnPhase, bank_op_allowed, date_of, market_halt,
+    Pending, PendingDecision, PerformanceHold, PlaceItemRequested, PlayCardRequested,
+    RemoteUpgradeRequested, RequestRemoteDice, RequestRoll, RequestSkip, RequestStay,
+    START_CASH_TIERS, SaveRequest, ShopOpRequested, StartCashChoice, StartMode, StaySentence,
+    StockId, StockTradeRequested, TileIndex, TradeSide, TurnOrder, TurnPhase, bank_op_allowed,
+    date_of, market_halt,
 };
 
 use crate::boards::{BoardLibrary, BoardPick};
@@ -131,6 +132,9 @@ impl Plugin for UiPlugin {
                     minigame::sync_arcade,
                     minigame::step_arcade,
                     dispatch_ui_actions,
+                    // 过场里单击 = 跳过（P16b）。排在派发之后：点在按钮上也照跳，
+                    // 而按钮自己那一件事仍然办得到（两条各读各的游标）
+                    skip_beat_on_click,
                     // 排在内层派发之后：读档失败那一帧写进 `SaveNotice` 的话，
                     // 当帧就出现在按钮下面（菜单上没有棋盘，所以它不受 Live 门禁）
                     menu::refresh_notice,
@@ -503,8 +507,16 @@ pub struct BoardUi;
 ///
 /// 规则层还会再认一次「是不是当前玩家」，所以这里放行错人也不会真的掷出骰子
 /// （`roll_dice_system` 的守门）。
-pub(crate) fn can_roll(phase: TurnPhase, paused: &Paused, pending: &PendingDecision) -> bool {
-    phase == TurnPhase::WaitRoll && !paused.0 && pending.active().is_none()
+///
+/// `hold` 是 P16b 的台词闸：有一句台词在念时，掷骰按钮灰着、按下去也不派发 ——
+/// 规则层同样会拒（`not_held`），两处读同一个资源，所以不会出现「亮着却按不动」。
+pub(crate) fn can_roll(
+    phase: TurnPhase,
+    paused: &Paused,
+    pending: &PendingDecision,
+    hold: &PerformanceHold,
+) -> bool {
+    phase == TurnPhase::WaitRoll && !paused.0 && pending.active().is_none() && !hold.0
 }
 
 /// 证券交易的窗口与掷骰同一条：`WaitRoll`、没暂停、没被模态占住。
@@ -517,9 +529,10 @@ pub(crate) fn can_trade(
     phase: TurnPhase,
     paused: &Paused,
     pending: &PendingDecision,
+    hold: &PerformanceHold,
     market_open: bool,
 ) -> bool {
-    market_open && can_roll(phase, paused, pending)
+    market_open && can_roll(phase, paused, pending, hold)
 }
 
 /// 出牌的窗口也是同一条：`WaitRoll`、没暂停、没被模态占住。规则层
@@ -529,8 +542,13 @@ pub(crate) fn can_trade(
 /// 单独一个函数而不是就地用 [`can_roll`]：PLAN §三 记着 4 代的出牌时机分三类
 /// （随时／走到别人地盘时／股市交易时），P3c 给地块卡开那个口子时改的是这一处，
 /// 而不是让「掷骰」那条判据跟着一起变宽。
-pub(crate) fn can_play(phase: TurnPhase, paused: &Paused, pending: &PendingDecision) -> bool {
-    can_roll(phase, paused, pending)
+pub(crate) fn can_play(
+    phase: TurnPhase,
+    paused: &Paused,
+    pending: &PendingDecision,
+    hold: &PerformanceHold,
+) -> bool {
+    can_roll(phase, paused, pending, hold)
 }
 
 /// 柜台此刻开着的话，是关于谁的。
@@ -948,6 +966,9 @@ struct Gate<'w, 's> {
     /// 身上挂着停留计时的人那一颗「掷骰」是「停留」（P4④）。派发读它，不是为了替规则
     /// 层判资格 —— 那边 `roll_dice_system` 仍会拒掉被按住的掷骰，这里只决定发哪个意图。
     stays: Query<'w, 's, &'static StaySentence>,
+    /// 台词闸（P16b）：有一句在念时掷骰/出牌/证券/道具四下都不许派发 ——
+    /// 规则层同样拒（`not_held`），两处读同一个资源，不会「亮着按不动」
+    hold: Res<'w, PerformanceHold>,
 }
 
 /// 命中测试给出的实体那一侧：动作、禁用标记、父链。
@@ -1047,7 +1068,7 @@ struct Saves<'w> {
 /// 被停留按住的人一律改发 [`RequestStay`] —— 规则层也会拒掉他的掷骰，
 /// 但派发侧发对意图，AI 与恶人那条路才有对应的人类入口（P4④）。
 fn send_roll(sends: &mut Sends<'_>, gate: &Gate<'_, '_>, dice: u32) {
-    if !can_roll(*gate.phase.get(), &gate.paused, &gate.pending) {
+    if !can_roll(*gate.phase.get(), &gate.paused, &gate.pending, &gate.hold) {
         return;
     }
     let Some(player) = gate.order.as_ref().and_then(|o| o.current()) else {
@@ -1058,6 +1079,34 @@ fn send_roll(sends: &mut Sends<'_>, gate: &Gate<'_, '_>, dice: u32) {
     } else {
         sends.rolls.write(RequestRoll { player, dice });
     }
+}
+
+/// 过场里单击一下 = 「别等了，往下走」（P16b）。
+///
+/// 读的是**任何一次主键点击**，不挑目标：过场里没有模态，也没有非点不可的按钮 ——
+/// 顶栏那几颗照旧能点，点了顺带跳过早也不算坏事（玩家的意思本来就是「我不想等」）。
+/// 规则层只认当前回合玩家，所以这里发的是当前回合那位的意图，与真人按下的那条同义。
+///
+/// 写在 `Update` 里：`PointerClick` 是 UI 这一帧才采到的。规则层的 `skip_beat_system`
+/// 在下一帧读到它（消息活两帧），最多晚一帧 —— 玩家看不出来。
+fn skip_beat_on_click(
+    mut clicks: MessageReader<PointerClick>,
+    phase: Res<State<TurnPhase>>,
+    order: Option<Res<TurnOrder>>,
+    mut skips: MessageWriter<RequestSkip>,
+) {
+    // 全部读完再判断：短路会让没读完的点击留到下一帧，那时若刚好进了过场就会「隔空跳过」
+    let mut asked = false;
+    for click in clicks.read() {
+        asked |= click.button == PointerButton::Primary;
+    }
+    if !asked || !matches!(phase.get(), TurnPhase::Rolling | TurnPhase::Placing) {
+        return;
+    }
+    let Some(player) = order.as_ref().and_then(|o| o.current()) else {
+        return;
+    };
+    skips.write(RequestSkip { player });
 }
 
 /// 读 `PointerClick`，沿父链找到动作后派发。
@@ -1151,7 +1200,7 @@ fn dispatch_ui_actions(
             // 放道具与出牌同一条窗口（「本回合怎么走」在我走之前定完）。目标格合法性
             // 由规则层的 `place_denied` 再判一次 —— 这里只挡窗口与主语
             UiAction::PlaceItem { item, tile } => {
-                if !can_play(*gate.phase.get(), &gate.paused, &gate.pending) {
+                if !can_play(*gate.phase.get(), &gate.paused, &gate.pending, &gate.hold) {
                     continue;
                 }
                 let Some(player) = gate.order.as_ref().and_then(|o| o.current()) else {
@@ -1165,7 +1214,7 @@ fn dispatch_ui_actions(
             }
             // 遥控骰子：与掷骰互斥地决定这一回合走几格，窗口也同一条
             UiAction::UseRemoteDice { steps } => {
-                if !can_play(*gate.phase.get(), &gate.paused, &gate.pending) {
+                if !can_play(*gate.phase.get(), &gate.paused, &gate.pending, &gate.hold) {
                     continue;
                 }
                 let Some(player) = gate.order.as_ref().and_then(|o| o.current()) else {
@@ -1205,7 +1254,13 @@ fn dispatch_ui_actions(
                 side,
                 shares,
             } => {
-                if !can_trade(*gate.phase.get(), &gate.paused, &gate.pending, market_open) {
+                if !can_trade(
+                    *gate.phase.get(),
+                    &gate.paused,
+                    &gate.pending,
+                    &gate.hold,
+                    market_open,
+                ) {
                     continue;
                 }
                 let Some(player) = gate.order.as_ref().and_then(|o| o.current()) else {
@@ -1303,7 +1358,7 @@ fn dispatch_ui_actions(
             // 出牌：主语仍然取当前回合玩家，而不是按钮里带的谁 —— 手牌面板只画得下
             // 「这个人的手」，规则层 `play_card_system` 还会再认一次主语与窗口
             UiAction::PlayCard { card, aim } => {
-                if !can_play(*gate.phase.get(), &gate.paused, &gate.pending) {
+                if !can_play(*gate.phase.get(), &gate.paused, &gate.pending, &gate.hold) {
                     continue;
                 }
                 let Some(player) = gate.order.as_ref().and_then(|o| o.current()) else {
@@ -1695,6 +1750,9 @@ mod tests {
         /// 被动卡那道门按下的那一句（P13b②）：`(谁, 哪个动作)`。这一栏的主语是**这一阶段
         /// 唯一的看点**：门问的是挨事的那一位，而他在回合序里通常不是当前玩家
         gates: Vec<(Entity, PassiveMove)>,
+        /// 过场里单击跳过的意图（P16b）：`(谁)`。过场里一个按钮都不用点，
+        /// 所以这一栏只有「点了一下、发给了当前回合那位」这一种读数
+        skips: Vec<Entity>,
     }
 
     /// 派发出口的读者们。装成参数包而不是八个函数参数：这仓库遇到 `too_many_arguments`
@@ -1717,6 +1775,7 @@ mod tests {
         builds: MessageReader<'w, 's, BuildRequested>,
         magic_spells: MessageReader<'w, 's, MagicSpellPicked>,
         gates: MessageReader<'w, 's, PassiveAnswer>,
+        skips: MessageReader<'w, 's, RequestSkip>,
     }
 
     fn collect(mut seen: ResMut<Seen>, mut r: Readers<'_, '_>) {
@@ -1753,6 +1812,7 @@ mod tests {
             .extend(r.magic_spells.read().map(|m| (m.player, m.spell)));
         seen.gates
             .extend(r.gates.read().map(|a| (a.player, a.what)));
+        seen.skips.extend(r.skips.read().map(|s| s.player));
     }
 
     /// 仓库里那份真角色表：测试与真实客户端读同一份，数据写错先在这里红。
@@ -1872,6 +1932,8 @@ mod tests {
                 .add_message::<PointerClick>()
                 .add_message::<RequestRoll>()
                 .add_message::<RequestStay>()
+                // P16b：单击跳过的出口（过场里任何主键点击都会走这条）
+                .add_message::<RequestSkip>()
                 .add_message::<DecisionChosen>()
                 .add_message::<BankOpRequested>()
                 .add_message::<StockTradeRequested>()
@@ -1957,7 +2019,12 @@ mod tests {
                     bank_vault: 0,
                 })
                 .insert_resource(pending)
-                .add_systems(Update, (dispatch_ui_actions, collect).chain());
+                // P16b：台词闸。默认开着（没有台词在念）—— 需要验「闸住」的用例自己改它
+                .init_resource::<PerformanceHold>()
+                .add_systems(
+                    Update,
+                    (dispatch_ui_actions, skip_beat_on_click, collect).chain(),
+                );
 
             // P2d：「开始对局」要把角色 id 翻成开局配置，派发因此要读表
             let characters = install_characters(&mut app);
@@ -2174,6 +2241,40 @@ mod tests {
         let mut h = Harness::new(TurnPhase::WaitRoll, true, PendingDecision::default());
         h.click(h.roll_label);
         assert!(h.seen().rolls.is_empty(), "暂停时不该放行掷骰");
+    }
+
+    /// P16b：有一句台词在念时，掷骰按钮灰着、派发也关门 —— 与暂停同一条形状，
+    /// 只是来源是「台词队列非空」而不是玩家按了 Esc。规则层还有 `not_held` 守着，
+    /// 这一条钉的是**按钮那一侧**：看着能点、按下去没反应，是这里写错才会有的病。
+    #[test]
+    fn a_voice_line_holds_the_roll_button_shut() {
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        h.click(h.roll_label);
+        assert_eq!(h.seen().rolls, vec![h.player], "没有闸时照常掷");
+
+        h.app.world_mut().resource_mut::<PerformanceHold>().0 = true;
+        h.click(h.roll_label);
+        assert_eq!(h.seen().rolls, vec![h.player], "闸住之后不该再发第二条掷骰");
+    }
+
+    /// P16b：过场里点一下就是「别等了」。过场里没有非点不可的按钮，所以点在哪儿都算，
+    /// 发的是**当前回合那位**的意图（规则层只认他）。
+    ///
+    /// 两条一起看：过场外点击不该顺手塞一条跳过 —— 那会让每一次普通点击都留下一句
+    /// 「我其实想快进」，而规则层只在过场相位里消费它，于是它只是一条永远不响的噪声。
+    #[test]
+    fn a_click_during_a_beat_asks_to_skip_it() {
+        let mut h = Harness::new(TurnPhase::Rolling, false, PendingDecision::default());
+        h.click(h.bare);
+        assert_eq!(
+            h.seen().skips,
+            vec![h.player],
+            "过场里点一下 = 跳过，主语是当前回合那位"
+        );
+
+        let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
+        h.click(h.bare);
+        assert!(h.seen().skips.is_empty(), "不在过场里，普通点击不该发跳过");
     }
 
     #[test]
@@ -2704,8 +2805,21 @@ mod tests {
             "停止放款还借得出去，这条新闻就白播了"
         );
         // 股市反过来：休市就不亮
-        assert!(can_trade(TurnPhase::WaitRoll, &paused, &pending, true));
-        assert!(!can_trade(TurnPhase::WaitRoll, &paused, &pending, false));
+        let hold = PerformanceHold(false);
+        assert!(can_trade(
+            TurnPhase::WaitRoll,
+            &paused,
+            &pending,
+            &hold,
+            true
+        ));
+        assert!(!can_trade(
+            TurnPhase::WaitRoll,
+            &paused,
+            &pending,
+            &hold,
+            false
+        ));
     }
 
     #[test]
@@ -3046,6 +3160,8 @@ mod tests {
     fn the_play_window_is_exactly_the_roll_window() {
         let paused_on = Paused(true);
         let paused_off = Paused(false);
+        let hold_on = PerformanceHold(true);
+        let hold_off = PerformanceHold(false);
         let mut open = PendingDecision::default();
         open.offer(
             Entity::from_raw_u32(9).expect("9 不是保留值"),
@@ -3056,22 +3172,27 @@ mod tests {
             TurnPhase::Boot,
             TurnPhase::TurnStart,
             TurnPhase::WaitRoll,
+            TurnPhase::Rolling,
             TurnPhase::Walking,
             TurnPhase::Halted,
             TurnPhase::Landed,
             TurnPhase::WaitDecision,
+            TurnPhase::Placing,
             TurnPhase::TurnEnd,
             TurnPhase::Over,
         ] {
             for paused in [&paused_off, &paused_on] {
                 for pending in [PendingDecision::default(), open] {
-                    assert_eq!(
-                        can_play(phase, paused, &pending),
-                        can_roll(phase, paused, &pending),
-                        "{phase:?} / paused={} / pending={:?} 两条窗口判据漂了",
-                        paused.0,
-                        pending.active().map(|(_, about)| about)
-                    );
+                    for hold in [&hold_off, &hold_on] {
+                        assert_eq!(
+                            can_play(phase, paused, &pending, hold),
+                            can_roll(phase, paused, &pending, hold),
+                            "{phase:?} / paused={} / hold={} / pending={:?} 两条窗口判据漂了",
+                            paused.0,
+                            hold.0,
+                            pending.active().map(|(_, about)| about)
+                        );
+                    }
                 }
             }
         }
@@ -3099,6 +3220,10 @@ mod tests {
             .init_state::<TurnPhase>()
             .insert_resource(Paused::default())
             .insert_resource(PendingDecision::default())
+            // P16b：台词闸与它的出口。真实应用里闸门由 core 注册、出口消息也由 core 注册；
+            // 少了它们 `skip_beat_on_click` 建不出来，而它与派发同在一条链上
+            .init_resource::<PerformanceHold>()
+            .add_message::<RequestSkip>()
             .init_resource::<AtmAccess>()
             // P7：`sync_arcade` 读那一手布局种子（对局里由 core 发下来）
             .init_resource::<game_core::prelude::ArcadeDeal>()

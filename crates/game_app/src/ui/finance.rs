@@ -15,8 +15,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
     AtmAccess, BankOp, Books, DataHandles, GameRules, HolidaySet, Institution, MarketClock, Paused,
-    PendingDecision, PriceHistory, StockId, StockPrice, StockSet, TradeSide, TurnOrder, TurnPhase,
-    date_of, days_until_dividend,
+    PendingDecision, PerformanceHold, PriceHistory, StockId, StockPrice, StockSet, TradeSide,
+    TurnOrder, TurnPhase, date_of, days_until_dividend,
 };
 
 use super::skin::Skins;
@@ -265,6 +265,8 @@ pub(crate) struct StockView<'w, 's> {
     pending: Res<'w, PendingDecision>,
     phase: Res<'w, State<TurnPhase>>,
     order: Option<Res<'w, TurnOrder>>,
+    /// 台词闸（P16b）：有一句在念时，买卖按钮灰着（规则层同样拒）
+    hold: Res<'w, PerformanceHold>,
     clock: Res<'w, MarketClock>,
     rules: Res<'w, GameRules>,
     holidays: Res<'w, HolidaySet>,
@@ -296,6 +298,7 @@ pub(crate) fn sync_stock_panel(
             *view.phase.get(),
             &view.paused,
             &view.pending,
+            &view.hold,
             halt.is_open(),
         ) && same_actor(p, &view.pending)
     });
