@@ -10,6 +10,8 @@
 
 use std::sync::OnceLock;
 
+use game_core::board::BuildingKind;
+
 use crate::asset_root;
 
 /// 素材总开关。`NM_ART=0` 整屏退回程序化几何 —— 留这一条是为了能逐像素 A/B：
@@ -294,6 +296,25 @@ pub fn chalk_corner() -> Option<String> {
 /// **成套才上**的判据不在这里 —— 这里是逐级问，成套由 [`crate::render::BuildingModels`] 判。
 pub fn dwell_model(level: u8) -> Option<String> {
     on_disk(&format!("model/dwell_L{level}.glb"))
+}
+
+/// 商业设施的素材槽名（`model/com_<槽>_L<级别>.glb`）。槽名与枚举的对应只写一处 ——
+/// 「盘上明明有图却读不到」查起来比缺图难得多。
+pub fn facility_slug(kind: BuildingKind) -> &'static str {
+    match kind {
+        BuildingKind::Mall => "mall",
+        BuildingKind::Hotel => "hotel",
+        BuildingKind::GasStation => "gas",
+        BuildingKind::Lab => "lab",
+        BuildingKind::Park => "park",
+    }
+}
+
+/// 商业设施模型（`model/com_<槽>_L<level>.glb`，level 1..=5）。与住宅同一条闸门：
+/// 盘上没有就退回程序化方体，不报错。「五级齐不齐」由 [`crate::render::BuildingModels`] 判 ——
+/// 这里是逐级问，成套由那边定。
+pub fn com_model(kind: BuildingKind, level: u8) -> Option<String> {
+    on_disk(&format!("model/com_{}_L{level}.glb", facility_slug(kind)))
 }
 
 /// 特殊格薄饼上的圆形图标（`textures/disc/<格类型>.png`，圆外真透明）。

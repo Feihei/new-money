@@ -7,7 +7,12 @@
 //!   归属不染模型（模型保持原色），而是再摆一份**反向外壳**做角色色描边：同一份场景、
 //!   网格沿法线外扩一圈（`OutlineMeshes`，不是按原点放大），材质换成纯色且只画背面
 //!   （`cull_mode: Front`），轮廓就从模型边缘露出来。
-//! - **程序化方体**（素材不在盘上，或商业地）：一次铺满 `max_building_level` 个方体，
+//! - **商业设施模型**（`model/com_<槽>_L1..L5.glb`，五类各一套）：2×2 地块上五类各五级
+//!   一次摆全、只切可见性 —— 设施类型要到**建楼那一刻**才知道（空商业地身上没有
+//!   `Facility`，`Pending::Build` 才带 kind）。预建设施的 `BuildingLevel` 是 0（它数的是
+//!   加盖次数），可视等级按 `max(1)` 补一层，否则购物中心会画成平地却照收服务费。
+//!   描边与住宅同一套。
+//! - **程序化方体**（素材不在盘上，或民用 1×1）：一次铺满 `max_building_level` 个方体，
 //!   等级只决定露出几层 —— 于是「升级」这条路径上没有 spawn/despawn 的簿记。
 //!
 //! 两条路径都**一次摆满、只切可见性**，这样升级不会产生「这栋旧的没清掉」的空间。
@@ -17,9 +22,10 @@ use std::collections::HashMap;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
+use game_core::board::BuildingKind;
 use game_core::prelude::{
-    BuildingLevel, GameRules, LandId, LandType, Owner, PerformanceHold, PlayerColor, PlayerId,
-    PlayerName, TurnPhase,
+    BuildingLevel, Facility, GameRules, LandId, LandType, Owner, PerformanceHold, PlayerColor,
+    PlayerId, PlayerName, TurnPhase,
 };
 
 use super::geom::BoardRead;
@@ -59,12 +65,23 @@ pub(crate) struct LandVisual {
     bodies: Vec<Entity>,
     /// 模型路径的描边外壳（与 `bodies` 同下标一一对应）；方体路径为空。
     outlines: Vec<Entity>,
+    /// 与 `bodies` 同下标：(设施类别, **类别内等级**)。类别 `None` 是住宅模型或方体
+    ///  —— 这两种没有「设施类别」这个概念。
+    ///
+    /// 等级必须与下标分开存：商业地把五类各五级摊在同一个 `bodies` 里（25 栋），
+    /// 加油站 Lv1 的下标是 10，按 `下标 + 1` 当等级会把它读成 11 级，整类永不显形。
+    body_kinds: Vec<(Option<BuildingKind>, u8)>,
     /// 方体路径的归属色材质（模型路径没有 —— 模型保持原色，归属靠描边）。
     owner_mat: Option<Handle<StandardMaterial>>,
     /// 模型路径的描边材质：一块地一份，换主人只改这一个。
     outline_mat: Option<Handle<StandardMaterial>>,
     /// `bodies` 是场景根（模型）而不是方体。同步时两者对等级的解释不同。
     scenic: bool,
+    /// 这块地此刻立着什么设施 —— 规则层 `Facility` 的一份缓存，由 `sync_facility_kind` 维护。
+    /// 住宅/民用地恒 `None`；空商业地也是 `None`（建成那一刻才由组件填上）。
+    facility: Option<BuildingKind>,
+    /// 上一次漏掉的同步：设施刚插上时 `BuildingLevel` 可能还没变（见 `sync_facility_kind`）。
+    dirty: bool,
     /// 空地上那件归属标志物的两张贴屏四边形：本体与归属色蒙版。
     /// 与建筑一样**一次摆好、只切可见性**，摆不摆由 `sync_buildings` 定。
     prop_body: Entity,
@@ -160,7 +177,7 @@ pub(crate) fn attach_land_visuals(
     art: GroundArt<'_>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<StandardMaterial>>,
-    lands: Query<(Entity, &LandId)>,
+    lands: Query<(Entity, &LandId, Option<&Facility>)>,
 ) {
     let b = &board.active.def;
     let props = art.props.len();
@@ -187,7 +204,7 @@ pub(crate) fn attach_land_visuals(
         }
         meshes.add(mesh)
     };
-    for (entity, id) in &lands {
+    for (entity, id, facility) in &lands {
         // `BoardDef::validate` 保证土地有定义且坐标在网格内；拿不到就是数据错，不画即可
         let (Some(def), Some(frame)) = (b.land(id.0), board.geom.land(id.0)) else {
             continue;
@@ -253,11 +270,29 @@ pub(crate) fn attach_land_visuals(
             }
         }
 
-        // 住宅 1×1 才走模型：商业地是 2×2 的设施，模型是「一户人」的尺度，铺上去会像
-        // 把房子摆在停车场里。素材缺一级时 `BuildingModels` 已经是空表，这里自然退回方体。
-        let scenic = def.land_type == LandType::Residential && !art.models.levels.is_empty();
-        let (bodies, outlines, owner_mat, outline_mat) = if scenic {
-            // 描边材质每块地一份：五个等级共享，换主人只改这一个颜色。
+        // 两条素材路径。住宅是 1×1，五级一套；商业地是 2×2，设施类型要到**建楼那一刻**
+        // 才知道（空商业地身上没有 `Facility`），所以五类各五级一次摆全、只切可见性 ——
+        // 隐藏的 scene 实例不进渲染，这里省掉的是运行时 spawn 的簿记，不是画 25 栋楼。
+        // 某类缺一级时 `BuildingModels::facility` 返回 None，那一类不摆；一类都不齐才退回方体。
+        let residential = def.land_type == LandType::Residential && !art.models.levels.is_empty();
+        let facility_sets: Vec<(BuildingKind, Vec<Handle<WorldAsset>>)> =
+            if def.land_type == LandType::Commercial {
+                BuildingKind::ALL
+                    .iter()
+                    .filter_map(|kind| art.models.facility(*kind).map(|set| (*kind, set.to_vec())))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        let scenic = residential || !facility_sets.is_empty();
+
+        let scale = if residential {
+            dim::DWELL_SCALE
+        } else {
+            dim::COM_SCALE
+        };
+        let (bodies, outlines, body_kinds, owner_mat, outline_mat) = if scenic {
+            // 描边材质每块地一份：同一套模型共享，换主人只改这一个颜色。
             // `unlit` 是「这一圈就是代表色本身」；只画背面（`cull_mode: Front`）才是描边 ——
             // 正面照常画的话这就是一层壳，把模型整个盖住。
             let outline = mats.add(StandardMaterial {
@@ -266,16 +301,37 @@ pub(crate) fn attach_land_visuals(
                 cull_mode: Some(bevy::render::render_resource::Face::Front),
                 ..default()
             });
-            let mut bodies = Vec::with_capacity(art.models.levels.len());
-            let mut outlines = Vec::with_capacity(art.models.levels.len());
-            for handle in &art.models.levels {
+            // (类别, 类别内等级, 句柄)：住宅整列类别都是 `None`，商业按 `ALL` 序一类接一类。
+            let handles: Vec<(Option<BuildingKind>, u8, Handle<WorldAsset>)> = if residential {
+                art.models
+                    .levels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, handle)| (None, i as u8 + 1, handle.clone()))
+                    .collect()
+            } else {
+                facility_sets
+                    .iter()
+                    .flat_map(|(kind, set)| {
+                        let kind = Some(*kind);
+                        set.iter().enumerate().map(move |(i, handle)| {
+                            (kind, i as u8 + 1, handle.clone())
+                        })
+                    })
+                    .collect()
+            };
+            let mut bodies = Vec::with_capacity(handles.len());
+            let mut outlines = Vec::with_capacity(handles.len());
+            let mut body_kinds = Vec::with_capacity(handles.len());
+            for (kind, level, handle) in handles {
                 let at = Transform::from_xyz(center.x, dim::PLOT_H, center.z)
-                    .with_rotation(plot_rot * dim::dwell_upright());
+                    .with_rotation(plot_rot * dim::dwell_upright())
+                    .with_scale(Vec3::splat(scale));
                 bodies.push(
                     commands
                         .spawn((
                             WorldAssetRoot(handle.clone()),
-                            at.with_scale(Vec3::splat(dim::DWELL_SCALE)),
+                            at,
                             Visibility::Hidden,
                             Rendered,
                         ))
@@ -284,19 +340,20 @@ pub(crate) fn attach_land_visuals(
                 outlines.push(
                     commands
                         .spawn((
-                            WorldAssetRoot(handle.clone()),
+                            WorldAssetRoot(handle),
                             SceneOutline {
                                 mat: outline.clone(),
                                 patched: false,
                             },
-                            at.with_scale(Vec3::splat(dim::DWELL_SCALE)),
+                            at,
                             Visibility::Hidden,
                             Rendered,
                         ))
                         .id(),
                 );
+                body_kinds.push((kind, level));
             }
-            (bodies, outlines, None, Some(outline))
+            (bodies, outlines, body_kinds, None, Some(outline))
         } else {
             let w = footprint * dim::BUILD_SCALE;
             let owner_mat = flat(&mut mats, Color::WHITE);
@@ -314,7 +371,7 @@ pub(crate) fn attach_land_visuals(
                     .id();
                 slabs.push(slab);
             }
-            (slabs, Vec::new(), Some(owner_mat), None)
+            (slabs, Vec::new(), Vec::new(), Some(owner_mat), None)
         };
         // 空地的归属标志物：本体 + 归属色蒙版两张。一开始都藏着 —— 摆不摆由
         // `sync_buildings` 按「有主人 + 还是空地 + 这位角色有素材」决定。
@@ -357,9 +414,16 @@ pub(crate) fn attach_land_visuals(
         commands.entity(entity).insert(LandVisual {
             bodies,
             outlines,
+            body_kinds,
             owner_mat,
             outline_mat,
             scenic,
+            facility: facility.map(|f| f.0),
+            // `LandVisual` 是 `Commands` 延迟插的，`sync_buildings` 第一次看见它时
+            // `Owner`/`BuildingLevel` 的 change tick 可能已经与上次运行对齐，`is_changed()`
+            // 读成 false —— 那就一次都不摆（预建设施与空地全停在 `Hidden`，画面上只有粉笔框）。
+            // 首帧强制同步一次，代价是每块地一次。
+            dirty: true,
             prop_body,
             prop_edge,
             prop_body_mat,
@@ -375,7 +439,7 @@ pub(crate) fn attach_land_visuals(
 /// 模型是 PBR 材质，盘上其余东西全 `unlit` —— 没有光模型就是一团黑剪影（§7.5）。
 /// 只在模型真装了的时候加一盏斜上方的主光；环境光在 `RenderPlugin` 里常驻。
 pub(crate) fn spawn_building_light(mut commands: Commands, models: Res<BuildingModels>) {
-    if models.levels.is_empty() {
+    if !models.any() {
         return;
     }
     commands.spawn((
@@ -392,6 +456,22 @@ pub(crate) fn spawn_building_light(mut commands: Commands, models: Res<BuildingM
     ));
 }
 
+/// 把规则层的 [`Facility`] 抄进 [`LandVisual`]。
+///
+/// 为什么另开一条而不是让 `sync_buildings` 直接读：`Facility` 是建楼时用 `Commands` 插的
+/// （`property::build_op_system`），同一帧的 `sync_buildings` 还看不到它 —— 而到了下一帧
+/// `BuildingLevel` 已经不再变化，那条会整块跳过，楼就永远不出现。这条每帧扫一遍
+/// （几十块地，成本可忽略），只在类别真的变了时打一个「漏同步」标记。
+pub(crate) fn sync_facility_kind(lands: Query<(Option<&Facility>, &mut LandVisual)>) {
+    for (facility, mut visual) in lands {
+        let kind = facility.map(|f| f.0);
+        if visual.facility != kind {
+            visual.facility = kind;
+            visual.dirty = true;
+        }
+    }
+}
+
 /// 归属与等级是唯一的真相来源，这里只做变化驱动的同步（`Ref<T>` 变化检测，不轮询）。
 pub(crate) fn sync_buildings(
     mut commands: Commands,
@@ -401,9 +481,18 @@ pub(crate) fn sync_buildings(
     mut mats: ResMut<Assets<StandardMaterial>>,
 ) {
     for (owner, level, mut visual) in &mut lands {
-        if !owner.is_changed() && !level.is_changed() {
+        if !owner.is_changed() && !level.is_changed() && !visual.dirty {
             continue;
         }
+        // 有设施就至少露 Lv1：预建设施在棋盘数据里只写「这块地立着什么」，而
+        // `BuildingLevel` 数的是**加盖次数**，开局是 0。不补这一格，购物中心会画成一块
+        // 平地却照收服务费（服务费只看 `Facility`，不看等级）。
+        let shown = if visual.facility.is_some() {
+            level.0.max(1)
+        } else {
+            level.0
+        };
+        visual.dirty = false;
         // 首帧这次同步只摆状态、不播动画（读档时的「一场雨」见 `synced_once` 的注）
         let first = !visual.synced_once;
         visual.synced_once = true;
@@ -428,9 +517,15 @@ pub(crate) fn sync_buildings(
         for (i, body) in visual.bodies.iter().enumerate() {
             // 模型：同时只露等级对应的那一栋；方体：露出前 `level` 个，堆成塔
             let visible = if visual.scenic {
-                level.0 == i as u8 + 1
+                // 商业地还要挑对类别：五类各五级只露「当前设施 + 当前等级」这一栋。
+                let (kind, at) = visual
+                    .body_kinds
+                    .get(i)
+                    .copied()
+                    .unwrap_or((None, 0));
+                kind == visual.facility && shown == at
             } else {
-                (i as u8) < level.0
+                (i as u8) < shown
             };
             // `try_insert` 而不是 `insert`（P10c 踩到）：这一帧若正好在拆场
             // （`OnEnter(Menu)` 把整盘连建筑一起 despawn），`Commands` 的延迟写会
@@ -458,7 +553,7 @@ pub(crate) fn sync_buildings(
         // 「这位有没有素材」也在这里判 —— 查不到就不摆，不按座位借别人的道具（那是假信息）。
         let want = who
             .and_then(|(_, _, name)| crate::art::prop_key(&name.0))
-            .filter(|key| level.0 == 0 && props.get(key).is_some());
+            .filter(|key| shown == 0 && props.get(key).is_some());
         if want != visual.prop_key {
             if let Some(key) = want
                 && let Some((body, edge)) = props.get(key)

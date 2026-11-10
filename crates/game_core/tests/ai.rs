@@ -1137,7 +1137,9 @@ fn status_of(app: &App, land: u32) -> Option<LandStatus> {
 #[test]
 fn an_ai_seat_plays_its_grab_card_on_the_best_plot() {
     // 演示盘六块空地，大佬奸（25.6 倍回本）算下来最值的是外滩商业区：
-    // 单地块那一族一买下就是垄断（租金 280 → 560），560 × 25.6 − 4400 = 9936，全场最高。
+    // 单地块那一族一买下就是垄断（租金 280 → 560），560 × 25.6 − 6600 = 7736，全场最高。
+    // 6600 = 地价 4400 + 预建购物中心的造价 2200：设施建成即 Lv1，账面价值含它
+    // （`estate_value = land_price + upgrade_cost × level`），买地就是连楼一起过户。
     let (mut app, seat) = solo_ai(AiProfile::SHARK);
     set_cash(&mut app, seat, 20_000);
     let grab = item_index(&app, "item_grab").0;
@@ -1155,8 +1157,8 @@ fn an_ai_seat_plays_its_grab_card_on_the_best_plot() {
     );
     assert_eq!(
         cash_of(&mut app, seat),
-        15_600,
-        "买地走的是 Books::buy 正路：地价 4400 从现金里扣"
+        13_400,
+        "买地走的是 Books::buy 正路：地价 4400 + 设施造价 2200（连楼一起过户）"
     );
 }
 

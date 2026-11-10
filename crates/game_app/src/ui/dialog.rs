@@ -28,8 +28,8 @@ use super::finance::{comma, money_row};
 use super::skin::{Skins, UiKit};
 use super::theme::{col, layout, size};
 use super::{
-    BoardUi, ButtonSpec, SECONDARY, UiAction, building_label, button, info_row, label, overlay,
-    panel, separator,
+    BoardUi, ButtonSpec, SECONDARY, UiAction, building_label, button, facility_label, info_row,
+    label, overlay, panel, separator,
 };
 use crate::art;
 use crate::render::{DevFont, palette};
@@ -1162,6 +1162,8 @@ fn buy_modal(
     });
     let price = books.quoted(ChargeKind::BuyLand { land }, player, base);
     let rent: Vec<i64> = def.map(|l| l.rent.clone()).unwrap_or_default();
+    let commercial = def.is_some_and(|l| l.land_type == LandType::Commercial);
+    let facility = books.facility_of(land);
     let type_text = match def.map(|l| l.land_type) {
         Some(LandType::Commercial) => "商业用地",
         Some(LandType::Insurance) => "保险用地",
@@ -1211,18 +1213,25 @@ fn buy_modal(
                     col::COST,
                     key_w,
                 );
-                // 地上已经有楼：那几层不是赠品，而是买价里最贵的一截，必须自己占一行说话。
-                // 等级念的是 `building_label` 那一套（Lv0＝空地、Lv1..=5＝建筑 Lv1..=5），
-                // 而这一行恰好是那条映射最有用的地方 —— 「楼上已有 Lv3」会被读成盖了三层
-                if storeys >= 2 {
-                    info_row(
-                        rows,
-                        &font.0,
-                        "楼上已有",
-                        &format!("{}，连地一起过户", building_label(storeys)),
-                        col::GAIN,
-                        key_w,
-                    );
+                // 地上已经有楼/设施：那几层不是赠品，而是买价里最贵的一截，必须自己占一行说话。
+                // 住宅念 `building_label` 那一套（Lv0＝空地）；商业地建成即 Lv1，
+                // 念 `facility_label`（空地是 Lv0、设施是 Lv1..=Lv5）。
+                let built = if commercial {
+                    facility.is_some()
+                } else {
+                    storeys >= 2
+                };
+                if built {
+                    let what = if commercial {
+                        format!(
+                            "{} {}，连地一起过户",
+                            facility.map_or("设施", |k| k.label()),
+                            facility_label(storeys)
+                        )
+                    } else {
+                        format!("{}，连地一起过户", building_label(storeys))
+                    };
+                    info_row(rows, &font.0, "楼上已有", &what, col::GAIN, key_w);
                     info_row(
                         rows,
                         &font.0,
@@ -1233,7 +1242,20 @@ fn buy_modal(
                     );
                 }
                 info_row(rows, &font.0, "类型", type_text, col::VALUE, key_w);
-                if !rent.is_empty() {
+                if commercial {
+                    // 商业地不走租金表，收的是「基础金额 × 等级」的服务费；具体原型的
+                    // 骰面/单价按类别各不相同，面板只说这条通则可算的那一半。
+                    if let Some(kind) = facility {
+                        info_row(
+                            rows,
+                            &font.0,
+                            "服务费",
+                            &format!("{} 基础 × {}", kind.label(), storeys.max(1)),
+                            col::VALUE,
+                            key_w,
+                        );
+                    }
+                } else if !rent.is_empty() {
                     rows.spawn(label(&font.0, "租金表", size::SMALL, col::KEY));
                     for (i, amount) in rent.iter().enumerate() {
                         info_row(
@@ -1311,6 +1333,8 @@ fn upgrade_modal(
         .unwrap_or(col::TITLE_GOLD);
     let cost = game_core::economy::upgrade_cost(&books.active.def, &view).unwrap_or(0);
     let rent: Vec<i64> = def.map(|l| l.rent.clone()).unwrap_or_default();
+    let commercial = def.is_some_and(|l| l.land_type == LandType::Commercial);
+    let facility = books.facility_of(land);
     let level = view.level as usize;
     let current_rent = rent.get(level.saturating_sub(1)).copied().unwrap_or(0);
     let new_rent = rent.get(level).copied().unwrap_or(0);
@@ -1348,54 +1372,101 @@ fn upgrade_modal(
             })
             .with_children(|rows| {
                 let key_w = layout::INFO_KEY_W_WIDE;
-                info_row(
-                    rows,
-                    &font.0,
-                    "当前等级",
-                    &building_label(level as u8),
-                    col::VALUE,
-                    key_w,
-                );
-                info_row(
-                    rows,
-                    &font.0,
-                    "升级后",
-                    &building_label(level as u8 + 1),
-                    col::GAIN,
-                    key_w,
-                );
-                info_row(
-                    rows,
-                    &font.0,
-                    "升级费用",
-                    &format!("${cost}"),
-                    col::COST,
-                    key_w,
-                );
-                info_row(
-                    rows,
-                    &font.0,
-                    "当前租金",
-                    &format!("${current_rent}"),
-                    col::VALUE,
-                    key_w,
-                );
-                info_row(
-                    rows,
-                    &font.0,
-                    "升级后租金",
-                    &format!("${new_rent}"),
-                    col::GAIN,
-                    key_w,
-                );
-                info_row(
-                    rows,
-                    &font.0,
-                    "租金增幅",
-                    &format!("+${}", new_rent - current_rent),
-                    col::GAIN,
-                    key_w,
-                );
+                if commercial {
+                    // 商业设施念 `facility_label`（建成即 Lv1），收益是**服务费倍率**
+                    // 而不是租金表 —— 踩到的人付「基础金额 × 等级」。
+                    info_row(
+                        rows,
+                        &font.0,
+                        "当前等级",
+                        &facility_label(level as u8),
+                        col::VALUE,
+                        key_w,
+                    );
+                    info_row(
+                        rows,
+                        &font.0,
+                        "升级后",
+                        &facility_label(level as u8 + 1),
+                        col::GAIN,
+                        key_w,
+                    );
+                    info_row(
+                        rows,
+                        &font.0,
+                        "升级费用",
+                        &format!("${cost}"),
+                        col::COST,
+                        key_w,
+                    );
+                    info_row(
+                        rows,
+                        &font.0,
+                        "服务费",
+                        &format!("基础 × {} → × {}", level.max(1), level + 1),
+                        col::GAIN,
+                        key_w,
+                    );
+                    if let Some(kind) = facility {
+                        info_row(
+                            rows,
+                            &font.0,
+                            "设施",
+                            kind.label(),
+                            col::VALUE,
+                            key_w,
+                        );
+                    }
+                } else {
+                    info_row(
+                        rows,
+                        &font.0,
+                        "当前等级",
+                        &building_label(level as u8),
+                        col::VALUE,
+                        key_w,
+                    );
+                    info_row(
+                        rows,
+                        &font.0,
+                        "升级后",
+                        &building_label(level as u8 + 1),
+                        col::GAIN,
+                        key_w,
+                    );
+                    info_row(
+                        rows,
+                        &font.0,
+                        "升级费用",
+                        &format!("${cost}"),
+                        col::COST,
+                        key_w,
+                    );
+                    info_row(
+                        rows,
+                        &font.0,
+                        "当前租金",
+                        &format!("${current_rent}"),
+                        col::VALUE,
+                        key_w,
+                    );
+                    info_row(
+                        rows,
+                        &font.0,
+                        "升级后租金",
+                        &format!("${new_rent}"),
+                        col::GAIN,
+                        key_w,
+                    );
+                    info_row(
+                        rows,
+                        &font.0,
+                        "租金增幅",
+                        &format!("+${}", new_rent - current_rent),
+                        col::GAIN,
+                        key_w,
+                    );
+                }
             });
             p.spawn(separator());
             p.spawn(center_label(
@@ -1975,6 +2046,22 @@ fn remote_build_modal(
                 let land = view.id;
                 let cost = game_core::economy::upgrade_cost(def, view).unwrap_or(i64::MAX);
                 let name = def.land(land.0).map_or("？", |l| l.name.as_str());
+                // 商业设施与住宅两套判据：商业只看这一块、封顶按设施类别，
+                // 加油站／公园 `cap == 1` 连按钮都不该亮。
+                let commercial = def
+                    .land(land.0)
+                    .is_some_and(|l| l.land_type == LandType::Commercial);
+                let facility = books.facility_of(land);
+                let cap = if commercial {
+                    facility.map_or(1, |k| k.max_level())
+                } else {
+                    books.rules.max_building_level
+                };
+                let upgradable = if commercial {
+                    facility.is_some_and(|k| k.upgradable())
+                } else {
+                    true
+                };
                 let deny: Option<&'static str> = if view.owner != Some(pid) {
                     Some(if view.owner.is_none() {
                         "无主的地"
@@ -1983,24 +2070,42 @@ fn remote_build_modal(
                     })
                 } else if view.mortgaged {
                     Some("抵押中的地")
-                } else if view.level >= books.rules.max_building_level {
+                } else if !upgradable {
+                    Some("这里只有 Lv1")
+                } else if view.level >= cap {
                     Some("已经封顶")
                 } else if view.status == Some(LandStatus::Sealed) {
                     Some("查封中的地")
-                } else if !game_core::economy::can_upgrade(
-                    view,
-                    pid,
-                    &views,
-                    cost,
-                    cash,
-                    &books.rules,
-                ) {
-                    // 剩下的拒绝只可能是组内那两条与钱 —— 归成一句人话
-                    Some("组内还有别的地没齐，或带的钱不够")
+                } else if if commercial {
+                    !game_core::economy::can_upgrade_facility(view, pid, cost, cash, cap)
+                } else {
+                    !game_core::economy::can_upgrade(
+                        view,
+                        pid,
+                        &views,
+                        cost,
+                        cash,
+                        &books.rules,
+                    )
+                } {
+                    // 商业只可能是钱不够；住宅还剩组内那两条
+                    Some(if commercial {
+                        "带的钱不够"
+                    } else {
+                        "组内还有别的地没齐，或带的钱不够"
+                    })
                 } else {
                     None
                 };
-                let text = format!("{}  {}", name, building_label(view.level));
+                let text = format!(
+                    "{}  {}",
+                    name,
+                    if commercial {
+                        facility_label(view.level)
+                    } else {
+                        building_label(view.level)
+                    }
+                );
                 let buy = if free {
                     "免费升两层".to_string()
                 } else {

@@ -14,6 +14,7 @@
 
 mod common;
 
+use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::App;
 use common::*;
 use game_core::board::{BuildingKind, FeeDef, LandType};
@@ -64,6 +65,16 @@ fn service_lines(app: &App) -> Vec<String> {
         .into_iter()
         .filter(|l| l.starts_with("Service("))
         .collect()
+}
+
+/// 某块地的 `BuildingLevel`。商业地建成即 1、预建设施也是 1 —— 空地才是 0。
+fn level_of(app: &mut App, land: u32) -> u8 {
+    let w = app.world_mut();
+    let mut q = w.query::<(&LandId, &BuildingLevel)>();
+    q.iter(w)
+        .find(|(id, _)| id.0 == land)
+        .map(|(_, level)| level.0)
+        .expect("prototype 里有这块地")
 }
 
 /// 格号一律现读（`common::land_tile` / `common::stand_to_land`），这条文件里不留写死的站位。
@@ -528,22 +539,23 @@ fn your_own_empty_lot_opens_the_build_window_and_refuses_a_second_build() {
     assert_cash_audit(&mut app, START);
 }
 
-/// 建成之后踩回自己家：无事发生 —— 设施不可升级、没有「逛自己的店」。
+/// 建成之后踩回自己家：购物中心能升到 Lv5，所以开**升级**窗口、不再开第二次建设。
+/// 加油站／公园不在这条路上（见 `a_gas_station_has_no_upgrade_window`）—— 它们没有第二级。
 #[test]
-fn your_own_occupied_lot_says_nothing_at_all() {
-    let (mut app, _p0) = ready_on(5, 1, DecisionPolicy::DeclineAll);
-    own(&mut app, 2, Some(0), 0, false); // 预建购物中心就在身上
+fn your_own_occupied_mall_offers_an_upgrade_not_a_second_build() {
+    let (mut app, p0) = ready_on(5, 1, DecisionPolicy::Hold);
+    own(&mut app, 2, Some(0), 1, false); // 预建购物中心就在身上（Lv1）
 
     play_turns(&mut app, 1);
 
-    assert_eq!(pending_of(&app), None);
+    assert_eq!(pending_of(&app), Some((p0, Pending::Upgrade(LandId(2)))));
     assert!(
         !ledger(&app).iter().any(|l| l.starts_with("BuildOffer(")),
         "有设施的地不开建设窗口"
     );
     assert!(
-        !ledger(&app).iter().any(|l| l.starts_with("UpgradeOffer(")),
-        "设施也不接受升级报价"
+        ledger(&app).iter().any(|l| l.starts_with("UpgradeOffer(")),
+        "购物中心接受升级报价"
     );
 }
 
@@ -699,4 +711,125 @@ fn a_hotel_guest_cannot_be_bailed_out_of_the_jail_gate() {
         "监狱门口放不出住在旅馆里的人 —— 窗口管的是这一处"
     );
     assert_eq!(points_of(&app, p1), 300, "被拒的保释一分不许收");
+}
+// ===== 商业设施的等级上限（10-31 拍板） =====
+
+/// 类别级数表：购物中心／旅馆／研究所 = 5，加油站／公园 = 1。
+#[test]
+fn only_three_facilities_have_five_levels() {
+    use game_core::board::BuildingKind::{GasStation, Hotel, Lab, Mall, Park};
+    assert_eq!(Mall.max_level(), 5);
+    assert_eq!(Hotel.max_level(), 5);
+    assert_eq!(Lab.max_level(), 5);
+    assert_eq!(GasStation.max_level(), 1);
+    assert_eq!(Park.max_level(), 1);
+    assert!(Mall.upgradable() && Hotel.upgradable() && Lab.upgradable());
+    assert!(!GasStation.upgradable() && !Park.upgradable());
+}
+
+/// 建成即 Lv1：`Books::build` 那一格。少了它，商业地第一次升级会从 0 变 1，
+/// 视觉上停在 L1 升不上去（预建设施在 `spawn_lands` 里也按同一个口径置 1）。
+#[test]
+fn a_new_facility_is_built_at_level_one() {
+    let (mut app, p0) = ready_on(5, 1, DecisionPolicy::Hold);
+    strip_facility(&mut app, 2);
+    own(&mut app, 2, Some(0), 0, false);
+
+    play_turns(&mut app, 1);
+    assert_eq!(pending_of(&app), Some((p0, Pending::Build(LandId(2)))));
+    build_ask(&mut app, p0, LandId(2), BuildingKind::Mall);
+
+    assert_eq!(facility_of(&mut app, 2), Some(BuildingKind::Mall));
+    assert_eq!(level_of(&mut app, 2), 1, "建成即 Lv1");
+    assert_cash_audit(&mut app, START);
+}
+
+/// Lv4 的购物中心能升到 Lv5；满级之后账本自己就不认第二次。
+#[test]
+fn a_mall_can_reach_five_and_then_stops() {
+    let (mut app, p0) = ready_on(5, 1, DecisionPolicy::AcceptAll);
+    own(&mut app, 2, Some(0), 4, false);
+    set_cash(&mut app, p0, 50_000);
+
+    play_turns(&mut app, 1);
+    assert_eq!(level_of(&mut app, 2), 5, "Lv4 → Lv5");
+
+    let again = app
+        .world_mut()
+        .run_system_once(move |mut books: game_core::settle::Books| {
+            books.upgrade(p0, LandId(2))
+        })
+        .expect("升级 system 跑得起来");
+    assert_eq!(again, None, "满级不再升");
+    assert_eq!(level_of(&mut app, 2), 5);
+}
+
+/// 加油站只有 Lv1：踩回自己家什么都不弹，连升级报价都没有。
+#[test]
+fn a_gas_station_has_no_upgrade_window() {
+    let (mut app, _p0) = ready_on(5, 1, DecisionPolicy::Hold);
+    retune(
+        &mut app,
+        2,
+        BuildingKind::GasStation,
+        Some(FeeDef::PerStep {
+            rate: 150,
+            requires_mount: true,
+        }),
+    );
+    own(&mut app, 2, Some(0), 1, false);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(pending_of(&app), None);
+    assert!(
+        !ledger(&app).iter().any(|l| l.starts_with("BuildOffer(")),
+        "有设施的地不开建设窗口"
+    );
+    assert!(
+        !ledger(&app).iter().any(|l| l.starts_with("UpgradeOffer(")),
+        "加油站没有第二级"
+    );
+}
+
+/// 公园同理 —— 换一个类别再回一次，免得「只测了加油站」。
+#[test]
+fn a_park_has_no_upgrade_window() {
+    let (mut app, _p0) = ready_on(5, 1, DecisionPolicy::Hold);
+    retune(&mut app, 2, BuildingKind::Park, None);
+    own(&mut app, 2, Some(0), 1, false);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(pending_of(&app), None);
+    assert!(!ledger(&app).iter().any(|l| l.starts_with("UpgradeOffer(")));
+}
+
+/// 服务费 × 等级：同一块购物中心 Lv2，踩到付的是档位的**两倍**。
+/// 升级若有收益却不进这笔账，「能升到 Lv5」在玩家眼里就是纯装饰。
+#[test]
+fn the_service_fee_scales_with_the_facility_level() {
+    let (mut app, _p0) = ready_on(5, 1, DecisionPolicy::Hold);
+
+    own(&mut app, 2, Some(1), 2, false); // 归 P1，二级
+
+    play_turns(&mut app, 1);
+
+    let lines = service_lines(&app);
+    assert_eq!(lines.len(), 1, "恰好一笔服务费，实际: {lines:?}");
+    let line = &lines[0];
+    let roll: u32 = line
+        .split("摇")
+        .nth(1)
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.parse().ok())
+        .expect("流水里带摇出的数");
+    let amount: i64 = line
+        .split('$')
+        .nth(1)
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.parse().ok())
+        .expect("流水里带金额");
+    assert_eq!(amount, tier_of(roll) * 2, "Lv2 收两倍：{line}");
+    assert_cash_audit(&mut app, START);
 }

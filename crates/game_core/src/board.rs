@@ -128,6 +128,25 @@ impl BuildingKind {
             Self::Park => "公园",
         }
     }
+
+    /// 这一类设施在规则上能升到几级。
+    ///
+    /// 购物中心、旅馆、研究所有五级形态与逐级递增的服务费；加油站与公园**只有 Lv1**
+    /// —— 加油站收的是「本回合骰面 × 单价」（没有值得逐级递进的东西），公园根本
+    /// 不收费（D 型空实现），两者建成即终态。所以升级窗口对它们根本不弹，
+    /// 模型侧也各只有一栋（用最丰富的那套形体代表唯一的 L1）。
+    pub const fn max_level(self) -> u8 {
+        match self {
+            Self::Mall | Self::Hotel | Self::Lab => 5,
+            Self::GasStation | Self::Park => 1,
+        }
+    }
+
+    /// 能不能升级。读 [`Self::max_level`] 而不是另写一张匹配表：两者一旦分开，
+    /// 「能升却只有一级」这种自相矛盾的状态就写得出来。
+    pub const fn upgradable(self) -> bool {
+        self.max_level() > 1
+    }
 }
 
 /// 收费原型的参数（serde 形，P10b）。**收费就是数据**：购物中心与旅馆的档位、

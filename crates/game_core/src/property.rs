@@ -177,9 +177,13 @@ pub fn settle_property_landing(
 /// 共用这一份判据 —— 两处各写一遍就会出现「一边的按钮灰着、另一边的账本能办」。
 /// 返回是否真的摆了窗口：停留那一侧拿它决定「把回合交给窗口」还是「照常结束回合」。
 ///
-/// 商业地已有设施时是空支（设施不可升级，4 代也没有「逛自己的店」）；四个「必败」条件
-/// （押着／查封／衰神在场／现金不够升级）里，前三条连窗口都不弹，现金不够**照样弹**
-/// —— 与买地报价同一条口径，按钮灰着、理由写在按钮上。
+/// 商业地分两段：**空商业地**开建设窗口；**已有设施**时，购物中心／旅馆／研究所
+/// 开升级窗口（升到 Lv5），加油站／公园建成即终态、什么都不弹。商业升级的判据是
+/// `economy::can_upgrade_facility`，与住宅那套「垄断整街 + 组内最低层」分开 ——
+/// 后者对商业地永远不成立（一条街 4 住宅 + 1 商业，商业建成即 1 级，不可能是组内最低）。
+///
+/// 四个「必败」条件（押着／查封／衰神在场／现金不够升级）里，前三条连窗口都不弹，
+/// 现金不够**照样弹** —— 与买地报价同一条口径，按钮灰着、理由写在按钮上。
 pub fn offer_own_land(
     books: &Books,
     player: Entity,
@@ -193,17 +197,33 @@ pub fn offer_own_land(
         return false;
     };
     if def_land.land_type == LandType::Commercial {
-        if books.facility_of(land).is_some()
-            || view.mortgaged
-            || view.status == Some(crate::status::LandStatus::Sealed)
-            || books.acquire_denied(player)
-        {
+        let Some(owner) = books.id_of(player) else {
+            return false;
+        };
+        let base = economy::upgrade_cost(&books.active.def, view).unwrap_or(0);
+        let Some(facility) = books.facility_of(land) else {
+            if view.mortgaged
+                || view.status == Some(crate::status::LandStatus::Sealed)
+                || books.acquire_denied(player)
+            {
+                return false;
+            }
+            let cost = books.quoted(ChargeKind::Build { land }, player, base);
+            offer(pending, player, Pending::Build(land), from_landing);
+            sink.builds.write(BuildOffered { player, land, cost });
+            return true;
+        };
+        // 已有设施：加油站／公园没有第二级，满级的那一类也不再报价
+        let cap = facility.max_level();
+        if !facility.upgradable() || view.level >= cap || books.acquire_denied(player) {
             return false;
         }
-        let base = economy::upgrade_cost(&books.active.def, view).unwrap_or(0);
-        let cost = books.quoted(ChargeKind::Build { land }, player, base);
-        offer(pending, player, Pending::Build(land), from_landing);
-        sink.builds.write(BuildOffered { player, land, cost });
+        let cost = books.quoted(ChargeKind::Upgrade { land }, player, base);
+        if !economy::can_upgrade_facility(view, owner, cost, books.balance(player), cap) {
+            return false;
+        }
+        offer(pending, player, Pending::Upgrade(land), from_landing);
+        sink.upgrades.write(UpgradeOffered { player, land, cost });
         return true;
     }
     let Some(owner) = books.id_of(player) else {
@@ -286,18 +306,26 @@ fn settle_service(
     let Some(bill) = service::assess(&proto, roll, steps, mount) else {
         return;
     };
+    // 服务费 × 设施等级（10-31 拍板）：L1 就是数据里那一档，L5 是五倍。
+    // 等级只乘在**名义金额**上、不进 `stay_days`（住几天跟几层楼无关），
+    // 也不改免费卡/大财神那类修正的语义 —— 它们消的是这一整笔账。
+    let level = gate
+        .sink
+        .books
+        .view(land)
+        .map_or(1, |v| v.level.max(1)) as i64;
     let charge = Charge::new(
         ChargeKind::Service,
         Some(player),
         Some(owner_entity),
-        bill.base,
+        bill.base * level,
     );
     submit(
         gate,
         Job::new(
             player,
             vec![Step::Bill(charge)],
-            format!("L{} 的{}", land.0, kind.label()),
+            format!("L{} 的{}{}级", land.0, kind.label(), level),
             None,
             Gavel::Public,
             Tail::Service {

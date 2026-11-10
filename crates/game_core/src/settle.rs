@@ -1202,6 +1202,22 @@ impl<'w, 's> Books<'w, 's> {
         if self.acquire_denied(player) {
             return None;
         }
+        // 封顶与判据都按「这块地是住宅还是商业」分叉：商业设施只看自己那一块，
+        // 加油站／公园的 `cap` 是 1（`upgradable` 为假），到这里直接没有升级这回事。
+        let commercial = self
+            .active
+            .def
+            .land(land.0)
+            .is_some_and(|d| d.land_type == crate::board::LandType::Commercial);
+        let cap = if commercial {
+            let kind = self.facility_of(land)?;
+            if !kind.upgradable() {
+                return None;
+            }
+            kind.max_level()
+        } else {
+            self.rules.max_building_level
+        };
         let base = economy::upgrade_cost(&self.active.def, &view)?;
         // 董事长免价：quote 都不用问 —— 那条管线是「这笔账怎么打折」的，没有账
         let cost = if chairman {
@@ -1209,16 +1225,20 @@ impl<'w, 's> Books<'w, 's> {
         } else {
             self.quoted(ChargeKind::Upgrade { land }, player, base)
         };
-        let views = self.views();
         let cash = self.balance(player);
-        if !economy::can_upgrade(&view, pid, &views, cost, cash, &self.rules) {
+        let allowed = if commercial {
+            economy::can_upgrade_facility(&view, pid, cost, cash, cap)
+        } else {
+            let views = self.views();
+            economy::can_upgrade(&view, pid, &views, cost, cash, &self.rules)
+        };
+        if !allowed {
             return None;
         }
         let entity = self.land_entity(land)?;
         if cost > 0 {
             self.debit(player, cost).ok()?;
         }
-        let max = self.rules.max_building_level;
         let extra = if chairman {
             1
         } else {
@@ -1226,7 +1246,7 @@ impl<'w, 's> Books<'w, 's> {
         };
         let (_, _, _, mut level, _) = self.plots.get_mut(entity).ok()?;
         // 封顶那一位上多出来的那一层少掉，不是缺陷：4 代也没有「盖穿顶」这件事
-        level.0 = level.0.saturating_add(1 + extra).min(max);
+        level.0 = level.0.saturating_add(1 + extra).min(cap);
         Some(level.0)
     }
 
@@ -1246,6 +1266,15 @@ impl<'w, 's> Books<'w, 's> {
         let cost = self.build_probe(player, land, kind)?;
         self.debit(player, cost)
             .map_err(|_| crate::property::BuildDeny::ShortOfCash)?;
+        // 商业地建成即 Lv1（住宅是买地 Lv0、加盖第一层才起楼）。这一格有两个读者：
+        // 渲染只露「当前等级」那一栋；`estate_value` 按 `land_price + upgrade_cost × level`
+        // 记账面，少了它这笔造价就从物价指数里蒸发。
+        let Some(entity) = self.land_entity(land) else {
+            return Err(crate::property::BuildDeny::NoWindow);
+        };
+        if let Ok((_, _, _, mut level, _)) = self.plots.get_mut(entity) {
+            level.0 = level.0.max(1);
+        }
         Ok(cost)
     }
 

@@ -197,6 +197,28 @@ pub fn is_group_floor(all: &[LandView], land: &LandView) -> bool {
     any && land.level <= min
 }
 
+/// 商业设施的升级判定 —— 与住宅那一套 [`can_upgrade`] **刻意分开**。
+///
+/// 住宅加盖读的是「整条街垄断 + 本块是组内最低层」，那条判据对商业地永远不成立：
+/// 一条街是 4 住宅 + 1 商业，住宅从 0 起、商业建成即 1，商业地的层数一辈子都不可能是
+/// 组内最低。硬套的结果就是「商业设施永远升不了」—— 所以商业地只看自己这一块。
+///
+/// `cap` 由设施类别给（[`crate::board::BuildingKind::max_level`]）：购物中心／旅馆／
+/// 研究所 5 级，加油站／公园 1 级。`cap == 1` 时 `level < cap` 恒假，升级窗口自然不弹。
+pub fn can_upgrade_facility(
+    land: &LandView,
+    by: PlayerId,
+    cost: i64,
+    cash: i64,
+    cap: u8,
+) -> bool {
+    land.owner == Some(by)
+        && !land.mortgaged
+        && land.level < cap
+        && land.status != Some(LandStatus::Sealed)
+        && cash >= cost
+}
+
 /// 升级判定（`property_system.gd:105-125`）：**由 `by` 发起** + 未抵押 + 未满级 +
 /// 垄断同色组 + 这块地是组内最低层 + 现金够。
 ///

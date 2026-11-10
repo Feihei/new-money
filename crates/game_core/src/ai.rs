@@ -978,7 +978,11 @@ impl AiHand<'_, '_> {
     }
 
     /// 加盖要付多少、多收多少。`None` = 这一格不许加盖（不是我的地、抵押着、满级、
-    /// 不是组内最低层、身上有衰神、付不起）—— 判据一条都不重写，读 `economy::can_upgrade`。
+    /// 不是组内最低层、身上有衰神、付不起）。
+    ///
+    /// 住宅与商业设施**两套判据**：住宅读 `economy::can_upgrade`（垄断整街 + 组内最低层），
+    /// 商业读 `economy::can_upgrade_facility`（只看这一块，`cap` 按设施类别）。
+    /// 收益那一头也分叉：住宅是租金差，商业是服务费差（每次访问多收一份基础金额）。
     ///
     /// `free` 只给建设公司的董事长开：他的远程升级**不花钱**（`Books::upgrade_chairman`），
     /// 所以报价那一格跳过管线、直接是 0 —— 与 `upgrade_inner` 里那句「董事长免价」同一条。
@@ -988,6 +992,21 @@ impl AiHand<'_, '_> {
         if view.owner != Some(me) || self.books.acquire_denied(subject) {
             return None;
         }
+        let commercial = self
+            .books
+            .active
+            .def
+            .land(land.0)
+            .is_some_and(|d| d.land_type == LandType::Commercial);
+        let cap = if commercial {
+            let kind = self.books.facility_of(land)?;
+            if !kind.upgradable() {
+                return None;
+            }
+            kind.max_level()
+        } else {
+            self.books.rules.max_building_level
+        };
         let base = economy::upgrade_cost(&self.books.active.def, &view)?;
         let cost = if free {
             0
@@ -995,8 +1014,16 @@ impl AiHand<'_, '_> {
             self.books
                 .quoted(ChargeKind::Upgrade { land }, subject, base)
         };
-        let views = self.books.views();
         let cash = self.books.balance(subject);
+        if commercial {
+            if !economy::can_upgrade_facility(&view, me, cost, cash, cap) {
+                return None;
+            }
+            // 服务费 × 等级：升一级就多收一份「基础金额」（期望值，A 型取均值）
+            let kind = self.books.facility_of(land)?;
+            return Some((cost, self.visit_fee(land, kind).round() as i64));
+        }
+        let views = self.books.views();
         if !economy::can_upgrade(&view, me, &views, cost, cash, &self.books.rules) {
             return None;
         }

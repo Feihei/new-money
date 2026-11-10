@@ -850,6 +850,15 @@ pub fn building_label(level: u8) -> String {
     }
 }
 
+/// 商业设施的等级写法：`Lv1`..`Lv5`。
+///
+/// 住宅那一套 `building_label` 对商业地不成立 —— 商业地**建成即 Lv1**（空地是 Lv0、
+/// 没有设施），套过去会把一座购物中心写成「空地」。所以商业地的显示统一走这里，
+/// 别在每块屏上各写一遍 `format!("Lv{level}")`。
+pub fn facility_label(level: u8) -> String {
+    format!("Lv{}", level.max(1))
+}
+
 /// 一行「键 值」信息。`key_w` 是键列的固定宽（Godot 的 `custom_minimum_size.x`），
 /// 值列 `flex_grow` 吃掉余下宽度，长文案就在列内换行。
 pub fn info_row(

@@ -1024,6 +1024,11 @@ fn format_lands(view: &DumpView) -> Vec<String> {
             let name = def
                 .and_then(|d| d.land(id.0))
                 .map_or("", |l| l.name.as_str());
+            // 商业地建成即 Lv1，念 `facility_label`（Lv1..=5）；住宅念 `building_label`
+            // （Lv0＝空地）—— 两张表不能在同一个数字上读出两种意思。
+            let commercial = def
+                .and_then(|d| d.land(id.0))
+                .is_some_and(|l| l.land_type == game_core::board::LandType::Commercial);
             (
                 id.0,
                 format!(
@@ -1031,10 +1036,11 @@ fn format_lands(view: &DumpView) -> Vec<String> {
                     id.0,
                     name,
                     owner.0.map(|p| p.0),
-                    // 等级念 `building_label` 那一套（Lv0＝空地、Lv1..=5＝建筑 Lv1..=5）——
-                    // 这个面板是给人查账的，读出来的编号必须与 UI 那几块屏是同一个数，
-                    // 否则「为什么这块 Lv1 的地只值 1,500」又要问一遍
-                    crate::ui::building_label(level.0),
+                    if commercial {
+                        crate::ui::facility_label(level.0)
+                    } else {
+                        crate::ui::building_label(level.0)
+                    },
                     // 本金要说得出数：「抵押」与「押了 750、赎回要 825」在查账时是两件事
                     if mortgage.held() {
                         format!("抵押{}", mortgage.proceeds)

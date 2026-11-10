@@ -17,7 +17,10 @@ use game_core::prelude::{
 
 use super::skin::Skins;
 use super::theme::{col, layout, size};
-use super::{BoardUi, ButtonSpec, UiAction, border_color, building_label, button, info_row, label};
+use super::{
+    BoardUi, ButtonSpec, UiAction, border_color, building_label, button, facility_label, info_row,
+    label,
+};
 use crate::render::{DevFont, dim, geom::BoardGeom, palette};
 
 /// 现在看的是哪一格（网格坐标，含死胡同格）。`None` = 没有详情卡。
@@ -198,13 +201,30 @@ fn spawn_card(
             owner_name.unwrap_or_else(|| "无主".to_string()),
             value_color,
         ));
-        rows.push(("建筑等级", building_label(view.level), col::GAIN));
-        for (i, rent) in def.rent.iter().enumerate() {
-            rows.push((
-                "租金",
-                format!("{} — ${rent}", building_label(i as u8)),
-                value_color,
-            ));
+        rows.push((
+            "建筑等级",
+            if def.land_type == game_core::board::LandType::Commercial {
+                facility_label(view.level)
+            } else {
+                building_label(view.level)
+            },
+            col::GAIN,
+        ));
+        if def.land_type == game_core::board::LandType::Commercial {
+            // 商业地不按租金表收钱（收的是「服务费 = 基础 × 等级」），把那六行
+            // 住宅租金排出来就是假信息。设施名只有棋盘预建的那一块读得到 ——
+            // 玩家自建的存在 `Facility` 组件上，这张卡不开第二条查询。
+            if let Some(kind) = def.building_kind {
+                rows.push(("设施", kind.label().to_string(), value_color));
+            }
+        } else {
+            for (i, rent) in def.rent.iter().enumerate() {
+                rows.push((
+                    "租金",
+                    format!("{} — ${rent}", building_label(i as u8)),
+                    value_color,
+                ));
+            }
         }
     }
     // 点券箱的面额写在格子上，玩家点一下就该看见「这一格值多少点券」——

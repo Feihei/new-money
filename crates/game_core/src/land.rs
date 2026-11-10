@@ -92,10 +92,14 @@ pub fn spawn_lands(commands: &mut Commands, board: &BoardDef) -> HashMap<LandId,
         .iter()
         .map(|l| {
             let id = LandId(l.id);
+            // 预建设施在棋盘数据里写的是「这块地开局就立着这座设施」——那它就是 Lv1，
+            // 不是「加盖了 0 次」。与 `Books::build` 把新建设施置成 1 同一条口径，
+            // 否则商业地初始 0 级会被升级一次还停在 Lv1（视觉上永远升不上去）。
+            let level = BuildingLevel(u8::from(l.building_kind.is_some()));
             let mut entity = commands.spawn((
                 id,
                 Owner::default(),
-                BuildingLevel::default(),
+                level,
                 Mortgaged::default(),
                 RentLedger::default(),
                 Gameplay,

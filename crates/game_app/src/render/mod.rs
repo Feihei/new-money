@@ -18,7 +18,7 @@ pub mod token;
 use bevy::{
     ecs::system::SystemParam, gltf::GltfAssetLabel, prelude::*, world_serialization::WorldAsset,
 };
-use game_core::prelude::ActiveBoard;
+use game_core::{board::BuildingKind, prelude::ActiveBoard};
 
 /// 表现层自己 spawn 的实体标记（棋盘几何、土地视觉、棋子、格名、相机、弹层底板）。
 /// 回主菜单时按它一次性清场 —— 规则层的实体由 `game_core::Gameplay` 负责，两边互不知晓。
@@ -137,14 +137,38 @@ impl PropArt {
     }
 }
 
-/// 住宅五级建筑模型（`model/dwell_L1..L5.glb`，下标 = 等级 − 1）。
+/// 建筑模型素材：住宅五级一套（`model/dwell_L1..L5.glb`）；商业按类别给级数
+/// —— 购物中心／旅馆／研究所 `com_<槽>_L1..L5.glb` 五级，加油站／公园只有
+/// `com_<槽>_L1.glb` 一栋（规则上它们也只有 Lv1，那一栋用的是最丰富的 L5 形体）。
 ///
-/// **成套才上**：缺任意一级就整块退回方体 —— 半套素材摆出来会是「Lv2 是一栋房子、
-/// Lv3 是一摞盒子」，而那种画面查起来比全是盒子难得多（与 `Chalk` 同一条纪律）。
+/// **成套才上**：住宅缺任意一级就整块退回方体；商业缺任意一级就**那一类**不摆（其余四类
+/// 照常）—— 半套素材摆出来会是「Lv2 是一栋房子、Lv3 是一摞盒子」，而那种画面查起来比全是
+/// 盒子难得多（与 `Chalk` 同一条纪律）。
 /// 素材不入库（AGENTS.md 硬约束 8），所以空表在别的机器上是正常状态，不是错误。
 #[derive(Resource, Clone, Default)]
 pub struct BuildingModels {
+    /// 住宅五级（下标 = 等级 − 1）。
     pub levels: Vec<Handle<WorldAsset>>,
+    /// 商业五类各一列，下标与 [`BuildingKind::ALL`] 同序；列长 = 该类的 `max_level()`，
+    /// 缺一级的那一类留空。
+    pub facilities: Vec<Vec<Handle<WorldAsset>>>,
+}
+
+impl BuildingModels {
+    /// 这一类设施的完整素材（级数 = [`BuildingKind::max_level`]）。缺一级就不算齐，
+    /// 按「没装」处理。
+    pub fn facility(&self, kind: BuildingKind) -> Option<&[Handle<WorldAsset>]> {
+        let index = BuildingKind::ALL.iter().position(|k| *k == kind)?;
+        self.facilities
+            .get(index)
+            .filter(|set| set.len() == kind.max_level() as usize)
+            .map(Vec::as_slice)
+    }
+
+    /// 一件模型都没装。主光与环境光只为 PBR 模型加 —— 盘上其余东西全 `unlit`。
+    pub fn any(&self) -> bool {
+        !self.levels.is_empty() || self.facilities.iter().any(|set| !set.is_empty())
+    }
 }
 
 /// 地面与住宅模型用到的素材。它们永远一起被读（哪一版地面、要不要粉笔、有没有模型），
@@ -190,10 +214,28 @@ impl Plugin for RenderPlugin {
         app.insert_resource(Chalk::load(&server));
         app.insert_resource(DiscIcons::load(&server));
         app.insert_resource(PropArt::load(&server));
-        // 五级齐了才装；缺一级就整块退回方体（见 `BuildingModels` 的注释）
+        // 住宅五级齐了才装；缺一级就整块退回方体（见 `BuildingModels` 的注释）。
+        // 商业按**类别自己的级数**找：购物中心／旅馆／研究所 5 级，加油站／公园只有 L1
+        // （它们规则上就只有这一级，模型侧也只留那一栋最丰富的形体）。
         let levels = (1..=5)
             .map(crate::art::dwell_model)
             .collect::<Option<Vec<String>>>();
+        let facilities = BuildingKind::ALL
+            .iter()
+            .map(|kind| {
+                (1..=kind.max_level())
+                    .map(|level| crate::art::com_model(*kind, level))
+                    .collect::<Option<Vec<String>>>()
+                    .map(|paths| {
+                        paths
+                            .into_iter()
+                            .map(|p| server.load(GltfAssetLabel::Scene(0).from_asset(p)))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+
         app.init_resource::<land::OutlineMeshes>();
         app.insert_resource(BuildingModels {
             levels: levels
@@ -204,6 +246,7 @@ impl Plugin for RenderPlugin {
                         .collect()
                 })
                 .unwrap_or_default(),
+            facilities,
         });
         // 建筑模型是带 PBR 材质的 glb，对局里一个光源都没有会渲成黑剪影（§7.5）。
         // 环境光只有 PBR 材质读，盘上那些 `unlit` 的平涂色块不受影响。
@@ -230,6 +273,9 @@ impl Plugin for RenderPlugin {
                     token::animate_tokens,
                     dice::spawn_dice_visuals,
                     dice::animate_dice_visuals,
+                    // 设施类型先抄进 `LandVisual`，`sync_buildings` 再用它挑该露的那一栋。
+                    // 两条都改 `&mut LandVisual`，靠外层的 `chain` 定先后（坑 36）。
+                    land::sync_facility_kind,
                     land::sync_buildings,
                     // 标志物落下（P16b）。`chain` 不 flush `Commands`（坑 43），所以
                     // `sync_buildings` 这一帧挂上的 `PropDrop` 下一帧才被它看见 —— 动画的
@@ -300,6 +346,12 @@ pub mod dim {
     /// 是地块中间的一间小屋。
     /// Lv5 的楼高约 3.35，仍要抬头看，但不至于占掉邻格的屋顶。
     pub const DWELL_SCALE: f32 = 1.7;
+    /// 商业设施模型（`com_<槽>_L1..L5.glb`）的缩放。轴向与住宅同一套（Z-up、脚底原点）。
+    /// 取 1.6：2×2 地块的底座边约 3.84（`frame.side * PLOT_SCALE`），最宽的一级
+    /// （加油站 Lv5 的 1.92）缩成约 3.07，两侧各留约 0.38 —— 与住宅那 0.38 是同一个数，
+    /// 两块地看过去的「楼基离粉笔框多远」才是一回事。最高的旅馆 Lv5（3.50）成 5.6，
+    /// 与住宅 Lv5 的 5.7 齐平，所以升级到顶时不会有一栋比别人矮半头。
+    pub const COM_SCALE: f32 = 1.6;
     /// Z-up → Y-up：绕 X 转 −90°。转完模型正面（Blender 的 −Y）朝 +Z，
     /// 正好对着 (8,16,8) 那台等轴测相机。
     pub fn dwell_upright() -> Quat {
