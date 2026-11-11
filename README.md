@@ -20,7 +20,7 @@ cargo test -p game_core   # 规则层测试，不需要窗口
 `NM_ATM=1` / `NM_STOCK=1`（开局即浮出 ATM / 证券面板，`NM_ATM` 顺带把 ATM 卡发到当前玩家手里）。
 完整清单与每条的存在理由见 [`.agents/ARCHITECTURE.md` §6.1](./.agents/ARCHITECTURE.md)。
 
-Bevy 精确锁定 `=0.20.0`（见 `Cargo.toml`），**不要 `cargo update`**。
+Bevy 精确锁定 `=0.20.1`（见 `Cargo.toml`），**不要 `cargo update`**。
 
 ## 现在到哪一步了
 

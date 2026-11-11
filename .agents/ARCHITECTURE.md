@@ -102,7 +102,7 @@
 
 ```
 new-money-bevy/
-├─ Cargo.toml                  # workspace；[workspace.dependencies] 精确 =0.20.0
+├─ Cargo.toml                  # workspace；[workspace.dependencies] 精确 =0.20.1
 ├─ assets/                     # 从 Godot 原样拷来，文件名不变
 │  └─ data/{boards,cards,stocks}/*.json
 ├─ crates/
@@ -272,11 +272,11 @@ Godot 端把这件事做成了"逻辑等渲染"（`turn_manager.gd:219` 等 `boa
 
 ## 六、Bevy 0.20 依赖矩阵（已核实）
 
-Bevy **0.20.0 发布于 2026-10-08**（5 天前），生态还没跟上，这直接约束选型：
+Bevy **0.20.0 发布于 2026-10-08**，生态还没跟上，这直接约束选型。**当前锁 `=0.20.1`**（11-11 升上来的补丁版，源码零改动，见 §6.2）：
 
 | crate | 支持 0.20 的版本 | 判定 |
 |---|---|---|
-| `bevy` | `=0.20.0` | **精确锁定**，`[workspace.dependencies]` 统一 |
+| `bevy` | `=0.20.1` | **精确锁定**，`[workspace.dependencies]` 统一 |
 | `bevy_egui` | 0.43.1（bevy `^0.20.0`） | ✅ 可用 —— 调试面板、棋盘可视化编辑辅助 |
 | `bevy_common_assets` | 0.18.0（bevy `^0.20.0`） | **未采用**：自写 20 行 `JsonAssetLoader<A>` 就够了（`game_core/src/loader.rs`），既省一个第三方依赖，也避开了 `.crate` 文件走 static.crates.io 直连不稳的问题 |
 | `bevy_inspector_egui` | 最新 0.37.0，只配 bevy `^0.19` | ❌ **0.20 版未发布**。缺口：不能可视化 inspect 实体。缓解：用 `bevy_egui` 自写一个只读 entity dump（`ReflectedEntity`/`World::inspect_entity`），或等适配 |
@@ -443,6 +443,47 @@ B5 之后这条判据升级为「**每个界面都必须有一条不依赖鼠标
 就 `Display::None`，不排版。**代价说清**：标签不参与深度，永远浮在建筑之上 ——
 等轴测棋盘上「每格名字都读得到」比「被前面那栋楼挡住」有用，所以这笔换算是赚的。
 `ZIndex(-1)` 让它排在 HUD 之下（同属 UI 层，靠 z_index 分先后）。
+
+### 6.2 0.20.0 → 0.20.1（11-11，独立升级任务）
+
+**结论：源码零改动。** `cargo check --workspace --all-targets` 零警告零错误，`crates/**` 一行没改；
+规则层 **842** 项 + 表现层 **217** 项全绿，与升级前同一组数字（P10c 之后的基线）。
+0.20.1 是纯补丁版：`_release-content/migration-guides/` 与 0.20.0 **逐字节相同**（74 份，一份没加），
+所以这次没有迁移指南可读 —— 判断「有没有破坏性改动」靠的是逐 crate diff `src/`，不是版本号语义。
+
+改的只有两处：根 `Cargo.toml` 的 `=0.20.0` → `=0.20.1`，以及 `Cargo.lock`
+（69 个 bevy crate 跟着升，第三方只动 `ruzstd 0.8.3 → 0.9.1`，**没有增删包、没有无关升级**）。
+`bevy_egui 0.43.1` 不用动：它依赖的是各个 `bevy_*` 子 crate 的 `^0.20.0`，不是伞 crate 的精确锁。
+
+**全树只有 5 处真实修复**（其余 130 多个 crate 只有版本号变）：
+
+| crate | 修了什么 | 与本项目 |
+|---|---|---|
+| `bevy_transform` | `mark_dirty_trees` 的 producer 不再把 orphaned 实体**同时**塞进 traversal 与 consumer 两条通道（issue #25416）。旧写法在**实体索引被复用**时会让重生的子节点留着上一世的 `GlobalTransform` | **最相关的一条**。`StaticTransformOptimizations` 默认 `Enabled`，而本项目正是大批父子层级同帧拆建：`OnEnter(Menu)` 整盘连建筑一起回收、新局再 spawn 一套（`NM_MENULOOP` 是紧循环），`dice.rs` 每次掷骰重建骰子视觉，`occupancy.rs` 增删道路图标。上游回归测试的形状（256 根 × 8 子，同帧 despawn + respawn）与这里一致 |
+| `bevy_render` | `UninitBufferVec::item_size` 从 `size_of::<T>()` 改成 `T::SHADER_SIZE`（CPU 上 12 字节的 `Vec3` 在 WGSL 里是 16） | 间接：本项目不直接用 `UninitBufferVec`，bevy 内部用 |
+| `bevy_ecs` | `par_iter_many_unique{,_mut}` 改用 `collect_set()` 去重 | 不用这两个 API |
+| `bevy_reflect` | `Option<T>` 补 `#[reflect(Default)]` | 纯增量；存档走手写 `GameSnapshot`（§九），不赌 reflect |
+| `bevy_pbr` / `bevy_scene` | 体积雾；`bsn!` 里 `..Default::default()` 的 codegen | 都不用 |
+
+> **升级手法记一笔**：别裸 `cargo update`（会把整棵树无关的包一起顶上去）。改精确锁之后跑一次
+> `cargo metadata` 让它最小化重解析，再逐 crate 比对 lock 里的版本号 ——「只动了该动的」这件事
+> 要**核对过**才算数，不是相信 cargo。旧 lock 留在 `.tmp/Cargo.lock.pre-0201.bak`。
+
+> **门红了先别怪升级**：这次 `./check.sh` 第一遍 7/8，红的是 `fmt`，7 处差异散在 5 个源码文件里。
+> 判据不是「我改了什么」而是**把 HEAD 的副本单独喂给 rustfmt**：
+> `git show HEAD:<file> > .tmp/x.rs && rustfmt --check --edition 2024 .tmp/x.rs` ——
+> 行号与差异逐条对上，就证明这笔债在升级之前就在（`cargo fmt` 只看源码，与 bevy 版本无关）。
+> 那 7 处已单独一笔 `style:` 修掉，升级 commit 不卷进去。修完八道全绿。
+
+**实跑核对（11-11）**：菜单、整盘、跨局重生三张截图 + 一次 autoroll 长跑。
+跨局那条是冲着 `bevy_transform` 的修复去的：`NM_MENULOOP=6` 在第二局之前回收了
+**1772 个表现层实体 + 94 个规则层实体**再整套重生（正是索引复用的形状），第二局整盘图与第一局
+逐像素比对只差 **522 px（0.06%）**，且全部落在归属标志物与 HUD「地产」数字上
+（`NM_PLOTS` 的注入名额一局一次，第二局没有那 6 面旗）—— 草地、格名、建筑几何**零差异**。
+图在 `.tmp/shots-0201/`。日志里两条常驻噪音与升级无关：Vulkan 那条 ERROR 是 RenderDoc 的
+layer JSON 缺失，`Camera order ambiguities` 出自 `bevy_render::camera`（0.20.1 没改这个文件）。
+长跑（`NM_AUTOROLL=1 NM_AUTOGAP=0 NM_SEED=3`，100 s）掷骰 **136 次**、零 panic，中途踩到
+破产 → 破产变卖三笔流标 → 月末结息 → 乐透月息与开奖，深路径在 0.20.1 下都走得通。
 
 ---
 
@@ -628,7 +669,7 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 
 | 风险 | 概率 | 影响 | 应对 |
 |---|---|---|---|
-| **Bevy 0.20 太新**（发布 5 天），插件与文档滞后；0.21 一升级 API 又变 | 高 | 中 | 锁 `=0.20.0`；`game_core` 只依赖无渲染子集隔离冲击；**禁止 `cargo update`**；升级 Bevy 作为独立任务单做 |
+| **Bevy 0.20 太新**（0.20.0 发布于 2026-10-08），插件与文档滞后；0.21 一升级 API 又变 | 高 | 中 | 锁 `=0.20.1`；`game_core` 只依赖无渲染子集隔离冲击；**禁止 `cargo update`**；升级 Bevy 作为独立任务单做 |
 | `bevy_inspector_egui` 无 0.20 版，失去运行时实体可视化（对 agent 调试影响最大的一项） | 已发生 | 中 | ✅ **已拍板（10-13）选 ①**：用 `bevy_egui` 自写只读 dump 面板。10-16 核对时还没落地，同日 **T1 落地**（`game_app/src/dump.rs` + `NM_DUMP=1`，见 §6.1 坑 28）—— 缺口已补，但它是**手写 Debug 打印**不是通用 inspector：新组件要手动往面板加一行 |
 | UI 无编辑器、代码排版迭代慢 | 高 | 高 | B4/B5 排在逻辑之后；主题常量集中；预留 1.5–2 倍工时 |
 | 中文渲染第一天就踩空（无内建回退） | 高 | 低 | 开工第一件事就是"屏上显示 3 行中文"的 spike（并入 B0 验收） |
@@ -639,7 +680,7 @@ PBR 模型直接搬进对局会黑成剪影；要用这批模型，先定美术�
 | Rust 借用检查与回合制结算的冲突（一处结算要同时改两个玩家） | 中 | 中 | 已规避：状态放组件、用 `Commands` 延迟；`charge_rent` 这类跨实体操作用 `Entity` 句柄 + `single`/`get` 而不是同时 `iter` |
 
 已拍板（2026-10-13）：
-1. **Bevy 锁 0.20**（`=0.20.0`）。`bevy_inspector_egui` 缺口用 `bevy_egui` 自写只读 entity dump 补。
+1. **Bevy 锁 0.20**（`=0.20.1`，11-11 从 `=0.20.0` 升上来，见 §6.2）。`bevy_inspector_egui` 缺口用 `bevy_egui` 自写只读 entity dump 补。
 2. ~~**Godot 目录不冻结**，双边改动节奏由用户控制。→ §五 映射表因此升级为**必须维护**的资产：每移植完一个 Godot 文件就划掉并记录差异，防止两边行为悄悄分叉。~~
    **10-15 推翻**：Bevy 转为主线，§5.1 停止逐文件维护（10-16 已整块归档到 [`docs/archive/migration-b0-b5b.md`](../docs/archive/migration-b0-b5b.md)），画面与交互不再对齐。
 3. **场景流转用单 App + state**（不用 SubApp / 多窗口）。
