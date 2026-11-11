@@ -205,13 +205,7 @@ pub fn is_group_floor(all: &[LandView], land: &LandView) -> bool {
 ///
 /// `cap` 由设施类别给（[`crate::board::BuildingKind::max_level`]）：购物中心／旅馆／
 /// 研究所 5 级，加油站／公园 1 级。`cap == 1` 时 `level < cap` 恒假，升级窗口自然不弹。
-pub fn can_upgrade_facility(
-    land: &LandView,
-    by: PlayerId,
-    cost: i64,
-    cash: i64,
-    cap: u8,
-) -> bool {
+pub fn can_upgrade_facility(land: &LandView, by: PlayerId, cost: i64, cash: i64, cap: u8) -> bool {
     land.owner == Some(by)
         && !land.mortgaged
         && land.level < cap

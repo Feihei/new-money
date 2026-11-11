@@ -314,9 +314,9 @@ pub(crate) fn attach_land_visuals(
                     .iter()
                     .flat_map(|(kind, set)| {
                         let kind = Some(*kind);
-                        set.iter().enumerate().map(move |(i, handle)| {
-                            (kind, i as u8 + 1, handle.clone())
-                        })
+                        set.iter()
+                            .enumerate()
+                            .map(move |(i, handle)| (kind, i as u8 + 1, handle.clone()))
                     })
                     .collect()
             };
@@ -518,11 +518,7 @@ pub(crate) fn sync_buildings(
             // 模型：同时只露等级对应的那一栋；方体：露出前 `level` 个，堆成塔
             let visible = if visual.scenic {
                 // 商业地还要挑对类别：五类各五级只露「当前设施 + 当前等级」这一栋。
-                let (kind, at) = visual
-                    .body_kinds
-                    .get(i)
-                    .copied()
-                    .unwrap_or((None, 0));
+                let (kind, at) = visual.body_kinds.get(i).copied().unwrap_or((None, 0));
                 kind == visual.facility && shown == at
             } else {
                 (i as u8) < shown

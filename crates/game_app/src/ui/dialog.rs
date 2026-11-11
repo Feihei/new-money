@@ -1408,14 +1408,7 @@ fn upgrade_modal(
                         key_w,
                     );
                     if let Some(kind) = facility {
-                        info_row(
-                            rows,
-                            &font.0,
-                            "设施",
-                            kind.label(),
-                            col::VALUE,
-                            key_w,
-                        );
+                        info_row(rows, &font.0, "设施", kind.label(), col::VALUE, key_w);
                     }
                 } else {
                     info_row(
@@ -2079,14 +2072,7 @@ fn remote_build_modal(
                 } else if if commercial {
                     !game_core::economy::can_upgrade_facility(view, pid, cost, cash, cap)
                 } else {
-                    !game_core::economy::can_upgrade(
-                        view,
-                        pid,
-                        &views,
-                        cost,
-                        cash,
-                        &books.rules,
-                    )
+                    !game_core::economy::can_upgrade(view, pid, &views, cost, cash, &books.rules)
                 } {
                     // 商业只可能是钱不够；住宅还剩组内那两条
                     Some(if commercial {

@@ -309,11 +309,7 @@ fn settle_service(
     // 服务费 × 设施等级（10-31 拍板）：L1 就是数据里那一档，L5 是五倍。
     // 等级只乘在**名义金额**上、不进 `stay_days`（住几天跟几层楼无关），
     // 也不改免费卡/大财神那类修正的语义 —— 它们消的是这一整笔账。
-    let level = gate
-        .sink
-        .books
-        .view(land)
-        .map_or(1, |v| v.level.max(1)) as i64;
+    let level = gate.sink.books.view(land).map_or(1, |v| v.level.max(1)) as i64;
     let charge = Charge::new(
         ChargeKind::Service,
         Some(player),

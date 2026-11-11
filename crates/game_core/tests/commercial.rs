@@ -756,9 +756,7 @@ fn a_mall_can_reach_five_and_then_stops() {
 
     let again = app
         .world_mut()
-        .run_system_once(move |mut books: game_core::settle::Books| {
-            books.upgrade(p0, LandId(2))
-        })
+        .run_system_once(move |mut books: game_core::settle::Books| books.upgrade(p0, LandId(2)))
         .expect("升级 system 跑得起来");
     assert_eq!(again, None, "满级不再升");
     assert_eq!(level_of(&mut app, 2), 5);
