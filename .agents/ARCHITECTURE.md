@@ -485,6 +485,68 @@ layer JSON 缺失，`Camera order ambiguities` 出自 `bevy_render::camera`（0.
 长跑（`NM_AUTOROLL=1 NM_AUTOGAP=0 NM_SEED=3`，100 s）掷骰 **136 次**、零 panic，中途踩到
 破产 → 破产变卖三笔流标 → 月末结息 → 乐透月息与开奖，深路径在 0.20.1 下都走得通。
 
+### 6.3 依赖普查与两针 yanked 修复（11-14，独立 chore）
+
+**结论：625 条锁定版本里只有 2 条必须动，其余没有「必须升」的理由。** 直接依赖全部已是各自系列最新
+（`bevy 0.20.1` / `bevy_egui 0.43.1` / `serde 1.0.229` / `serde_json 1.0.154` / `rand 0.9.5` / `rand_chacha 0.9.0`）。
+
+被 yank 的两条，以及它们的来路：
+
+| crate | 升到 | 来路 | 为什么必须 |
+|---|---|---|---|
+| `async-executor` 1.14.0 | **1.14.1** | `bevy_tasks` ← 整个 Bevy | 上游 release note 明写的 **use-after-free 回归**：`Executor::drop` 期间 `Waker` 触发（1.14.0 引入、1.14.1 修，11-02）。本轮唯一一条真内存安全缺陷 |
+| `clipboard-win` 5.4.1 | **5.4.3** | `arboard` ← `bevy_egui` ← `game_app`（仅 Windows） | 同样被 yank；原因上游没公布在我能取到的地方（无 release/tag、CHANGELOG 404） |
+
+修法就是两针 `cargo update -p <crate> --precise <ver>`：`bevy_tasks` 要 `^1.11`、`arboard 3.6.1` 要 `^5.3.1`，
+所以**两个目标版本都在范围内 —— manifest 一行不改、Bevy 精确锁不动、arboard 也不必跟着升**。
+锁差异恰好 4 行（两个 version + 两个 checksum），无增删包；旧锁在 `.tmp/Cargo.lock.pre-yankfix.bak`。
+升完复查：625 条里 yanked **0 条**。
+
+**安全公告：0 条真漏洞。** `cargo audit` 本机没装、OSV 直连超时，改成把 RustSec advisory-db 整包（1489 条）
+拉到本地，按每条的 `patched`/`unaffected` 区间匹配全部锁定版本（脚本 `.tmp/adv_match.py`，结果 `.tmp/adv_report.txt`）。
+命中 4 条 informational，且**四条都不在 Windows 依赖图里** —— `cargo tree -i` 在本机目标下打印不出东西，
+要 `--target all` 才看得到来路：
+
+| crate | 公告 | 性质 | 来路 / 平台 |
+|---|---|---|---|
+| `tokio` 1.53.2 | RUSTSEC-2026-0386 | unsound（`AsyncFd` 违反 I/O safety） | ← `wasm-bindgen-futures`，**wasm only** |
+| `rustix` 1.1.5 | RUSTSEC-2026-0486 | unsound（xattr 把未写字节标记为已初始化） | ← `async-io`，非 Windows |
+| `ttf-parser` 0.25.1 | RUSTSEC-2026-0192 | unmaintained | ← `ab_glyph` ← `sctk-adwaita`，Linux Wayland |
+| `xml-rs` 0.8.29 | RUSTSEC-2022-0048 | unmaintained | 非 Windows |
+
+前两条的修复版（`tokio` 1.54.1 / `rustix` 1.1.6）就在下面那批在范围清单里，将来真出 wasm/Linux 版再顺手带上。
+
+> **第一版匹配器是空转的**：取 `package` 时把引号一起捕获成 `'"tokio"'`，于是 1489 条一条都匹配不上、
+> 报「0 命中」。**反向探针**（断言 tokio/rustix/ttf-parser 这三条已知应命中的必须出现在结果里，缺一条就退出码 1）
+> 当场把它抓出来。与 §6.1 那些坑同源：**「零命中／全绿」必须先证明探针会红**，否则它可能根本没在测。
+
+**在范围内可升、但没有必要的一批**：`cargo update --dry-run`（只读，不写锁）报 **75 项可升 + 1 新增
+`utf_types` − 10 移除旧 `windows-sys` 重复**；按 `cargo tree -e normal,build` 分类，**59 项进 Windows 构建、
+16 项只影响 wasm/linux/apple**。显眼的是 `wgpu`/`naga` 全家 30.0.1→30.0.2、`cc` 1.8.0→1.11.2、
+`toml` 1.1.8→1.2.1、`icu_*` 2.3→2.4。**没有一条命中公告或 yank**，所以按「禁止 `cargo update`」的纪律整批不动 ——
+一次引进 75 个变量换不来任何已知收益。清单留在 `.tmp/dryrun.txt`。
+
+**拿不到的新版（上游 caret 钉死）**：`egui`/`epaint` 0.37（`bevy_egui 0.43.1` 钉 0.36）、`glam` 0.34、
+`taffy` 0.15、`parley` 0.13、`accesskit` 0.25、`rodio` 0.23、`cpal` 0.18、`smol_str` 0.3 ——
+dry-run 一项都没提，这本身就是被上游范围挡住的证据，等 Bevy 0.21 / bevy_egui 下一版。
+
+**附带发现**：Bevy 0.20.1 自己用 `rand 0.10.3`（`bevy_math`），我们钉 `rand 0.9` → 锁里
+`rand`/`rand_core`/`getrandom` 各存两份。要合一得把 manifest 升到 0.10 并改 API，属独立任务，本轮不做。
+
+**实跑核对（11-15）**：八道门全绿，规则层 **842** + 表现层 **217**（与 0.20.1 基线同一组数字，源码零改动），
+clippy/check 零警告。三张同旋钮截图与 `.tmp/shots-0201/` 基线比对：**menu 与 board1 逐字节相同（MD5 一致）**；
+board2（跨局重生那一屏）差 **70 px（0.0076%）**，放大后全部落在草地纹理采样与格名文字/细线的 1 px 抗锯齿上，
+几何、文字内容、HUD 数字零差异 —— 重生后相机/动画相位对帧时机敏感，而 `async-executor` 改的正是任务调度时机，
+这个量级与「差一帧」相符，不是渲染回归。图在 `.tmp/shots-yankfix/`。
+长跑（`NM_AUTOROLL=1 NM_AUTOGAP=0 NM_SEED=3`，100 s）掷骰 **130 次**、零 panic；2 条 ERROR 仍是 RenderDoc 的
+Vulkan loader 噪音。
+
+> **两个探针教训**：① 长跑日志里没有 `DiceRolled` 字样，第一版 `grep -c 'DiceRolled'` 报 0，而日志满屏
+> `sfx dice_roll` —— 计数探针必须先确认它数的是真实存在的字符串（改数 `sfx dice_roll` 得 130）。
+> ② board2 第一次截出 **1×1（72 B）**，而日志里清场 1772+94、第二局装配、`Screenshot saved` 全都正常；
+> 单独重跑不复现（正常 1280×720）。形状像截图那一瞬窗口没有有效尺寸，原因未确证，**不作为回归证据**，
+> 但记一笔免得下次把空图当崩溃。
+
 ---
 
 ## 七、表现层重写要点
