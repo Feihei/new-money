@@ -9,6 +9,10 @@
 //!
 //! 内容在弹出那一刻**烤死**，之后不随世界状态更新：待决事项被回答时 `PendingDecision`
 //! 一定先清空再挂上下一个，所以每次报价都是一整块新面板，没有「忘了刷新」的余地。
+//!
+//! **电脑座位的窗口不上屏**（11-15，见 [`sync_modal`] 那道 `Controller::is_ai` 过滤）：
+//! 它在 `AiCadence` 里自己答完，一屏一闪的报价既没人点得到，也会把画面切碎。拍卖台例外。
+//! 两屏报价（买地/升级）也**只报一个数**：租金表交给点格详情卡，这里只回答「掏不掏」。
 
 use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
@@ -16,12 +20,13 @@ use bevy::prelude::*;
 use game_core::prelude::{
     ActiveBoard, Ask, BailDeny, BailFacts, BankOp, BidDeny, BidFacts, BidMove, Blocker, Books,
     BuildingKind, CardDef, CardDrawn, CardId, CardKind, CardNotice, ChargeKind, CompanyCharged,
-    Decision, Detention, DetentionPlace, EffectOutcome, Facility, Gate, Gavel, Hand, Institution,
-    Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets, MagicFilter,
-    MagicSpell, MortgageDeny, MortgageOp, Owner, PassiveCard, PassiveEvent, PassiveMove, Pending,
-    PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf, ShopDeny, ShopStock,
-    TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders, blame_candidates, buy_allowed,
-    buyback, counter_plots, mortgage_op_allowed, read_facts, restock, shop_op_allowed,
+    Controller, Decision, Detention, DetentionPlace, EffectOutcome, Facility, Gate, Gavel, Hand,
+    Institution, Jackpot, LandId, LandStatus, LandType, Lot, LotteryDeny, LotteryTickets,
+    MagicFilter, MagicSpell, MortgageDeny, MortgageOp, Owner, PassiveCard, PassiveEvent,
+    PassiveMove, Pending, PendingDecision, PlayerId, PlayerName, Rng, ServiceCharged, Shelf,
+    ShopDeny, ShopStock, TradeSide, TurnOrder, bail_op_allowed, bid_allowed, bidders,
+    blame_candidates, buy_allowed, buyback, counter_plots, mortgage_op_allowed, read_facts,
+    restock, shop_op_allowed,
 };
 
 use super::finance::{comma, money_row};
@@ -250,7 +255,19 @@ pub(crate) struct ModalView<'w, 's> {
     /// 他手里有哪几个号。与 `hands` 同一形：只有彩票柜台用得上。
     /// 带 `Entity` 是因为独占那一格要问「**谁**占着这个号」，而 `iter()` 交的是数据项本身
     tickets: Query<'w, 's, (Entity, &'static LotteryTickets), With<PlayerId>>,
+    /// 窗口上那位是不是电脑开的（11-15）。电脑座位的窗口一律不上屏 —— 它在
+    /// `AiCadence` 的 0.5–1.5 s 里自己答完，一屏一闪的报价没人读得到，只会把画面切碎
+    controllers: Query<'w, 's, &'static Controller>,
     open: Query<'w, 's, (Entity, &'static ModalRoot)>,
+}
+
+/// 这一屏该不该挂出来。**电脑座位一律不挂**（11-15），拍卖台是唯一的口子 —— 它不是
+/// 「某人的一问」而是全场共用的一台戏，跟着换人收起来会按每一拍闪一次。
+///
+/// 抽成纯函数是为了让这条规则有一处可以钉：真判据要读世界（`Controller` 与
+/// `PendingDecision`），而「哪些窗口免检」不该只在 `sync_modal` 的闭包里活着。
+fn seat_shows_modal(ai: bool, about: &Pending) -> bool {
+    !ai || matches!(about, Pending::Auction)
 }
 
 /// 跟着 `PendingDecision` 建/换/收模态。排在 [`remember_drawn_card`] 之后，
@@ -272,7 +289,19 @@ pub(crate) fn sync_modal(
     // 而账本已经在 `FilterDesk` 里，再开一条 `Books` 会在参数建立期撞成 B0001 —— §6.1 坑 33
     // 的资源版）。现在不筛人了，参数退回 `Books` 本身。
     let books = &books;
-    let want = view.pending.active();
+    // 电脑座位不弹窗（11-15）。它的问题在 `AiCadence` 的 0.5–1.5 s 之后由
+    // `ai_answer_system` 自己答掉（买地/升级/柜台/收据一概如此），中间这块屏既没人点、
+    // 也不该占着画面 —— 顶栏那句「（电脑·大佬奸）正在想…」已经把「在等谁」说清楚了。
+    //
+    // **拍卖台是唯一的例外**，而这不是口味：它不是「某人的一问」，是全场共用的一台戏。
+    // 每次 AI 加价都把它收起来再建回去的话，屏幕会按一拍一闪；而拍卖期间面板本来就
+    // 每拍换人（读数跟着「此刻该出价的那一位」走）。
+    let want = view.pending.active().filter(|(player, about)| {
+        seat_shows_modal(
+            view.controllers.get(*player).is_ok_and(Controller::is_ai),
+            about,
+        )
+    });
     // 柜台前那位手里有哪几张（卖回那一排的内容，也进签名）
     let held: Vec<CardId> = want
         .and_then(|(player, _)| view.hands.get(player).ok())
@@ -1116,6 +1145,37 @@ fn center_label(
     )
 }
 
+/// 「这次要掏多少钱」那一块：小字标签压在一个大字号的钱数上。
+///
+/// 买地/升级两屏都只报一个数，11-16 把它从信息行里搬出来单独占一块 —— 之前它与
+/// 「类型」「楼上已有」同字号同权重排在一列里，玩家得在几行灰字里找钱。标签留着自己
+/// 说话（买价／升级费用），按钮上就不再复述价格：按钮只写动作，掏不起的时候灰掉
+/// （`ButtonSpec::disabled` 既改色又拦派发，不需要再写一句「现金不足」）。
+fn price_block(p: &mut ChildSpawnerCommands, font: &Handle<Font>, caption: &str, amount: i64) {
+    p.spawn(center_label(font, caption, size::SMALL, col::KEY));
+    p.spawn(center_label(
+        font,
+        format!("${}", comma(amount)),
+        size::PRICE,
+        col::COST,
+    ));
+}
+
+/// 报价屏那个「掏钱」按钮：**只写动作**，不写价格、也不写「现金不足」。
+///
+/// 价格已经由 [`price_block`] 用一个大字号说清楚了，按钮上再复述一遍只会跟它抢注意力；
+/// 买不起的时候也不换文案 —— `ButtonSpec::disabled` 既把按钮涂灰又拦掉派发，
+/// 那一刻「点不动」本身就是答案。两块报价屏共用这一条，别各自再写一份。
+fn quote_button(action: &'static str, affordable: bool) -> ButtonSpec<'static> {
+    ButtonSpec::new(
+        action,
+        layout::MODAL_BUTTON,
+        super::PRIMARY,
+        UiAction::Decide(Decision::Accept),
+    )
+    .disabled(!affordable)
+}
+
 /// 一行按钮（Godot 的 `btn_box`：居中、间距 20）。
 fn button_row(parent: &mut ChildSpawnerCommands, f: impl FnOnce(&mut ChildSpawnerCommands)) {
     parent
@@ -1135,8 +1195,15 @@ fn button_row(parent: &mut ChildSpawnerCommands, f: impl FnOnce(&mut ChildSpawne
 /// 同一条式子。只写名义地价在这里曾经是安全的（无主地就是 Lv0），而 10-22 之后「无主却立着楼」
 /// 是真状态 —— 破产留下的那一手、天使白给的那一层。那时按地价写就成了「写着 1,500、扣掉 3,100」，
 /// 而这一块屏是唯一让玩家决定掏不掏这笔钱的地方。
-/// 「地价」那一行照旧留着（它是这块地的固有属性，租金表按它排），多出来的那一截由
-/// 「楼上已有」与「买价」两行自己说清楚 —— 灰按钮带理由那条纪律在这儿的形式是**价带理由**。
+///
+/// 11-15 起这一屏**只写一个数**：原先的「地价」与整张租金表都撤了。理由是这一屏要回答的
+/// 只有「买不买」，而租金表是六行收益，读它并不能改变那一刻的答案 —— 它属于点格详情卡
+/// （那里才是「这块地值多少」的场合）。「楼上已有」那一行留着：买价里最贵的一截就是它，
+/// 不说就成了「写着 6,000、账上却只见过 3,000 的地价」。
+///
+/// 11-16 又收了一刀：**颜色组与「你的现金」都不写了**，价格从信息行里搬出来，成了分隔线
+/// 下面一块大字号（`price_block`）。颜色组并没有丢 —— 面板边框与标题本来就按组色画，
+/// 那比一行「颜色组：花莲」更早被眼睛读到；余额归 HUD，而这一屏只回答「多少钱、买不买」。
 fn buy_modal(
     commands: &mut Commands,
     font: &DevFont,
@@ -1154,14 +1221,12 @@ fn buy_modal(
     } else {
         palette::group(&group)
     };
-    let nominal = def.map(|l| l.price).unwrap_or(0);
     let view = books.view(land);
     let storeys = view.as_ref().map_or(0, |v| v.level);
     let base = view.as_ref().map_or(0, |v| {
         game_core::economy::estate_value(&books.active.def, v)
     });
     let price = books.quoted(ChargeKind::BuyLand { land }, player, base);
-    let rent: Vec<i64> = def.map(|l| l.rent.clone()).unwrap_or_default();
     let commercial = def.is_some_and(|l| l.land_type == LandType::Commercial);
     let facility = books.facility_of(land);
     let type_text = match def.map(|l| l.land_type) {
@@ -1169,14 +1234,10 @@ fn buy_modal(
         Some(LandType::Insurance) => "保险用地",
         _ => "住宅用地",
     };
-    let cash = books.balance(player);
-    let affordable = cash >= price;
-    let buy_text = if affordable {
-        format!("购买 (${})", comma(price))
-    } else {
-        "现金不足".to_string()
-    };
-    let cash_text = format!("你的现金: ${cash}");
+    // 现金只在按钮上体现：够就亮、不够就灰（`ButtonSpec::disabled` 既改色也不派发），
+    // 不再占一行「你的现金」。这一屏要回答的是「这块地多少钱、买不买」，
+    // 余额去 HUD 看；买不起时灰按钮已经把话说完了。
+    let affordable = books.balance(player) >= price;
 
     frame(
         skins,
@@ -1202,17 +1263,7 @@ fn buy_modal(
             })
             .with_children(|rows| {
                 let key_w = layout::INFO_KEY_W;
-                if !group.is_empty() {
-                    info_row(rows, &font.0, "颜色组", &group, accent, key_w);
-                }
-                info_row(
-                    rows,
-                    &font.0,
-                    "地价",
-                    &format!("${}", comma(nominal)),
-                    col::COST,
-                    key_w,
-                );
+                info_row(rows, &font.0, "类型", type_text, col::VALUE, key_w);
                 // 地上已经有楼/设施：那几层不是赠品，而是买价里最贵的一截，必须自己占一行说话。
                 // 住宅念 `building_label` 那一套（Lv0＝空地）；商业地建成即 Lv1，
                 // 念 `facility_label`（空地是 Lv0、设施是 Lv1..=Lv5）。
@@ -1232,66 +1283,13 @@ fn buy_modal(
                         format!("{}，连地一起过户", building_label(storeys))
                     };
                     info_row(rows, &font.0, "楼上已有", &what, col::GAIN, key_w);
-                    info_row(
-                        rows,
-                        &font.0,
-                        "买价",
-                        &format!("${}", comma(price)),
-                        col::COST,
-                        key_w,
-                    );
-                }
-                info_row(rows, &font.0, "类型", type_text, col::VALUE, key_w);
-                if commercial {
-                    // 商业地不走租金表，收的是「基础金额 × 等级」的服务费；具体原型的
-                    // 骰面/单价按类别各不相同，面板只说这条通则可算的那一半。
-                    if let Some(kind) = facility {
-                        info_row(
-                            rows,
-                            &font.0,
-                            "服务费",
-                            &format!("{} 基础 × {}", kind.label(), storeys.max(1)),
-                            col::VALUE,
-                            key_w,
-                        );
-                    }
-                } else if !rent.is_empty() {
-                    rows.spawn(label(&font.0, "租金表", size::SMALL, col::KEY));
-                    for (i, amount) in rent.iter().enumerate() {
-                        info_row(
-                            rows,
-                            &font.0,
-                            &building_label(i as u8),
-                            &format!("${amount}"),
-                            col::VALUE,
-                            key_w,
-                        );
-                    }
                 }
             });
             p.spawn(separator());
-            p.spawn(center_label(
-                &font.0,
-                cash_text,
-                size::NAME,
-                if affordable {
-                    col::CASH_OK
-                } else {
-                    col::CASH_BAD
-                },
-            ));
+            // 这一屏唯一的数：`Books::buy` 扣的就是它（同一块地，同一个表达式）
+            price_block(p, &font.0, "买价", price);
             button_row(p, |line| {
-                button(
-                    line,
-                    &font.0,
-                    ButtonSpec::new(
-                        &buy_text,
-                        layout::MODAL_BUTTON,
-                        super::PRIMARY,
-                        UiAction::Decide(Decision::Accept),
-                    )
-                    .disabled(!affordable),
-                );
+                button(line, &font.0, quote_button("购买", affordable));
                 button(
                     line,
                     &font.0,
@@ -1307,6 +1305,16 @@ fn buy_modal(
     )
 }
 
+/// 替自己的地加盖那一屏。
+///
+/// 与买地那屏同一条口径（11-15）：**钱只写一个数**——这里就是 `Books::upgrade` 要扣的
+/// 那一笔（`economy::upgrade_cost`）。原先的「当前租金／升级后租金／租金增幅」三行与商业地的
+/// 「服务费 ×n → ×n+1」都撤了：它们是收益，不是这次要付的钱，而点击详情卡里本来就有完整的
+/// 租金表。留下的是「买的是什么」——当前等级与升级后那一行，两者都在 `building_label`／
+/// `facility_label` 里翻成人话。
+///
+/// 11-16 与买地那屏一起改成「一块大字号价格 + 一个只写动作的按钮」：升级费用也从信息行里
+/// 搬进了 `price_block`，「你的现金」撤掉（余额归 HUD，买不起就灰按钮）。
 fn upgrade_modal(
     commands: &mut Commands,
     font: &DevFont,
@@ -1332,21 +1340,12 @@ fn upgrade_modal(
         .map(palette::group)
         .unwrap_or(col::TITLE_GOLD);
     let cost = game_core::economy::upgrade_cost(&books.active.def, &view).unwrap_or(0);
-    let rent: Vec<i64> = def.map(|l| l.rent.clone()).unwrap_or_default();
     let commercial = def.is_some_and(|l| l.land_type == LandType::Commercial);
     let facility = books.facility_of(land);
     let level = view.level as usize;
-    let current_rent = rent.get(level.saturating_sub(1)).copied().unwrap_or(0);
-    let new_rent = rent.get(level).copied().unwrap_or(0);
-    let cash = books.balance(player);
-    let affordable = cash >= cost;
+    // 同买地那屏：现金不上屏，只决定按钮亮不亮
+    let affordable = books.balance(player) >= cost;
     let title = format!("升级 {name}");
-    let buy_text = if affordable {
-        format!("升级 (${cost})")
-    } else {
-        "现金不足".to_string()
-    };
-    let cash_text = format!("你的现金: ${cash}");
 
     frame(
         skins,
@@ -1373,8 +1372,11 @@ fn upgrade_modal(
             .with_children(|rows| {
                 let key_w = layout::INFO_KEY_W_WIDE;
                 if commercial {
-                    // 商业设施念 `facility_label`（建成即 Lv1），收益是**服务费倍率**
-                    // 而不是租金表 —— 踩到的人付「基础金额 × 等级」。
+                    // 商业设施念 `facility_label`（建成即 Lv1）。设施名要自己占一行：
+                    // 光看「Lv2 → Lv3」读不出里面是旅馆还是购物中心。
+                    if let Some(kind) = facility {
+                        info_row(rows, &font.0, "设施", kind.label(), col::VALUE, key_w);
+                    }
                     info_row(
                         rows,
                         &font.0,
@@ -1391,25 +1393,6 @@ fn upgrade_modal(
                         col::GAIN,
                         key_w,
                     );
-                    info_row(
-                        rows,
-                        &font.0,
-                        "升级费用",
-                        &format!("${cost}"),
-                        col::COST,
-                        key_w,
-                    );
-                    info_row(
-                        rows,
-                        &font.0,
-                        "服务费",
-                        &format!("基础 × {} → × {}", level.max(1), level + 1),
-                        col::GAIN,
-                        key_w,
-                    );
-                    if let Some(kind) = facility {
-                        info_row(rows, &font.0, "设施", kind.label(), col::VALUE, key_w);
-                    }
                 } else {
                     info_row(
                         rows,
@@ -1427,63 +1410,13 @@ fn upgrade_modal(
                         col::GAIN,
                         key_w,
                     );
-                    info_row(
-                        rows,
-                        &font.0,
-                        "升级费用",
-                        &format!("${cost}"),
-                        col::COST,
-                        key_w,
-                    );
-                    info_row(
-                        rows,
-                        &font.0,
-                        "当前租金",
-                        &format!("${current_rent}"),
-                        col::VALUE,
-                        key_w,
-                    );
-                    info_row(
-                        rows,
-                        &font.0,
-                        "升级后租金",
-                        &format!("${new_rent}"),
-                        col::GAIN,
-                        key_w,
-                    );
-                    info_row(
-                        rows,
-                        &font.0,
-                        "租金增幅",
-                        &format!("+${}", new_rent - current_rent),
-                        col::GAIN,
-                        key_w,
-                    );
                 }
             });
             p.spawn(separator());
-            p.spawn(center_label(
-                &font.0,
-                cash_text,
-                size::NAME,
-                if affordable {
-                    col::CASH_OK
-                } else {
-                    col::CASH_BAD
-                },
-            ));
+            // `Books::upgrade` 扣的就是这个数（`economy::upgrade_cost`）
+            price_block(p, &font.0, "升级费用", cost);
             button_row(p, |line| {
-                button(
-                    line,
-                    &font.0,
-                    ButtonSpec::new(
-                        &buy_text,
-                        layout::MODAL_BUTTON,
-                        super::PRIMARY,
-                        UiAction::Decide(Decision::Accept),
-                    )
-                    .disabled(!affordable),
-                );
+                button(line, &font.0, quote_button("升级", affordable));
                 button(
                     line,
                     &font.0,
@@ -4227,7 +4160,37 @@ pub(crate) fn describe(outcome: &EffectOutcome) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LotteryDeny, LotteryDesk};
+    use super::{LotteryDeny, LotteryDesk, quote_button, seat_shows_modal};
+    use game_core::prelude::Pending;
+
+    /// 报价屏的按钮只写动作（11-16）：价格归那块大字号，按钮上不再复述一遍；
+    /// 买不起时也不改文案，灰掉就够。两条都要钉 —— 只钉「有钱」那一侧的话，
+    /// 把文案写回「购买 ($12,000)」或者干脆永远禁用都能过。
+    #[test]
+    fn a_quote_button_says_the_action_and_greys_out_when_short() {
+        let ok = quote_button("购买", true);
+        assert_eq!(ok.text, "购买");
+        assert!(!ok.disabled);
+
+        let short = quote_button("购买", false);
+        assert_eq!(short.text, "购买", "买不起也不许把价格/现金不足写进按钮");
+        assert!(short.disabled, "买不起就得灰掉并拦派发");
+    }
+
+    /// 电脑座位的窗口不上屏，而拍卖台是那条规则唯一的口子（11-15）。
+    /// 反例要两条：电脑的普通窗口（一张卡面就够了）与「人类当然要看到」那一侧 ——
+    /// 只钉一条的话，把判据写成「永远不弹」也能过。
+    #[test]
+    fn a_computer_seat_gets_no_window_except_the_auction_table() {
+        assert!(seat_shows_modal(false, &Pending::Card));
+        assert!(!seat_shows_modal(true, &Pending::Card));
+        assert!(!seat_shows_modal(true, &Pending::BankTeller));
+        assert!(
+            seat_shows_modal(true, &Pending::Auction),
+            "拍卖台是全场共用的，跟着换人收起来就会按每一拍闪一次"
+        );
+        assert!(seat_shows_modal(false, &Pending::Auction));
+    }
 
     /// 柜台前那位口袋里有钱、号码池是默认的 36 个、一注 1000。
     /// 面板这一侧的判据全部由 `LotteryDesk` 的字段决定，所以构造它不需要世界。

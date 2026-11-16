@@ -25,7 +25,8 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use game_core::prelude::{
-    ArcadeDeal, GameKind, GameRules, MinigameResult, Paused, Payout, Pending, PendingDecision,
+    ArcadeDeal, Controller, GameKind, GameRules, MinigameResult, Paused, Payout, Pending,
+    PendingDecision,
 };
 use rand::Rng as _;
 use rand::SeedableRng as _;
@@ -319,26 +320,32 @@ fn result_line(round: &Round) -> String {
 
 // ===== 建屏 =====
 
-/// 「这一屏该是哪一局」要问的五样。打包是房规（§六 坑 8）：五位散装参数撞的是
-/// `too_many_arguments`，而它们回答的其实是同一个问题。
+/// 「这一屏该是哪一局」要问的六样。打包是房规（§六 坑 8）：它们回答的其实是同一个问题，
+/// 而散装参数迟早会撞上「一个 system 读八样东西」那条线。
 #[derive(SystemParam)]
-pub(crate) struct ArcadeWish<'w> {
+pub(crate) struct ArcadeWish<'w, 's> {
     scene: Res<'w, State<Scene>>,
     pending: Res<'w, PendingDecision>,
     /// 对局里那一手的布局种子（core 发下来的）
     deal: Res<'w, ArcadeDeal>,
     practice: Res<'w, Practice>,
     rounds: Res<'w, PracticeRounds>,
+    /// 窗口上那位是不是电脑开的（11-15）。电脑座位不摆这一屏：它报完分就走，
+    /// 这块能玩 25 秒的玩法区对它是纯装饰，而对玩家是一整块画面被抢走一拍。
+    controllers: Query<'w, 's, &'static Controller>,
 }
 
-impl ArcadeWish<'_> {
+impl ArcadeWish<'_, '_> {
     /// 对局里的窗口优先（它挂着回合）；没有窗口才轮到菜单里的练习请求。
     ///
     /// 场景那一道门是防呆：回菜单时 `clear_match` 会清 `PendingDecision`，
     /// 但「清场」与「切场景」不同帧，多问一句比赌顺序便宜。
     fn wanted(&self) -> Option<Wanted> {
         match self.pending.active() {
-            Some((player, Pending::Minigame(game))) if *self.scene.get() == Scene::Board => {
+            Some((player, Pending::Minigame(game)))
+                if *self.scene.get() == Scene::Board
+                    && !self.controllers.get(player).is_ok_and(Controller::is_ai) =>
+            {
                 Some(Wanted::Match {
                     player,
                     game,
@@ -361,7 +368,7 @@ pub(crate) fn sync_arcade(
     mut commands: Commands,
     font: Res<DevFont>,
     rules: Res<GameRules>,
-    wish: ArcadeWish<'_>,
+    wish: ArcadeWish<'_, '_>,
     mut arcade: ResMut<Arcade>,
     panels: Query<Entity, With<ArcadePanel>>,
 ) {

@@ -95,7 +95,6 @@ pub mod col {
     /// 收益与增幅
     pub const GAIN: Color = Color::srgb(0.40, 0.85, 0.50);
     pub const CASH_OK: Color = Color::srgb(0.50, 0.85, 0.55);
-    pub const CASH_BAD: Color = Color::srgb(1.00, 0.45, 0.45);
     pub const BANKRUPT: Color = Color::srgb(1.00, 0.35, 0.35);
     pub const JAILED: Color = Color::srgb(1.00, 0.60, 0.30);
     /// 卡面「效果：」那一行（card_notice.gd:138）
@@ -147,6 +146,9 @@ pub mod size {
     /// 读起来像「弹窗被拉大了」，而不是「到了另一个地方」
     pub const SCENE_TITLE: f32 = 30.0;
     pub const BUY_TITLE: f32 = 24.0;
+    /// 报价屏（买地／升级）上那个要掏的钱数。比正文 14 大一倍多，落在一屏灰字中间
+    /// 一眼就能找到它 —— 这一屏只回答「多少钱、买不买」
+    pub const PRICE: f32 = 30.0;
     pub const RENT_AMOUNT: f32 = 32.0;
     pub const PAUSE_TITLE: f32 = 28.0;
     pub const MENU_TITLE: f32 = 48.0;
@@ -162,9 +164,14 @@ pub mod layout {
     pub const ROLL_BUTTON: [f32; 2] = [140.0, 44.0];
     pub const BACK_BUTTON: [f32; 2] = [120.0, 44.0];
 
-    /// 弹层面板宽与「左上角相对屏幕中心」的偏移（`PRESET_CENTER` + `position`）
-    pub const BUY_PANEL: [f32; 3] = [400.0, -200.0, -220.0];
-    pub const UPGRADE_PANEL: [f32; 3] = [400.0, -200.0, -180.0];
+    /// 弹层面板宽与「左上角相对屏幕中心」的偏移（`PRESET_CENTER` + `position`）。
+    ///
+    /// ⚠️ 竖向那一格是「面板高度的一半」的替身，内容一改就得跟着改（Bevy 这块面板由内容
+    /// 撑开，没有 Godot 那个固定高度）。11-15 砍掉租金表后从 -220/-180 收到 -155；11-16
+    /// 再把「颜色组／你的现金」两行换成一块大字号价格、面板缩到 ~320–365，量出来 -155
+    /// 会让面板整体低 5–15px（行数越多越低），于是取 -165 把三种高度摊平（实测都在 ±6px）。
+    pub const BUY_PANEL: [f32; 3] = [400.0, -200.0, -165.0];
+    pub const UPGRADE_PANEL: [f32; 3] = [400.0, -200.0, -165.0];
     pub const RENT_PANEL: [f32; 3] = [380.0, -190.0, -150.0];
     pub const CARD_PANEL: [f32; 3] = [420.0, -210.0, -170.0];
     /// 卡面带图时的那一块：宽出一张卡面加一条间隙，横向偏移跟着减半（面板靠
