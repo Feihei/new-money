@@ -102,6 +102,12 @@ pub mod col {
     pub const CHANCE: Color = Color::srgb(0.30, 0.70, 0.85); // card_notice.gd:13
     pub const FATE: Color = Color::srgb(0.80, 0.60, 0.95); // card_notice.gd:14
 
+    /// 台词气泡（P16d）：比 HUD 再暗一档，白字是唯一主角；描边取顶栏金色那一族，
+    /// 与棋子头顶的关系读得出「这句话是那颗棋子说的」。落在整屏遮罩（ZIndex 3）之上，
+    /// 所以模态开着时台词也读得到。
+    pub const BUBBLE: Color = Color::srgba(0.08, 0.08, 0.11, 0.94);
+    pub const BUBBLE_BORDER: Color = Color::srgba(0.90, 0.78, 0.42, 0.95);
+
     // ===== 按钮（dialog 的 `_style_button`）=====
     pub const BTN_PRIMARY: Color = Color::srgb(0.25, 0.55, 0.30);
     pub const BTN_PRIMARY_HOVER: Color = Color::srgb(0.30, 0.65, 0.35);
@@ -154,6 +160,9 @@ pub mod size {
     pub const MENU_TITLE: f32 = 48.0;
     /// 卡面「确定」按钮（`card_notice.gd:150` 的 17，比其余按钮大一档）
     pub const CARD_OK: f32 = 17.0;
+    /// 台词气泡（P16d）。比正文大一档：它落在棋盘上而不是面板里，背景是花花绿绿的
+    /// 地面与建筑，16 号字读起来费劲；17 是「一屏里最先被读到的字」那一档。
+    pub const BUBBLE: f32 = 17.0;
 }
 
 /// 布局尺寸（px）。
@@ -256,6 +265,24 @@ pub mod layout {
     pub const ITEM_DICE_BUTTON: [f32; 2] = [44.0, 30.0];
     /// 一件道具的标题行与候选行之间
     pub const ITEM_ROW_GAP: f32 = 4.0;
+
+    // ===== 11-23：台词气泡（P16d）=====
+    /// 棋子头顶的对话气泡。锚点比**脚底**高 2.9：人形棋子顶点 2.0（`TOKEN_FEET_Y` +
+    /// `TOKEN_SPRITE_H`），球顶点 1.3。2.15 那一版实测气泡底边正压在帽檐上、2.45 也只
+    /// 挪开两三个像素（P16d 实报），2.9 才在帽顶与气泡底边之间留出一行字的净空 ——
+    /// 屏幕上一单位约 72 像素。11-24 用户要求尖尾先不要，高度不降回去。
+    /// 最宽 320 是「一句 15 字在 17 号字下约两行」的量；再宽会横跨好几格，读不出是谁在说。
+    pub const CAPTION_MAX_W: f32 = 320.0;
+    pub const CAPTION_LIFT: f32 = 2.9;
+    pub const CAPTION_GAP: f32 = 10.0;
+    pub const CAPTION_PAD: [f32; 2] = [12.0, 8.0];
+    pub const CAPTION_RADIUS: f32 = 10.0;
+    pub const CAPTION_BORDER: f32 = 2.0;
+    /// 说话的人不在镜头里时，气泡落到底部中央（这也是字幕的默认位）：
+    /// 底边距 96 压在 HUD（112）之上，不遮顶栏也不遮手牌/道具浮层。
+    pub const CAPTION_FALLBACK_BOTTOM: f32 = 220.0;
+    /// 气泡离屏幕边的最小距离。贴着边也要留一口气，否则圆角与描边读不出来
+    pub const CAPTION_SCREEN_MARGIN: f32 = 8.0;
 
     // ===== P3d②：百货公司柜台 =====
     /// 柜台模态：比银行柜台再宽一点 —— 每行是「卡名 + 效果 + 一颗带数额的按钮」三段，

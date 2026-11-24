@@ -21,6 +21,7 @@ mod audio;
 mod autopilot;
 mod boards;
 mod dev;
+mod dialogue;
 mod dump;
 mod paths;
 mod render;
@@ -79,6 +80,8 @@ fn main() {
         .add_plugins(paths::SavePlugin)
         // 设置（P15c）：行走速度写回 `GameRules`，值一变就落盘
         .add_plugins(settings::SettingsPlugin)
+        // 台词正文（P16d）：语音起播时字幕要读它，所以排在音频之前
+        .add_plugins(dialogue::DialoguePlugin)
         // 音频（P16a）：BGM 场景机 + 世界播放列表。它只读别人的状态（哪一屏、开着哪扇窗口、
         // 按没按暂停），一个字都不写回去 —— 所以 `NM_AUDIO=0` 那条路能整块关掉而不碰玩法
         .add_plugins(audio::AudioPlugin)

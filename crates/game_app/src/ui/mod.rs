@@ -11,6 +11,7 @@
 //! 事件就停在那里，不会穿到顶栏按钮上。
 
 pub mod calendar_fx;
+pub mod caption;
 pub mod dialog;
 pub mod finance;
 pub mod hand;
@@ -92,7 +93,12 @@ impl Plugin for UiPlugin {
             .add_systems(
                 Update,
                 (
-                    (top_bar::spawn_top_bar, player_hud::spawn_player_hud).in_set(UiSet::Boot),
+                    (
+                        top_bar::spawn_top_bar,
+                        player_hud::spawn_player_hud,
+                        caption::spawn_voice_bubble,
+                    )
+                        .in_set(UiSet::Boot),
                     // 集合成员**逐个标**：`sync_stock_panel` 的参数包 `StockView<'w, 's>`
                     // 带两个生命周期，而元组整体 `.in_set(...)` 在这种元素上会退化到
                     // `ObserverSystemExt` 的重载解析然后崩（§6.1 坑 14）。
@@ -102,6 +108,8 @@ impl Plugin for UiPlugin {
                         top_bar::refresh_top_bar.in_set(UiSet::Live),
                         top_bar::hint_from_events.in_set(UiSet::Live),
                         player_hud::refresh_player_hud.in_set(UiSet::Live),
+                        // 台词气泡（P16d）：位置每帧跟棋子，文字只在换句时重写
+                        caption::sync_voice_bubble.in_set(UiSet::Live),
                         // `NM_DECISION=card` 的模态要补一条真卡才有内容可截（见它的注释）
                         dialog::dev_seed_card.in_set(UiSet::Live),
                         dialog::remember_drawn_card.in_set(UiSet::Live),

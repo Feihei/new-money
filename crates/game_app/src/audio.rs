@@ -39,6 +39,7 @@ use game_core::prelude::{
     PlayerDetained, PlayerId, PlayerName, RentDue, StockTraded, TurnOrder, TurnPhase, TurnStarted,
 };
 
+use crate::dialogue::DialogueLines;
 use crate::scene::Scene;
 use crate::settings::{Settings, VolumeBus};
 use crate::ui::finance::StockPanelOpen;
@@ -674,10 +675,62 @@ struct VoiceQueue {
     /// 此刻正在播的那一句（`Despawn` 模式，放完实体自己消失，所以这里只是一个句柄）
     current: Option<Entity>,
     pending: std::collections::VecDeque<VoiceCue>,
+    /// 已经念过开场白的玩家（P16b 修正）：判据是「谁的回合开始而他还没念过」，
+    /// 于是**每人第一回合前念自己的那句** —— 第一位上场、第一位行动、第二位上场……
+    /// 而不是第一位回合前把全员连成串。实体带 generation，跨局复用 index 也不会
+    /// 误挡新玩家；回菜单时 `clear_voice` 照样清，账不过夜。
+    entered: std::collections::HashSet<Entity>,
+    /// 当前这一句是什么时候起播的（`Time::elapsed_secs`）。只给「单击跳过」用：
+    /// 起播那一刻之前就在路上的点击不许把这一句掐掉（见 [`SKIP_GRACE`]）。
+    started_at: f32,
 }
 
 #[derive(Component)]
 struct VoiceLine;
+
+/// 此刻该上屏的那一句（P16d）。语音**真的起播**时才写，念完、跳过、回菜单时清 ——
+/// 字幕跟着声音走，不跟队列走：队列里排着的那几句现在没人说。
+///
+/// `seq` 每换一句 +1：UI 只在它变的时候重写文字（与各浮层「按签名重建」同一条）。
+#[derive(Resource, Default)]
+pub(crate) struct VoiceCaption {
+    /// 说话的人（画面上的棋子），`None` = 没有该上屏的台词
+    pub(crate) player: Option<Entity>,
+    pub(crate) text: String,
+    pub(crate) seq: u64,
+}
+
+impl VoiceCaption {
+    fn show(&mut self, player: Entity, text: &str) {
+        if text.trim().is_empty() {
+            self.clear();
+            return;
+        }
+        self.player = Some(player);
+        self.text = text.to_string();
+        self.seq = self.seq.wrapping_add(1);
+    }
+
+    fn clear(&mut self) {
+        if self.player.take().is_some() {
+            self.text.clear();
+            self.seq = self.seq.wrapping_add(1);
+        }
+    }
+}
+
+/// `NM_AUDIO=0` 时字幕自己走的钟。有声时不参与 —— 一句的长度由声音素材决定，
+/// 那是唯一与「观众听到的」对得上的长度。静音模式没有 sink 可等，只能按字数估一个
+/// 停留时长，否则队列一帧走一句、字还没读完就换下一条。
+#[derive(Resource, Default)]
+struct CaptionClock(f32);
+
+/// 一句台词的停留时长（秒）：中文按每秒约 5–6 字估，短句留 1.2 秒起步，
+/// 长句封顶 6 秒。估长了只是多停一会儿，估短了是读不完 —— 所以宁长勿短。
+fn caption_secs(text: &str) -> f32 {
+    let chars = text.chars().count() as f32;
+    (1.2 + chars * 0.18).clamp(1.2, 6.0)
+}
 
 /// 名字 + 事件 → 资产路径。查不到嗓子（四恶人、无名座位、没录音的候补）就是 `None`。
 fn voice_path(name: &str, event: VoiceEvent) -> Option<String> {
@@ -911,20 +964,18 @@ fn collect_voice(
             cue(&mut cues, placed.player, VoiceEvent::Mine, 0, placed.player);
         }
     }
-    // 开场白：第一回合（`turn_count` 在 `TurnEnded` 才 +1，所以只有第一位看得到 0）。
-    // 读档不重跑 `TurnStart`，所以「回到第一回合的存档」也不会再念一遍 —— 这条判据
-    // 不是靠 `StartMode` 的标志位，而是靠回合机本来的形状。
-    let first_turn = inbox.started.read().count() > 0
-        && inbox
-            .session
-            .as_ref()
-            .is_some_and(|session| session.turn_count == 0);
-    if first_turn && let Some(order) = inbox.order.as_ref() {
-        for (seat, player) in order.order.iter().enumerate() {
+    // 开场白（P16b 修正）：**谁的回合开始而他还没念过，谁念自己的那句**。节奏是
+    // 「第一位上场 → 第一位行动 → 第二位上场 → 第二位行动……」—— 旧版用
+    // `turn_count == 0` 当判据，它只认得出第一位，于是四句连串挤在第一位行动之前。
+    // 拘留跳过的回合也发 `TurnStarted`（turn.rs 三处都在回合机推进里），所以被押着
+    // 的第一回合照样开口。读档不重跑 `TurnStarted`（restore 不走回合机），回到
+    // 第一回合的存档也不会再念 —— 判据靠回合机本来的形状，不靠 `StartMode`。
+    for started in inbox.started.read() {
+        if queue.entered.insert(started.player) {
             cues.push(VoiceCue {
-                player: *player,
+                player: started.player,
                 event: VoiceEvent::Enter,
-                seat,
+                seat: seat_of(started.player),
                 sub: 0,
             });
         }
@@ -1165,12 +1216,30 @@ fn reaches_three(
 /// 念下一句：当前那句的实体已经没了（`Despawn` 播完）就取队头。
 ///
 /// 一次只起一条；没有嗓子的人（四恶人、无名座位）当场跳过 —— 静默是设计，不是错误。
+/// 字幕那几样总是同进同出：谁在说、静音时那一句要停多久、正文表与墙钟。
+/// 打包也是房规（§六 坑 8）：全摊在 `advance_voice` 的参数表上会越过 clippy 的七参数线。
+/// 正文表取 `Option`：单测里的 App 不装 `DialoguePlugin`，缺表时照常放声音、只是没字幕。
+#[derive(bevy::ecs::system::SystemParam)]
+struct CaptionDesk<'w> {
+    caption: ResMut<'w, VoiceCaption>,
+    clock: ResMut<'w, CaptionClock>,
+    dialogue: Option<Res<'w, DialogueLines>>,
+    time: Res<'w, Time>,
+}
+
+/// 起播一条语音要的三样（开关与日志、音量档位、素材服务），同样只在这里打包一次。
+#[derive(bevy::ecs::system::SystemParam)]
+struct PlaybackDesk<'w> {
+    cfg: Res<'w, AudioConfig>,
+    settings: Res<'w, Settings>,
+    server: Res<'w, AssetServer>,
+}
+
 fn advance_voice(
     mut commands: Commands,
     mut queue: ResMut<VoiceQueue>,
-    cfg: Res<AudioConfig>,
-    settings: Res<Settings>,
-    server: Res<AssetServer>,
+    mut desk: CaptionDesk,
+    playback: PlaybackDesk,
     live: Query<Entity, With<VoiceLine>>,
     players: Query<&PlayerName>,
 ) {
@@ -1178,29 +1247,55 @@ fn advance_voice(
         return;
     }
     queue.current = None;
+    // 静音模式：上一条字幕还没读够就先不换（有声音时这段永远是 0）
+    if !playback.cfg.playback && desk.clock.0 > 0.0 {
+        desk.clock.0 -= desk.time.delta_secs();
+        return;
+    }
     while let Some(cue) = queue.pending.pop_front() {
         let Ok(name) = players.get(cue.player) else {
             continue;
         };
         let Some(path) = voice_path(&name.0, cue.event) else {
-            if cfg.log {
+            if playback.cfg.log {
                 info!("audio: voice {} 无语音（静默）", name.0);
             }
             continue;
         };
-        if cfg.playback {
+        // 字幕跟**这一条声音**同时起：正文按语音目录名 + 事件键查表，
+        // 查不到就空着（有声音没字幕，不编一句）
+        let text = desk
+            .dialogue
+            .as_ref()
+            .and_then(|lines| {
+                crate::art::voice_key(&name.0).and_then(|key| lines.line(key, cue.event.file()))
+            })
+            .unwrap_or("");
+        if playback.cfg.playback {
             queue.current = Some(
                 commands
                     .spawn((
-                        AudioPlayer::new(server.load(path)),
+                        AudioPlayer::new(playback.server.load(path)),
                         PlaybackSettings::DESPAWN
-                            .with_volume(Volume::Linear(VolumeBus::Voice.gain(&settings))),
+                            .with_volume(Volume::Linear(VolumeBus::Voice.gain(&playback.settings))),
                         VoiceLine,
                     ))
                     .id(),
             );
+            queue.started_at = desk.time.elapsed_secs();
+            desk.caption.show(cue.player, text);
+        } else if !text.is_empty() {
+            desk.caption.show(cue.player, text);
+            desk.clock.0 = caption_secs(text);
+            queue.started_at = desk.time.elapsed_secs();
+            if playback.cfg.log {
+                info!("audio: caption {text} (silent {:.1}s)", desk.clock.0);
+            }
+            return;
+        } else {
+            // 静音且没有正文：这一条不占时间，接着找下一条有词的
         }
-        if cfg.log {
+        if playback.cfg.log {
             info!(
                 "audio: voice {} {} (queue {})",
                 name.0,
@@ -1210,6 +1305,23 @@ fn advance_voice(
         }
         return;
     }
+    // 队列空了、也没有人在念：气泡跟着声音一起消失
+    desk.caption.clear();
+    desk.clock.0 = 0.0;
+}
+
+/// 起播之后这一小段里不认「单击跳过」。启动某一屏的那一下点击会留下一条 `PointerClick`
+/// （消息活两帧），而开局头几帧的帧长有上百毫秒 —— 开场白起播之后那条旧点击还会被读到，
+/// 于是「点开始对局」这一下把自己的第一句掐掉了（P16d 实报：「第一个角色没有登场台词，
+/// 后面都有」，日志是 `voice 姬百年 enter` 之后 13ms 的 `voice skip by click`）。
+/// 0.3 秒只盖住这段余量，不改变「点一下跳过一句」的手感。
+const SKIP_GRACE: f32 = 0.3;
+
+/// 这一次点击该不该掐掉当前这句。判据是**这句已经念了多久**，不是点击自己的时间戳 ——
+/// `PointerClick` 不带时刻，能读到的只有「它两帧之内还在」。抽成纯函数是为了让 13ms
+/// 那条实报能被钉进单测（`now - started_at` 恰好是日志里那两个时刻之差）。
+fn click_may_skip(started_at: f32, now: f32) -> bool {
+    now - started_at >= SKIP_GRACE
 }
 
 /// 主键点一下打断一句。**一次点击只打断一条**：循环里 `break`，于是同一次点击
@@ -1218,10 +1330,14 @@ fn skip_voice_on_click(
     mut clicks: MessageReader<PointerClick>,
     mut commands: Commands,
     mut queue: ResMut<VoiceQueue>,
+    time: Res<Time>,
     cfg: Res<AudioConfig>,
     live: Query<Entity, With<VoiceLine>>,
 ) {
     let Some(current) = queue.current else { return };
+    if !click_may_skip(queue.started_at, time.elapsed_secs()) {
+        return;
+    }
     for click in clicks.read() {
         if click.button != PointerButton::Primary || !live.contains(current) {
             continue;
@@ -1240,9 +1356,15 @@ fn skip_voice_on_click(
 fn clear_voice(
     mut commands: Commands,
     mut queue: ResMut<VoiceQueue>,
+    mut caption: ResMut<VoiceCaption>,
+    mut clock: ResMut<CaptionClock>,
     live: Query<Entity, With<VoiceLine>>,
 ) {
     queue.pending.clear();
+    queue.entered.clear();
+    queue.started_at = 0.0;
+    caption.clear();
+    clock.0 = 0.0;
     if let Some(entity) = queue.current.take()
         && live.contains(entity)
     {
@@ -1415,6 +1537,8 @@ impl Plugin for AudioPlugin {
             .add_message::<UiSoundRequest>()
             .init_resource::<Bgm>()
             .init_resource::<VoiceQueue>()
+            .init_resource::<VoiceCaption>()
+            .init_resource::<CaptionClock>()
             .insert_resource(Selftest {
                 on: env::var("NM_AUDIO_SELFTEST").is_ok_and(|value| value.trim() == "1"),
                 ..Default::default()
@@ -1450,6 +1574,7 @@ impl Plugin for AudioPlugin {
 mod tests {
     use super::*;
     use bevy::{
+        ecs::system::RunSystemOnce,
         prelude::{AppExtStates, Messages, MinimalPlugins, NextState},
         state::app::StatesPlugin,
     };
@@ -1906,6 +2031,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<VoiceQueue>()
+            .init_resource::<VoiceCaption>()
+            .init_resource::<CaptionClock>()
             .insert_resource(AudioConfig {
                 playback: false,
                 hold: false,
@@ -2072,6 +2199,84 @@ mod tests {
         );
     }
 
+    /// 开场白的节奏（P16b 修正）：**每人自己的第一回合前念自己那句** ——
+    /// 第一位回合开始只进队一句，第二位回合开始再进下一句；念过的不再念。
+    /// 旧版在第一位回合前把全员连成串，这条测试的「恰好一句」就是那版的回归线。
+    #[test]
+    fn each_player_announces_on_their_own_first_turn() {
+        let mut app = voice_app();
+        let a = speaker(&mut app, "姬百年", 0);
+        let b = speaker(&mut app, "莱息", 1);
+
+        // 第一位上场：队列里只有他自己的那一句
+        app.world_mut()
+            .resource_mut::<Messages<TurnStarted>>()
+            .write(TurnStarted { player: a });
+        app.update();
+        let said: Vec<Entity> = app
+            .world()
+            .resource::<VoiceQueue>()
+            .pending
+            .iter()
+            .map(|cue| cue.player)
+            .collect();
+        assert_eq!(
+            said,
+            vec![a],
+            "第一位回合前只该有他自己的上场台词，不该全员连串：{said:?}"
+        );
+
+        // 第一位行动完，第二位上场：追加的正是第二位那句
+        app.world_mut().resource_mut::<VoiceQueue>().pending.clear();
+        app.world_mut()
+            .resource_mut::<Messages<TurnStarted>>()
+            .write(TurnStarted { player: b });
+        app.update();
+        let said: Vec<Entity> = app
+            .world()
+            .resource::<VoiceQueue>()
+            .pending
+            .iter()
+            .map(|cue| cue.player)
+            .collect();
+        assert_eq!(said, vec![b], "第二位上场前才轮到他那句：{said:?}");
+
+        // 第二位又轮到一圈：念过的不再念
+        app.world_mut().resource_mut::<VoiceQueue>().pending.clear();
+        app.world_mut()
+            .resource_mut::<Messages<TurnStarted>>()
+            .write(TurnStarted { player: a });
+        app.update();
+        assert!(
+            app.world()
+                .resource::<VoiceQueue>()
+                .pending
+                .iter()
+                .all(|cue| cue.player != a),
+            "开场白一人只念一次"
+        );
+
+        // 回菜单清账（`clear_voice`）：新局的第一回合不记账。
+        // `run_system_once` 缺资源时**不 panic 而是返回 Err** —— 写 `let _ =` 会让
+        // 这条用例在「清账其实没跑」时绿着，所以这里要它必须跑成功。
+        app.world_mut()
+            .run_system_once(clear_voice)
+            .expect("clear_voice 的参数必须齐全（VoiceCaption／CaptionClock 等）");
+        app.world_mut().resource_mut::<VoiceQueue>().pending.clear();
+        app.world_mut()
+            .resource_mut::<Messages<TurnStarted>>()
+            .write(TurnStarted { player: a });
+        app.update();
+        let said: Vec<Entity> = app
+            .world()
+            .resource::<VoiceQueue>()
+            .pending
+            .iter()
+            .map(|cue| cue.player)
+            .collect();
+        assert_eq!(said, vec![a], "清账之后开场白要重新起头：{said:?}");
+    }
+
     #[derive(Resource, Default)]
     struct Captured(Vec<&'static str>);
 
@@ -2183,6 +2388,61 @@ mod tests {
         );
         assert_eq!(voice_path("沈万三", VoiceEvent::Enter), None);
         assert_eq!(voice_path("甲", VoiceEvent::Enter), None);
+    }
+
+    /// 字幕表的事件键与 `VoiceEvent::file()` 必须逐字相同。一边是 enum、一边是 JSON，
+    /// 拼错一个字谁都不会报错 —— 症状只有「有声音、没字幕」。
+    #[test]
+    fn every_voice_event_has_a_dialogue_line() {
+        let lines = crate::dialogue::DialogueLines::load();
+        for event in VoiceEvent::ALL {
+            assert!(
+                lines.line("ji-bainian", event.file()).is_some(),
+                "{} 在台词表里查不到，字幕会静默缺失",
+                event.file()
+            );
+        }
+    }
+
+    /// 字幕的停留时长：短句有下限、长句有上限、中间跟着字数走。静音模式下这是
+    /// 「字还没读完就换下一条」唯一挡板 —— 队列本身一帧就能走完。
+    #[test]
+    fn caption_dwell_scales_with_line_length_but_stays_bounded() {
+        assert_eq!(caption_secs(""), 1.2, "空句也给一个下限");
+        assert!(caption_secs(&"字".repeat(20)) > caption_secs("站住。"));
+        assert_eq!(caption_secs(&"字".repeat(100)), 6.0, "长句封顶");
+    }
+
+    /// 起播那一小段里不认跳过：实报「开局第一个角色没有登场台词」就是启动那一屏的
+    /// 点击在开场白起播之后才被读到（日志里两条相隔 13ms）。同一句被点一下之后
+    /// （过了宽限期）仍然必须掐得掉，否则跳过就废了。
+    #[test]
+    fn a_click_that_was_already_in_flight_does_not_kill_the_first_line() {
+        assert!(
+            !click_may_skip(12.137, 12.150),
+            "13ms 前起播的那一句，不该被启动那一屏的点击掐掉"
+        );
+        assert!(!click_may_skip(12.137, 12.3), "宽限期内仍不掐");
+        assert!(click_may_skip(12.137, 12.6), "过了宽限期照常掐");
+    }
+
+    /// 上屏状态机：`show` 换人换词并递增 `seq`（UI 按它决定重写文字），空句与
+    /// `clear` 都收起来；本来空着时 `clear` 不再动 `seq` —— 否则每帧空转都会让
+    /// 气泡重排一次。
+    #[test]
+    fn caption_shows_and_clears_without_spinning_the_sequence() {
+        let mut caption = VoiceCaption::default();
+        let speaker = Entity::PLACEHOLDER;
+        caption.show(speaker, "站住。");
+        assert_eq!(caption.player, Some(speaker));
+        assert_eq!(caption.seq, 1);
+
+        caption.show(speaker, "  ");
+        assert_eq!(caption.player, None, "空句等于没有台词");
+        assert_eq!(caption.seq, 2);
+
+        caption.clear();
+        assert_eq!(caption.seq, 2, "本来就空着，不该再动 seq");
     }
 
     /// 每条正在响的 sink 归哪条总线。串线的症状是「拉满语音，背景音乐也变响」，
