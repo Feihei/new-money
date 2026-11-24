@@ -150,6 +150,18 @@ pub(crate) fn spawn_top_bar(mut commands: Commands, font: Res<DevFont>) {
                     UiAction::ToggleItems,
                 ),
             );
+            // 玩家一览（11-18）：HUD 只显示当前行动者，其余座位的详细账目在这里查。
+            // 与手牌/道具同一条 —— 看是随时的事，不阻断回合
+            button(
+                bar,
+                &font.0,
+                ButtonSpec::new(
+                    "玩家",
+                    layout::FINANCE_BUTTON,
+                    SECONDARY,
+                    UiAction::TogglePlayers,
+                ),
+            );
             // Godot 的暂停只有 ESC 一条路（`pause_menu.gd:19-25`），这里补一个按钮：
             // 只用键盘能找到的功能，鼠标玩家就找不到
             button(
@@ -225,6 +237,8 @@ fn button_allowed(action: &UiAction, turn: &TurnView) -> bool {
         UiAction::ToggleHand => !turn.paused.0,
         // 道具栏同理：看是随时的事，放不放得下由面板里那排候选与规则层判
         UiAction::ToggleItems => !turn.paused.0,
+        // 玩家一览：纯读数，暂停之外没有理由挡它（暂停时遮罩本来也压着）
+        UiAction::TogglePlayers => !turn.paused.0,
         _ => true,
     }
 }
@@ -1448,8 +1462,7 @@ fn god_deed_word(god: &str, who: &str, cash: i64, cards: usize) -> String {
     }
 }
 
-/// 银行操作的中文动词。`BankOp` 在规则层是枚举，屏幕上要给人话，映射属于表现层
-/// （与 `tile_info::kind_name` 同一条分工）。
+/// 银行操作的中文动词。`BankOp` 在规则层是枚举，屏幕上要给人话，映射属于表现层。
 fn op_verb(op: game_core::prelude::BankOp) -> &'static str {
     use game_core::prelude::BankOp;
     match op {

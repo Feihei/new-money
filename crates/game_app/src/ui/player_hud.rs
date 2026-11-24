@@ -1,10 +1,15 @@
-//! 底部玩家卡：颜色点、名字、现金、点券、地产数与状态，高亮当前回合那位。
+//! 底部玩家卡：**只显示当前回合那一位**，颜色点、名字、现金、点券、地产数与状态。
 //!
 //! 对应 Godot `player_hud.gd`（220 行、七个信号回调各自找自己的 label 改文字）。
 //!
+//! 11-18 起不再把全体座位铺在屏幕底下：一局四个人时那一排读的是「别人的账」，
+//! 而玩家在这一回合真正要盯的只有自己（轮到电脑时是电脑）。其余座位的详细数据
+//! 搬到顶栏「玩家」那颗按钮后面（[`super::players`]），需要对照时再翻开。
+//!
 //! 移植成「一次装配 + 每帧按世界状态重算」：信号驱动的问题是少接一个就有一处数字不更新，
 //! 而「地产数没跟着破产变」这类错平时看不出来，只在关键回合暴露。改成从组件直接算之后，
-//! 卡片内容与 `Owner`/`Wallet` 不可能不一致（§5.1 差异表）。
+//! 卡片内容与 `Owner`/`Wallet` 不可能不一致（§5.1 差异表）。卡片本身只有一张，
+//! 换人时改 `PlayerCard.player` 指向新的当前回合，而不是重建实体。
 //!
 //! 整块挂 [`Pickable::IGNORE`]：它横在棋盘下方，一旦参与命中测试就会吃掉那一片的点格点击
 //! （Godot 端同一个 `mouse_filter = MOUSE_FILTER_IGNORE`，`player_hud.gd:20`）。
@@ -19,37 +24,24 @@ use super::theme::{col, layout, size};
 use super::{BoardUi, label};
 use crate::render::DevFont;
 
-/// 一张玩家卡：五段文本 + 颜色点，外加「上次写进去的整行内容」。
+/// 唯一那张玩家卡：五段文本 + 颜色点，外加「上次写进去的整行内容」。
 ///
 /// 缓存整张卡而不是逐段比对，是因为这几段本来就要一起变：一次比较，要么全写要么全不写。
-/// 高亮另记一个 `bool` —— 它是样式，不在文本里。
+/// `player` 是**当前回合那一位**，换人时只改这一格（`None` = 世界还没装配到玩家，
+/// 或此刻没有行动者），实体本身不重建 —— 重建会让这一条 HUD 每回合闪一下。
 #[derive(Component)]
 pub(crate) struct PlayerCard {
-    player: Entity,
+    player: Option<Entity>,
+    dot: Entity,
     name: Entity,
     cash: Entity,
     points: Entity,
     props: Entity,
     status: Entity,
     cached: String,
-    highlighted: bool,
 }
 
-pub(crate) fn spawn_player_hud(
-    mut commands: Commands,
-    font: Res<DevFont>,
-    players: Query<(
-        Entity,
-        &PlayerId,
-        &PlayerName,
-        &Wallet,
-        &Points,
-        &PlayerColor,
-    )>,
-) {
-    let mut sorted: Vec<_> = players.iter().collect();
-    sorted.sort_by_key(|(_, id, ..)| id.0);
-
+pub(crate) fn spawn_player_hud(mut commands: Commands, font: Res<DevFont>) {
     let list = commands
         .spawn((
             BoardUi,
@@ -65,7 +57,9 @@ pub(crate) fn spawn_player_hud(
                 // P14a 之后默认局有四个座位，钉死的高度装不下四行 —— 而 bevy_ui 不裁子节点
                 // （§6.1 坑 34），第四行不是被裁掉而是**画到窗口下沿之外**，症状是
                 // 「有一个玩家整个 HUD 看不见」，看着像 HUD 坏了。`bottom` 锚住 + `Auto` 高度
-                // 就是往上长，一位与八位都刚好贴着底边
+                // 就是往上长，一位与八位都刚好贴着底边。
+                // 11-18 只剩当前玩家一张卡，这个 `Auto` 仍然留着：它不再服务人数，
+                // 但 `HUD_BOTTOM[0]` 那个旧高度从一开始就只是「两张卡」的替身
                 height: Val::Auto,
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(layout::HUD_CARD_GAP),
@@ -74,28 +68,32 @@ pub(crate) fn spawn_player_hud(
         ))
         .id();
 
-    for (player, _, name, wallet, points, color) in sorted {
-        let card = commands
-            .spawn((
-                Pickable::IGNORE,
-                ChildOf(list),
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    column_gap: Val::Px(layout::HUD_ROW_GAP),
-                    padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
-                    border: UiRect::all(Val::Px(0.0)),
-                    border_radius: BorderRadius::all(Val::Px(6.0)),
-                    ..default()
-                },
-                BackgroundColor(col::HUD_CARD),
-                super::border_color(Color::NONE),
-            ))
-            .id();
+    let card = commands
+        .spawn((
+            Pickable::IGNORE,
+            ChildOf(list),
+            Node {
+                // 首帧还没轮到人：先藏着，`refresh_player_hud` 拿到当前回合那位再亮出来。
+                // 用 `Display::None` 而不是空文字卡 —— 空卡会在开局那一帧闪一下
+                display: Display::None,
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(layout::HUD_ROW_GAP),
+                padding: UiRect::axes(Val::Px(12.0), Val::Px(8.0)),
+                border: UiRect::all(Val::Px(2.0)),
+                border_radius: BorderRadius::all(Val::Px(6.0)),
+                ..default()
+            },
+            // 这张卡永远属于「此刻在行动的人」，所以高亮是常态而不是一种比较结果
+            BackgroundColor(col::HUD_CARD_ACTIVE),
+            super::border_color(col::HUD_BORDER_ACTIVE),
+        ))
+        .id();
 
-        // 颜色圆点：Godot 用 `ColorRect` + `SIZE_SHRINK_CENTER`，这里靠父级的
-        // `align_items: Center` 居中，圆角取半径当成圆
-        commands.spawn((
+    // 颜色圆点：Godot 用 `ColorRect` + `SIZE_SHRINK_CENTER`，这里靠父级的
+    // `align_items: Center` 居中，圆角取半径当成圆
+    let dot = commands
+        .spawn((
             Pickable::IGNORE,
             ChildOf(card),
             Node {
@@ -104,90 +102,80 @@ pub(crate) fn spawn_player_hud(
                 border_radius: BorderRadius::all(Val::Px(layout::HUD_DOT / 2.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgb(color.0[0], color.0[1], color.0[2])),
-        ));
+            BackgroundColor(Color::WHITE),
+        ))
+        .id();
 
-        let (t, f, c) = label(&font.0, name.0.clone(), size::NAME, col::HUD_NAME);
-        let name_e = commands
-            .spawn((
-                ChildOf(card),
-                Node {
-                    min_width: Val::Px(80.0),
-                    ..default()
-                },
-                t,
-                f,
-                c,
-            ))
-            .id();
-        let (t, f, c) = label(
-            &font.0,
-            format!("${}", wallet.cash),
-            size::BODY,
-            col::HUD_CASH,
-        );
-        let cash_e = commands
-            .spawn((
-                ChildOf(card),
-                Node {
-                    min_width: Val::Px(100.0),
-                    ..default()
-                },
-                t,
-                f,
-                c,
-            ))
-            .id();
-        // 第二套账单独一段：与现金并排、另取一色，「永不通兑」在界面上的表达就是
-        // 它是另一个数字，不是 `$` 后面多出来的几位
-        let (t, f, c) = label(
-            &font.0,
-            format!("点券:{}", points.0),
-            size::BODY,
-            col::HUD_POINTS,
-        );
-        let points_e = commands
-            .spawn((
-                ChildOf(card),
-                Node {
-                    min_width: Val::Px(84.0),
-                    ..default()
-                },
-                t,
-                f,
-                c,
-            ))
-            .id();
-        let (t, f, c) = label(&font.0, "地产:0", size::SMALL, col::HUD_PROPS);
-        let props_e = commands.spawn((ChildOf(card), t, f, c)).id();
-        let (t, f, c) = label(&font.0, String::new(), size::SMALL, col::BODY);
-        // 状态标签贴右（`SIZE_EXPAND_FILL` + `HORIZONTAL_ALIGNMENT_RIGHT`）
-        let status_e = commands
-            .spawn((
-                ChildOf(card),
-                Node {
-                    flex_grow: 1.0,
-                    justify_content: JustifyContent::FlexEnd,
-                    ..default()
-                },
-                TextLayout::justify(Justify::Right),
-                t,
-                f,
-                c,
-            ))
-            .id();
+    let (t, f, c) = label(&font.0, String::new(), size::NAME, col::HUD_NAME);
+    let name_e = commands
+        .spawn((
+            ChildOf(card),
+            Node {
+                min_width: Val::Px(80.0),
+                ..default()
+            },
+            t,
+            f,
+            c,
+        ))
+        .id();
+    let (t, f, c) = label(&font.0, String::new(), size::BODY, col::HUD_CASH);
+    let cash_e = commands
+        .spawn((
+            ChildOf(card),
+            Node {
+                min_width: Val::Px(100.0),
+                ..default()
+            },
+            t,
+            f,
+            c,
+        ))
+        .id();
+    // 第二套账单独一段：与现金并排、另取一色，「永不通兑」在界面上的表达就是
+    // 它是另一个数字，不是 `$` 后面多出来的几位
+    let (t, f, c) = label(&font.0, String::new(), size::BODY, col::HUD_POINTS);
+    let points_e = commands
+        .spawn((
+            ChildOf(card),
+            Node {
+                min_width: Val::Px(84.0),
+                ..default()
+            },
+            t,
+            f,
+            c,
+        ))
+        .id();
+    let (t, f, c) = label(&font.0, String::new(), size::SMALL, col::HUD_PROPS);
+    let props_e = commands.spawn((ChildOf(card), t, f, c)).id();
+    let (t, f, c) = label(&font.0, String::new(), size::SMALL, col::BODY);
+    // 状态标签贴右（`SIZE_EXPAND_FILL` + `HORIZONTAL_ALIGNMENT_RIGHT`）
+    let status_e = commands
+        .spawn((
+            ChildOf(card),
+            Node {
+                flex_grow: 1.0,
+                justify_content: JustifyContent::FlexEnd,
+                ..default()
+            },
+            TextLayout::justify(Justify::Right),
+            t,
+            f,
+            c,
+        ))
+        .id();
 
-        commands.entity(card).insert(PlayerCard {
-            player,
-            name: name_e,
-            cash: cash_e,
-            points: points_e,
-            props: props_e,
-            status: status_e,
-            cached: String::new(),
-            highlighted: false,
-        });
-    }
+    commands.entity(card).insert(PlayerCard {
+        player: None,
+        dot,
+        name: name_e,
+        cash: cash_e,
+        points: points_e,
+        props: props_e,
+        status: status_e,
+        cached: String::new(),
+    });
 }
 
 /// 一名玩家在 HUD 上需要的全部状态。起别名是因为这个八元组写进 `Query<...>` 会撞
@@ -198,6 +186,7 @@ pub(crate) fn spawn_player_hud(
 type HudPlayer<'w> = (
     &'w PlayerId,
     &'w PlayerName,
+    &'w PlayerColor,
     &'w Wallet,
     &'w Points,
     Option<&'w Detention>,
@@ -223,20 +212,21 @@ type HudPlayer<'w> = (
 
 /// 每帧从世界状态重算五段文案，只在真的变了才写文本（反复赋同一个字符串会让排版重来）。
 ///
+/// 卡片跟着 `TurnOrder::current()` 走：换人时只改 `PlayerCard.player`，同一张实体接着画
+/// 下一位的账 —— 重建实体就等于每回合让这条 HUD 闪一次。
+///
 /// 归属用的是 `PlayerId` 而不是实体句柄（`land.rs:20` 的 `Owner(pub Option<PlayerId>)`），
 /// 所以地产数按 `PlayerId` 数 —— 混用两种指代就会算出「同一块地有两个主人」。
 pub(crate) fn refresh_player_hud(
     order: Res<TurnOrder>,
     players: Query<HudPlayer<'_>>,
     lands: Query<&Owner, With<LandId>>,
-    mut cards: Query<(
-        &mut PlayerCard,
-        &mut BackgroundColor,
-        &mut BorderColor,
-        &mut Node,
-    )>,
+    mut cards: Query<(&mut PlayerCard, &mut Node), With<PlayerCard>>,
     mut texts: Query<&mut Text>,
     mut colors: Query<&mut TextColor>,
+    // 颜色点也挂在 `BackgroundColor` 上，与卡片本身同组件 —— 用 `PlayerCard`
+    // 把两条查询分开，否则同一个 system 里两次 `&mut BackgroundColor` 会在建立期撞上
+    mut dots: Query<&mut BackgroundColor, Without<PlayerCard>>,
 ) {
     let current = order.current();
     let mut owned: Vec<(PlayerId, usize)> = players.iter().map(|(id, ..)| (*id, 0usize)).collect();
@@ -248,10 +238,24 @@ pub(crate) fn refresh_player_hud(
         }
     }
 
-    for (mut card, mut bg, mut border, mut node) in &mut cards {
+    for (mut card, mut node) in &mut cards {
+        // 换人：缓存作废，下一段就会把五段文案整套重写（同名同钱的两个人也要重写，
+        // 否则名字会停在上一位身上）
+        if card.player != current {
+            card.player = current;
+            card.cached.clear();
+        }
+        // `None` = 世界还没装配到玩家，或此刻没有行动者。藏起来而不是留一张空卡
+        let Some(player) = card.player else {
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
+            continue;
+        };
         let Ok((
             pid,
             name,
+            tint,
             wallet,
             points,
             detained,
@@ -263,10 +267,16 @@ pub(crate) fn refresh_player_hud(
             inventory,
             held,
             controller,
-        )) = players.get(card.player)
+        )) = players.get(player)
         else {
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
             continue;
         };
+        if node.display != Display::Flex {
+            node.display = Display::Flex;
+        }
         let props = owned
             .iter()
             .find(|(id, _)| *id == *pid)
@@ -314,6 +324,13 @@ pub(crate) fn refresh_player_hud(
         let items: u32 = inventory.entries().iter().map(|(_, n)| *n).sum();
         let props_line = format!("地产:{props} 道具:{items}");
 
+        if card.cached.is_empty() {
+            // 刚换到这一位：颜色点跟着换（颜色是角色身份，一局里不变，所以只在
+            // 换人这一刻写，不在每帧的文案比对里）
+            if let Ok(mut dot) = dots.get_mut(card.dot) {
+                dot.0 = Color::srgb(tint.0[0], tint.0[1], tint.0[2]);
+            }
+        }
         let line = format!("{}|{cash}|{points}|{props_line}|{status}", name.0);
         if line != card.cached {
             card.cached = line;
@@ -326,31 +343,98 @@ pub(crate) fn refresh_player_hud(
                 color.0 = status_color;
             }
         }
-
-        let active = current == Some(card.player);
-        if active != card.highlighted {
-            card.highlighted = active;
-            bg.0 = if active {
-                col::HUD_CARD_ACTIVE
-            } else {
-                col::HUD_CARD
-            };
-            let edge = if active {
-                col::HUD_BORDER_ACTIVE
-            } else {
-                Color::NONE
-            };
-            border.top = edge;
-            border.right = edge;
-            border.bottom = edge;
-            border.left = edge;
-            node.border = UiRect::all(Val::Px(if active { 2.0 } else { 0.0 }));
-        }
     }
 }
 
 fn write(texts: &mut Query<&mut Text>, target: Entity, value: &str) {
     if let Ok(mut text) = texts.get_mut(target) {
         *text = Text::new(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spawn_player(app: &mut App, id: u32, name: &str, color: [f32; 3]) -> Entity {
+        app.world_mut()
+            .spawn((
+                PlayerId(id),
+                PlayerName(name.to_string()),
+                PlayerColor(color),
+                Wallet {
+                    cash: 1_000 + id as i64,
+                },
+                Points(id),
+                Heading::Forward,
+                Mount::Foot,
+                Inventory::default(),
+                Controller::Human,
+            ))
+            .id()
+    }
+
+    /// 底部只剩一张卡，而它必须跟着回合走：换人时名字、金额、颜色点全换，
+    /// 实体本身不重建（重建会让这条 HUD 每回合闪一下）。少任何一样都会出现
+    /// 「轮到他了，底下还画着上一位的账」。
+    #[test]
+    fn the_only_card_follows_the_current_turn_and_swaps_its_color() {
+        let mut app = App::new();
+        app.add_systems(Update, refresh_player_hud);
+        let a = spawn_player(&mut app, 0, "阿土伯", [1.0, 0.0, 0.0]);
+        let b = spawn_player(&mut app, 1, "孙小美", [0.0, 0.0, 1.0]);
+        app.world_mut().insert_resource(TurnOrder::new(vec![a, b]));
+
+        let name = app.world_mut().spawn(Text::new("")).id();
+        let cash = app.world_mut().spawn(Text::new("")).id();
+        let points = app.world_mut().spawn(Text::new("")).id();
+        let props = app.world_mut().spawn(Text::new("")).id();
+        let status = app
+            .world_mut()
+            .spawn((Text::new(""), TextColor(Color::WHITE)))
+            .id();
+        let dot = app.world_mut().spawn(BackgroundColor(Color::WHITE)).id();
+        let card = app
+            .world_mut()
+            .spawn((
+                PlayerCard {
+                    player: None,
+                    dot,
+                    name,
+                    cash,
+                    points,
+                    props,
+                    status,
+                    cached: String::new(),
+                },
+                Node {
+                    display: Display::None,
+                    ..default()
+                },
+            ))
+            .id();
+
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(card).expect("卡片在").display,
+            Display::Flex,
+            "有行动者时卡片该亮出来"
+        );
+        assert_eq!(app.world().get::<Text>(name).unwrap().0, "阿土伯");
+        assert_eq!(app.world().get::<Text>(cash).unwrap().0, "$1000");
+        assert_eq!(
+            app.world().get::<BackgroundColor>(dot).unwrap().0,
+            Color::srgb(1.0, 0.0, 0.0)
+        );
+
+        app.world_mut().resource_mut::<TurnOrder>().cursor = 1;
+        app.update();
+        assert_eq!(app.world().get::<Text>(name).unwrap().0, "孙小美");
+        assert_eq!(app.world().get::<Text>(cash).unwrap().0, "$1001");
+        assert_eq!(
+            app.world().get::<BackgroundColor>(dot).unwrap().0,
+            Color::srgb(0.0, 0.0, 1.0),
+            "换了人，颜色点还留着上一位"
+        );
     }
 }

@@ -21,6 +21,7 @@ pub mod menu;
 pub mod minigame;
 pub mod pause;
 pub mod player_hud;
+pub mod players;
 pub mod settings;
 pub mod skin;
 pub mod theme;
@@ -73,6 +74,9 @@ impl Plugin for UiPlugin {
             .insert_resource(finance::AtmPanelOpen::from_env())
             .insert_resource(hand::HandPanelOpen::from_env())
             .insert_resource(items::ItemsPanelOpen::from_env())
+            // `NM_PLAYERS=1`：全部座位的一览（11-18）。与其余三块浮层同一条 ——
+            // 每个界面都得有一条不靠鼠标的入口，否则截图脚本抓不到
+            .insert_resource(players::PlayersPanelOpen::from_env())
             // 游乐场那四条（P7）常驻而不是 `insert_resource(from_env())`：这一屏**两个场景
             // 都要用**（对局里踩到那一格、主菜单上练习），所以「开机时定」那一套不适用 ——
             // 旋钮 `NM_MINIGAME` 走的是 core 的窗口（见 `dev.rs`），不从 UI 侧开门
@@ -123,6 +127,7 @@ impl Plugin for UiPlugin {
                         finance::sync_stock_panel.in_set(UiSet::Live),
                         hand::sync_hand_panel.in_set(UiSet::Live),
                         items::sync_items_panel.in_set(UiSet::Live),
+                        players::sync_players_panel.in_set(UiSet::Live),
                         pause::sync_pause_menu.in_set(UiSet::Live),
                         tile_info::pick_tile.in_set(UiSet::Live),
                         tile_info::sync_tile_card.in_set(UiSet::Live),
@@ -275,8 +280,6 @@ pub enum UiAction {
     Roll,
     /// 回答当前待决事项。「回答关于谁」由 `PendingDecision` 决定，按钮不背这个信息
     Decide(Decision),
-    /// 关闭点格详情卡（新增交互，见 [`tile_info`]）
-    CloseInfo,
     /// 开合暂停菜单（ESC 键与「继续」「暂停」按钮同一个动作）
     TogglePause,
     /// 开合设置面板（P15c）。只有主菜单那颗按钮发得出来
@@ -318,6 +321,9 @@ pub enum UiAction {
     ToggleHand,
     /// 开合道具浮层（P5）：身上带着什么、能放到前方哪一格
     ToggleItems,
+    /// 开合玩家一览（11-18）：全部座位各一行详细账目。HUD 从此只显示当前行动者，
+    /// 想看别人有多少钱、几块地、挂着什么状态，走这一屏
+    TogglePlayers,
     /// 把一件道具放到主环的某一格。**目标烤在按钮里**（「5 南京路」本身就是一整个意图），
     /// 与 [`Self::PlayCard`] 同一条形状
     PlaceItem {
@@ -469,7 +475,6 @@ fn action_sound(action: &UiAction) -> crate::audio::UiSound {
         | UiAction::Practice(_) => UiSound::Confirm,
         UiAction::Decide(Decision::Decline | Decision::Acknowledge)
         | UiAction::BackToMenu
-        | UiAction::CloseInfo
         | UiAction::TogglePause
         | UiAction::ToggleSettings
         | UiAction::ToggleMatchSetup
@@ -477,6 +482,7 @@ fn action_sound(action: &UiAction) -> crate::audio::UiSound {
         | UiAction::ToggleStock
         | UiAction::ToggleHand
         | UiAction::ToggleItems
+        | UiAction::TogglePlayers
         | UiAction::ToggleArcadeChoice
         | UiAction::ArcadeQuit
         | UiAction::ArcadeLeave => UiSound::Cancel,
@@ -1036,11 +1042,13 @@ struct Sends<'w> {
 #[derive(SystemParam)]
 struct UiState<'w> {
     toggle: ResMut<'w, pause::PauseMenuOpen>,
-    selected: ResMut<'w, tile_info::SelectedTile>,
     atm: ResMut<'w, finance::AtmPanelOpen>,
     stock: ResMut<'w, finance::StockPanelOpen>,
     hand: ResMut<'w, hand::HandPanelOpen>,
     items: ResMut<'w, items::ItemsPanelOpen>,
+    /// 玩家一览（11-18）：与其余三块浮层同一条 —— 派发只翻这一个位，
+    /// 面板在不在由 `sync_players_panel` 按它重建
+    players: ResMut<'w, players::PlayersPanelOpen>,
     /// 设置面板开合与设置本身（P15c）。设置值住在 `crate::settings::Settings`，
     /// 落盘由那个模块的单写者负责 —— 这里改了就算数
     settings_open: ResMut<'w, settings::SettingsOpen>,
@@ -1290,7 +1298,6 @@ fn dispatch_ui_actions(
                     shares: *shares,
                 });
             }
-            UiAction::CloseInfo => ui.selected.0 = None,
             UiAction::TogglePause => ui.toggle.flip(),
             // 设置面板（P15c）：三个动作都只改 `Settings`／它的开合。落盘由
             // `settings::persist_settings` 单写者做，界面不碰文件
@@ -1372,6 +1379,7 @@ fn dispatch_ui_actions(
             UiAction::ToggleStock => ui.stock.0 = !ui.stock.0,
             UiAction::ToggleHand => ui.hand.0 = !ui.hand.0,
             UiAction::ToggleItems => ui.items.0 = !ui.items.0,
+            UiAction::TogglePlayers => ui.players.0 = !ui.players.0,
             // 出牌：主语仍然取当前回合玩家，而不是按钮里带的谁 —— 手牌面板只画得下
             // 「这个人的手」，规则层 `play_card_system` 还会再认一次主语与窗口
             UiAction::PlayCard { card, aim } => {
@@ -1899,7 +1907,6 @@ mod tests {
         decide: Entity,
         disabled_roll: Entity,
         bare: Entity,
-        close: Entity,
         pause: Entity,
         deposit: Entity,
         buy: Entity,
@@ -1934,6 +1941,8 @@ mod tests {
         toggle_stock: Entity,
         toggle_hand: Entity,
         toggle_items: Entity,
+        /// 玩家一览（11-18）。与其余三块浮层同一个入口形状
+        toggle_players: Entity,
     }
 
     impl Harness {
@@ -1993,6 +2002,7 @@ mod tests {
                 .init_resource::<finance::StockPanelOpen>()
                 .init_resource::<hand::HandPanelOpen>()
                 .init_resource::<items::ItemsPanelOpen>()
+                .init_resource::<players::PlayersPanelOpen>()
                 .init_resource::<minigame::Arcade>()
                 .init_resource::<minigame::Practice>()
                 .init_resource::<minigame::PracticeRounds>()
@@ -2073,7 +2083,6 @@ mod tests {
                 .id();
             let disabled_roll = app.world_mut().spawn((UiAction::Roll, Disabled)).id();
             let bare = app.world_mut().spawn(Node::default()).id();
-            let close = app.world_mut().spawn(UiAction::CloseInfo).id();
             let pause = app.world_mut().spawn(UiAction::TogglePause).id();
             let deposit = app
                 .world_mut()
@@ -2147,6 +2156,7 @@ mod tests {
                 .id();
             let toggle_hand = app.world_mut().spawn(UiAction::ToggleHand).id();
             let toggle_items = app.world_mut().spawn(UiAction::ToggleItems).id();
+            let toggle_players = app.world_mut().spawn(UiAction::TogglePlayers).id();
             let place_rock = app
                 .world_mut()
                 .spawn(UiAction::PlaceItem {
@@ -2176,7 +2186,6 @@ mod tests {
                 decide,
                 disabled_roll,
                 bare,
-                close,
                 pause,
                 deposit,
                 buy,
@@ -2198,6 +2207,7 @@ mod tests {
                 toggle_stock,
                 toggle_hand,
                 toggle_items,
+                toggle_players,
             }
         }
 
@@ -2403,14 +2413,9 @@ mod tests {
     #[test]
     fn the_ui_only_actions_write_ui_state() {
         let mut h = Harness::new(TurnPhase::WaitRoll, false, PendingDecision::default());
-        h.app
-            .world_mut()
-            .resource_mut::<tile_info::SelectedTile>()
-            .0 = Some((1, 1));
-
-        h.click(h.close);
-        assert_eq!(h.app.world().resource::<tile_info::SelectedTile>().0, None);
-
+        // 点格详情卡改成「按住显示、松开消失」之后，`SelectedTile` 的清空挪去了
+        // `pick_tile` 的 `PointerRelease` 那一半（要相机与拾取事件，无头夹具搭不起），
+        // 派发不再碰它 —— 这里只钉住暂停那颗还写 UI 自己的状态
         h.click(h.pause);
         assert!(h.app.world().resource::<pause::PauseMenuOpen>().0);
     }
@@ -2850,6 +2855,8 @@ mod tests {
         assert!(h.app.world().resource::<hand::HandPanelOpen>().0);
         h.click(h.toggle_items);
         assert!(h.app.world().resource::<items::ItemsPanelOpen>().0);
+        h.click(h.toggle_players);
+        assert!(h.app.world().resource::<players::PlayersPanelOpen>().0);
         h.click(h.toggle_atm);
         assert!(!h.app.world().resource::<finance::AtmPanelOpen>().0);
     }
@@ -4026,7 +4033,6 @@ mod tests {
         );
         assert_eq!(action_sound(&UiAction::StartMatch), UiSound::Confirm);
         assert_eq!(action_sound(&UiAction::BackToMenu), UiSound::Cancel);
-        assert_eq!(action_sound(&UiAction::CloseInfo), UiSound::Cancel);
         assert_eq!(action_sound(&UiAction::SetBoard(0)), UiSound::Click);
         assert_eq!(
             action_sound(&UiAction::SetVolume {

@@ -8,6 +8,10 @@
 //!
 //! 代价说清楚：投影出来的标签不参与深度，永远浮在建筑之上。等轴测棋盘上「每格名字都读得到」
 //! 比「被前面那栋楼挡住」有用，所以这笔换算是赚的。
+//!
+//! **默认不铺**：常驻格名把棋盘糊成一张字海（12-08 实报），地名改由点格详情卡按住显示
+//! （见 `ui::tile_info`）。这一条只剩调试价值 —— 「棋子在第几格」与「看到的是哪一格」要能
+//! 一眼对上 —— 用 `NM_LABELS=1` 点名才进场。
 
 use bevy::prelude::*;
 use game_core::prelude::ActiveBoard;
@@ -26,6 +30,10 @@ pub(crate) fn spawn_tile_labels(
     font: Res<DevFont>,
     geom: Res<BoardGeom>,
 ) {
+    // 默认一张不铺；`NM_LABELS=1` 才是那批调试标签的入口
+    if std::env::var("NM_LABELS").as_deref() != Ok("1") {
+        return;
+    }
     let b = &active.def;
     for t in &b.tiles {
         // 主环格带下标：调试时「棋子在第几格」与「看到的是哪一格」要能一眼对上
