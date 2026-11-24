@@ -38,8 +38,6 @@ TIERS = {
     "low": {"res_base": 12_000, "res_step": 1_500, "comm_base": 32_000, "comm_step": 2_500},
 }
 
-MALL = {"random_amount": {"sides": 6, "tiers": [800, 1600, 2400, 3200, 4800, 6400]}}
-
 
 def res(name: str) -> Plot:
     return Plot(name, "res")
@@ -53,15 +51,15 @@ STREETS = {
     # ===== 上边：四条 6 格街 =====
     "beijing": Street(
         "beijing", "北京", "high",
-        [res("王府井"), res("前门大街"), res("三里屯"), res("什刹海"), comm("中关村", "lab")],
+        [res("王府井"), res("前门大街"), res("三里屯"), res("什刹海"), comm("中关村")],
     ),
     "tianjin": Street(
         "tianjin", "天津", "mid",
-        [res("五大道"), res("意式风情区"), res("古文化街"), res("海河"), comm("天津之眼", "park")],
+        [res("五大道"), res("意式风情区"), res("古文化街"), res("海河"), comm("天津之眼")],
     ),
     "qingdao": Street(
         "qingdao", "青岛", "low",
-        [res("栈桥"), res("八大关"), res("台东步行街"), res("崂山"), comm("青岛啤酒城", "mall", MALL)],
+        [res("栈桥"), res("八大关"), res("台东步行街"), res("崂山"), comm("青岛啤酒城")],
     ),
     "harbin": Street(
         "harbin", "哈尔滨", "low",
@@ -70,15 +68,15 @@ STREETS = {
     # ===== 右边：四条 6 格街 =====
     "shanghai": Street(
         "shanghai", "上海", "high",
-        [res("淮海路"), res("外滩"), res("新天地"), res("徐家汇"), comm("南京路", "mall", MALL)],
+        [res("淮海路"), res("外滩"), res("新天地"), res("徐家汇"), comm("南京路")],
     ),
     "nanjing": Street(
         "nanjing", "南京", "mid",
-        [res("夫子庙"), res("中山陵"), res("秦淮河"), res("玄武湖"), comm("新街口", "mall", MALL)],
+        [res("夫子庙"), res("中山陵"), res("秦淮河"), res("玄武湖"), comm("新街口")],
     ),
     "suzhou": Street(
         "suzhou", "苏州", "mid",
-        [res("观前街"), res("平江路"), res("拙政园"), res("山塘街"), comm("苏州中心", "mall", MALL)],
+        [res("观前街"), res("平江路"), res("拙政园"), res("山塘街"), comm("苏州中心")],
     ),
     "hangzhou": Street(
         "hangzhou", "杭州", "mid",
@@ -87,11 +85,11 @@ STREETS = {
     # ===== 下边：四条 6 格街 =====
     "guangzhou": Street(
         "guangzhou", "广州", "high",
-        [res("北京路"), res("上下九"), res("沙面"), res("白鹅潭"), comm("珠江新城", "lab")],
+        [res("北京路"), res("上下九"), res("沙面"), res("白鹅潭"), comm("珠江新城")],
     ),
     "shenzhen": Street(
         "shenzhen", "深圳", "high",
-        [res("东门老街"), res("华强北"), res("世界之窗"), res("深南大道"), comm("南山科技园", "lab")],
+        [res("东门老街"), res("华强北"), res("世界之窗"), res("深南大道"), comm("南山科技园")],
     ),
     "xiamen": Street(
         "xiamen", "厦门", "low",
@@ -104,19 +102,19 @@ STREETS = {
     # ===== 左边：四条 6 格街 =====
     "chengdu": Street(
         "chengdu", "成都", "mid",
-        [res("春熙路"), res("宽窄巷子"), res("锦里"), res("九眼桥"), comm("太古里", "mall", MALL)],
+        [res("春熙路"), res("宽窄巷子"), res("锦里"), res("九眼桥"), comm("太古里")],
     ),
     "chongqing": Street(
         "chongqing", "重庆", "mid",
-        [res("洪崖洞"), res("磁器口"), res("观音桥"), res("朝天门"), comm("解放碑", "mall", MALL)],
+        [res("洪崖洞"), res("磁器口"), res("观音桥"), res("朝天门"), comm("解放碑")],
     ),
     "xian": Street(
         "xian", "西安", "mid",
-        [res("钟楼"), res("回民街"), res("大雁塔"), res("城墙"), comm("大唐不夜城", "park")],
+        [res("钟楼"), res("回民街"), res("大雁塔"), res("城墙"), comm("大唐不夜城")],
     ),
     "wuhan": Street(
         "wuhan", "武汉", "mid",
-        [res("江汉路"), res("黄鹤楼"), res("楚河汉街"), res("昙华林"), comm("光谷", "lab")],
+        [res("江汉路"), res("黄鹤楼"), res("楚河汉街"), res("昙华林"), comm("光谷")],
     ),
     # ===== 四个角的斜街：各 6 块住宅 =====
     "shenyang": Street(

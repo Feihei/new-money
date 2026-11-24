@@ -1141,8 +1141,8 @@ mod tests {
         assert_eq!(commercial.len(), 9, "九块商业地");
         assert!(commercial.iter().all(|l| l.size == 2));
         assert!(
-            commercial.iter().any(|l| l.building_kind.is_none()),
-            "真盘上要留空商业地给建设窗口"
+            commercial.iter().all(|l| l.building_kind.is_none()),
+            "真盘商业地全是空地：买空地 → 建设窗口选型 → 升级（11-16 拍板）"
         );
         assert_eq!(
             b.tiles.iter().filter(|t| t.land_id.is_none()).count(),
@@ -1270,8 +1270,8 @@ mod tests {
         assert_eq!(commercial.len(), 13, "十三块商业地");
         assert!(commercial.iter().all(|l| l.size == 2));
         assert!(
-            commercial.iter().any(|l| l.building_kind.is_none()),
-            "大地图上也要留空商业地给建设窗口"
+            commercial.iter().all(|l| l.building_kind.is_none()),
+            "大地图商业地同样全空（11-16 拍板）"
         );
         assert_eq!(
             b.tiles.iter().filter(|t| t.land_id.is_none()).count(),

@@ -991,21 +991,7 @@
 				61920,
 				96320
 			],
-			"upgrade_cost": 27500,
-			"building_kind": "mall",
-			"fee": {
-				"random_amount": {
-					"sides": 6,
-					"tiers": [
-						600,
-						1200,
-						1800,
-						2400,
-						3600,
-						4800
-					]
-				}
-			}
+			"upgrade_cost": 27500
 		},
 		{
 			"id": 5,
@@ -1100,21 +1086,7 @@
 				42840,
 				66640
 			],
-			"upgrade_cost": 19000,
-			"building_kind": "mall",
-			"fee": {
-				"random_amount": {
-					"sides": 6,
-					"tiers": [
-						400,
-						800,
-						1200,
-						1600,
-						2400,
-						3200
-					]
-				}
-			}
+			"upgrade_cost": 19000
 		},
 		{
 			"id": 10,
@@ -1361,14 +1333,7 @@
 				61920,
 				96320
 			],
-			"upgrade_cost": 27500,
-			"building_kind": "gas_station",
-			"fee": {
-				"per_step": {
-					"rate": 300,
-					"requires_mount": true
-				}
-			}
+			"upgrade_cost": 27500
 		},
 		{
 			"id": 23,
@@ -1577,8 +1542,7 @@
 				42840,
 				66640
 			],
-			"upgrade_cost": 19000,
-			"building_kind": "park"
+			"upgrade_cost": 19000
 		},
 		{
 			"id": 34,
@@ -1730,8 +1694,7 @@
 				61920,
 				96320
 			],
-			"upgrade_cost": 27500,
-			"building_kind": "lab"
+			"upgrade_cost": 27500
 		},
 		{
 			"id": 42,
@@ -1826,21 +1789,7 @@
 				31500,
 				49000
 			],
-			"upgrade_cost": 14000,
-			"building_kind": "mall",
-			"fee": {
-				"random_amount": {
-					"sides": 6,
-					"tiers": [
-						400,
-						800,
-						1200,
-						1600,
-						2400,
-						3200
-					]
-				}
-			}
+			"upgrade_cost": 14000
 		},
 		{
 			"id": 47,
@@ -1935,21 +1884,7 @@
 				61920,
 				96320
 			],
-			"upgrade_cost": 27500,
-			"building_kind": "mall",
-			"fee": {
-				"random_amount": {
-					"sides": 6,
-					"tiers": [
-						600,
-						1200,
-						1800,
-						2400,
-						3600,
-						4800
-					]
-				}
-			}
+			"upgrade_cost": 27500
 		},
 		{
 			"id": 52,
@@ -2101,14 +2036,7 @@
 				42840,
 				66640
 			],
-			"upgrade_cost": 19000,
-			"building_kind": "hotel",
-			"fee": {
-				"random_stay": {
-					"sides": 4,
-					"per_day": 1200
-				}
-			}
+			"upgrade_cost": 19000
 		},
 		{
 			"id": 60,

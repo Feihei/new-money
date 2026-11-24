@@ -1310,8 +1310,7 @@
 				78840,
 				122640
 			],
-			"upgrade_cost": 35000,
-			"building_kind": "lab"
+			"upgrade_cost": 35000
 		},
 		{
 			"id": 5,
@@ -1406,8 +1405,7 @@
 				54000,
 				84000
 			],
-			"upgrade_cost": 24000,
-			"building_kind": "park"
+			"upgrade_cost": 24000
 		},
 		{
 			"id": 10,
@@ -1502,21 +1500,7 @@
 				36000,
 				56000
 			],
-			"upgrade_cost": 16000,
-			"building_kind": "mall",
-			"fee": {
-				"random_amount": {
-					"sides": 6,
-					"tiers": [
-						800,
-						1600,
-						2400,
-						3200,
-						4800,
-						6400
-					]
-				}
-			}
+			"upgrade_cost": 16000
 		},
 		{
 			"id": 15,
@@ -1839,21 +1823,7 @@
 				78840,
 				122640
 			],
-			"upgrade_cost": 35000,
-			"building_kind": "mall",
-			"fee": {
-				"random_amount": {
-					"sides": 6,
-					"tiers": [
-						800,
-						1600,
-						2400,
-						3200,
-						4800,
-						6400
-					]
-				}
-			}
+			"upgrade_cost": 35000
 		},
 		{
 			"id": 32,
@@ -1948,21 +1918,7 @@
 				54000,
 				84000
 			],
-			"upgrade_cost": 24000,
-			"building_kind": "mall",
-			"fee": {
-				"random_amount": {
-					"sides": 6,
-					"tiers": [
-						800,
-						1600,
-						2400,
-						3200,
-						4800,
-						6400
-					]
-				}
-			}
+			"upgrade_cost": 24000
 		},
 		{
 			"id": 37,
@@ -2057,21 +2013,7 @@
 				54000,
 				84000
 			],
-			"upgrade_cost": 24000,
-			"building_kind": "mall",
-			"fee": {
-				"random_amount": {
-					"sides": 6,
-					"tiers": [
-						800,
-						1600,
-						2400,
-						3200,
-						4800,
-						6400
-					]
-				}
-			}
+			"upgrade_cost": 24000
 		},
 		{
 			"id": 42,
@@ -2375,8 +2317,7 @@
 				78840,
 				122640
 			],
-			"upgrade_cost": 35000,
-			"building_kind": "lab"
+			"upgrade_cost": 35000
 		},
 		{
 			"id": 58,
@@ -2471,8 +2412,7 @@
 				78840,
 				122640
 			],
-			"upgrade_cost": 35000,
-			"building_kind": "lab"
+			"upgrade_cost": 35000
 		},
 		{
 			"id": 63,
@@ -2909,21 +2849,7 @@
 				54000,
 				84000
 			],
-			"upgrade_cost": 24000,
-			"building_kind": "mall",
-			"fee": {
-				"random_amount": {
-					"sides": 6,
-					"tiers": [
-						800,
-						1600,
-						2400,
-						3200,
-						4800,
-						6400
-					]
-				}
-			}
+			"upgrade_cost": 24000
 		},
 		{
 			"id": 86,
@@ -3018,21 +2944,7 @@
 				54000,
 				84000
 			],
-			"upgrade_cost": 24000,
-			"building_kind": "mall",
-			"fee": {
-				"random_amount": {
-					"sides": 6,
-					"tiers": [
-						800,
-						1600,
-						2400,
-						3200,
-						4800,
-						6400
-					]
-				}
-			}
+			"upgrade_cost": 24000
 		},
 		{
 			"id": 91,
@@ -3127,8 +3039,7 @@
 				54000,
 				84000
 			],
-			"upgrade_cost": 24000,
-			"building_kind": "park"
+			"upgrade_cost": 24000
 		},
 		{
 			"id": 96,
@@ -3223,8 +3134,7 @@
 				54000,
 				84000
 			],
-			"upgrade_cost": 24000,
-			"building_kind": "lab"
+			"upgrade_cost": 24000
 		},
 		{
 			"id": 101,

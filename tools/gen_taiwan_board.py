@@ -37,11 +37,6 @@ TIERS = {
     "low": {"res_base": 10_000, "res_step": 1_000, "comm_base": 28_000, "comm_step": 2_000},
 }
 
-MALL_HIGH = {"random_amount": {"sides": 6, "tiers": [600, 1200, 1800, 2400, 3600, 4800]}}
-MALL_MID = {"random_amount": {"sides": 6, "tiers": [400, 800, 1200, 1600, 2400, 3200]}}
-HOTEL = {"random_stay": {"sides": 4, "per_day": 1200}}
-GAS = {"per_step": {"rate": 300, "requires_mount": True}}
-
 
 def res(name: str) -> Plot:
     return Plot(name, "res")
@@ -56,12 +51,12 @@ STREETS = {
     "taipei": Street(
         "taipei", "台北", "high",
         [res("忠孝东路"), res("仁爱路"), res("信义路"), res("南京东路"),
-         comm("台北101", "mall", MALL_HIGH)],
+         comm("台北101")],
     ),
     "taoyuan": Street(
         "taoyuan", "桃园", "mid",
         [res("大溪老街"), res("石门水库"), res("慈湖"), res("拉拉山"),
-         comm("中坜商业区", "mall", MALL_MID)],
+         comm("中坜商业区")],
     ),
     "hsinchu": Street(
         "hsinchu", "新竹", "mid",
@@ -81,7 +76,7 @@ STREETS = {
     "taichung": Street(
         "taichung", "台中", "high",
         [res("逢甲夜市"), res("一中街"), res("精明一街"), res("彩虹眷村"),
-         comm("台中港", "gas_station", GAS)],
+         comm("台中港")],
     ),
     "yunlin": Street(
         "yunlin", "云林", "mid",
@@ -90,29 +85,29 @@ STREETS = {
     "chiayi": Street(
         "chiayi", "嘉义", "mid",
         [res("奋起湖"), res("布袋港"), res("民雄"), res("朴子"),
-         comm("阿里山森林游乐区", "park")],
+         comm("阿里山森林游乐区")],
     ),
     # ===== 下边：三条 6 格街 =====
     "tainan": Street(
         "tainan", "台南", "high",
         [res("安平古堡"), res("赤崁楼"), res("花园夜市"), res("孔庙"),
-         comm("台南科学园区", "lab")],
+         comm("台南科学园区")],
     ),
     "tamsui": Street(
         "tamsui", "淡水", "low",
         [res("淡水老街"), res("渔人码头"), res("红毛城"), res("小白宫"),
-         comm("淡水名品城", "mall", MALL_MID)],
+         comm("淡水名品城")],
     ),
     "kaohsiung": Street(
         "kaohsiung", "高雄", "high",
         [res("西子湾"), res("旗津"), res("爱河"), res("六合夜市"),
-         comm("梦时代", "mall", MALL_HIGH)],
+         comm("梦时代")],
     ),
     # ===== 左边：三条 6 格街 =====
     "pingtung": Street(
         "pingtung", "屏东", "mid",
         [res("垦丁大街"), res("东港"), res("潮州"), res("恒春"),
-         comm("垦丁福华饭店", "hotel", HOTEL)],
+         comm("垦丁福华饭店")],
     ),
     "taitung": Street(
         "taitung", "台东", "low",
