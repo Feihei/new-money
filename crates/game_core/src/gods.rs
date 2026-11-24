@@ -54,14 +54,13 @@ use crate::board::{BoardDef, TileIndex};
 use crate::charge::{
     Adjustment, Charge, ChargeDomain, ChargeKind, Correction, Corrections, Scope, Source,
 };
-use crate::damage::LandDamage;
 use crate::deck::{CardId, Shelf};
 use crate::hand::{Hand, card_notice, deal_to};
 use crate::land::LandId;
 use crate::landing::{Landed, Landing, LandingDomain};
 use crate::msg::{
     CardGained, CardLost, CardNotice, GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed,
-    LandTaken, PlayerArrived, TileStepped,
+    LandBlessed, LandTaken, PlayerArrived,
 };
 use crate::occupancy::{Occupancy, OccupancyAt, OccupancyKind, place};
 use crate::player::{Heading, PlayerId};
@@ -609,38 +608,30 @@ pub fn drain_cards(
     gone
 }
 
-/// 附身的人**走路**时，脚下每一格动一次什么（P6c）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WalkEffect {
-    /// 什么都不动（十二位里的九位）
-    Nothing,
-    /// 加盖一层：不分敌我、无主地也盖、不收钱（天使）
-    Bless,
-    /// 降一级：复用 P2 的建筑损害阶梯，空地不拆那条写在 [`crate::damage::strike`] 里（恶魔）
-    Blight,
+/// 这位神让附身的人**落脚**那一格长一层吗（12-08 改版的天使）。
+///
+/// 与 [`takes_landing`] 同族的表：天使从「所经」搬到「所到」之后，他的读点是落格
+/// 流水线的收尾（[`mark_god_landing_system`]）与回答窗口的那条链（`decision_system`），
+/// 两者都要问这一句。**穷尽表，不许 `_`**。
+pub fn blesses_landing(god: God) -> bool {
+    matches!(god, God::Angel)
 }
 
-/// 这位神让附身的人**所经**之地长出什么／塌掉什么。
+/// 这位神让附身的人**落脚**那一格塌一层吗（12-08 改版的恶魔）。
 ///
-/// PLAN §三 在这里用了两个不同的词，而那个区别就是这条表存在的全部理由：
-/// 天使与恶魔是「**所经**一律加盖／降一级」——一次 6 点的掷骰最多动六格；
-/// 土地公是「**所到**之地直接占有」——只有停下那一格（见 [`takes_landing`]）。
-/// 合成一张表就会把「走一圈」变成「拆一圈」，那是两件不同的事。
-pub fn walk_effect(god: God) -> WalkEffect {
-    match god {
-        God::Angel => WalkEffect::Bless,
-        God::Devil => WalkEffect::Blight,
-        God::BigRich | God::SmallRich | God::BigFortune | God::SmallFortune => WalkEffect::Nothing,
-        God::BigPoor | God::SmallPoor | God::BigDoom | God::SmallDoom => WalkEffect::Nothing,
-        // 土地公改的是归属，但它改在「落脚」那一格，不在路上
-        God::LandDeity | God::Death => WalkEffect::Nothing,
-    }
+/// 与天使同一天搬的家：PLAN §三 那句「所经降一级」与天使的「所经一律加盖」一起被实报推翻
+/// ——「走过一条街整条都在塌」同样看不懂也不会玩想要。恶魔改成**落脚那一格**降一级，
+/// 而且要等购买/付租金答完才落（先照原样收租，再塌）—— 与天使共用同一条读点
+/// （[`mark_god_landing_system`]）。**穷尽表，不许 `_`**。
+pub fn blights_landing(god: God) -> bool {
+    matches!(god, God::Devil)
 }
 
 /// 这位神让附身的人**踩到**的那块地归谁（P6c 的土地公）。
 ///
-/// 与 [`walk_effect`] 分开两张表：一个是「每经过一格」，一个是「停下那一格」，
-/// 而它们的读点根本不同（`TileStepped` 的 reader 对 `Landed` 链里的一块结算）。
+/// 与 [`blesses_landing`]／[`blights_landing`] 同族的第三张表：改归属的只有他一位，
+/// 而他的读点也在 `Landed` 链里（`settle_land_deity_landing_system`）——
+/// 「所到」这件事今天只剩这一条读法，「所经」那张表 12-08 起退役。
 pub fn takes_landing(god: God) -> bool {
     matches!(god, God::LandDeity)
 }
@@ -880,61 +871,110 @@ pub fn settle_god_landing_system(
     }
 }
 
-// ===== 走路时 =====
+// ===== 落脚动手（12-08 改版：天使加盖、恶魔降级，同一个读点）=====
 
-/// 天使与恶魔：附身的人**走过**的每一格都动一次房子（PLAN §三「所经」）。
+/// 神明落脚待办：这一趟落格，附身的那位要在**落脚那块地**上动手（天使加盖一级／
+/// 恶魔降一级）。落格流水线把它**记下**，等购买/付租金那一问答完才落
+/// （`decision_system` 消费它）；那一问根本没挂出来时由 [`mark_god_landing_system`]
+/// 自己当场落。`None` = 这一趟没有神的份。
 ///
-/// 读 [`TileStepped`] 而不是 `PlayerArrived` —— 「所经」那两个字就是这条系统的形状：
-/// 一次 6 点的掷骰最多动六格，绕别人那条街盖（拆）一圈，正是那句话的分量。土地公不在这里，
-/// 它读的是落脚那一格（见 [`takes_landing`] 与 `settle_land_deity_landing_system`）。
+/// 为什么是资源而不是消息：动手的时机押在「窗口答完」那件事上，而回答发生在
+/// `WaitDecision` —— 离落格那条流水线已经隔了一个相位。中间这口气只能存在一处
+/// 世界状态里，而它与 [`crate::landing::PendingDecision`] 一样是「回合内的临时记号」，
+/// 下一次落格必然把它整个重写（记错也只能错到本回合结束）。带 `God` 是因为
+/// 消费那一刻要按它分岔（加盖走选型窗/加盖，降级走 [`Books::blight`]），
+/// 不能只存「谁在哪块地」。
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct GodLanding(pub Option<(Entity, LandId, God)>);
+
+/// 天使与恶魔：附身的人**落脚**那一格动一次房子（12-08 改版，PLAN §三「所到」）。
 ///
-/// 注册形状照 `bank.rs` 的 `grant_atm_access_system`（同为 `TileStepped` 的 core 侧 reader），
-/// 包括那两条连带决定：**不挂阶段闸门** —— 挂在 `Walking` 上会漏掉最后一步，那一条
-/// `TileStepped` 是行走收尾那一帧写的、要到下一帧才读得到，而那时候状态已经是 `Landed`；
-/// **也不闸暂停** —— 暂停期间根本没有新消息，加了只会漏掉恢复行走那一帧的那一步。
-pub fn walk_effect_system(mut steps: MessageReader<TileStepped>, mut books: Books<'_, '_>) {
-    for step in steps.read() {
-        let Some(held) = books.god_of(step.player) else {
-            continue;
-        };
-        let effect = walk_effect(held.god);
-        if effect == WalkEffect::Nothing {
-            continue;
+/// 排在落格流水线的**收尾**（`settle_bail_landing_system` 之后、`close_landing_system`
+/// 之前），它要回答的其实是一件事：「这一趟的动手**现在落**还是**记下来等**？」
+///
+/// - 落脚格没有地（银行/命运/百货…）→ 没有神的份。
+/// - 查封中的地不施工（天使）／不拆（恶魔）—— 与 [`Books::bless`]／[`Books::blight`]
+///   里那条同一个读法，在标记这一步就拦住，省得空商业地的选型窗照开。
+/// - 天使踩**商业空地**：不走就地加盖，走选型窗（五类免费选一类，12-08 拍板），
+///   窗口由 `decision_system` 与 `build_op_system` 接手。
+/// - 有任何待决挂着（买地/付租/收费的窗口，或门/拍卖占着回合）→ 购买与租金**还没落定**，
+///   此刻动房子就是「先长楼再收租」的怪顺序（恶魔那半是镜像：「先塌楼再收租」，
+///   房东照塌掉的层数收租，塌的这一级白塌）—— 记进 [`GodLanding`]，
+///   由 `decision_system` 在那一问答完之后消费。
+/// - 什么都没挂 → 当场落：天使就地加盖一级并发凭据 [`LandBlessed`]（商业空地把选型窗
+///   直接摆上，`close_landing_system` 排在后面，它看得见这扇窗，回合就停进
+///   `WaitDecision`）；恶魔就地降一级并发凭据 [`LandBlighted`]（空地塌无可塌，
+///   凭据也不发 —— 「恶魔来过但什么都没发生」不值得一条播报）。
+pub fn mark_god_landing_system(
+    mut books: Books<'_, '_>,
+    landing: Res<Landing>,
+    mut pending: ResMut<crate::landing::PendingDecision>,
+    gate: Res<crate::passive::Gate>,
+    mut queued: ResMut<GodLanding>,
+    mut blessed: MessageWriter<'_, LandBlessed>,
+    mut blighted: MessageWriter<'_, crate::msg::LandBlighted>,
+) {
+    // 先说「这一趟没有神的份」，有再写回去 —— 上一次落格留下的待办不许活着跨过这一次
+    queued.0 = None;
+    let Some(landed) = landing.0.as_ref() else {
+        return;
+    };
+    // 恶人身上挂不了神（`attach` 只认玩家），`god_of` 对他们天然是 `None`
+    let Some(held) = books.god_of(landed.player) else {
+        return;
+    };
+    let bless = blesses_landing(held.god);
+    let blight = blights_landing(held.god);
+    if !bless && !blight {
+        return;
+    }
+    let Some(land) = landed.land else {
+        return;
+    };
+    // 查封不动（`Books::bless`/`blight` 那条判据的提前问 —— 空商业地的选型窗也不该开）
+    let Some(view) = books.view(land) else {
+        return;
+    };
+    if view.status == Some(crate::status::LandStatus::Sealed) {
+        return;
+    }
+    let commercial_empty = books
+        .active
+        .def
+        .land(land.0)
+        .is_some_and(|d| d.land_type == crate::board::LandType::Commercial)
+        && books.facility_of(land).is_none();
+    if pending.active().is_some() || books.auction.holds_turn() || gate.holds_turn() {
+        // 购买/付租金还没落定：记下来，等 `decision_system` 答完那一问再落
+        queued.0 = Some((landed.player, land, held.god));
+        return;
+    }
+    if bless && commercial_empty {
+        pending.offer(landed.player, crate::landing::Pending::BlessBuild(land));
+        return;
+    }
+    if bless {
+        if let Some(level) = books.bless(land) {
+            blessed.write(LandBlessed {
+                player: landed.player,
+                land,
+                kind: None,
+                new_level: level,
+            });
         }
-        // 先把「这一格上那块地」抄出来：`books.active` 是 `books` 的借用，不能与下面
-        // 那次 `&mut books` 同时活着（P5 的炸弹在同一处踩过，写法照它）
-        let Some(land) = books
-            .active
-            .def
-            .tile(step.tile.0 as i64)
-            .and_then(|t| t.land_id)
-            .map(LandId)
-        else {
-            continue;
-        };
-        match effect {
-            WalkEffect::Bless => {
-                if let Some(level) = books.bless(land) {
-                    debug!("天使经过 格{}：L{} 加盖到 Lv{level}", step.tile.0, land.0);
-                }
-            }
-            // 与定时炸弹共用同一段写组件的 code path（`damage_lands` 而不是 `damage`）：
-            // 范围已经由「他踩到了哪一格」算完，这里只剩一块地，不必再走一次 `area_of`。
-            // 日志只在**真的有一层被拆掉**时打：空地也是 `hit`，照着 `hit` 念会刷出一串
-            // 「拆到 Lv0」，而那句话既没拆什么也读不出这条效果有没有生效
-            WalkEffect::Blight => {
-                let before = books.view(land).map_or(0, |view| view.level);
-                books.damage_lands(&[land], LandDamage::Degrade { levels: 1 });
-                if before > 0 {
-                    let after = books.view(land).map_or(0, |view| view.level);
-                    debug!(
-                        "恶魔经过 格{}：L{} 从 Lv{before} 拆到 Lv{after}",
-                        step.tile.0, land.0
-                    );
-                }
-            }
-            WalkEffect::Nothing => {}
-        }
+        return;
+    }
+    // 恶魔那半：`blight` 自己看着层数 —— 空地塌无可塌（0 级 saturating 出来还是 0），
+    // 只有**真的塌掉一层**才发凭据
+    if let Some((before, after)) = books.blight(land)
+        && after < before
+    {
+        blighted.write(crate::msg::LandBlighted {
+            player: landed.player,
+            land,
+            old_level: before,
+            new_level: after,
+        });
     }
 }
 

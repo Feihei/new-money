@@ -1541,6 +1541,98 @@ impl<'w, 's> Books<'w, 's> {
         Some(level.0)
     }
 
+    /// 恶魔的降级：[`Self::bless`] 的镜像动词（12-08 改版，从「所经降一级」缩到
+    /// 「所到之地降一级」）。返回 `(塌之前的层数, 塌之后的层数)` —— 调用方拿
+    /// `after < before` 判断「这一下真的塌了没有」，空地塌无可塌就不该发凭据。
+    ///
+    /// 与定时炸弹共用同一条损害阶梯（[`damage::strike`] 的 `Degrade` 那一支）：
+    /// **永不动所有权**、0 级不出负数。只保留两道判：
+    /// - **查封**：与 `bless` 同一条 —— 法院贴着条子的地，天使不许施工、恶魔不许拆，
+    ///   两半是同一句话的两面；
+    /// - **抵押不挡**：塌掉一层不替任何人解押，债还是原额 —— 原主的账，不是这次拆房的分支。
+    pub fn blight(&mut self, land: LandId) -> Option<(u8, u8)> {
+        let view = self.view(land)?;
+        if view.status == Some(LandStatus::Sealed) {
+            return None;
+        }
+        let entity = self.land_entity(land)?;
+        let (_, _, mut owner, mut level, _) = self.plots.get_mut(entity).ok()?;
+        let before = level.0;
+        damage::strike(
+            &mut level.0,
+            &mut owner.0,
+            damage::LandDamage::Degrade { levels: 1 },
+        );
+        Some((before, level.0))
+    }
+
+    /// 天使在**空商业地**上「这一类建不建得起来」的同一问法 —— 窗口的灰按钮与
+    /// `build_op_system` 办的那一笔读同一张判据（P3d④a 那条「报价与成交同一表达式」）。
+    ///
+    /// 与 [`Self::build_probe`] 分开写是刻意的：那条问业主、问现金、问垄断（都不属于
+    /// 天使），这一条只答「天使能不能在这块地上免费立起 `kind`」—— 商业、空地、
+    /// 未查封、收费型设施得有参数。返回 `Err(why)` 时 `why.label()` 就是按钮上的灰话。
+    pub fn bless_probe(
+        &self,
+        land: LandId,
+        kind: crate::board::BuildingKind,
+    ) -> Result<(), crate::property::BuildDeny> {
+        let Some(view) = self.view(land) else {
+            return Err(crate::property::BuildDeny::NoWindow);
+        };
+        if view.status == Some(LandStatus::Sealed) {
+            return Err(crate::property::BuildDeny::Sealed);
+        }
+        let Some(def_land) = self.active.def.land(land.0) else {
+            return Err(crate::property::BuildDeny::NoWindow);
+        };
+        if def_land.land_type != crate::board::LandType::Commercial {
+            return Err(crate::property::BuildDeny::NotCommercial);
+        }
+        if self.facility_of(land).is_some() {
+            return Err(crate::property::BuildDeny::Occupied);
+        }
+        // 收费型必须配了参数才能立（`build_probe` 里那条的照抄）：建出一座
+        // 「永远不收钱的旅馆」比拒绝它更糟。天使免的是钱，免不掉这一条
+        let has_fee = match kind {
+            crate::board::BuildingKind::Mall
+            | crate::board::BuildingKind::Hotel
+            | crate::board::BuildingKind::GasStation => {
+                self.active.def.facility_fee(land.0, kind).is_some()
+            }
+            crate::board::BuildingKind::Lab | crate::board::BuildingKind::Park => true,
+        };
+        if !has_fee {
+            return Err(crate::property::BuildDeny::NoFee);
+        }
+        Ok(())
+    }
+
+    /// 天使的免费立起（12-08 改版）：空商业地上按选出的 `kind` 建一座设施，**不收费、
+    /// 不问归属** —— 谁的地，设施就归谁（「不分敌我」）。返回立起后的等级（必为 1）。
+    ///
+    /// `Facility` 组件由调用方插（[`crate::property::build_op_system`]），与付费建造同一条
+    /// 写法；这里只做判据与层数。抵押不挡它 —— 与 [`Self::bless`] 同一条口径：
+    /// 天使不收钱，也不管这块地押没押着。
+    pub fn bless_build(
+        &mut self,
+        land: LandId,
+        kind: crate::board::BuildingKind,
+    ) -> Result<u8, crate::property::BuildDeny> {
+        self.bless_probe(land, kind)?;
+        let entity = self
+            .land_entity(land)
+            .ok_or(crate::property::BuildDeny::NoWindow)?;
+        let (_, _, _, mut level, _) = self
+            .plots
+            .get_mut(entity)
+            .map_err(|_| crate::property::BuildDeny::NoWindow)?;
+        // 商业地建成即 Lv1（`Books::build` 那一格的同一句）：渲染只露「当前等级」那一栋，
+        // `estate_value` 按 `land_price + upgrade_cost × level` 记账面
+        level.0 = level.0.max(1);
+        Ok(level.0)
+    }
+
     /// 该地块的租金（无主/抵押 → 0；垄断翻倍）。
     pub fn rent_of(&self, land: LandId) -> i64 {
         let Some(view) = self.view(land) else {

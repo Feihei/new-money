@@ -217,8 +217,10 @@ fn auto_answer_system(
         ) => Decision::Acknowledge,
         // 建设窗口（P10c）只认「先不建」。它**不建** —— 与彩票那格「不买券」同一条理由：
         // 建一座设施要 2200，长跑用例的现金断言钉的是「租金与地价」那几笔，
-        // 多一笔建设费会让几十条既有断言一起红。建造那条路由 `tests/commercial.rs` 自己走
-        (Pending::Build(_), _) => Decision::Acknowledge,
+        // 多一笔建设费会让几十条既有断言一起红。建造那条路由 `tests/commercial.rs` 自己走。
+        // 天使的免费选型窗（12-08）同一格同一句：免费倒是免费，但「盖谁家」会把
+        // 长跑的归属断言搅浑，那条路由 `tests/gods.rs` 自己走
+        (Pending::Build(_) | Pending::BlessBuild(_), _) => Decision::Acknowledge,
         // 远程建设窗口（P10d②）同一条：自动玩家**不升**任何地 —— 日产格一踩到就开窗，
         // 长跑不自动关掉会整片挂在 `WaitDecision`，而升级那条路由 `tests/remote_build.rs` 自己走
         (Pending::RemoteBuild, _) => Decision::Acknowledge,

@@ -305,6 +305,14 @@ pub enum Pending {
     /// 请求走 [`crate::msg::RemoteUpgradeRequested`]。判据与扣款全在 `Books::upgrade`
     /// （正路），董事长的「免费升两层」只是同一判据换了价钱与层数（`upgrade_chairman`）。
     RemoteBuild,
+    /// 天使落脚在**空商业地**：这一趟免费立起哪一类设施（12-08 改版）。
+    ///
+    /// 与 [`Pending::Build`] 同形（窗口、五类候选、请求走 [`crate::msg::BuildRequested`]），
+    /// 但三处不同：**不收费**（天使不收钱，造价恒为 0）、**不问归属**（落地这格是谁的都行，
+    /// 设施归地主 —— 「不分敌我」那句口径），判据只有「商业、空地、未查封、收费型有参数」
+    /// 四条（[`crate::settle::Books::bless_probe`]）。与 [`Pending::Build`] 分开占一格而不是
+    /// 共用，理由与柜台那两格相同：判据不一样却合用一个变体，面板的灰按钮迟早各说各话。
+    BlessBuild(LandId),
     /// 魔法屋：女巫摇出的一条条件已经摆在桌上，这一步选**一道法术**（P13 / P13c）。
     ///
     /// P13c 之前这里有两个变体（`Pending::Magic` 答条件 → 本条答法术），而第一步是
@@ -416,6 +424,11 @@ pub struct DecisionDesk<'w, 's> {
     answers: MessageReader<'w, 's, DecisionChosen>,
     bought: MessageWriter<'w, LandBought>,
     upgraded: MessageWriter<'w, LandUpgraded>,
+    /// 神明的落脚待办（12-08）。**只在落脚来的那一问上消费**：停留停在自家地上
+    /// 开出来的建设窗（P14d②）与它无关，天使加盖／恶魔降级那一下已经在那一落办完了
+    mark: ResMut<'w, crate::gods::GodLanding>,
+    blessed: MessageWriter<'w, crate::msg::LandBlessed>,
+    blighted: MessageWriter<'w, crate::msg::LandBlighted>,
     rules: Res<'w, GameRules>,
     beat: ResMut<'w, BeatClock>,
     next: ResMut<'w, NextState<TurnPhase>>,
@@ -491,6 +504,7 @@ pub fn decision_system(mut books: Books, view: DecisionView<'_>, mut desk: Decis
             | Pending::Bail(_)
             | Pending::Minigame(_)
             | Pending::Build(_)
+            | Pending::BlessBuild(_)
             | Pending::RemoteBuild
             // 魔法屋（P13 / P13c）：与柜台同族 —— 法术走自己的意图消息
             // （`MagicSpellPicked`），这里只认「离开」。
@@ -506,6 +520,7 @@ pub fn decision_system(mut books: Books, view: DecisionView<'_>, mut desk: Decis
             | Pending::Bail(_)
             | Pending::Minigame(_)
             | Pending::Build(_)
+            | Pending::BlessBuild(_)
             | Pending::RemoteBuild
             | Pending::MagicSpell(_),
             Decision::Accept | Decision::Decline,
@@ -530,6 +545,60 @@ pub fn decision_system(mut books: Books, view: DecisionView<'_>, mut desk: Decis
         ) => {}
         // 报价上答「已阅」= 没答，继续等（Godot 的 `_pending_decision != "buy"` 同义）
         (Pending::Buy(_) | Pending::Upgrade(_), Decision::Acknowledge) => return,
+    }
+
+    // 神明的落脚动手（12-08）：落格流水线把它记下（[`crate::gods::GodLanding`]），
+    // 就是为了等**这一刻** —— 购买/付租金已经答完、钱各归各位，房子现在才动
+    // （天使长一层；恶魔塌一层 —— 房东照塌**之前**的层数收的租，塌的这一级不抵租）。
+    // 排在保释后置问**之前**：先动房子、再问放人，两问各自都能接到下一问
+    // （答完选型窗，保释那道检查还会再走一次；反之亦然，各不吞并）。
+    // 排除 `BlessBuild` 自己：选型窗答完时待办早已清掉，这里再拦一遍是死代码。
+    if from_landing
+        && !matches!(about, Pending::BlessBuild(_))
+        && desk.mark.0.is_some_and(|(owner, _, _)| owner == asked)
+        && let Some((_, land, god)) = desk.mark.0
+    {
+        desk.mark.0 = None;
+        match god {
+            // 天使：商业空地 → 免费选型窗（五类选一，`build_op_system` 办）；
+            // 其余就地加盖一级
+            crate::gods::God::Angel => {
+                let commercial_empty = books
+                    .active
+                    .def
+                    .land(land.0)
+                    .is_some_and(|d| d.land_type == crate::board::LandType::Commercial)
+                    && books.facility_of(land).is_none();
+                if commercial_empty {
+                    desk.pending.offer(asked, Pending::BlessBuild(land));
+                    return;
+                }
+                if let Some(level) = books.bless(land) {
+                    desk.blessed.write(crate::msg::LandBlessed {
+                        player: asked,
+                        land,
+                        kind: None,
+                        new_level: level,
+                    });
+                }
+            }
+            // 恶魔：就地降一级。空地塌无可塌（`blight` 返回前后相等），凭据不发
+            crate::gods::God::Devil => {
+                if let Some((before, after)) = books.blight(land)
+                    && after < before
+                {
+                    desk.blighted.write(crate::msg::LandBlighted {
+                        player: asked,
+                        land,
+                        old_level: before,
+                        new_level: after,
+                    });
+                }
+            }
+            // 其余九位根本不会被记进待办（`mark_god_landing_system` 的表管着），
+            // 这一臂只为穷尽匹配存在
+            _ => {}
+        }
     }
 
     // 刚答完一个报价/窗口：如果这一格正是监狱或医院那条分支的**接入点**，且那里真关着人，

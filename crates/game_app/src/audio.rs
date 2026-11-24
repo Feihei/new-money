@@ -183,6 +183,7 @@ fn event_music(pending: &Pending) -> Option<EventMusic> {
         Pending::Buy(_)
         | Pending::Upgrade(_)
         | Pending::Build(_)
+        | Pending::BlessBuild(_)
         | Pending::RemoteBuild
         | Pending::RentNotice(_)
         | Pending::ServiceNotice(_)
@@ -1590,7 +1591,7 @@ mod tests {
     /// 六个整屏窗口（七个变体）各自换哪一首，九种小模态一律不换。这张表是「事件场景」的定义本身。
     #[test]
     fn only_the_full_screen_scenes_change_the_track() {
-        let cases: [(Pending, Option<EventMusic>); 17] = [
+        let cases: [(Pending, Option<EventMusic>); 18] = [
             (Pending::BankTeller, Some(EventMusic::Market)),
             (Pending::Shop, Some(EventMusic::Market)),
             (Pending::Lottery, Some(EventMusic::Fortune)),
@@ -1611,6 +1612,7 @@ mod tests {
             (Pending::Buy(LandId(3)), None),
             (Pending::Upgrade(LandId(3)), None),
             (Pending::Build(LandId(3)), None),
+            (Pending::BlessBuild(LandId(3)), None),
             (Pending::RemoteBuild, None),
             (Pending::RentNotice(LandId(3)), None),
             (Pending::ServiceNotice(LandId(3)), None),

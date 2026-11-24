@@ -109,13 +109,14 @@ pub mod prelude {
     };
     pub use crate::economy::LandView;
     pub use crate::gods::{
-        BestowKit, God, GodDesk, MAX_ON_BOARD, NO_GOD_ON_THE_ROAD, NO_GOD_TO_BANISH, Possession,
-        Presence, Rival, STARTING_GODS, WalkEffect, acquire_denied_word, age_possession, attach,
-        banishable, cards_lost_per_turn, denies_acquire, detach, doom_days, doom_multiplier,
-        drain_cards, extra_levels, god_refuses_banish, grant_effects, land_deity_succession_system,
-        money_corrections, nearest_god, presence_of, resists, revoke_effects,
-        settle_god_landing_system, settle_land_deity_landing_system, spawn_starting_gods,
-        takes_landing, top_up_gods_system, walk_effect, walk_effect_system, wander_gods_system,
+        BestowKit, God, GodDesk, GodLanding, MAX_ON_BOARD, NO_GOD_ON_THE_ROAD, NO_GOD_TO_BANISH,
+        Possession, Presence, Rival, STARTING_GODS, acquire_denied_word, age_possession, attach,
+        banishable, blesses_landing, blights_landing, cards_lost_per_turn, denies_acquire, detach,
+        doom_days, doom_multiplier, drain_cards, extra_levels, god_refuses_banish, grant_effects,
+        land_deity_succession_system, mark_god_landing_system, money_corrections, nearest_god,
+        presence_of, resists, revoke_effects, settle_god_landing_system,
+        settle_land_deity_landing_system, spawn_starting_gods, takes_landing, top_up_gods_system,
+        wander_gods_system,
     };
     pub use crate::hand::{
         CardAim, Hand, PASSIVE_WORD, PlayWindow, card_notice, deal_to, is_passive, play_card_system,
@@ -156,9 +157,9 @@ pub mod prelude {
         DetentionLifted, DetentionSkipped, DiceRolled, EffectOutcome, FacilityBuilt,
         FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GiftGiven, GiftsGiven,
         GodAppeared, GodDeed, GodExit, GodLeft, GodPossessed, IndemnityPaid, ItemPlaced,
-        ItemThieved, JackpotChanged, JackpotWhy, LandBought, LandTaken, LandUpgraded,
-        LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicOffered,
-        MagicSpellPicked, MinigameResult, MinigameScore, MortgageDone, MortgageOp,
+        ItemThieved, JackpotChanged, JackpotWhy, LandBlessed, LandBlighted, LandBought, LandTaken,
+        LandUpgraded, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast,
+        MagicOffered, MagicSpellPicked, MinigameResult, MinigameScore, MortgageDone, MortgageOp,
         MortgageRequested, MountChanged, MoveCapped, NewsAudience, NewsFired, NewsHit, NewsNotice,
         PassiveAnswer, PassiveMove, PassiveUsed, PlaceItemRequested, PlayCardRequested,
         PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported,
@@ -233,29 +234,29 @@ use prelude::{
     DepositsRobbed, DetentionLifted, DetentionSkipped, DiceRolled, EpochOverride, FacilityBuilt,
     FinancingDrawRequested, FinancingDrawn, FinancingRecalled, GameOver, GameRules, GameSeed,
     GameSetup, GiftsGiven, GodAppeared, GodDeed, GodLeft, GodPossessed, HolidaySet, IndemnityPaid,
-    ItemPlaced, ItemThieved, JackpotChanged, JsonAssetLoader, LandBought, LandTaken, LandUpgraded,
-    Landing, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicOffered,
-    MagicSpellPicked, MarketClock, MinigameResult, MinigameScore, MortgageDone, MortgageRequested,
-    MountChanged, MoveCapped, NewsFired, PassiveAnswer, PassiveUsed, Paused, PendingDecision,
-    PlaceItemRequested, PlayCardRequested, PlayerArrived, PlayerBailed, PlayerBankrupt,
-    PlayerDetained, PlayerTeleported, PointsChanged, PointsStolen, PolicyBought, RedEnvelope,
-    RemoteBuildOffered, RemoteDiceUsed, RemoteUpgradeRequested, RentDue, RentRerouted,
-    RequestRemoteDice, RequestRoll, RequestSkip, RequestStay, ServiceCharged, ShopOpDone,
-    ShopOpRequested, ShopStock, StartCashChoice, StayLifted, StaySkipped, StockPriceChanged,
-    StockSet, StockTradeRequested, StockTraded, StockVisited, TileStepped, TollExtorted, TurnEnded,
-    TurnPhase, TurnStarted, UpgradeOffered, VillainHired, WalkClock, WalkHalt, WalkHalted,
-    WalkStarted, accrue_jackpot_interest_system, advance_walk_clock_system, age_suspensions_system,
-    auction_hold_system, auction_move_system, bail_op_system, bank_op_system, begin_game_system,
-    build_op_system, decision_system, deliver_calendar_events_system, draw_lottery_system,
-    expire_land_status_system, financing_system, finish_halt_system, gate_system,
-    grant_atm_access_system, hoodlum_toll_system, insurance_claim_system,
-    land_deity_succession_system, lottery_op_system, magic_spell_system,
-    market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system, on_hired_system,
-    place_item_system, play_card_system, remote_build_system, resolve_halt_system,
+    ItemPlaced, ItemThieved, JackpotChanged, JsonAssetLoader, LandBlessed, LandBlighted,
+    LandBought, LandTaken, LandUpgraded, Landing, LotteryBought, LotteryDrawn, LotteryWon,
+    MagicBlocked, MagicCast, MagicOffered, MagicSpellPicked, MarketClock, MinigameResult,
+    MinigameScore, MortgageDone, MortgageRequested, MountChanged, MoveCapped, NewsFired,
+    PassiveAnswer, PassiveUsed, Paused, PendingDecision, PlaceItemRequested, PlayCardRequested,
+    PlayerArrived, PlayerBailed, PlayerBankrupt, PlayerDetained, PlayerTeleported, PointsChanged,
+    PointsStolen, PolicyBought, RedEnvelope, RemoteBuildOffered, RemoteDiceUsed,
+    RemoteUpgradeRequested, RentDue, RentRerouted, RequestRemoteDice, RequestRoll, RequestSkip,
+    RequestStay, ServiceCharged, ShopOpDone, ShopOpRequested, ShopStock, StartCashChoice,
+    StayLifted, StaySkipped, StockPriceChanged, StockSet, StockTradeRequested, StockTraded,
+    StockVisited, TileStepped, TollExtorted, TurnEnded, TurnPhase, TurnStarted, UpgradeOffered,
+    VillainHired, WalkClock, WalkHalt, WalkHalted, WalkStarted, accrue_jackpot_interest_system,
+    advance_walk_clock_system, age_suspensions_system, auction_hold_system, auction_move_system,
+    bail_op_system, bank_op_system, begin_game_system, build_op_system, decision_system,
+    deliver_calendar_events_system, draw_lottery_system, expire_land_status_system,
+    financing_system, finish_halt_system, gate_system, grant_atm_access_system,
+    hoodlum_toll_system, insurance_claim_system, land_deity_succession_system, lottery_op_system,
+    magic_spell_system, market_tick_on_turn_end_system, minigame_score_system, mortgage_op_system,
+    on_hired_system, place_item_system, play_card_system, remote_build_system, resolve_halt_system,
     robber_snatch_system, settle_arcade_landing, settle_god_landing_system,
     settle_landing_occupancy_system, shop_op_system, thief_deliver_system, tick_insurance_system,
     top_up_gods_system, trade_request_system, villain_rotation_system, villain_turn_system,
-    walk_effect_system, walk_step_system, wander_gods_system,
+    walk_step_system, wander_gods_system,
 };
 use turn::{
     BeatClock, LastRoll, PerformanceHold, advance_beat_clock_system, begin_turn_system,
@@ -322,6 +323,9 @@ impl Plugin for CoreGamePlugin {
             .init_resource::<crate::ai::AiErrands>()
             .init_resource::<Landing>()
             .init_resource::<PendingDecision>()
+            // 天使的落脚加盖待办（12-08）：落格记下、答完窗口才落。下一次落格必然
+            // 整个重写它，所以不用进「回菜单要清的那十几格」
+            .init_resource::<gods::GodLanding>()
             .init_resource::<AtmAccess>()
             .init_resource::<CouponBoxes>()
             .init_resource::<Corrections>()
@@ -371,6 +375,12 @@ impl Plugin for CoreGamePlugin {
             // 土地公的过户（P6c）。与 `LandBought` 分两条：那条说「有人付了这笔钱」，这条没有
             .add_message::<LandTaken>()
             .add_message::<LandUpgraded>()
+            // 天使的落脚加盖（12-08 改版）。与 `LandUpgraded` 分两条：那条背后有一笔
+            // 造价可付，这条不收钱 —— 合并就会让人以为这次加盖走了账
+            .add_message::<LandBlessed>()
+            // 恶魔的落脚降级（12-08 改版）。与 `LandBlessed` 成对：天使长楼不收钱、
+            // 恶魔塌楼不赔钱，两条背后都没有 `CashChanged`
+            .add_message::<LandBlighted>()
             .add_message::<BuildOffered>()
             .add_message::<BuildRequested>()
             .add_message::<FacilityBuilt>()
@@ -630,22 +640,17 @@ impl Plugin for CoreGamePlugin {
             // 而装配前的那些帧还没有这个资源 —— 别的 `Books` 用户都躲在状态门禁后面，
             // 这一只没有，所以漏一条就是每帧一次「Resource does not exist」。
             .add_systems(Update, grant_atm_access_system)
-            // 天使与恶魔：同一条 `TileStepped` 的 core 侧 reader，注册形状照上面那条 ATM
-            // （不设阶段闸门，理由见 `walk_effect_system` 的注）。它带 `Books`，
-            // 所以要 `resource_exists` 挡装配前与回菜单之后的那些帧。
-            // 恶人行为的三条 reader（P12b/c）与它同住这一组：`hoodlum_toll_system`
-            // 也带 `Books`（两条对 `&mut Wallet` 的访问冲突是调度期硬检查的），
-            // 所以这一组显式 `chain` —— 勒索与神明的脚步互不相干，chain 只是让
-            // 「同一帧读到同一条 TileStepped」的两条 reader 都跑得到。
+            // 恶人行为的 reader（P12b/c）住这一组：`hoodlum_toll_system`
+            // 带 `Books`（与其它带 `Books` 的 reader 的访问冲突是调度期硬检查的），
+            // 所以这一组显式 `chain`，串起来一眼看出「走路的事在这里」。
             // `robber_snatch_system`/`thief_deliver_system` 不带 `Books`
             // （前者动的是手牌与随机流，后者是道具栏），本来可以并行，
-            // 但它们读的消息与上面两条同源，串成一条链读起来一眼看出「走路的事在这里」。
+            // 但它们读的消息与上面同源，串成一条链读起来一眼看出「走路的事在这里」。
             // `on_hired_system` 读的是 `VillainHired`（保释窗口发的，下一帧才到），
             // 与这条链先后无语义，放在一起是因为它同样是「恶人的事」。
             .add_systems(
                 Update,
                 (
-                    walk_effect_system.run_if(resource_exists::<ActiveBoard>),
                     hoodlum_toll_system
                         .run_if(resource_exists::<ActiveBoard>)
                         .run_if(not_paused),
@@ -771,12 +776,19 @@ impl Plugin for CoreGamePlugin {
                 )
                     .chain(),
             )
-            // 收尾那条单独挂：上面的 14 元组已顶满 Bevy 元组 chain 的上限（15 起
-            // IntoIterator 就没了），而它必须等全部域结算完才能关这一趟 —— 用
-            // `.after` 显式接在链尾，与写在同一个元组里是同一条顺序约束
+            // 收尾那三条单独挂：上面的 14 元组已顶满 Bevy 元组 chain 的上限（15 起
+            // IntoIterator 就没了）。先后是硬的：神明的落脚动手（天使加盖／恶魔降级）
+            // 要看见「这一趟有没有窗口挂着」（保释那条可能刚摆了窗），
+            // 而 close 要看见天使摆上的选型窗 ——
+            // 保释 → 神明 → close，谁也不能并行（用 `.after` 显式接，与写在同一个
+            // 元组里是同一条顺序约束）
             .add_systems(
                 OnEnter(TurnPhase::Landed),
-                landing::close_landing_system.after(bail::settle_bail_landing_system),
+                gods::mark_god_landing_system.after(bail::settle_bail_landing_system),
+            )
+            .add_systems(
+                OnEnter(TurnPhase::Landed),
+                landing::close_landing_system.after(gods::mark_god_landing_system),
             )
             // 新闻中心（P11）：抽一条、当场播完并结算。**排在全部域结算之后、关这一趟之前**
             // 是因为新闻动的正是上面那些域管着的东西（钱、归属、身上的计时）——

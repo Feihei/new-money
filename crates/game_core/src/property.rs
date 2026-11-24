@@ -418,6 +418,11 @@ pub fn build_op_allowed(
 /// 建造柜台（P10c）：`BuildRequested` 逐笔进来办，窗口照开 —— 交还回合是
 /// `decision_system` 对「先不建」的回应，这里碰都不碰 `NextState`（域的纪律）。
 ///
+/// 天使的选型窗（`Pending::BlessBuild`，12-08）走的是**同一个柜台、另一条价目**：
+/// 窗口形一样（五类按钮、逐笔请求、办完照开），但建造走 [`Books::bless_build`] ——
+/// 不扣款、不问归属，凭据发 [`crate::msg::LandBlessed`] 而不是 [`FacilityBuilt`]，
+/// 因为「天使不收钱」那句口径连 0 元的账都不该有。
+///
 /// 判据与扣款都在 [`Books::build`]：钱不够不是这颗按钮说了算，是账本说了算 ——
 /// 同帧两条建造请求、第二条会看到第一条扣完的余额（`debit` 就地写），
 /// 「一次窗口付两遍钱」在 P3d③ 已经修过一次，这条纪律不许在新柜台上破。
@@ -427,12 +432,39 @@ pub fn build_op_system(
     pending: ResMut<PendingDecision>,
     mut requests: MessageReader<BuildRequested>,
     mut built: MessageWriter<FacilityBuilt>,
+    mut blessed: MessageWriter<crate::msg::LandBlessed>,
 ) {
-    let Some((asked, Pending::Build(window))) = pending.active() else {
+    let Some((asked, about @ (Pending::Build(window) | Pending::BlessBuild(window)))) =
+        pending.active()
+    else {
         return;
     };
+    let blessing = matches!(about, Pending::BlessBuild(_));
     for r in requests.read() {
         if r.player != asked || r.land != window {
+            continue;
+        }
+        if blessing {
+            match books.bless_build(r.land, r.kind) {
+                Ok(new_level) => {
+                    if let Some(entity) = books.land_entity(r.land) {
+                        commands.entity(entity).insert(Facility(r.kind));
+                    }
+                    blessed.write(crate::msg::LandBlessed {
+                        player: r.player,
+                        land: r.land,
+                        kind: Some(r.kind),
+                        new_level,
+                    });
+                }
+                Err(why) => debug!(
+                    "天使加盖被拒（{}）：{} 想在 L{} 立 {:?}",
+                    why.label(),
+                    books.id_of(r.player).map(|p| p.0).unwrap_or_default(),
+                    r.land.0,
+                    r.kind
+                ),
+            }
             continue;
         }
         match books.build(r.player, r.land, r.kind) {

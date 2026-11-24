@@ -1512,11 +1512,15 @@ fn dispatch_ui_actions(
             // 建设窗口（P10c）：主语是窗口挂着的那位，地块必须正是窗口问的那块 ——
             // 与保释那一格同一条：按钮只说「建哪一类」，主语与对象都由状态说。
             // 「建不建得成」全交给规则层的 `build_op_allowed`（按钮那颗灰是同源结果）。
+            // 天使的免费选型窗（12-08）发的是同一条请求：收费与否由窗口的形定，
+            // `build_op_system` 读挂着的是哪个 Pending 自己分流。
             UiAction::Build { land, kind } => {
                 if gate.paused.0 {
                     continue;
                 }
-                let Some((player, Pending::Build(window))) = gate.pending.active() else {
+                let Some((player, Pending::Build(window) | Pending::BlessBuild(window))) =
+                    gate.pending.active()
+                else {
                     continue;
                 };
                 if window != *land {

@@ -90,6 +90,7 @@ pub(crate) enum ModalKind {
     Rent,
     Card,
     Bank,
+    Bless,
 }
 
 #[derive(Resource)]
@@ -107,8 +108,9 @@ impl ForceModal {
             "rent" => ModalKind::Rent,
             "card" => ModalKind::Card,
             "bank" => ModalKind::Bank,
+            "bless" => ModalKind::Bless,
             _ => {
-                warn!("NM_DECISION={name} 不认识，应为 buy|upgrade|rent|card|bank");
+                warn!("NM_DECISION={name} 不认识，应为 buy|upgrade|rent|card|bank|bless");
                 return Self(None);
             }
         };
@@ -151,6 +153,19 @@ pub(crate) fn force_decision(
         ModalKind::Upgrade => Pending::Upgrade(land),
         ModalKind::Rent => Pending::RentNotice(land),
         ModalKind::Card => Pending::Card,
+        // 天使的免费选型窗（12-08）：挑一块**空着的商业地**，窗里才读得出「选型」而不是「已建成」
+        ModalKind::Bless => {
+            let Some(bless) = active
+                .def
+                .lands
+                .iter()
+                .find(|l| l.land_type == game_core::board::LandType::Commercial)
+                .map(|l| LandId(l.id))
+            else {
+                return;
+            };
+            Pending::BlessBuild(bless)
+        }
         ModalKind::Bank => unreachable!("柜台在上面就已经挂好了"),
     };
     pending.offer(player, about);
@@ -568,6 +583,11 @@ pub(crate) fn sync_modal(
             Pending::Build(land) => {
                 build_modal(&mut commands, &font, &skins, books, player, land, stamp);
             }
+            // 天使的免费选型窗（12-08）。与建设窗口同一条分工：灰按钮的判据全在
+            // `Books::bless_probe` —— 不问业主与现金，天使不收钱也不讲敌我
+            Pending::BlessBuild(land) => {
+                bless_build_modal(&mut commands, &font, &skins, books, player, land, stamp);
+            }
             // 远程建设窗口（P10d②）。与 `build_modal` 同一条分工：候选与灰按钮的判据
             // 全在 `economy::can_upgrade`（就是 `Books::upgrade` 认的那张表）；
             // 升完窗口照开，按「先不建」才收摊
@@ -889,6 +909,11 @@ fn modal_stamp(about: Pending, books: &Books, player: Entity, extra: ModalExtra<
                 books.facility_of(land).is_some() as u8,
             )
         }),
+        // 天使的免费选型窗（12-08）：不收钱，签名里没有现金那一格；但「立起没立起」
+        // 仍要进签名 —— 立完这一屏要翻成「这里已经立着设施」，少了它玩家会再点一次
+        Pending::BlessBuild(land) => {
+            format!("{}", books.facility_of(land).is_some() as u8)
+        }
         // 远程建设窗口（P10d②）：升一块地 = 层数与现金同时动，与 `Build` 同一条理由。
         // 签名带**全部**地块的层数 —— 候选列表本来就画着它们，谁变了这一屏都得重烤
         Pending::RemoteBuild => format!(
@@ -3518,6 +3543,123 @@ fn build_row(
             &font.0,
             ButtonSpec::new(
                 &format!("建{}", kind.label()),
+                layout::SHOP_BUTTON,
+                super::PRIMARY,
+                UiAction::Build { land, kind },
+            )
+            .disabled(probe.is_err()),
+        );
+        if let Err(reason) = probe {
+            line.spawn(super::label(&font.0, reason, size::ROW, col::JAILED));
+        }
+    });
+}
+
+/// 天使的免费选型窗（12-08）：落地这格是**空商业地**时，五类免费选一类立起来。
+///
+/// 与 [`build_modal`] 同一形（五颗按钮、办完照开、「离开」交还回合），三处不同：
+/// 不写价（天使不收钱，写了「$0」反而像一笔免掉的账）、灰按钮的判据走
+/// [`Books::bless_probe`]（不问业主与现金，只问「商业/空地/未查封/收费型有参数」）、
+/// 副标题把「设施归地主」说出来 —— 这是「不分敌我」那句口径在屏幕上的那一半。
+fn bless_build_modal(
+    commands: &mut Commands,
+    font: &DevFont,
+    skins: &Skins,
+    books: &Books,
+    player: Entity,
+    land: LandId,
+    stamp: String,
+) -> Entity {
+    let name = books
+        .active
+        .def
+        .land(land.0)
+        .map_or_else(String::new, |l| l.name.clone());
+    let built = books.facility_of(land);
+    let rows: Vec<(BuildingKind, Result<(), String>)> = BuildingKind::ALL
+        .iter()
+        .map(|kind| {
+            (
+                *kind,
+                books
+                    .bless_probe(land, *kind)
+                    .map_err(|why| why.label().to_string()),
+            )
+        })
+        .collect();
+
+    frame(
+        skins,
+        commands,
+        (player, Pending::BlessBuild(land)),
+        stamp,
+        layout::SHOP_PANEL,
+        col::BORDER_SHOP,
+        |p| {
+            p.spawn(center_label(
+                &font.0,
+                format!("天使加盖 {name}"),
+                size::DIALOG_TITLE,
+                col::TITLE_GOLD,
+            ));
+            p.spawn(center_label(
+                &font.0,
+                if built.is_some() {
+                    format!("这里已经立着{}", built.map(|k| k.label()).unwrap_or("设施"))
+                } else {
+                    "不收钱 — 选一类立起来，设施归地主".to_string()
+                },
+                size::ROW,
+                col::MUTED,
+            ));
+            p.spawn(separator());
+            for (kind, probe) in &rows {
+                bless_row(p, font, land, *kind, probe);
+            }
+            button_row(p, |line| {
+                button(
+                    line,
+                    &font.0,
+                    ButtonSpec::new(
+                        "离开",
+                        layout::MODAL_BUTTON,
+                        SECONDARY,
+                        UiAction::Decide(Decision::Acknowledge),
+                    ),
+                );
+            });
+        },
+    )
+}
+
+/// 天使选型窗的一行：设施名 + 一颗不带价的按钮 + 灰掉时的那句话。
+/// 与 [`build_row`] 同一形，只是没有「$」那一截 —— 天使不收钱，屏幕上也不该有价签。
+fn bless_row(
+    p: &mut ChildSpawnerCommands,
+    font: &DevFont,
+    land: LandId,
+    kind: BuildingKind,
+    probe: &Result<(), String>,
+) {
+    p.spawn(Node {
+        flex_direction: FlexDirection::Row,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(8.0),
+        ..default()
+    })
+    .with_children(|line| {
+        line.spawn((
+            Node {
+                flex_grow: 1.0,
+                ..default()
+            },
+            super::label(&font.0, kind.label().to_string(), size::ROW, col::BODY),
+        ));
+        button(
+            line,
+            &font.0,
+            ButtonSpec::new(
+                &format!("立{}", kind.label()),
                 layout::SHOP_BUTTON,
                 super::PRIMARY,
                 UiAction::Build { land, kind },

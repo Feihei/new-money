@@ -18,21 +18,22 @@ use game_core::prelude::{
     BidPlaced, BidWithdrawn, BombTransferred, CardLost, CardPlayed, CardSnatched, ChairmanTook,
     ChestOpened, CompanyCharged, Controller, DepositsRobbed, DetentionLifted, DetentionSkipped,
     FacilityBuilt, FinancingDrawn, FinancingRecalled, GameOver, GameSession, GodAppeared, GodDeed,
-    GodExit, GodLeft, GodPossessed, IndemnityPaid, Institution, ItemPlaced, ItemThieved, LandId,
-    LandTaken, LotteryBought, LotteryDrawn, LotteryWon, MagicBlocked, MagicCast, MagicSpell,
-    MarketClock, MinigameScore, MortgageDone, MortgageOp, MountChanged, MoveCapped, NewsAudience,
-    NewsFired, NewsScope, PassiveUsed, Paused, PendingDecision, PerformanceHold, PlayerBailed,
-    PlayerBankrupt, PlayerName, PointsChanged, PointsStolen, PolicyBought, RemoteDiceUsed,
-    RentRerouted, ServiceCharged, ShopOpDone, StayLifted, StaySentence, StaySkipped, StockTraded,
-    StockVisited, TileIndex, TollExtorted, TradeSide, TurnOrder, TurnPhase, VillainHired,
-    WalkHalted,
+    GodExit, GodLeft, GodPossessed, IndemnityPaid, Institution, ItemPlaced, ItemThieved,
+    LandBlessed, LandBlighted, LandId, LandTaken, LotteryBought, LotteryDrawn, LotteryWon,
+    MagicBlocked, MagicCast, MagicSpell, MarketClock, MinigameScore, MortgageDone, MortgageOp,
+    MountChanged, MoveCapped, NewsAudience, NewsFired, NewsScope, PassiveUsed, Paused,
+    PendingDecision, PerformanceHold, PlayerBailed, PlayerBankrupt, PlayerName, PointsChanged,
+    PointsStolen, PolicyBought, RemoteDiceUsed, RentRerouted, ServiceCharged, ShopOpDone,
+    StayLifted, StaySentence, StaySkipped, StockTraded, StockVisited, TileIndex, TollExtorted,
+    TradeSide, TurnOrder, TurnPhase, VillainHired, WalkHalted,
 };
 
 use super::dialog::describe;
 use super::finance::comma;
 use super::theme::{col, layout, size};
 use super::{
-    BoardUi, ButtonSpec, Disabled, PRIMARY, Palette, SECONDARY, UiAction, button, can_roll, label,
+    BoardUi, ButtonSpec, Disabled, PRIMARY, Palette, SECONDARY, UiAction, building_label, button,
+    can_roll, label,
 };
 use crate::render::DevFont;
 
@@ -566,6 +567,11 @@ pub(crate) struct Notices<'w, 's> {
     card_lost: MessageReader<'w, 's, CardLost>,
     /// 土地公把一块地直接拿走。它与「有人付钱买地」是两条凭据，那条带付款、这条不带
     land_taken: MessageReader<'w, 's, LandTaken>,
+    /// 天使的落脚加盖（12-08 改版）。与 `land_taken` 同一条理由：背后没有付款，
+    /// 合并进「升级」那条就会让人以为走了账 —— 而这一条是不收钱的那一半
+    land_blessed: MessageReader<'w, 's, LandBlessed>,
+    /// 恶魔的落脚降级（12-08 改版）。与 `land_blessed` 成对的坏消息：塌楼也不赔钱
+    land_blighted: MessageReader<'w, 's, LandBlighted>,
     // ===== 道路放置物与道具（P5）=====
     /// 放下了什么、放在哪一格。面板随道具数重建，一次性结果只有这一行能说
     placed: MessageReader<'w, 's, ItemPlaced>,
@@ -988,6 +994,20 @@ pub(crate) fn hint_from_events(
             plot,
             m.from.map(|prev| name(&names, prev)).as_deref(),
         ));
+    }
+    for m in notices.land_blessed.read() {
+        let plot = board
+            .as_ref()
+            .and_then(|b| b.def.land(m.land.0))
+            .map_or("？", |l| l.name.as_str());
+        line = Some(land_blessed_word(plot, m.kind, m.new_level));
+    }
+    for m in notices.land_blighted.read() {
+        let plot = board
+            .as_ref()
+            .and_then(|b| b.def.land(m.land.0))
+            .map_or("？", |l| l.name.as_str());
+        line = Some(land_blighted_word(plot, m.old_level, m.new_level));
     }
     for m in notices.god_possessed.read() {
         line = Some(god_possessed_word(
@@ -1444,6 +1464,30 @@ fn land_taken_word(who: &str, plot: &str, from: Option<&str>) -> String {
     format!("土地公 替 {who} 拿下{plot}（{tail}）")
 }
 
+/// 天使落脚加盖（12-08 改版）。两句话而不是一条带 `Option` 的：普通加盖说的是
+/// 「长到几层」，免费立起说的是「盖起了哪一类」—— 合并成一句总有一半读不通。
+fn land_blessed_word(
+    plot: &str,
+    kind: Option<game_core::prelude::BuildingKind>,
+    level: u8,
+) -> String {
+    match kind {
+        Some(kind) => format!("天使 在{plot}盖起{}（不收钱）", kind.label()),
+        None => format!("天使 把{plot}加盖到{}", building_label(level)),
+    }
+}
+
+/// 恶魔落脚降级（12-08 改版）。凭据只在**真的塌掉一层**时才发（空地塌无可塌不发、
+/// 查封不拆不发），所以这里读到的一定是 `old > new`，两头的层数都念出来 ——
+/// 「从几层塌到几层」比单念结果多说了「这里原本有楼」这件事
+fn land_blighted_word(plot: &str, old: u8, new: u8) -> String {
+    format!(
+        "恶魔 把{plot}从{}拆到{}",
+        building_label(old),
+        building_label(new)
+    )
+}
+
 /// 上身那一刻当场做的那件事。「给了」与「拿走了」分两句而不是带符号报数：负数写在屏幕上
 /// 读起来像账算错了，而这里说的是一笔真的动过的钱（明细在 `CashChanged`，两边对得上）。
 /// `cards` 只在钱那一格为零时才被念出来 —— 大福神是「送 2 张卡」，不送钱
@@ -1825,6 +1869,8 @@ mod tests {
             .add_message::<GodDeed>()
             .add_message::<CardLost>()
             .add_message::<LandTaken>()
+            .add_message::<LandBlessed>()
+            .add_message::<LandBlighted>()
             .add_message::<ItemPlaced>()
             .add_message::<WalkHalted>()
             .add_message::<BombTransferred>()

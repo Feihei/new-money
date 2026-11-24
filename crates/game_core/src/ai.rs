@@ -631,6 +631,10 @@ pub fn greedy(about: Pending, rules: &GameRules) -> AiMove {
         // （P14c④：五类设施同价，「建哪一类」问的是谁会被收钱＝`harm`），这里只剩
         // 「还没有先验的座位」与人类座位那条退路。
         Pending::Build(_) => AiMove::Decide(Decision::Acknowledge),
+        // 天使的免费选型窗（12-08）：同一条回答。会挑的那一半在 `AiHand::bless_build_table`
+        // —— 免费建造对 AI 自己没有现钱风险，但立在别人地上的设施将来也会收它的钱，
+        // 所以同样交给 `harm` 那把尺，没有先验的座位照旧「先不盖」。
+        Pending::BlessBuild(_) => AiMove::Decide(Decision::Acknowledge),
         // 远程建设窗口（P10d②）：与本地建设同一条回答，理由相同
         Pending::RemoteBuild => AiMove::Decide(Decision::Acknowledge),
         // 服务费收据（P10c）：钱已经扣完，与租金收据同一个回答
@@ -2151,6 +2155,34 @@ impl AiHand<'_, '_> {
         table
     }
 
+    /// 天使的免费选型窗（12-08）：哪一类值得免费立在**这块地**上。
+    ///
+    /// 与 [`Self::build_table`] 同一把尺（访客会被收多少 × `harm`），少了两道筛子：
+    /// 不问 `can_afford`（不花钱）、不问 [`Books::build_probe`]（天使不认业主那条判据，
+    /// 换 [`Books::bless_probe`] 的结论 —— 收费型没参数的类照样不许立）。
+    /// 立起来归地主，所以 `harm` 高的座位对「给谁白送一座购物中心」同样犹豫 ——
+    /// 那把尺在这里读的是**这块地的主人**会多收钱，而 AI 将来路过也要付。
+    fn bless_build_table(&self, subject: Entity, profile: &AiProfile, land: LandId) -> Candidates {
+        let mut table = Candidates::new();
+        table.add(0.0, AiMove::Decide(Decision::Acknowledge));
+        if self.errands.built == Some((subject, self.books.session.turn_count))
+            || profile.harm < AiProfile::HARM_START
+        {
+            return table;
+        }
+        for kind in BuildingKind::ALL {
+            if self.books.bless_probe(land, kind).is_err() {
+                continue;
+            }
+            let fee = self.visit_fee(land, kind);
+            if fee <= 0.0 {
+                continue;
+            }
+            table.add(fee * profile.harm, AiMove::Build { land, kind });
+        }
+        table
+    }
+
     /// 这一类设施「一个访客」交多少（期望值）。数据里没有收费参数的（研究所／公园）
     /// 就是 0 —— 不是「不好」，是今天**没有把产出折成钱的尺**。
     fn visit_fee(&self, land: LandId, kind: BuildingKind) -> f32 {
@@ -2254,8 +2286,9 @@ impl AiHand<'_, '_> {
             Pending::Buy(land) => self.buy_table(subject, &profile, land),
             Pending::Upgrade(land) => self.upgrade_table(subject, &profile, land),
             Pending::BankTeller => self.teller_table(subject, &profile),
-            // 两个建设窗口（P14c④）：本地选设施、远程选地
+            // 三个建设窗口（P14c④ + 12-08 天使）：本地选设施、远程选地、天使免费选型
             Pending::Build(land) => self.build_table(subject, &profile, land),
+            Pending::BlessBuild(land) => self.bless_build_table(subject, &profile, land),
             Pending::RemoteBuild => self.remote_build_table(subject, &profile),
             // 拍卖那一问（P14d④a）：不是报价，是「加一档还是放手」
             Pending::Auction => self.bid_table(subject, &profile),

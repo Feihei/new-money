@@ -1438,6 +1438,40 @@ pub struct RentRerouted {
     pub amount: i64,
 }
 
+/// 天使落脚加盖（12-08 改版：从「所经一律加盖」缩到「所到之地加盖一级」）。
+///
+/// `player` 是**附身者**（窗口与顶栏的主语是他），受益的是这块地的主人 —— 天使不讲敌我，
+/// 无主地、别人的地都照盖，这与 P6c 落地时的口径是同一句，只是范围从「走过的每一格」
+/// 缩到「落脚那一格」，而且要等购买/付租金那问答完才落（12-08 拍板）。
+///
+/// `kind` 是 `Some` 时表示这一下在**空商业地**上免费立起了一座设施（附身者选的型），
+/// `new_level` 必为 1；`None` 是普通的就地加盖一级（住宅或已有设施的商业地）。
+/// 天使不收钱：这条凭据背后**没有** `CashChanged`，与 [`FacilityBuilt`]（付了造价的那条）
+/// 合成一条就会让人以为这次建造走了账。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandBlessed {
+    pub player: Entity,
+    pub land: LandId,
+    pub kind: Option<crate::board::BuildingKind>,
+    pub new_level: u8,
+}
+
+/// 恶魔落脚降级（12-08 改版：从「所经降一级」缩到「所到之地降一级」，与天使同一天搬家）。
+///
+/// 与 [`LandBlessed`] 成对的坏消息：`player` 是**附身者**，受害的是这块地的主人 ——
+/// 恶魔同样不讲敌我，自己的地、别人的地都照塌。两条时序咬合的口径：
+/// 要等购买/付租金那问答完才落（房东照塌**之前**的层数收租，塌的这一级不抵租）；
+/// 空地塌无可塌（0 级 saturating 出来还是 0），**凭据也不发** —— 「恶魔来过但什么都没
+/// 发生」不值得一条播报。所以 `old_level > new_level` 恒成立，这条不需要 `kind`：
+/// 恶魔只拆不立。
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LandBlighted {
+    pub player: Entity,
+    pub land: LandId,
+    pub old_level: u8,
+    pub new_level: u8,
+}
+
 // ===== 魔法屋（P13）=====
 
 /// 一位玩家踩到魔法屋，女巫给出一条**摇出来的**条件（P13 / P13c）。

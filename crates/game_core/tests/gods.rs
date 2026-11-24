@@ -20,9 +20,10 @@ use bevy::app::App;
 use bevy::ecs::entity::Entity;
 use common::*;
 use game_core::prelude::{
-    CardAim, ChargeKind, Detention, DetentionPlace, GameRules, GameSeed, GameSetup, God, LandId,
-    LandStatus, MAX_ON_BOARD, OccupancyKind, PlayerId, Possession, Rival, STARTING_GODS,
-    StaySentence, Term, TileKind, WalkEffect, takes_landing, walk_effect,
+    BuildingKind, CardAim, ChargeKind, Detention, DetentionPlace, Facility, GameRules, GameSeed,
+    GameSetup, God, LandId, LandStatus, MAX_ON_BOARD, OccupancyKind, Pending, PendingDecision,
+    PlayerId, Possession, Rival, STARTING_GODS, StaySentence, Term, TileKind, blesses_landing,
+    blights_landing, takes_landing,
 };
 
 /// prototype 的 1 号格挂着 L0 南京路（见 `settle.rs` 顶上那张格子对照表）。
@@ -874,6 +875,18 @@ fn two_players() -> (App, Entity, Entity) {
     (app, p0, p1)
 }
 
+/// 摘掉某块地上的预建设施（「空商业地」那条路）。写法照 `commercial.rs` 的同名助手。
+fn strip_facility(app: &mut App, land: u32) {
+    let w = app.world_mut();
+    let mut q = w.query::<(bevy::prelude::Entity, &LandId)>();
+    let target = q
+        .iter(w)
+        .find(|(_, id)| id.0 == land)
+        .map(|(e, _)| e)
+        .expect("prototype 里有这块地");
+    app.world_mut().entity_mut(target).remove::<Facility>();
+}
+
 /// 三处「天数」各用一把尺，所以要挨个读：拘留数他的回合、停留数他按那颗按钮的回合、
 /// 乌龟数他掷骰的回合。合成一个「处境」就读不出「三处都过了同一个倍数」这件事。
 #[derive(Clone, Copy)]
@@ -1380,37 +1393,155 @@ fn walker(god: God, steps: u32) -> (App, Entity) {
 }
 
 #[test]
-fn the_angel_raises_every_plot_he_walks_over_regardless_of_who_owns_it() {
-    // PLAN §三「天使＝所经一律加盖（不分敌我、无主地也盖）」。
-    // 三块地三种归属：L0 是别人的、L1 是他自己的、L2 无主 —— 三种都要长一层，
-    // 少一种就是「一律」被某道归属判定偷偷过滤掉了
+fn the_angel_blesses_only_the_tile_he_lands_on_regardless_of_who_owns_it() {
+    // 12-08 改版：PLAN §三「所经一律加盖」被实报推翻，改成「所到之地加盖一级」。
+    // 骰 6 点走过 L0（别人的）、L1（自己的），落脚格 6 是外滩（L2，商业地、预建
+    // 购物中心 Lv1）—— 三块地只有落脚那块长一级，而它无主，正好把「不分敌我」
+    // 连「无主地也盖」一起钉住
     let (mut app, p0) = walker(God::Angel, 6);
     own(&mut app, RENT_LAND, Some(1), 1, false);
     own(&mut app, SECOND_LAND, Some(0), 2, false);
-    own(&mut app, 2, None, 0, false);
 
     play_turns(&mut app, 1);
 
-    assert_eq!(
-        tile_of(&app, p0),
-        6,
-        "前置：他应当正好走过格1、格2、格3、格4、格5、格6"
-    );
+    assert_eq!(tile_of(&app, p0), 6, "前置：落脚在格6（外滩）");
     assert_eq!(
         plot_state(&mut app, RENT_LAND).1,
-        2,
-        "别人的地也加盖（不分敌我）"
+        1,
+        "走过的地不再加盖 —— 「所经」那一半已经废了"
     );
-    assert_eq!(plot_state(&mut app, SECOND_LAND).1, 3, "自己的地照样加盖");
+    assert_eq!(
+        plot_state(&mut app, SECOND_LAND).1,
+        2,
+        "自己的地同样只有落脚才动"
+    );
     assert_eq!(
         plot_state(&mut app, 2).1,
-        1,
-        "无主地也盖 —— 这条是括号里点名的那一半，也是「买地不碰层数」的前提"
+        2,
+        "落脚那块照盖：预建 Lv1 → Lv2（无主、别人的地都一样）"
     );
     assert_eq!(
         cash_of(&mut app, p0),
         20_000,
         "祝福不是一笔交易：它没有付款人，现金分文不动"
+    );
+}
+
+#[test]
+fn the_angel_blesses_after_the_rent_is_settled_not_before() {
+    // 12-08 拍板的顺序：落脚在别人的地上，先照原样付租，**答完收据**那一级才长上来。
+    // 少了这条钩子，天使就在落格流水线里先动房子 —— 房东照收原价的租，长出来的
+    // 那一层白长了一趟
+    let (mut app, p0) = walker(God::Angel, 1);
+    own(&mut app, RENT_LAND, Some(1), 1, false);
+    let before = cash_of(&mut app, p0);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), RENT_TILE, "前置：落脚在格1（南京路）");
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND),
+        (Some(1), 2, false),
+        "付完租才加盖：Lv1 → Lv2，归属不动"
+    );
+    assert!(cash_of(&mut app, p0) < before, "租金照付原主 —— 加盖不抵租");
+}
+
+#[test]
+fn an_empty_commercial_lot_on_landing_opens_the_free_build_window() {
+    // 12-08：落在**空商业地**上不就地加盖，而是弹免费选型窗 —— 谁的地都行，
+    // 设施归地主。外滩的预建购物中心摘掉就是一块无主空商业地
+    let (mut app, p0) = walker(God::Angel, 6);
+    strip_facility(&mut app, 2);
+    // 摘组件只摘「设施」，预建留下的 BuildingLevel(1) 还挂着 —— 空商业地要把层也归零
+    own(&mut app, 2, None, 0, false);
+
+    play_turns(&mut app, 1);
+
+    // 自动玩家对这扇窗答「先不盖」（与建设窗口同一格）：窗开过、什么也没立、
+    // 回合照常交还 —— 选型那条路由下面的直接注入用例自己走
+    assert_eq!(pending_of(&app), None, "答完「先不盖」窗口就收了");
+    assert_eq!(facility_of(&mut app, 2), None, "自动玩家不选型");
+    assert_eq!(plot_state(&mut app, 2).1, 0, "空商业地不就地加盖");
+    assert_eq!(cash_of(&mut app, p0), 20_000, "窗口开着也不花钱");
+}
+
+#[test]
+fn the_free_build_costs_nothing_and_belongs_to_the_owner() {
+    // 免费选型窗的柜台那一半（`build_op_system` 的 BlessBuild 支路）：
+    // 直接把窗挂上，立一座收费型有参数的设施 —— 不扣款、层数到 1。
+    // 「不问业主」由上一条（落脚在无主地上照样开窗）承担，这里钉的是钱与层数
+    let (mut app, p0, _p1) = two_players();
+    strip_facility(&mut app, 2);
+    app.world_mut()
+        .resource_mut::<PendingDecision>()
+        .offer(p0, Pending::BlessBuild(LandId(2)));
+
+    build_ask(&mut app, p0, LandId(2), BuildingKind::Hotel);
+
+    assert_eq!(facility_of(&mut app, 2), Some(BuildingKind::Hotel));
+    assert_eq!(plot_state(&mut app, 2).1, 1, "建成即 Lv1");
+    assert_eq!(cash_of(&mut app, p0), 20_000, "天使不收钱：现金分文不动");
+}
+
+#[test]
+fn the_free_build_refuses_a_second_facility_and_a_non_commercial_lot() {
+    // `bless_probe` 那张判据：非商业地不施工、一格一设施（已有的地拒绝再立）——
+    // 天使免的是钱，免不掉这两条。（prototype 的全局 `facility_fees` 给三类收费设施
+    // 都配了参数，「无参数」那一道在演示盘上没有真实样本，就不硬造了）
+    let (mut app, p0, _p1) = two_players();
+    strip_facility(&mut app, 2);
+    own(&mut app, 2, None, 0, false);
+    app.world_mut()
+        .resource_mut::<PendingDecision>()
+        .offer(p0, Pending::BlessBuild(LandId(2)));
+
+    // L0 南京路是住宅地：判据第一道就挡
+    build_ask(&mut app, p0, LandId(0), BuildingKind::Mall);
+    assert_eq!(facility_of(&mut app, 0), None, "住宅地立不起设施");
+
+    build_ask(&mut app, p0, LandId(2), BuildingKind::Mall);
+    assert_eq!(
+        facility_of(&mut app, 2),
+        Some(BuildingKind::Mall),
+        "立起来了"
+    );
+
+    // 窗口照开（办完照开），第二下被拒：一格一设施
+    build_ask(&mut app, p0, LandId(2), BuildingKind::Mall);
+    assert_eq!(
+        facility_of(&mut app, 2),
+        Some(BuildingKind::Mall),
+        "一格一设施"
+    );
+    assert_eq!(cash_of(&mut app, p0), 20_000, "全程分文不动");
+}
+
+#[test]
+fn walking_over_a_street_moves_no_buildings_any_more() {
+    // 12-08 改版收尾口径：天使与恶魔都退了「所经」那张表，走路上动房子的**一位都不剩**。
+    // 两块地两种归属，走过的每一格都该原样 —— 落脚那格的加盖是**落脚规则**在干活，
+    // 与「所经」无关，单独断言
+    let (mut app, p0) = walker(God::Angel, 6);
+    own(&mut app, RENT_LAND, Some(1), 3, false);
+    own(&mut app, SECOND_LAND, Some(0), 3, false);
+    own(&mut app, 2, None, 3, false);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), 6, "前置：他应当正好走过那两块地所在的格");
+    assert_eq!(
+        (
+            plot_state(&mut app, RENT_LAND).1,
+            plot_state(&mut app, SECOND_LAND).1
+        ),
+        (3, 3),
+        "走过的地一格都不动 —— 「所经」这条路今天谁也不走"
+    );
+    assert_eq!(
+        plot_state(&mut app, 2).1,
+        4,
+        "落脚那格照长：这是天使的落脚规则（所到）在干活，不是走路规则"
     );
 }
 
@@ -1471,38 +1602,99 @@ fn the_angel_stops_at_the_roof_and_does_not_build_past_a_seal() {
 }
 
 #[test]
-fn the_devil_tears_down_everything_he_passes_but_never_past_empty_ground() {
-    // PLAN §三「恶魔＝所经降一级（空地不拆）」。三块地三种起点：Lv3 该塌成 Lv2、
-    // Lv1 该塌成 Lv0（下面那条注写清了「空地不拆」今天按哪条口径读）、
-    // 无主的 Lv0 本来就没东西可拆
+fn the_devil_tears_down_only_the_tile_he_lands_on_regardless_of_who_owns_it() {
+    // 12-08 改版：PLAN §三「所经降一级」被实报推翻，改成「所到之地降一级」——
+    // 与天使同一天搬的家。走过 L0（别人的 Lv3）、L1（自己的 Lv3）都原样，
+    // 落脚格 6 是外滩（无主、预建购物中心 Lv1）→ 塌到 Lv0：「不分敌我」连
+    // 「无主地也塌」一起钉住
     let (mut app, p0) = walker(God::Devil, 6);
     own(&mut app, RENT_LAND, Some(1), 3, false);
-    own(&mut app, SECOND_LAND, Some(0), 1, false);
-    own(&mut app, 2, None, 0, false);
+    own(&mut app, SECOND_LAND, Some(0), 3, false);
 
     play_turns(&mut app, 1);
 
-    assert_eq!(tile_of(&app, p0), 6, "前置：他应当走过那三块地所在的格");
-    assert_eq!(plot_state(&mut app, RENT_LAND).1, 2, "三级塌成二级");
+    assert_eq!(tile_of(&app, p0), 6, "前置：落脚在格6（外滩）");
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND).1,
+        3,
+        "走过的地不再塌 —— 「所经」那一半已经废了"
+    );
     assert_eq!(
         plot_state(&mut app, SECOND_LAND).1,
-        0,
-        "空地不拆今天这条口径是「不穿成负数」（`damage::strike` 与它的单测早就这么定），\
-         而 Lv1 就是我们现在那半条「买地即 Lv1 ＝ 空地」，所以塌下去是 Lv0 而不是停在 Lv1。\
-         「有主的 Lv0 到底存不存在」是 PLAN §七 那条 Lv0 待重判，定时炸弹同样会留下它 —— \
-         不在 P6c 现场替 P10 拍它"
+        3,
+        "自己的地同样只有落脚才动"
     );
     assert_eq!(
         plot_state(&mut app, 2).1,
         0,
-        "无主空地没东西可拆，也不该被拆出个负数"
+        "落脚那块照塌：Lv1 → Lv0（无主、别人的地都一样）"
     );
     assert_eq!(
-        plot_state(&mut app, RENT_LAND).0,
-        Some(1),
+        plot_state(&mut app, 2).0,
+        None,
         "降一级不动归属 —— `Degrade` 那一支压根没有 `seize` 这个开关"
     );
-    assert_eq!(cash_of(&mut app, p0), 20_000, "拆房也不赔钱");
+}
+
+#[test]
+fn the_devil_tears_down_after_the_rent_is_settled_not_before() {
+    // 12-08 拍板的顺序（与天使镜像）：落脚在别人的地上，先照塌**之前**的层数付租，
+    // **答完收据**那一级才塌下来。少了这条钩子，恶魔就在落格流水线里先拆房子 ——
+    // 房东照塌掉的层数收租，塌的这一级白塌
+    let (mut app, p0) = walker(God::Devil, 1);
+    own(&mut app, RENT_LAND, Some(1), 1, false);
+    let before = cash_of(&mut app, p0);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), RENT_TILE, "前置：落脚在格1（南京路）");
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND),
+        (Some(1), 0, false),
+        "付完租才塌：Lv1 → Lv0，归属不动"
+    );
+    assert!(
+        cash_of(&mut app, p0) < before,
+        "租金照塌之前的层数付 —— 塌楼不抵租"
+    );
+}
+
+#[test]
+fn the_devil_tears_down_his_own_land_for_free() {
+    // 落脚在**自己的**地上：没有待决（不买地也不交租）→ 当场落，不打折扣。
+    // 「不分敌我」的另一半：他自己的楼照样塌
+    let (mut app, p0) = walker(God::Devil, 1);
+    own(&mut app, RENT_LAND, Some(0), 2, false);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(tile_of(&app, p0), RENT_TILE, "前置：落脚在自家南京路");
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND),
+        (Some(0), 1, false),
+        "自家的地照样塌一层：Lv2 → Lv1"
+    );
+    assert_eq!(cash_of(&mut app, p0), 20_000, "塌自己的楼也不赔钱");
+}
+
+#[test]
+fn empty_ground_gives_the_devil_nothing_to_tear_down() {
+    // 「空地无效」：0 级塌无可塌（`saturating_sub`），层数不动、凭据也不发。
+    // 顺带钉住「塌楼不赔钱」：Lv0 的租本来就是 0
+    let (mut app, p0) = walker(God::Devil, 1);
+    own(&mut app, RENT_LAND, Some(1), 0, false);
+
+    play_turns(&mut app, 1);
+
+    assert_eq!(
+        plot_state(&mut app, RENT_LAND),
+        (Some(1), 0, false),
+        "空地没有楼可塌，也不塌出个负数"
+    );
+    assert!(
+        cash_of(&mut app, p0) < 20_000,
+        "落格照付 Lv0 的基础租（rent[0]，与本条无关）—— 塌楼本身不赔钱"
+    );
 }
 
 #[test]
@@ -1523,15 +1715,15 @@ fn a_money_god_walks_over_the_same_street_and_touches_no_buildings() {
             plot_state(&mut app, 2).1
         ),
         (2, 2, 2),
-        "只有天使与恶魔动房子：其余九位在 `walk_effect` 那张表上答的都是 Nothing"
+        "如今谁都不在走路时动房子 —— 其余九位连落脚的份都没有",
     );
 }
 
 #[test]
 fn a_man_who_never_walked_built_nothing() {
-    // 「所经」经的是**步**。他被停留按住、一步没走 → 一格都不该动。
+    // 12-08 之后天使吃的是**落脚**：他被停留按住、这一回合没有新的落格 → 一格都不该动。
     // 这条挡的是「把效果挂在回合开始/结束上」那种写法 —— 它跑起来同样「每回合动几格」，
-    // 只是动的不是他走过的那几格
+    // 只是动的不是他落脚的那一格
     let (mut app, p0) = walker(God::Angel, 4);
     own(&mut app, RENT_LAND, Some(1), 1, false);
     own(&mut app, SECOND_LAND, Some(0), 1, false);
@@ -1539,37 +1731,40 @@ fn a_man_who_never_walked_built_nothing() {
 
     play_turns(&mut app, 1);
 
-    assert_eq!(tile_of(&app, p0), 0, "前置：他一步没走");
+    assert_eq!(tile_of(&app, p0), 0, "前置：他一步没走、也没落新格");
     assert_eq!(
         (
             plot_state(&mut app, RENT_LAND).1,
             plot_state(&mut app, SECOND_LAND).1
         ),
         (1, 1),
-        "没走过就不加盖"
+        "没有落格就不加盖"
     );
 }
 
 #[test]
-fn the_two_walk_tables_answer_every_god() {
-    // 两张穷尽表一次钉住：`walk_effect`（所经）与 `takes_landing`（所到）。
-    // 它们必须是**两张**表 —— 合成一张就会把「走一圈」变成「拆一圈」，
-    // 而 PLAN §三 用两个不同的词写的正是这两件事
+fn the_three_effect_tables_answer_every_god() {
+    // 三张穷尽表一次钉住：`takes_landing`（所到占有）、`blesses_landing`（所到加盖）、
+    // `blights_landing`（所到降级）。它们必须是**三张**表 —— 合并任何两张都会把
+    // 「抢一格」「盖一格」「塌一格」说成同一件事，而 PLAN §三 用三个不同的词写的正是它们。
+    // 「所经」那张表 12-08 起退役：天使与恶魔同一天搬了家，走路上动房子的一位都不剩
     for god in God::ALL {
-        assert_eq!(
-            walk_effect(god),
-            match god {
-                God::Angel => WalkEffect::Bless,
-                God::Devil => WalkEffect::Blight,
-                _ => WalkEffect::Nothing,
-            },
-            "{} 的「所经」不对",
-            god.label()
-        );
         assert_eq!(
             takes_landing(god),
             god == God::LandDeity,
-            "{} 的「所到」不对 —— 直接占有只有土地公一位",
+            "{} 的「所到占有」不对 —— 直接占有只有土地公一位",
+            god.label()
+        );
+        assert_eq!(
+            blesses_landing(god),
+            god == God::Angel,
+            "{} 的「所到加盖」不对 —— 落脚长一层只有天使一位",
+            god.label()
+        );
+        assert_eq!(
+            blights_landing(god),
+            god == God::Devil,
+            "{} 的「所到降级」不对 —— 落脚塌一层只有恶魔一位",
             god.label()
         );
     }
