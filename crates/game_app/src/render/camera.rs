@@ -8,6 +8,7 @@ use bevy::{camera::ScalingMode, prelude::*};
 use game_core::prelude::{ActiveBoard, BoardDef, PlayerId, TokenPosition, TurnOrder};
 
 use super::{Rendered, dim, geom::BoardGeom, palette, token::TokenVisual};
+use crate::audio::VoiceCaption;
 
 #[derive(Component)]
 pub(crate) struct CameraRig;
@@ -67,20 +68,27 @@ pub(crate) fn spawn_camera_rig(
         });
 }
 
-/// rig 每帧向当前回合棋子的**视觉位置**靠一点。
+/// rig 每帧向焦点棋子的**视觉位置**靠一点。
+///
+/// 焦点的优先级（P16e）：**台词优先** —— 有人在说话时镜头看说话的人（`VoiceCaption.player`
+/// 由 `audio::advance_voice` 在声音真起播时写、念完清空），收租对白于是能「付款方 ↔ 收款方」
+/// 各给一个镜头；字幕一清就自动回到当前回合的棋子，下面那半段跟随逻辑一行不用改。
+/// 平时焦点是当前回合的人。
 ///
 /// 跟的是插值后的棋子而不是 `TokenPosition`：后者在掷骰那一帧就跳到终点，
 /// 跟着它会把镜头甩在棋子前面（Godot 端 `board.gd:459` 也是每落一格才 tween 一次）。
 pub(crate) fn follow_current_token(
     time: Res<Time>,
     order: Res<TurnOrder>,
+    caption: Res<VoiceCaption>,
     tokens: Query<(&TokenVisual, &GlobalTransform)>,
     mut rigs: Query<&mut Transform, With<CameraRig>>,
 ) {
     if full_board_view() || cam_at().is_some() {
         return;
     }
-    let (Some(player), Ok(mut rig)) = (order.current(), rigs.single_mut()) else {
+    let focus = caption.player.or(order.current());
+    let (Some(player), Ok(mut rig)) = (focus, rigs.single_mut()) else {
         return;
     };
     let Some((_, at)) = tokens.iter().find(|(v, _)| v.player == player) else {

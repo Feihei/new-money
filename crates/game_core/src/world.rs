@@ -30,6 +30,15 @@ use crate::turn::{GameSession, TurnOrder, TurnPhase};
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Gameplay;
 
+/// 这一局是**全新开局**而不是读档。`begin_game_system` 按走过的分支写：新局插入、
+/// 读档移除 —— 所以它不存在于上一局的残留里，读者不必自己清账。
+///
+/// 现在的读者只有开场白（game_app 的 `VoiceEvent::Enter`）：读档之后每个人的回合照样
+/// 发 `TurnStarted`，而「谁还没念过」那份账在跨局时被清空，光靠它挡不住
+/// 「读档后每人第一回合把开场白重播一遍」—— 判据必须落在装配分支上。
+#[derive(Resource, Debug)]
+pub struct FreshMatch;
+
 /// 规则层里需要被表现层门控的 system 组。
 ///
 /// 只把 `begin_game_system` 圈出来：装配一旦被 `Scene::Menu` 挡住，`TurnPhase` 就停在 `Boot`，
@@ -131,6 +140,8 @@ pub fn begin_game_system(
         // 读进去会把 0..=5 号地的归属套到另一张盘的前六块地上，名字与业主全错
         if snapshot.board == def.board_name {
             snapshot::resume_match(&mut commands, def, &stocks, holidays, news, *snapshot);
+            // 读档不是新局：把上一局可能残留的标记摘掉，开场白（等读者）这一局整局哑掉
+            commands.remove_resource::<FreshMatch>();
             next.set(TurnPhase::WaitRoll);
             return;
         }
@@ -216,6 +227,9 @@ pub fn begin_game_system(
     // 拿 generation 当清理机制，等于让「跨局残留」这一族靠句柄复用运气守着（§6.1 坑 22/25）。
     commands.insert_resource(crate::ai::AiErrands::default());
     commands.insert_resource(rng);
+    // 新局标记：开场白的读者靠它区分「新局的第一回合」与「读档后的第一回合」。
+    // 上一局若也是新局，这个标记会残留着 —— 插入同值幂等，无账可清
+    commands.insert_resource(FreshMatch);
     // 节假日是这一局的静态日历事实：克隆成资源，规则层与 UI 都直接读，
     // 免得每处再解一遍 `Assets`。装配失败前它不存在，于是所有读者都躲在状态门禁后面。
     commands.insert_resource(holidays);

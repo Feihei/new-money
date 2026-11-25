@@ -221,7 +221,7 @@ pub mod prelude {
     pub use crate::walk::{
         WalkClock, WalkPlan, advance_walk_clock_system, plan_walk, walk_step_system,
     };
-    pub use crate::world::{ActiveBoard, CoreSet, Gameplay, begin_game_system};
+    pub use crate::world::{ActiveBoard, CoreSet, FreshMatch, Gameplay, begin_game_system};
 }
 
 use bank::apply_month_end_interest_system;

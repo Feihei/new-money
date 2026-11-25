@@ -33,10 +33,11 @@ use bevy::{
 };
 use game_core::prelude::{
     ActiveBoard, AuctionWon, BankOpDone, CardDrawn, CardKind, CardPlayed, CashChanged, DiceRolled,
-    EffectOutcome, FacilityBuilt, FinancingDrawn, FinancingRecalled, GameOver, GameSession,
-    ItemKind, ItemPlaced, LandBought, LandId, LandUpgraded, LotteryBought, MortgageDone, Owner,
-    Paused, Pending, PendingDecision, PerformanceHold, PlayerBailed, PlayerBankrupt,
-    PlayerDetained, PlayerId, PlayerName, RentDue, StockTraded, TurnOrder, TurnPhase, TurnStarted,
+    EffectOutcome, FacilityBuilt, FinancingDrawn, FinancingRecalled, FreshMatch, GameOver,
+    GameSession, ItemKind, ItemPlaced, LandBought, LandId, LandUpgraded, LotteryBought,
+    MortgageDone, Owner, Paused, Pending, PendingDecision, PerformanceHold, PlayerBailed,
+    PlayerBankrupt, PlayerDetained, PlayerId, PlayerName, RentDue, StockTraded, TurnOrder,
+    TurnPhase, TurnStarted,
 };
 
 use crate::dialogue::DialogueLines;
@@ -676,10 +677,10 @@ struct VoiceQueue {
     /// 此刻正在播的那一句（`Despawn` 模式，放完实体自己消失，所以这里只是一个句柄）
     current: Option<Entity>,
     pending: std::collections::VecDeque<VoiceCue>,
-    /// 已经念过开场白的玩家（P16b 修正）：判据是「谁的回合开始而他还没念过」，
+    /// 已经念过开场白的玩家（P16b 修正）：判据是「**新局**里谁的回合开始而他还没念过」，
     /// 于是**每人第一回合前念自己的那句** —— 第一位上场、第一位行动、第二位上场……
-    /// 而不是第一位回合前把全员连成串。实体带 generation，跨局复用 index 也不会
-    /// 误挡新玩家；回菜单时 `clear_voice` 照样清，账不过夜。
+    /// 而不是第一位回合前把全员连成串。读档那一局判据被 `FreshMatch` 压住（整局不念），
+    /// 所以这份账只对全新一局负责；回菜单时 `clear_voice` 照样清，账不过夜。
     entered: std::collections::HashSet<Entity>,
     /// 当前这一句是什么时候起播的（`Time::elapsed_secs`）。只给「单击跳过」用：
     /// 起播那一刻之前就在路上的点击不许把这一句掐掉（见 [`SKIP_GRACE`]）。
@@ -749,7 +750,8 @@ fn loud_enough(amount: i64, price_index: f32) -> bool {
 /// 而其中三条只有「两条消息同帧到场」时才显形 —— 拿 SystemParam 去测它们要摆半局棋。
 ///
 /// 返回值：`(谁说话, 事件, 子序, 事件主语)`。租金的**两个人共用一个主语**（付款那位），
-/// 于是「得钱者先说、亏钱者后说」与「按回合顺序」两条排序规则不会打架。
+/// 于是「付款方先说、得钱者后说」（先交代要掏钱，镜头再切给收钱的）与「按回合顺序」
+/// 两条排序规则不会打架。
 fn cash_voices(
     price_index: f32,
     rents: &[(Entity, Entity, i64)],
@@ -759,13 +761,14 @@ fn cash_voices(
 ) -> Vec<(Entity, VoiceEvent, u8, Entity)> {
     let mut out = Vec::new();
     let mut taken = silent.clone();
-    // ① 租金是**显式接管**：不论金额大小，这两个人的现金都不再走通用那一句
+    // ① 租金是**显式接管**：不论金额大小，这两个人的现金都不再走通用那一句。
+    // 付款方 sub 0、得钱方 sub 1 —— 对白的顺序是「付款的先开口，收钱的接话」
     for (payer, owner, amount) in rents {
         taken.insert(*payer);
         taken.insert(*owner);
         if payer != owner && loud_enough(*amount, price_index) {
-            out.push((*owner, VoiceEvent::CashBigGain, 0, *payer));
-            out.push((*payer, VoiceEvent::CashBigLoss, 1, *payer));
+            out.push((*payer, VoiceEvent::CashBigLoss, 0, *payer));
+            out.push((*owner, VoiceEvent::CashBigGain, 1, *payer));
         }
     }
     // ② 命运那笔由 fate_gain／fate_loss 接管，同一个人不再出 cash_big_*
@@ -822,6 +825,9 @@ struct AudioInbox<'w, 's> {
     bankrupt: MessageReader<'w, 's, PlayerBankrupt>,
     over: MessageReader<'w, 's, GameOver>,
     started: MessageReader<'w, 's, TurnStarted>,
+    /// 新局标记（world::begin_game_system 写）。开场白只在新局念 —— 读档之后的
+    /// `TurnStarted` 一律不算数，否则「读档后每人第一回合重播开场白」挡不住。
+    fresh: Option<Res<'w, FreshMatch>>,
     rolled: MessageReader<'w, 's, DiceRolled>,
     bailed: MessageReader<'w, 's, PlayerBailed>,
     ui: MessageReader<'w, 's, UiSoundRequest>,
@@ -965,20 +971,24 @@ fn collect_voice(
             cue(&mut cues, placed.player, VoiceEvent::Mine, 0, placed.player);
         }
     }
-    // 开场白（P16b 修正）：**谁的回合开始而他还没念过，谁念自己的那句**。节奏是
+    // 开场白：**全新一局**里谁的回合开始而他还没念过，谁念自己的那句。节奏是
     // 「第一位上场 → 第一位行动 → 第二位上场 → 第二位行动……」—— 旧版用
     // `turn_count == 0` 当判据，它只认得出第一位，于是四句连串挤在第一位行动之前。
     // 拘留跳过的回合也发 `TurnStarted`（turn.rs 三处都在回合机推进里），所以被押着
-    // 的第一回合照样开口。读档不重跑 `TurnStarted`（restore 不走回合机），回到
-    // 第一回合的存档也不会再念 —— 判据靠回合机本来的形状，不靠 `StartMode`。
-    for started in inbox.started.read() {
-        if queue.entered.insert(started.player) {
-            cues.push(VoiceCue {
-                player: started.player,
-                event: VoiceEvent::Enter,
-                seat: seat_of(started.player),
-                sub: 0,
-            });
+    // 的第一回合照样开口。读档之后的回合也发 `TurnStarted`（restore 只是落点 `WaitRoll`，
+    // 之后的回合机照常推进），而 `entered` 那份账跨局时清空 —— 光靠「谁还没念过」
+    // 挡不住「读档后每人第一回合重播」（实测症状），所以判据再加上 core 的
+    // `FreshMatch`：读档进来时它不在，开场白这一局整局哑掉。
+    if inbox.fresh.is_some() {
+        for started in inbox.started.read() {
+            if queue.entered.insert(started.player) {
+                cues.push(VoiceCue {
+                    player: started.player,
+                    event: VoiceEvent::Enter,
+                    seat: seat_of(started.player),
+                    sub: 0,
+                });
+            }
         }
     }
 
@@ -1901,10 +1911,11 @@ mod tests {
             .collect()
     }
 
-    /// 收租这一对：两个人共用**付款那位**的回合序（否则「得钱者先说」会被座位号打乱），
-    /// 子序把收款方排在前面。租金是显式接管，所以他们这一帧的通用现金语音一律不再出。
+    /// 收租这一对：两个人共用**付款那位**的回合序（否则「付款方先说」会被座位号打乱），
+    /// 子序把付款方排在前面 —— 先交代要掏钱，镜头再切给收钱的。租金是显式接管，
+    /// 所以他们这一帧的通用现金语音一律不再出。
     #[test]
-    fn the_rent_pair_pays_the_receiver_first_under_one_seat() {
+    fn the_rent_pair_pays_the_payer_first_under_one_seat() {
         let who = ids(2);
         let (payer, owner) = (who[0], who[1]);
         let out = cash_voices(
@@ -1917,8 +1928,8 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                (owner, VoiceEvent::CashBigGain, 0, payer),
-                (payer, VoiceEvent::CashBigLoss, 1, payer),
+                (payer, VoiceEvent::CashBigLoss, 0, payer),
+                (owner, VoiceEvent::CashBigGain, 1, payer),
             ]
         );
     }
@@ -2035,6 +2046,8 @@ mod tests {
             .init_resource::<VoiceQueue>()
             .init_resource::<VoiceCaption>()
             .init_resource::<CaptionClock>()
+            // 开场白判据的一半：这批测试都是「新局」的形状（读档那一半见下一条）
+            .insert_resource(FreshMatch)
             .insert_resource(AudioConfig {
                 playback: false,
                 hold: false,
@@ -2101,10 +2114,10 @@ mod tests {
         );
     }
 
-    /// 正面的一半：一笔大额租金要真的进队，且收款方在前 —— 没有这一条，上面那条
+    /// 正面的一半：一笔大额租金要真的进队，且付款方在前 —— 没有这一条，上面那条
     /// 「什么都不说」在「整条 system 根本没跑」时也是绿的。
     #[test]
-    fn a_loud_rent_reaches_the_queue_receiver_first() {
+    fn a_loud_rent_reaches_the_queue_payer_first() {
         let mut app = voice_app();
         let payer = speaker(&mut app, "莱息", 1);
         let owner = speaker(&mut app, "范一文", 2);
@@ -2135,10 +2148,10 @@ mod tests {
         assert_eq!(
             said,
             vec![
-                (owner, VoiceEvent::CashBigGain, 0),
-                (payer, VoiceEvent::CashBigLoss, 1),
+                (payer, VoiceEvent::CashBigLoss, 0),
+                (owner, VoiceEvent::CashBigGain, 1),
             ],
-            "收款方该先说，付款方后说"
+            "付款方该先说，得钱方接话"
         );
     }
 
@@ -2277,6 +2290,29 @@ mod tests {
             .map(|cue| cue.player)
             .collect();
         assert_eq!(said, vec![a], "清账之后开场白要重新起头：{said:?}");
+    }
+
+    /// 读档那一局（没有 `FreshMatch`）：回合机的 `TurnStarted` 照发，但开场白一句不进队
+    /// —— 这条是「读档之后每个角色第一回合把开场白重播一遍」的回归线。新局标记是
+    /// core 的 `begin_game_system` 按装配分支写的，这里只验读者这一半。
+    #[test]
+    fn a_resumed_match_announces_nothing() {
+        let mut app = voice_app();
+        app.world_mut().remove_resource::<FreshMatch>();
+        let a = speaker(&mut app, "姬百年", 0);
+        app.world_mut()
+            .resource_mut::<Messages<TurnStarted>>()
+            .write(TurnStarted { player: a });
+        app.update();
+        assert!(
+            app.world()
+                .resource::<VoiceQueue>()
+                .pending
+                .iter()
+                .all(|cue| cue.event != VoiceEvent::Enter),
+            "读档局的开场白整局哑掉：{:?}",
+            app.world().resource::<VoiceQueue>().pending
+        );
     }
 
     #[derive(Resource, Default)]
