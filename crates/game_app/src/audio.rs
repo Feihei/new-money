@@ -595,11 +595,19 @@ impl UiSound {
 /// 音效总线同样走 [`Settings`] 的档位（默认 75%：UI 素材峰值 −6 dBFS，比 BGM 高一大截）。
 /// 十五个语音事件：文件名（去 `.ogg`）与日志键同字面量。`CHARACTERS-dialogue.md` §三
 /// 那张触发矩阵是这里的地基，改口径先改那张表。
+///
+/// `ALL` 是**「已录音」清单**，不是全事件清单：素材没落盘的事件不进它（自检不播、
+/// `every_voice_event_*` 两族断言不数），落盘那一刻由 tripwire 测试
+/// `cash_small_loss_waits_for_its_assets` 红着提醒扩格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceEvent {
     Enter,
     CashBigGain,
     CashBigLoss,
+    /// 小额租金付款方的专属一句（11-25 拍板：付款方开口、收款方静默）。
+    /// **素材未录**：接线已铺（`cash_voices` 的小额分支），缺素材时
+    /// `advance_voice` 的护栏让它整句静默，不闸回合机。
+    CashSmallLoss,
     Monopoly,
     Detained,
     FateGain,
@@ -639,6 +647,7 @@ impl VoiceEvent {
             VoiceEvent::Enter => "enter",
             VoiceEvent::CashBigGain => "cash_big_gain",
             VoiceEvent::CashBigLoss => "cash_big_loss",
+            VoiceEvent::CashSmallLoss => "cash_small_loss",
             VoiceEvent::Monopoly => "monopoly",
             VoiceEvent::Detained => "detained",
             VoiceEvent::FateGain => "fate_gain",
@@ -746,12 +755,11 @@ fn loud_enough(amount: i64, price_index: f32) -> bool {
 }
 
 /// 现金这一族的语音决定。抽成纯函数是因为它是全模块最容易写错的一块：
-/// 五条规矩（租金成对、命运接管、静默族、门槛随物价、同帧合并）挤在同一个函数里，
-/// 而其中三条只有「两条消息同帧到场」时才显形 —— 拿 SystemParam 去测它们要摆半局棋。
+/// 六条规矩（租金成对、小额租金独句、命运接管、静默族、门槛随物价、同帧合并）挤在同一个
+/// 函数里，而其中三条只有「两条消息同帧到场」时才显形 —— 拿 SystemParam 去测它们要摆半局棋。
 ///
 /// 返回值：`(谁说话, 事件, 子序, 事件主语)`。租金的**两个人共用一个主语**（付款那位），
-/// 于是「付款方先说、得钱者后说」（先交代要掏钱，镜头再切给收钱的）与「按回合顺序」
-/// 两条排序规则不会打架。
+/// 于是「付款方先说、得钱者后说」与「按回合顺序」两条排序规则不会打架。
 fn cash_voices(
     price_index: f32,
     rents: &[(Entity, Entity, i64)],
@@ -762,13 +770,18 @@ fn cash_voices(
     let mut out = Vec::new();
     let mut taken = silent.clone();
     // ① 租金是**显式接管**：不论金额大小，这两个人的现金都不再走通用那一句。
-    // 付款方 sub 0、得钱方 sub 1 —— 对白的顺序是「付款的先开口，收钱的接话」
+    // 大额：付款方先交代掏钱（sub 0），得钱方接话（sub 1）。小额（11-25 拍板）：
+    // 付款方独占一句与大额不一样的台词（`CashSmallLoss`，素材未录时静默），收款方闭嘴。
     for (payer, owner, amount) in rents {
         taken.insert(*payer);
         taken.insert(*owner);
-        if payer != owner && loud_enough(*amount, price_index) {
-            out.push((*payer, VoiceEvent::CashBigLoss, 0, *payer));
-            out.push((*owner, VoiceEvent::CashBigGain, 1, *payer));
+        if payer != owner {
+            if loud_enough(*amount, price_index) {
+                out.push((*payer, VoiceEvent::CashBigLoss, 0, *payer));
+                out.push((*owner, VoiceEvent::CashBigGain, 1, *payer));
+            } else {
+                out.push((*payer, VoiceEvent::CashSmallLoss, 0, *payer));
+            }
         }
     }
     // ② 命运那笔由 fate_gain／fate_loss 接管，同一个人不再出 cash_big_*
@@ -1273,6 +1286,20 @@ fn advance_voice(
             }
             continue;
         };
+        // 素材不在盘上 = 这一句不存在（出声与静音两种模式一致）：`AssetServer` 对缺失
+        // 文件只报一条 404，而 `PlaybackSettings::DESPAWN` 的实体要等「播放结束」才退役
+        // —— 素材缺了就永远不结束，`PerformanceHold` 会把回合机闸死（坑 38 的症状族）。
+        // 起播前先问一次盘，目前唯一会走到这一步的是小额租金那句（素材未录，11-25）。
+        if !crate::asset_root().join(&path).is_file() {
+            if playback.cfg.log {
+                info!(
+                    "audio: voice {} {} 素材不在盘上（静默）",
+                    name.0,
+                    cue.event.file()
+                );
+            }
+            continue;
+        }
         // 字幕跟**这一条声音**同时起：正文按语音目录名 + 事件键查表，
         // 查不到就空着（有声音没字幕，不编一句）
         let text = desk
@@ -1934,7 +1961,8 @@ mod tests {
         );
     }
 
-    /// 门槛随物价；边界含等号。小租金一句不说 —— 但它照样接管了两个人的现金，
+    /// 门槛随物价；边界含等号。门槛只管**大额那一对**——小额租金不再整段静默，
+    /// 付款方改说专属那一句（11-25 拍板），但它照样接管了两个人的现金，
     /// 于是「500 的租」不会拐个弯从通用那条路上说出来。
     #[test]
     fn the_floor_scales_with_the_price_index_and_includes_the_edge() {
@@ -1942,7 +1970,13 @@ mod tests {
         assert!(!loud_enough(1999, 1.0));
         assert!(loud_enough(4000, 2.0), "物价翻倍，门槛也翻倍");
         assert!(!loud_enough(3999, 2.0));
+    }
 
+    /// 小额租金（11-25 拍板）：付款方独占一句与大额不一样的台词，收款方闭嘴。
+    /// 素材未录——`advance_voice` 的缺素材护栏让它此刻整句静默，见
+    /// `cash_small_loss_waits_for_its_assets`。
+    #[test]
+    fn a_small_rent_gets_a_payer_only_line() {
         let who = ids(2);
         let (payer, owner) = (who[0], who[1]);
         let out = cash_voices(
@@ -1952,7 +1986,30 @@ mod tests {
             &[],
             &std::collections::HashSet::new(),
         );
-        assert!(out.is_empty(), "小额租金不该开口：{out:?}");
+        assert_eq!(
+            out,
+            vec![(payer, VoiceEvent::CashSmallLoss, 0, payer)],
+            "小额租金只有付款方开口：{out:?}"
+        );
+    }
+
+    /// tripwire：`CashSmallLoss` 的素材还没录。素材落盘那一刻本断言变红，
+    /// 提醒把三件事一起做完——扩 `ALL`（15→16）、给十二人各补一句进 `dialogue.json`
+    /// （`dialogue.rs` 的 EVENTS 与 `every_voice_event_has_a_dialogue_line` 会跟着要它）、
+    /// 把触发矩阵 §三 的 #3a 标成已铺。
+    #[test]
+    fn cash_small_loss_waits_for_its_assets() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        assert!(
+            !root
+                .join("audio/voice/ji-bainian/cash_small_loss.ogg")
+                .is_file(),
+            "小额租金的素材已落盘：扩 VoiceEvent::ALL（15→16）、补台词表、矩阵 #3a 标已铺"
+        );
+        assert!(
+            !VoiceEvent::ALL.contains(&VoiceEvent::CashSmallLoss),
+            "ALL 是「已录音」清单：素材落地前不进自检"
+        );
     }
 
     /// 静默族（银行／股票／抵押／买地那一族）压过一切：那些钱在别处已经说过了。
